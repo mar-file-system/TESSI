@@ -27,5 +27,14 @@ for domain in domains:
                 for addr in val['addrs']:
                     if addr['type'] == libvirt.VIR_IP_ADDR_TYPE_IPV4:
                         print(f"\tIP Address: {addr['addr']}")
+
+            # Get a list of snapshot names for the domain
+            snapshots = domain.listAllSnapshots()
+            if snapshots:
+                print("\tSnapshots:")
+                for snapshot in snapshots:
+                    snapshot_name = snapshot.getName()
+                    print(f"\t- {snapshot_name}")
+
         except libvirt.libvirtError as e:
             print(f"Error getting interface addresses for {domain.name()}: {e}")
