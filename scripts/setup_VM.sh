@@ -5,13 +5,17 @@ if [ "$(id -u)" != "0" ]; then
    exit 1
 fi
 
-iso_path="/path/to/Rocky-8.9-x86_64-minimal.iso"
 iso_url="https://download.rockylinux.org/pub/rocky/8/isos/x86_64/Rocky-8.9-x86_64-minimal.iso"
+iso_url="http://abqix.mm.fcix.net/centos/8-stream/isos/x86_64/CentOS-Stream-8-20231218.0-x86_64-boot.iso"
+
+filename=$(basename "$iso_url")
+iso_path="/var/lib/libvirt/images/$filename"
 
 # Check if the ISO file exists
 if [ ! -f "$iso_path" ]; then
     echo "ISO file not found. Downloading from $iso_url..."
     wget -O "$iso_path" "$iso_url"
+    chmod 0755 $iso_path
 fi
 
 # Define VM parameters
@@ -20,7 +24,10 @@ memory=2048
 cpus=2
 disk_size=6
 
-# Create VM
+location="http://mirror.centos.org/centos/8-stream/BaseOS/x86_64/os/"
+
+# Create VM, we were using iso_path as the argument to --location but let's try to do a network install now
+# --location "$iso_path" \
 virt-install \
 --name "$vm_name" \
 --ram "$memory" \
@@ -31,6 +38,9 @@ virt-install \
 --network network=default \
 --graphics none \
 --console pty,target_type=serial \
---location "$iso_path" \
+--location "$location" \
 --extra-args 'console=ttyS0'
+
+
+
 
