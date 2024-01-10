@@ -1,8 +1,11 @@
-#! /usr/bin/env python3
+#! /usr/bin/env python3.6
 
+import datetime
 import libvirt
 import os
 import sys
+import xml.etree.ElementTree as ET
+
 
 # Check if the current user is root
 if os.geteuid() != 0:
@@ -30,11 +33,18 @@ for domain in domains:
 
             # Get a list of snapshot names for the domain
             snapshots = domain.listAllSnapshots()
+            list_snaps = {}
             if snapshots:
                 print("\tSnapshots:")
                 for snapshot in snapshots:
-                    snapshot_name = snapshot.getName()
-                    print(f"\t- {snapshot_name}")
+                    s_name = snapshot.getName()
+                    s_xml = snapshot.getXMLDesc()
+                    xroot = ET.fromstring(s_xml)
+                    s_desc = xroot.find('.//description').text if xroot.find('.//description') is not None else "No Description"
+                    s_time = xroot.find('.//creationTime').text if xroot.find('.//creationTime') is not None else "No Timestamp"
+                    s_strtime = datetime.datetime.fromtimestamp(int(s_time)).strftime('%Y-%m-%d %H:%M:%S')
+                    list_snaps[s_time] = f"\t- {s_name} {s_desc} {s_strtime}"
+            [print(value) for key, value in sorted(list_snaps.items(), reverse=True)]
 
         except libvirt.libvirtError as e:
             print(f"Error getting interface addresses for {domain.name()}: {e}")
