@@ -16,5 +16,6 @@ sudo virsh shutdown $vm_name
 while [ "$(sudo virsh domstate tassi01)" != "shut off" ]; do
     sleep 1
 done
+echo "Reverting $vm_name to $snap"
 sudo virsh snapshot-revert --domain $vm_name --snapshotname $snap
 sudo virsh start $vm_name
