@@ -19,5 +19,5 @@ git clone https://github.com/openzfs/zfs.git
 cd zfs/
 git checkout tags/zfs-2.1.11 -b zfs-2.1.11
 ./autogen.sh; ./configure --with-spec=redhat; make pkg-utils pkg-kmod
-dnf localinstall *.$(uname -p).rpm
+dnf localinstall -y *.$(uname -p).rpm
 modprobe zfs
