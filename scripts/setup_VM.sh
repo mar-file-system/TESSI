@@ -19,7 +19,7 @@ if [ ! -f "$iso_path" ]; then
 fi
 
 # Define VM parameters
-vm_name="tassi01"
+vm_name="tassi02"
 memory=2048
 cpus=2
 disk_size=6
@@ -41,6 +41,12 @@ virt-install \
 --location "$location" \
 --extra-args 'console=ttyS0'
 
+# choose text mode
+# then choose 8 to do root password
+# then choose 4 to switch to minimal install
+# refresh if necessary to make sure installation source (#3) is good, then begin
+# for installation destination, choose 'Use All Space' and option 2 'LVM' 
+# set up time and use 0.pool.ntp.org 
 
-
+# would be good to also copy the ssh key to it and get the IP address somehow
 
