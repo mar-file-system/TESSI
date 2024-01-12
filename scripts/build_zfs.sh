@@ -1,4 +1,6 @@
 #! /usr/bin/bash
+set -e
+set -x
 
 if [ "$(id -u)" != "0" ]; then
    echo "This script must be run as root" 1>&2
