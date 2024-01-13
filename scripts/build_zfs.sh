@@ -21,3 +21,8 @@ git checkout tags/zfs-2.1.11 -b zfs-2.1.11
 ./autogen.sh; ./configure --with-spec=redhat; make pkg-utils pkg-kmod
 dnf localinstall -y *.$(uname -p).rpm
 modprobe zfs
+
+echo Verifying the ZFS build
+zfs -h
+lsmod | grep zfs
+modinfo zfs | grep version
