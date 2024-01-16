@@ -23,6 +23,6 @@ dnf localinstall -y *.$(uname -p).rpm
 modprobe zfs
 
 echo Verifying the ZFS build
-zfs -h
+zfs version
 lsmod | grep zfs
 modinfo zfs | grep version
