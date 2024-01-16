@@ -33,6 +33,23 @@ for domain in domains:
         except libvirt.libvirtError as e:
             print(f"Error getting interface addresses for {domain.name()}: {e}")
 
+            # Get the domain's XML description
+        xml_desc = domain.XMLDesc()
+        root = ET.fromstring(xml_desc)
+
+        # Find all disk elements in the XML
+        for disk in root.findall('.//devices/disk'):
+            if disk.get('device') == 'disk':
+                source = disk.find('source')
+                if source is not None:
+                    disk_file = source.get('file')
+                    if disk_file and os.path.exists(disk_file):
+                        # Get the size of the disk file
+                        size_bytes = os.path.getsize(disk_file)
+                        print(f"\tHDD Size: {size_bytes / (1024 ** 3):.2f} GB")
+                    else:
+                        print("\tHDD Size: Disk source file not found or inaccessible")
+
         try:
             # Get a list of snapshot names for the domain
             snapshots = domain.listAllSnapshots()
