@@ -20,7 +20,7 @@ for domain in domains:
     print(f"Name: {domain.name()}, ID: {domain.ID()}, State: {domain.state()}")
 
     # if the domain is running, figure out its ip address
-    if domain.state()[0] == libvirt.VIR_DOMAIN_RUNNING:
+    if True or domain.state()[0] == libvirt.VIR_DOMAIN_RUNNING:
         try:
             # Get the interface addresses for the domain
             addresses = domain.interfaceAddresses(libvirt.VIR_DOMAIN_INTERFACE_ADDRESSES_SRC_LEASE)
@@ -30,7 +30,10 @@ for domain in domains:
                 for addr in val['addrs']:
                     if addr['type'] == libvirt.VIR_IP_ADDR_TYPE_IPV4:
                         print(f"\tIP Address: {addr['addr']}")
+        except libvirt.libvirtError as e:
+            print(f"Error getting interface addresses for {domain.name()}: {e}")
 
+        try:
             # Get a list of snapshot names for the domain
             snapshots = domain.listAllSnapshots()
             list_snaps = {}
@@ -47,4 +50,4 @@ for domain in domains:
             [print(value) for key, value in sorted(list_snaps.items(), reverse=True)]
 
         except libvirt.libvirtError as e:
-            print(f"Error getting interface addresses for {domain.name()}: {e}")
+            print(f"Error getting snapshots for {domain.name()}: {e}")
