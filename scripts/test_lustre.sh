@@ -10,6 +10,10 @@ hostnamectl set-hostname $hname
 # also update /etc/hosts with this new hostname
 echo "$IP_ADDRESS $hname" >> /etc/hosts
 
+# first clean it up in case we forgot to do that
+./lustre/tests/llmountcleanup.sh
+\rm -rf /mnt/lustre
+
 FSTYPE=zfs ./lustre/tests/llmount.sh
 
 df -h /mnt/lustre
