@@ -1,0 +1,77 @@
+- hosts: all
+  gather_facts: yes
+  vars:
+    packages:
+      - name: "lustre"
+        module_command: "lsmod | grep -q lustre"
+        version_command: "lctl --version | awk '{print $2}'"
+      - name: "zfs"
+        module_command: "lsmod | grep -q zfs"
+        version_command: "zfs --version | head -1"
+    dbg_versions: {}
+    dbg_lsmod: {}
+
+  tasks:
+
+    - name: Display all gathered facts
+      debug:
+        var: ansible_facts
+      when: False
+
+    - name: Gather lsmod status for each package
+      shell: "{{ item.module_command }}"
+      register: lsmod_result
+      changed_when: false
+      ignore_errors: yes
+      failed_when: lsmod_result.rc not in [0, 1]
+      loop: "{{ packages }}"
+      loop_control:
+        loop_var: item
+
+    - name: Gather version for each package
+      shell: "{{ item.version_command }}"
+      register: version_result
+      changed_when: false
+      ignore_errors: yes
+      loop: "{{ packages }}"
+      loop_control:
+        loop_var: item
+
+    - name: Set versions from gathering
+      set_fact:
+        dbg_versions: "{{ dbg_versions | combine({ item.item.name: (item.stdout if item.stdout | length > 0 else 'n/a') }) }}"
+      loop: "{{ version_result.results }}"
+      no_log: true
+
+    - name: Set lsmod status from gathering
+      set_fact:
+        dbg_lsmod: >-
+          {{
+            dbg_lsmod | combine({ item.item.name: (item.rc == 0) })
+          }} 
+      loop: "{{ lsmod_result.results }}"
+      no_log: true
+
+    - name: Display Mounts 
+      debug:
+        msg: |
+          Mounts: {{ ansible_facts['mounts'] }}
+      when: False
+
+    # ANSIBLE_STDOUT_CALLBACK=debug needs to be set for this to look good
+    - name: Display Pertinent Facts 
+      debug:
+        msg: |
+          Node: {{ inventory_hostname }}
+          OS: {{ ansible_facts['distribution'] }} {{ ansible_facts['distribution_version'] }}
+          Architecture: {{ ansible_facts['architecture'] }}
+          Date/Time: {{ ansible_facts['date_time']['iso8601'] }}
+          HDD Size: {{ ansible_facts['devices']['dm-0']['size'] }}
+          Mem Total: {{ ansible_facts['memtotal_mb'] }}
+          Proc Count: {{ ansible_facts['processor_count'] }}
+          Python: {{ ansible_facts['python_version'] }}
+          Uptime: {{ ansible_facts['uptime_seconds'] }}
+          ZFS Module Loaded : {{ dbg_lsmod.zfs }}
+          ZFS Version : {{ dbg_versions.zfs }}
+          Lustre Module Loaded : {{ dbg_lsmod.lustre }}
+          Lustre Version : {{ dbg_versions.lustre }}
