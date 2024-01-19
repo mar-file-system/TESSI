@@ -16,7 +16,7 @@ conn = libvirt.open()
 
 # List all defined virtual machines
 domains = conn.listAllDomains()
-for domain in domains:
+for domain in sorted(domains, key=lambda domain: domain.name()):
     print(f"Name: {domain.name()}, ID: {domain.ID()}, State: {domain.state()}")
 
     # if the domain is running, figure out its ip address
