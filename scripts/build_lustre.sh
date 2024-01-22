@@ -30,3 +30,4 @@ git checkout tags/2.15.4 -b 2.15.4
 
 echo "Build Lustre"
 sh autogen.sh; ./configure --with-zfs --disable-ldiskfs --with-linux=/usr/src/kernels/$(uname -r); make -j$(nproc)
+make install
