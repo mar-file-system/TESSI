@@ -6,7 +6,6 @@ import os
 import sys
 import xml.etree.ElementTree as ET
 
-
 # Check if the current user is root
 if os.geteuid() != 0:
     sys.exit("Warning: This script must be run as root.")
@@ -14,13 +13,32 @@ if os.geteuid() != 0:
 # Connect to the libvirt daemon
 conn = libvirt.open()
 
+def state_to_string(state):
+    state_strings = {
+        libvirt.VIR_DOMAIN_NOSTATE: 'No State',
+        libvirt.VIR_DOMAIN_RUNNING: 'Running',
+        libvirt.VIR_DOMAIN_BLOCKED: 'Blocked on resource',
+        libvirt.VIR_DOMAIN_PAUSED: 'Paused by user',
+        libvirt.VIR_DOMAIN_SHUTDOWN: 'Being shut down',
+        libvirt.VIR_DOMAIN_SHUTOFF: 'Shut off',
+        libvirt.VIR_DOMAIN_CRASHED: 'Crashed',
+        libvirt.VIR_DOMAIN_PMSUSPENDED: 'Suspended by guest power management',
+    }
+
+    return state_strings.get(state, "Unknown")
+
 # List all defined virtual machines
 domains = conn.listAllDomains()
 for domain in sorted(domains, key=lambda domain: domain.name()):
-    print(f"Name: {domain.name()}, ID: {domain.ID()}, State: {domain.state()}")
+    state = domain.state()[0]  # Get the state integer
+    print(f"Name: {domain.name()}, ID: {domain.ID()}, State: {state_to_string(state)}")
+
+    # Get the domain's XML description
+    xml_desc = domain.XMLDesc()
+    root = ET.fromstring(xml_desc)
 
     # if the domain is running, figure out its ip address
-    if True or domain.state()[0] == libvirt.VIR_DOMAIN_RUNNING:
+    if domain.state()[0] == libvirt.VIR_DOMAIN_RUNNING:
         try:
             # Get the interface addresses for the domain
             addresses = domain.interfaceAddresses(libvirt.VIR_DOMAIN_INTERFACE_ADDRESSES_SRC_LEASE)
@@ -32,23 +50,6 @@ for domain in sorted(domains, key=lambda domain: domain.name()):
                         print(f"\tIP Address: {addr['addr']}")
         except libvirt.libvirtError as e:
             print(f"Error getting interface addresses for {domain.name()}: {e}")
-
-            # Get the domain's XML description
-        xml_desc = domain.XMLDesc()
-        root = ET.fromstring(xml_desc)
-
-        # Find all disk elements in the XML
-        for disk in root.findall('.//devices/disk'):
-            if disk.get('device') == 'disk':
-                source = disk.find('source')
-                if source is not None:
-                    disk_file = source.get('file')
-                    if disk_file and os.path.exists(disk_file):
-                        # Get the size of the disk file
-                        size_bytes = os.path.getsize(disk_file)
-                        print(f"\tHDD Size: {size_bytes / (1024 ** 3):.2f} GB")
-                    else:
-                        print("\tHDD Size: Disk source file not found or inaccessible")
 
         try:
             # Get a list of snapshot names for the domain
@@ -68,3 +69,16 @@ for domain in sorted(domains, key=lambda domain: domain.name()):
 
         except libvirt.libvirtError as e:
             print(f"Error getting snapshots for {domain.name()}: {e}")
+
+    # Find all disk elements in the XML
+    for disk in root.findall('.//devices/disk'):
+        if disk.get('device') == 'disk':
+            source = disk.find('source')
+            if source is not None:
+                disk_file = source.get('file')
+                if disk_file and os.path.exists(disk_file):
+                    # Get the size of the disk file
+                    size_bytes = os.path.getsize(disk_file)
+                    print(f"\tHDD Size: {size_bytes / (1024 ** 3):.2f} GB")
+                else:
+                    print("\tHDD Size: Disk source file not found or inaccessible")

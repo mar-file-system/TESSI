@@ -65,16 +65,20 @@ virt-install \
 --network network=default \
 --graphics none \
 --initrd-inject "$ks_dir/$ks_file" \
---console pty,target_type=serial \
 --location "$baseos_location" \
 --noreboot \
---extra-args "inst.ks=file:/$ks_file console=ttyS0,115200n8" < /dev/null
+--wait 20 \
+--noautoconsole \
+--extra-args "inst.ks=file:/$ks_file console=tty0 console=ttyS0,115200n8" < /dev/null
 
 #--noautoconsole < /dev/null
 
 # --extra-args "console=ttyS0 ks=http://$web_server_ip:$web_server_port/$hostname.kickstart" \
 
-# start the VM
-# virsh start $hostname
+virsh shutdown $hostname
+sleep 60
 
-echo "$hostname is being installed now. Run ssh-copy-id when complete to allow passwordless ssh"
+# start the VM
+virsh start $hostname
+
+echo "$hostname should be booting now. Run ssh-copy-id when complete to allow passwordless ssh"
