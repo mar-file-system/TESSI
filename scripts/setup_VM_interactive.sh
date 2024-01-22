@@ -19,10 +19,10 @@ if [ ! -f "$iso_path" ]; then
 fi
 
 # Define VM parameters
-vm_name="tassi02"
-memory=2048
+vm_name="in15vm04"
+memory=4096
 cpus=2
-disk_size=6
+disk_size=12
 
 location="http://mirror.centos.org/centos/8-stream/BaseOS/x86_64/os/"
 
