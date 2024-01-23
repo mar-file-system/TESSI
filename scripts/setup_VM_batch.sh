@@ -16,7 +16,7 @@ centos8="http://mirror.centos.org/centos/8-stream"
 baseos_location="$centos8/BaseOS/x86_64/os/"
 appstr_location="$centos8/AppStream/x86_64/os/"
 root_password="password"
-ssh_pub=`cat /home/jbent/.ssh/id_rsa.pub`
+ssh_pub=`cat /home/jbent/.ssh/authorized_keys`
 
 # Prepare kickstart file and chdir to the directory where we create it
 ks_dir="kickstart_files"
