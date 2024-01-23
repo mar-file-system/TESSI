@@ -16,6 +16,7 @@ centos8="http://mirror.centos.org/centos/8-stream"
 baseos_location="$centos8/BaseOS/x86_64/os/"
 appstr_location="$centos8/AppStream/x86_64/os/"
 root_password="password"
+ssh_pub=`cat /home/jbent/.ssh/id_rsa.pub`
 
 # Prepare kickstart file and chdir to the directory where we create it
 ks_dir="kickstart_files"
@@ -50,6 +51,10 @@ pwpolicy user --minlen=6 --minquality=1 --notstrict --nochanges --emptyok
 pwpolicy luks --minlen=6 --minquality=1 --notstrict --nochanges --notempty
 %end
 %post
+mkdir -p /root/.ssh
+chmod 700 /root/.ssh
+echo "${ssh_pub}" >> /root/.ssh/authorized_keys
+chmod 600 /root/.ssh/authorized_keys
 shutdown -P now
 %end
 EOF
@@ -81,4 +86,7 @@ sleep 60
 # start the VM
 virsh start $hostname
 
-echo "$hostname should be booting now. Run ssh-copy-id when complete to allow passwordless ssh"
+# clear out any old hostnames
+ssh-keygen -R $hostname
+
+echo "$hostname should be booting now." 
