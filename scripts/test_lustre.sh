@@ -22,4 +22,5 @@ df -h /mnt/lustre
 ./lustre/utils/lfs getstripe /mnt/lustre/
 
 dd if=/dev/zero of=/mnt/lustre/file.out bs=1MB count=400
-
+echo "Data should be striped across both osts"
+df -h /mnt/lustre-ost*
