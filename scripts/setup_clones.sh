@@ -31,6 +31,26 @@ shutdown_vm_and_wait() {
     echo "$vm_name has been shut down."
 }
 
+set_hostname() {
+    local vm_name="$1"
+
+    # was doing this with virt-sysprep but that was purging a bunch of other stuff
+    #virt-sysprep --hostname $vm -d $vm
+
+    # now do it by mounting the disk image and manually overriding the file content
+    mpoint=/tmp/mnt/vm_disk.$$
+    mkdir -p $mpoint 
+
+    vmimage=`virsh domblklist $vm_name | grep vda | awk '{print $2}'`
+    guestmount -a $vmimage -i $mpoint
+    hfile=$mpoint/etc/hostname
+    [[ -e "$hfile" ]] || { echo "Warning: $hfile not found"; exit 1; }
+    echo $vm_name > $hfile
+    guestunmount $mpoint
+
+    echo "Set hostname to be $vm_name"
+}
+
 baseavailable=`$listvms | grep -q $baseimage`
 if $baseavailable; then
   shutdown_vm_and_wait $baseimage
@@ -54,9 +74,9 @@ for i in {01..05}; do
 
   if $baseavailable; then
    echo "Need to clone from $baseimage"
-   virt-clone --original $baseimage --name $vm --auto-clone 
+   virt-clone --original $baseimage --name $vm --auto-clone --nonsparse
    sleep $sleeptime
-   virt-sysprep --hostname $vm -d $vm
+   set_hostname $vm
    sleep $sleeptime
    virsh start $vm
   fi
