@@ -12,9 +12,11 @@ test_striping() {
     FILESIZE_MB=200
     testfile=/mnt/lustre/file.out
     dd if=/dev/zero of=$testfile bs=1MB count=$FILESIZE_MB
-    sleep 3
+    sleep 10
     stripes=`df -h /mnt/lustre-ost* | grep -v Filesystem | awk '{print $3}' | tr '\n' ' '`
     echo "Stripes with $1 pattern: $stripes"
+    rm $testfile
+    sleep 10
 }
 
 # first clean it up in case we forgot to do that
