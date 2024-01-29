@@ -1,5 +1,7 @@
 #!/bin/bash
 
+cd /usr/local/src/lustre_release
+
 LLMOUNT="./lustre/tests/llmount.sh"
 [ ! -f "$LLMOUNT_SH" ] && { echo "Warning: $LLMOUNT_SH does not exist."; exit 1; }
 [ "$(id -u)" -ne 0 ] && { echo "Warning: This script must be run as root."; exit 1; }
