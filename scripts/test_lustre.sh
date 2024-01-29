@@ -3,13 +3,14 @@
 cd /usr/local/src/lustre-release
 
 LLMOUNT="./lustre/tests/llmount.sh"
+LLMOUNT_CLEANUP="./lustre/tests/llmountcleanup.sh"
 [ ! -f "$LLMOUNT" ] && { echo "Warning: $LLMOUNT does not exist."; exit 1; }
 [ "$(id -u)" -ne 0 ] && { echo "Warning: This script must be run as root."; exit 1; }
 
 testfile=/mnt/lustre/file.out
 
 # first clean it up in case we forgot to do that
-\rm -rf /mnt/lustre
+$LLMOUNT_CLEANUP
 
 FSTYPE=zfs $LLMOUNT 
 
