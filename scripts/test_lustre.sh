@@ -1,37 +1,36 @@
 #!/bin/bash
 
-testfile=/mnt/lustre/file.out
+cd /usr/local/src/lustre-release
 
-# Get the primary IP address
-IP_ADDRESS=$(hostname -I)
+LLMOUNT="./lustre/tests/llmount.sh"
+LLMOUNT_CLEANUP="./lustre/tests/llmountcleanup.sh"
 
-# Set the hostname 
-# not necessary anymore since the VM creation tools handle this
-# hname=mylustrehost
-# hostnamectl set-hostname $hname 
+[ ! -f "$LLMOUNT" ] && { echo "Warning: $LLMOUNT does not exist."; exit 1; }
+[ "$(id -u)" -ne 0 ] && { echo "Warning: This script must be run as root."; exit 1; }
 
-# also update /etc/hosts with this new hostname
-# hmmm, I wonder if this is necessary?
-echo "No longer setting the hostname in /etc/hosts, is that a problem?"
-# echo "$IP_ADDRESS $hname" >> /etc/hosts
+test_striping() {
+    FILESIZE_MB=200
+    testfile=/mnt/lustre/file.out
+    dd if=/dev/zero of=$testfile bs=1MB count=$FILESIZE_MB
+    sleep 10
+    stripes=`df -h /mnt/lustre-ost* | grep -v Filesystem | awk '{print $3}' | tr '\n' ' '`
+    echo "Stripes with $1 pattern: $stripes"
+    rm $testfile
+    sleep 10
+}
 
 # first clean it up in case we forgot to do that
-./lustre/tests/llmountcleanup.sh
-\rm -rf /mnt/lustre
+$LLMOUNT_CLEANUP
 
-FSTYPE=zfs ./lustre/tests/llmount.sh
+FSTYPE=zfs $LLMOUNT 
 
+# test the default striping behavior
 df -h /mnt/lustre
 ./lustre/utils/lfs getstripe /mnt/lustre/
-dd if=/dev/zero of=$testfile bs=1MB count=400
-df -h /mnt/lustre-*
-\rm $testfile
+test_striping "default"
 
 # change striping behavior, 
-# write a large file and then check it was striped across all osts
 ./lustre/utils/lfs setstripe -c -1 /mnt/lustre
 ./lustre/utils/lfs getstripe /mnt/lustre/
 
-dd if=/dev/zero of=$testfile bs=1MB count=400
-df -h /mnt/lustre-*
-\rm $testfile
+test_striping "modified"
