@@ -5,6 +5,13 @@ import libvirt
 import os
 import sys
 import xml.etree.ElementTree as ET
+from xml.dom import minidom
+
+# Connect to the hypervisor
+conn = libvirt.open('qemu:///system')
+
+#
+
 
 # Check if the current user is root
 if os.geteuid() != 0:
@@ -42,6 +49,15 @@ for domain in sorted(domains, key=lambda domain: domain.name()):
         try:
             # Get the interface addresses for the domain
             addresses = domain.interfaceAddresses(libvirt.VIR_DOMAIN_INTERFACE_ADDRESSES_SRC_LEASE)
+
+            # Find all interface elements within the domain XML
+            dom = minidom.parseString(xml_desc)
+            interfaces = dom.getElementsByTagName('interface')
+            for interface in interfaces:
+                # Find the MAC address element within each interface
+                mac_element = interface.getElementsByTagName('mac')[0]
+                mac_address = mac_element.getAttribute('address')
+                print(f"\tMAC Address: {mac_address}")
 
             # Extract and print the IP address
             for (name, val) in addresses.items():
