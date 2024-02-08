@@ -31,7 +31,7 @@ def state_to_string(state):
 domains = conn.listAllDomains()
 for domain in sorted(domains, key=lambda domain: domain.name()):
     state = domain.state()[0]  # Get the state integer
-    print(f"Name: {domain.name()}, ID: {domain.ID()}, State: {state_to_string(state)}")
+    print(f"Name: {domain.name()} - ID: {domain.ID()}, State: {state_to_string(state)}")
 
     # Get the domain's XML description
     xml_desc = domain.XMLDesc()
