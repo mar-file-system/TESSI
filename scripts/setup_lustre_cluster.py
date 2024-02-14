@@ -1,13 +1,16 @@
 #! /usr/bin/env python3.6
 
 import argparse
-import os
-import sys
+import inspect
 import libvirt
+import os
+import subprocess
+import sys
 import time
 import xml.etree.ElementTree as ET
+import yaml
+
 from uuid import uuid4
-import subprocess
 
 def check_vm_status(conn,vm_name,shutdown=True,destroy=False):
     """Check if the VM exists and is shut off."""
@@ -69,7 +72,7 @@ def check_network_exists(conn, network_name):
     except libvirt.libvirtError:
         return False
 
-def setup_hostonly_network(conn, network, network_name, mac_addresses):
+def setup_hostonly_network(conn, network, network_name, mac_addresses = ''):
     """Set up host-only network with optional static MAC address assignments."""
     network_xml = f"""
 <network>
@@ -120,7 +123,79 @@ def libvirt_connect():
         sys.exit(1)
     return conn
 
-def create_node(conn, src_vm, target_vm, network_name, network, target_ip, mac_addr_map):
+def create_disk_image(image_path, size):
+    """Create a raw disk image using qemu-img."""
+    command = ["qemu-img", "create", "-f", "raw", image_path, size]
+    try:
+        subprocess.run(command, check=True)
+        print(f"Disk image {image_path} created with size {size}.")
+    except subprocess.CalledProcessError as e:
+        print(f"Failed to create disk image: {e}")
+        sys.exit(1)
+
+def attach_disk_to_vm(vm_name, disk_path, target_dev, cache_mode='none', persistent=True):
+    """Attach a disk to a VM using virsh."""
+    command = ["virsh", "attach-disk", vm_name, disk_path, target_dev, "--cache", cache_mode]
+    if persistent:
+        command.append("--persistent")
+    try:
+        subprocess.run(command, check=True)
+        print(f"Disk {disk_path} attached to {vm_name} as {target_dev}.")
+    except subprocess.CalledProcessError as e:
+        print(f"Failed to attach disk to VM: {e}")
+        sys.exit(1)
+
+def get_image_storage_pool_path(conn):
+    """Get the path of the default storage pool."""
+    try:
+        # Get the default storage pool (usually named 'default')
+        pool = conn.storagePoolLookupByName('images')
+        # Get the XML description of the pool
+        pool_xml = pool.XMLDesc(0)
+        # Parse the XML to find the path
+        path_start = pool_xml.find('<path>') + 6  # Add 6 to skip the <path> tag itself
+        path_end = pool_xml.find('</path>', path_start)
+        path = pool_xml[path_start:path_end]
+        return path
+    except libvirt.libvirtError as e:
+        print(f"Error getting default storage pool path: {e}")
+        return None
+
+def set_hostname(conn, vm_name):
+    try:
+        dom = conn.lookupByName(vm_name)
+    except libvirt.libvirtError:
+        print(f"VM {vm_name} not found")
+        sys.exit(1)
+
+    mpoint = f"/tmp/mnt/vm_disk.{os.getpid()}"
+    os.makedirs(mpoint, exist_ok=True)
+
+    try:
+        vmimage = subprocess.check_output(['virsh', 'domblklist', vm_name, '--details']).decode()
+        for line in vmimage.splitlines():
+            if 'vda' in line:
+                vmimage = line.split()[-1]
+                break
+        else:
+            raise Exception("vda not found in domblklist output")
+
+        subprocess.run(['guestmount', '-a', vmimage, '-i', mpoint], check=True)
+        hfile = os.path.join(mpoint, 'etc/hostname')
+        if not os.path.exists(hfile):
+            raise Exception(f"Warning: {hfile} not found")
+
+        with open(hfile, 'w') as f:
+            f.write(vm_name + '\n')
+
+        subprocess.run(['guestunmount', mpoint], check=True)
+        print(f"Set hostname to be {vm_name}")
+
+    except Exception as e:
+        print(e)
+        sys.exit(1)
+
+def create_node(conn, src_vm, target_vm, network_name, network, target_ip, mac_addr_map, hds=None):
     if not check_vm_status(conn, src_vm, shutdown=True, destroy=False):
         print(f"Warning: VM {src_vm} is not appropriately shutdown.")
         sys.exit(1)
@@ -139,16 +214,25 @@ def create_node(conn, src_vm, target_vm, network_name, network, target_ip, mac_a
     print(mac_addresses)
     setup_hostonly_network(conn, network, network_name, mac_addresses)
 
+    set_hostname(conn,target_vm)
+
+    get_letter = lambda x: chr(ord('b') + x )
+    try:
+        for idx,hd in enumerate(hds):
+            path = f"{get_image_storage_pool_path(conn)}/{target_vm}_hdd{idx}_{hd}GB"
+            create_disk_image(path, f"{hd}G")
+            attach_disk_to_vm(target_vm, path, f"vd{get_letter(idx)}")
+    except TypeError:
+        pass # hds can be none 
 
 def main():
 
     # Parse command-line arguments
     parser = argparse.ArgumentParser(description='VM and network setup script using libvirt.')
-    parser.add_argument('-v', '--base_vm', default='freshinstall', help='Name of the base VM.')
-    parser.add_argument('-l', '--base_lustre', default='lustrebase', help='Name for the Lustre base VM clone.')
-    parser.add_argument('-n', '--network_name', default='hostonly-net', help='Name of the virtual network.')
-    parser.add_argument('-a', '--ip_addr', default='101', help='IP address to assign to the Lustre base VM.')
-    parser.add_argument('-i', '--network', default='192.168.56', help='Hostonly network.')
+    parser.add_argument('-v', '--base_vm',     default='freshinstall', help='Name of the base VM.')
+    parser.add_argument('-l', '--lustre_gold', default='lustrebase',   help='Name for the Lustre base VM clone.')
+    parser.add_argument('-a', '--ip_addr',     default='101',          help='IP address to assign to the Lustre base VM.')
+    parser.add_argument('config_file',         type=str,               help='Path to the configuration file')
     args = parser.parse_args()
 
     # Check if script is run as root
@@ -156,30 +240,32 @@ def main():
         print("Must be run as root")
         sys.exit(1)
 
+    # open the config file
+    with open(args.config_file, 'r') as file:
+        config = yaml.safe_load(file) 
+
     # Connect to libvirt
     conn = libvirt_connect()
 
+    # pull key things from config file
+    network = config['system']['network']
+    hosts   = config['system']['hosts']
+
     # Main execution starts here
-    setup_hostonly_network(conn, args.network, args.network_name, "")
+    setup_hostonly_network(conn, network['addr'], network['name'])
 
     if not check_vm_status(conn, args.base_vm):
         print(f"Warning: VM {args.base_vm} does not exist or is not shut off.")
         sys.exit(1)
 
     mac_addr_map = {}
-    create_node(conn, args.base_vm, args.base_lustre, args.network_name, args.network, args.ip_addr, mac_addr_map)
+    create_node(conn, args.base_vm, args.lustre_gold, network['name'], network['addr'], args.ip_addr, mac_addr_map)
 
-    # now create each desired lustre node
-    hosts = {
-        'mds00':  '10',
-        'mds01':  '20',
-        'oss00':  '30',
-        'oss01':  '40',
-        'client': '50'
-    }
-    for hname,hip in hosts.items():
-        create_node(conn, args.base_vm, hname, args.network_name, args.network, hip, mac_addr_map)
-        print(f"Created {hname}:{args.network}.{hip}. TODO: Need to create from {args.base_lustre} and need to set up disks")
+    for hname,hinfo in hosts.items():
+        hip = hinfo['ip']
+        hds = hinfo['hds']
+        create_node(conn, args.lustre_gold, hname, network['name'], network['addr'], hip, mac_addr_map, hds)
+        print(f"Created {hname}:{network['addr']}.{hip}.")
 
     # Restart libvirt services to apply changes
     time.sleep(2)
@@ -190,7 +276,7 @@ def main():
     conn = libvirt_connect()
 
     # Start the cloned VMs
-    dom = conn.lookupByName(args.base_lustre)
+    dom = conn.lookupByName(args.lustre_gold)
     dom.create()
     for hname in hosts:
         print(f"Starting {hname}")
@@ -200,7 +286,7 @@ def main():
     # Close the libvirt connection
     conn.close()
 
-    print(f"Setup completed. Lustre cluster should now be running with new NICs attached to {args.network_name}.")
+    print(f"Setup completed. Lustre cluster should now be running with new NICs attached to {network['name']}.")
 
 if __name__ == "__main__":
     main()
