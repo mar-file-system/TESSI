@@ -1,0 +1,4563 @@
+From degremoa at amazon.com  Fri Oct  1 02:22:47 2021
+From: degremoa at amazon.com (Degremont, Aurelien)
+Date: Fri, 1 Oct 2021 09:22:47 +0000
+Subject: [lustre-discuss] how to optimize write performances
+In-Reply-To: <3c8ec310-232c-3a73-05f2-9358d5348fa5@cnaf.infn.it>
+References: <3c8ec310-232c-3a73-05f2-9358d5348fa5@cnaf.infn.it>
+Message-ID: <AA68B295-924D-441B-9F6F-C4800586E0CB@amazon.com>
+
+Hello
+
+To achieve higher throughput with a single threaded process, you should try to limit latencies and parallelize under the hood.
+Try checking the following parameters:
+- Stripe your file across multiple OSTs
+- Do large I/O, multiple MB per write, to let Lustre send multiple RPC to different OSTs
+- Try testing with and without Direct I/O.
+
+What is your 'dd' test command?
+Clear and check rpc stats (sudo lctl set_param osc.*.rpc_stats=clear; sudo lctl get_param osc.*.rpc_stats). Check you are sending large RPCs (pages per rpc).
+
+Aur?lien
+
+?Le 30/09/2021 18:11, ? lustre-discuss au nom de Riccardo Veraldi ? <lustre-discuss-bounces at lists.lustre.org au nom de riccardo.veraldi at cnaf.infn.it> a ?crit :
+
+    CAUTION: This email originated from outside of the organization. Do not click links or open attachments unless you can confirm the sender and know the content is safe.
+
+
+
+    Hello,
+
+    I wanted to ask some hint on how I may increase single process
+    sequential write performance on Lustre.
+
+    I am using Lustre 2.12.7 on RHEL 7.9
+
+    I have a number of OSSes with SAS SSDs in raidz. 3 OST per oss and each
+    OST is made by 8 SSD in raidz.
+
+    On a local test with multiple writes I can write and read from the zpool
+    at 7GB/s per OSS.
+
+    With Lustre/ZFS backend I can reach peak writes of 5.5GB/s per OSS which
+    is ok.
+
+    This anyway happens only with several multiple writes at once on the
+    filesystem.
+
+    A single write cannot perform more than 800MB-1GB/s
+
+    Changing the underlying hardware and moving to MVMe slightly improve
+    single write performance but just slightly.
+
+    What is preventing a single write pattern to perform better ? They are
+    XTC files.
+
+    Each single SSD has a 500MB/s write capability by factory specs. So
+    seems like that with a single write it is not possible to take advantage
+    of the
+
+    zpool parallelism. I tried also striping but that does not really help much.
+
+    Any hint is really appreciated.
+
+    Best
+
+    Riccardo
+
+
+
+    _______________________________________________
+    lustre-discuss mailing list
+    lustre-discuss at lists.lustre.org
+    http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org
+
+
+From darby.vicker-1 at nasa.gov  Mon Oct  4 09:47:27 2021
+From: darby.vicker-1 at nasa.gov (Vicker, Darby J. (JSC-EG111)[Jacobs Technology, Inc.])
+Date: Mon, 4 Oct 2021 16:47:27 +0000
+Subject: [lustre-discuss] ASSERTION( obj->oo_with_projid ) failed
+Message-ID: <057FC212-8AC8-4E1F-BD0C-1531B885377D@nasa.gov>
+
+We were able to get our LFS back up using the fix in LU-13189 and have been stable since.  But I'd still appreciate some help backing out of this.  
+
+* Is the "lfs setquota -p 1" the likely cause of our crash?
+* If so:
+	* Why would it take 1 week to show up?
+	* What is the best way to reverse any ill effects the "lfs setquota -p 1" command may have caused?
+	* Should there be some protection in the lustre source for this?
+
+
+?-----Original Message-----
+From: lustre-discuss <lustre-discuss-bounces at lists.lustre.org> on behalf of "Vicker, Darby J. (JSC-EG111)[Jacobs Technology, Inc.] via lustre-discuss" <lustre-discuss at lists.lustre.org>
+Reply-To: "Vicker, Darby J. (JSC-EG111)[Jacobs Technology, Inc.]" <darby.vicker-1 at nasa.gov>
+Date: Thursday, September 30, 2021 at 11:41 AM
+To: Colin Faber via lustre-discuss <lustre-discuss at lists.lustre.org>
+Subject: [EXTERNAL] [lustre-discuss] ASSERTION( obj->oo_with_projid ) failed
+
+    Hello everyone,
+
+    We've run into a pretty nasty LBUG that took our LFS down.  We're not exactly sure the cause and could use some help.  Its pretty much identical to this:
+
+	https://jira.whamcloud.com/browse/LU-13189
+
+    One of our OSS's started crashing repeated last night.  We are configured with HA and tried failing over to its pair just to have that OSS crash in the same way.  We are in the process of doing the same thing mentioned in the above LU to get back up and running but we'd like to try and fix this without the #undef ZFS_PROJINHERIT if possible.  A couple of months ago we updated our servers to 2.14 ? stock, no modifications ? and we'd like to get back to stock 2.14 again if possible.  Up until last night, our experience with 2.14 was great ? very stable compared to what we were running previously (very old 2.10) and better performing.  Our specific stack trace from the crash dump is below if that helps.  Our servers are running 3.10.0-1160.31.1.el7.x86_64.  MDT and OST's are both using ZFS (version 2.0).  
+
+    There are two things that could have contributed to the crash.  
+
+    First, about 1 week ago, we tried to use project quotas for the first time.  Without reading the lustre manual, I just tried to set a project quota as such:
+
+
+    	lfs setquota -p 1 -b 307200 -B 309200 -i 10000 -I 11000 .
+
+
+    But it was pretty obvious that didn't work.
+
+
+    	# lfs quota -p 1 /nobackup/
+    	Unexpected quotactl error: Operation not supported
+    	Disk quotas for prj 1 (pid 1):
+    	     Filesystem  kbytes   quota   limit   grace   files   quota   limit   grace
+     	    /nobackup/     [0]     [0]     [0]       -     [0]     [0]     [0]       -
+    	Some errors happened when getting quota info. Some devices may be not working or deactivated. The data in "[]" is inaccurate.
+    	#
+
+
+    Then, after reading section 25.2 in the lustre manual (https://doc.lustre.org/lustre_manual.xhtml#enabling_disk_quotas), I saw that zfs version >=0.8 with kernel version < 4.5 requires a patched kernel.  So I just moved on figuring project quotas would not work since we are using the stock kernel.  But it now it appears this might be the cause of our problem.  As of right now, I see this in the zfs properties for our metadata filesystem. 
+
+    	[root at hpfs-fsl-mds0 ~]# zpool get all mds0-0-new  | grep proj
+    	mds0-0-new  feature at project_quota          active                        local
+    	[root at hpfs-fsl-mds0 ~]#
+
+
+    Several questions come to mind.  
+
+    * Is this the likely cause of our crash?
+    * Why would it take 1 week to show up?
+    * What is the best way to reverse any ill effects the "lfs setquota -p 1" command may have caused?
+
+
+
+    The second possible contributor is related to some maintenance we just finished on the metadata server yesterday morning.  After the update to 2.14 (and zfs update from 0.7 to 2.0), we got this message from "zpool status" on our mdt pool:
+
+
+      pool: mds0-0
+     state: ONLINE
+    status: One or more devices are configured to use a non-native block size.
+    	Expect reduced performance.
+    action: Replace affected devices with devices that support the
+    	configured block size, or migrate data to a properly configured
+    	pool.
+      scan: scrub repaired 0B in 1 days 17:49:23 with 0 errors on Fri Jul  9 21:03:24 2021
+    config:
+
+    	NAME        STATE     READ WRITE CKSUM
+    	mds0-0      ONLINE       0     0     0
+    	  mirror-0  ONLINE       0     0     0
+    	    mpathm  ONLINE       0     0     0  block size: 512B configured, 4096B native
+    	    mpathn  ONLINE       0     0     0  block size: 512B configured, 4096B native
+    	  mirror-1  ONLINE       0     0     0
+    	    mpatho  ONLINE       0     0     0  block size: 512B configured, 4096B native
+    	    mpathp  ONLINE       0     0     0  block size: 512B configured, 4096B native
+    	  mirror-2  ONLINE       0     0     0
+    	    mpathq  ONLINE       0     0     0  block size: 512B configured, 4096B native
+    	    mpathr  ONLINE       0     0     0  block size: 512B configured, 4096B native
+    	  mirror-3  ONLINE       0     0     0
+    	    mpaths  ONLINE       0     0     0  block size: 512B configured, 4096B native
+    	    mpatht  ONLINE       0     0     0  block size: 512B configured, 4096B native
+    	  mirror-4  ONLINE       0     0     0
+    	    mpathu  ONLINE       0     0     0  block size: 512B configured, 4096B native
+    	    mpathv  ONLINE       0     0     0  block size: 512B configured, 4096B native
+    	  mirror-5  ONLINE       0     0     0
+    	    mpathw  ONLINE       0     0     0  block size: 512B configured, 4096B native
+    	    mpathx  ONLINE       0     0     0  block size: 512B configured, 4096B native
+
+
+
+    This is related to the SSD's we are using for the MDT.  The physical block size is 4k (ashift=12) but the logical block size is 0.5k (ashift=9).  Apparently, the old version of zfs (under which the original pool was built) picked ashift=9 but after the update zfs 2.0 was telling us we should be using the larger block size to match the physical block size of these drives.  Despite this mismatch, our mdtest results (via io500) were greatly improved with the lustre 2.14 update.  But its still something we wanted to fix, which was the purpose of our maintenance outage yesterday.  So we backed up the mds0-0/meta-fsl file system to a separate pool, destroyed the old pool, rebuilt it (now with zfs choosing shift=12 for the block size) and copied the data back to the newly created pool.  However, this process failed.  Our old metadata file system (512B block size) was using about 490 GB of our 2.2 TB pool.  Due to the increase in block size, the data take up more space in the file system - potentially 8x more if each entry is less than 512 B to begin with.  We filled up the new ashift=12 pool.  So we had to revert back to an ashift=9 pool.   We are going to have buy more or bigger SSD's (or use raidz instead of raid10) if we want to go to a bigger ashift.  
+
+    So this could be related too.  Theoretically, nothing should have changed as far as lustre was concerned.  But its hard to ignore that we put the file system back in service yesterday morning and about 10 hours later we ran into this problem.  
+
+
+    If anyone has ideas, please let us know.  We're happy to post details here or to an LU.  
+
+    Thanks,
+    Darby Vicker
+
+
+
+
+    [  138.597710] LustreError: 2476:0:(tgt_grant.c:803:tgt_grant_check()) hpfs-fsl-OST0005: cli cd0fda1d-691d-bb4f-1548-c45f8c2e578d is replaying OST_WRITE while one rnb hasn't OBD_BRW_FROM_GRANT set (0x8)
+    [  138.699120] LustreError: 2476:0:(osd_object.c:1353:osd_attr_set()) ASSERTION( obj->oo_with_projid ) failed:
+    [  138.699155] LustreError: 2476:0:(osd_object.c:1353:osd_attr_set()) LBUG
+    [  138.699176] Pid: 2476, comm: tgt_recover_5 3.10.0-1160.31.1.el7.x86_64 #1 SMP Thu Jun 10 13:32:12 UTC 2021
+    [  138.699177] Call Trace:
+    [  138.699184]  [<ffffffffc104167c>] libcfs_call_trace+0x8c/0xc0 [libcfs]
+    [  138.699194]  [<ffffffffc104199c>] lbug_with_loc+0x4c/0xa0 [libcfs]
+    [  138.699199]  [<ffffffffc17a62db>] osd_attr_set+0xdeb/0xe60 [osd_zfs]
+    [  138.699207]  [<ffffffffc18cf50e>] ofd_write_attr_set+0x87e/0xd20 [ofd]
+    [  138.699213]  [<ffffffffc18cfc03>] ofd_commitrw_write+0x253/0x1510 [ofd]
+    [  138.699218]  [<ffffffffc18d484d>] ofd_commitrw+0x2ad/0x9a0 [ofd]
+    [  138.699223]  [<ffffffffc15b85d1>] tgt_brw_write+0xe51/0x1a10 [ptlrpc]
+    [  138.699273]  [<ffffffffc15bca5a>] tgt_request_handle+0x7ea/0x1750 [ptlrpc]
+    [  138.699299]  [<ffffffffc150a096>] handle_recovery_req+0x96/0x290 [ptlrpc]
+    [  138.699317]  [<ffffffffc151406b>] replay_request_or_update.isra.25+0x2fb/0x930 [ptlrpc]
+    [  138.699336]  [<ffffffffc1514dbd>] target_recovery_thread+0x71d/0x11d0 [ptlrpc]
+    [  138.699354]  [<ffffffffba6c5e31>] kthread+0xd1/0xe0
+    [  138.699357]  [<ffffffffbad95df7>] ret_from_fork_nospec_end+0x0/0x39
+    [  138.699360]  [<ffffffffffffffff>] 0xffffffffffffffff
+    [  138.699380] Kernel panic - not syncing: LBUG
+    [  138.699395] CPU: 1 PID: 2476 Comm: tgt_recover_5 Kdump: loaded Tainted: P           OE  ------------   3.10.0-1160.31.1.el7.x86_64 #1
+    [  138.699429] Hardware name: Supermicro X9DRT/X9DRT, BIOS 3.2a 08/04/2015
+    [  138.699449] Call Trace:
+    [  138.699460]  [<ffffffffbad835a9>] dump_stack+0x19/0x1b
+    [  138.699477]  [<ffffffffbad7d2b1>] panic+0xe8/0x21f
+    [  138.699496]  [<ffffffffc10419eb>] lbug_with_loc+0x9b/0xa0 [libcfs]
+    [  138.699519]  [<ffffffffc17a62db>] osd_attr_set+0xdeb/0xe60 [osd_zfs]
+    [  138.699543]  [<ffffffffc18ca5cd>] ? ofd_attr_handle_id+0x12d/0x410 [ofd]
+    [  138.699566]  [<ffffffffc18cf50e>] ofd_write_attr_set+0x87e/0xd20 [ofd]
+    [  138.699588]  [<ffffffffba7de42d>] ? kzfree+0x2d/0x70
+    [  138.699607]  [<ffffffffc18cfc03>] ofd_commitrw_write+0x253/0x1510 [ofd]
+    [  138.699628]  [<ffffffffba7c7675>] ? __free_pages+0x25/0x30
+    [  138.699649]  [<ffffffffc18d484d>] ofd_commitrw+0x2ad/0x9a0 [ofd]
+    [  138.699693]  [<ffffffffc15b85d1>] tgt_brw_write+0xe51/0x1a10 [ptlrpc]
+    [  138.699738]  [<ffffffffc15bca5a>] tgt_request_handle+0x7ea/0x1750 [ptlrpc]
+    [  138.699761]  [<ffffffffba6aee98>] ? add_timer+0x18/0x20
+    [  138.699779]  [<ffffffffba6bc13b>] ? __queue_delayed_work+0x8b/0x1a0
+    [  138.699822]  [<ffffffffc15bc270>] ? tgt_hpreq_handler+0x2c0/0x2c0 [ptlrpc]
+    [  138.699861]  [<ffffffffc150a096>] handle_recovery_req+0x96/0x290 [ptlrpc]
+    [  138.699899]  [<ffffffffc151406b>] replay_request_or_update.isra.25+0x2fb/0x930 [ptlrpc]
+    [  138.699940]  [<ffffffffc1514dbd>] target_recovery_thread+0x71d/0x11d0 [ptlrpc]
+    [  138.699963]  [<ffffffffbad88e60>] ? __schedule+0x320/0x680
+    [  138.699998]  [<ffffffffc15146a0>] ? replay_request_or_update.isra.25+0x930/0x930 [ptlrpc]
+    [  138.700023]  [<ffffffffba6c5e31>] kthread+0xd1/0xe0
+    [  138.700039]  [<ffffffffba6c5d60>] ? insert_kthread_work+0x40/0x40
+    [  138.700059]  [<ffffffffbad95df7>] ret_from_fork_nospec_begin+0x21/0x21
+    [  138.700079]  [<ffffffffba6c5d60>] ? insert_kthread_work+0x40/0x40
+
+    _______________________________________________
+    lustre-discuss mailing list
+    lustre-discuss at lists.lustre.org
+    https://gcc02.safelinks.protection.outlook.com/?url=http%3A%2F%2Flists.lustre.org%2Flistinfo.cgi%2Flustre-discuss-lustre.org&amp;data=04%7C01%7Cdarby.vicker-1%40nasa.gov%7C84f0c8414146473a79d308d984398304%7C7005d45845be48ae8140d43da96dd17b%7C0%7C0%7C637686204818487883%7CUnknown%7CTWFpbGZsb3d8eyJWIjoiMC4wLjAwMDAiLCJQIjoiV2luMzIiLCJBTiI6Ik1haWwiLCJXVCI6Mn0%3D%7C1000&amp;sdata=pSEabqH75rxqYLWIKI0JrRjiTMtQ5BhoFuyQKFQsGL8%3D&amp;reserved=0
+
+
+From degremoa at amazon.com  Tue Oct  5 02:56:25 2021
+From: degremoa at amazon.com (Degremont, Aurelien)
+Date: Tue, 5 Oct 2021 09:56:25 +0000
+Subject: [lustre-discuss] how to optimize write performances
+In-Reply-To: <708f593b-68d5-5f62-1c96-d755218c2120@cnaf.infn.it>
+References: <3c8ec310-232c-3a73-05f2-9358d5348fa5@cnaf.infn.it>
+ <AA68B295-924D-441B-9F6F-C4800586E0CB@amazon.com>
+ <708f593b-68d5-5f62-1c96-d755218c2120@cnaf.infn.it>
+Message-ID: <B8D31329-91D7-476D-BAC9-BB6512CBF147@amazon.com>
+
+Hello
+
+Direct I/O is impacting the whole I/O path, from client down to ZFS. Agreed ZFS does not support it, but all the rest of I/O path is.
+
+Could you provide you fio command line?
+As I said, you need to do _large I/O_ of multiple MB size. If you are just doing 1 MB I/O (assuming stripesize is 1MB), you application will just send 1 RPC at a time to 1 OST, wait for the reply and send the next one. The client cache will help at the beginning, until it is full (32MB max_dirty_mb per OST by default). 
+What about rpc_stats?
+
+
+Aur?lien
+
+?Le 04/10/2021 18:32, ? Riccardo Veraldi ? <riccardo.veraldi at cnaf.infn.it> a ?crit :
+
+    CAUTION: This email originated from outside of the organization. Do not click links or open attachments unless you can confirm the sender and know the content is safe.
+
+
+
+    Hello Aurelien,
+
+    I Am using ZFS as lustre backend. ZFS does not support direct I/O.
+
+    Ok Lustre does but anyway the performance with direct I/O are worse when
+    using ZFS backend at least during my tests.
+
+    Best
+
+    Riccardo
+
+
+    On 10/1/21 2:22 AM, Degremont, Aurelien wrote:
+    > Hello
+    >
+    > To achieve higher throughput with a single threaded process, you should try to limit latencies and parallelize under the hood.
+    > Try checking the following parameters:
+    > - Stripe your file across multiple OSTs
+    > - Do large I/O, multiple MB per write, to let Lustre send multiple RPC to different OSTs
+    > - Try testing with and without Direct I/O.
+    >
+    > What is your 'dd' test command?
+    > Clear and check rpc stats (sudo lctl set_param osc.*.rpc_stats=clear; sudo lctl get_param osc.*.rpc_stats). Check you are sending large RPCs (pages per rpc).
+    >
+    > Aur?lien
+    >
+    > Le 30/09/2021 18:11, ? lustre-discuss au nom de Riccardo Veraldi ? <lustre-discuss-bounces at lists.lustre.org au nom de riccardo.veraldi at cnaf.infn.it> a ?crit :
+    >
+    >      CAUTION: This email originated from outside of the organization. Do not click links or open attachments unless you can confirm the sender and know the content is safe.
+    >
+    >
+    >
+    >      Hello,
+    >
+    >      I wanted to ask some hint on how I may increase single process
+    >      sequential write performance on Lustre.
+    >
+    >      I am using Lustre 2.12.7 on RHEL 7.9
+    >
+    >      I have a number of OSSes with SAS SSDs in raidz. 3 OST per oss and each
+    >      OST is made by 8 SSD in raidz.
+    >
+    >      On a local test with multiple writes I can write and read from the zpool
+    >      at 7GB/s per OSS.
+    >
+    >      With Lustre/ZFS backend I can reach peak writes of 5.5GB/s per OSS which
+    >      is ok.
+    >
+    >      This anyway happens only with several multiple writes at once on the
+    >      filesystem.
+    >
+    >      A single write cannot perform more than 800MB-1GB/s
+    >
+    >      Changing the underlying hardware and moving to MVMe slightly improve
+    >      single write performance but just slightly.
+    >
+    >      What is preventing a single write pattern to perform better ? They are
+    >      XTC files.
+    >
+    >      Each single SSD has a 500MB/s write capability by factory specs. So
+    >      seems like that with a single write it is not possible to take advantage
+    >      of the
+    >
+    >      zpool parallelism. I tried also striping but that does not really help much.
+    >
+    >      Any hint is really appreciated.
+    >
+    >      Best
+    >
+    >      Riccardo
+    >
+    >
+    >
+    >      _______________________________________________
+    >      lustre-discuss mailing list
+    >      lustre-discuss at lists.lustre.org
+    >      http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org
+    >
+
+
+From dsathaye at gmail.com  Thu Oct  7 09:03:36 2021
+From: dsathaye at gmail.com (Dilip Sathaye)
+Date: Thu, 7 Oct 2021 21:33:36 +0530
+Subject: [lustre-discuss] No soace left on device Error
+Message-ID: <CAB8BVvryEZz1HxeFs-6ht-TeT7jj3dLK6__DOx_QVURCTFUewg@mail.gmail.com>
+
+Dear All,
+We are running lustre 2.7.x  in our cluster, which was running stable for
+few years. Suddenly a bug got triggered and basic copy command also fails
+with message like no space left on device.
+We were told to upgrade to lustre 2.10.  Could we know:
+
+1. If there is any simpler work around available, as we want to avoid
+upgrade. Upgrade can be complex process.
+
+2. If upgrade is unavoidable, what is way to move from 2.7.x to 2.10 ?
+
+Thanks
+Dilip G Sathayr
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20211007/72ae1608/attachment.html>
+
+From mrashid2 at uncc.edu  Thu Oct  7 12:19:20 2021
+From: mrashid2 at uncc.edu (Md Hasanur Rashid)
+Date: Thu, 7 Oct 2021 15:19:20 -0400
+Subject: [lustre-discuss] Fwd: RPCs in Flight are more than the
+ max_rpcs_in_flight value
+In-Reply-To: <CAOgrjkj4f-tyYB4OyWfxo71FVaU12uakboR-Hso-5pycv3fpZw@mail.gmail.com>
+References: <CAOgrjkj4f-tyYB4OyWfxo71FVaU12uakboR-Hso-5pycv3fpZw@mail.gmail.com>
+Message-ID: <CAOgrjkinzXc8_uBYaE0hzy3uDG4uAEd5Z_eqTxxEXnNgBPeH3Q@mail.gmail.com>
+
+Hello Everyone,
+
+I am running the Filebench benchmark in my Lustre cluster. I set the
+max_rpcs_in_flight value to be 1. Before executing and after executing, I
+verified that the value of max_rpcs_in_flight is indeed 1. However, when I
+check the rpc_stats, the stat shows a much higher value for RPCs in flight.
+Following is the value shown for one OSC just for reference:
+
+osc.hasanfs-OST0000-osc-ffff882fcf777000.rpc_stats=
+snapshot_time:         1632483604.967291 (secs.usecs)
+read RPCs in flight:  0
+write RPCs in flight: 0
+pending write pages:  0
+pending read pages:   0
+
+read write
+pages per rpc         rpcs   % cum % |       rpcs   % cum %
+1:         1 100 100   |          0   0   0
+2:         0   0 100   |          0   0   0
+4:         0   0 100   |          0   0   0
+8:         0   0 100   |          0   0   0
+16:         0   0 100   |          0   0   0
+32:         0   0 100   |          0   0   0
+64:         0   0 100   |          0   0   0
+128:         0   0 100   |          0   0   0
+256:         0   0 100   |       9508 100 100
+
+read write
+rpcs in flight        rpcs   % cum % |       rpcs   % cum %
+0:         0   0   0   |          0   0   0
+1:         1 100 100   |         10   0   0
+2:         0   0 100   |       9033  95  95
+3:         0   0 100   |        465   4 100
+
+read write
+offset                rpcs   % cum % |       rpcs   % cum %
+0:         1 100 100   |        725   7   7
+1:         0   0 100   |          0   0   7
+2:         0   0 100   |          0   0   7
+4:         0   0 100   |          0   0   7
+8:         0   0 100   |          0   0   7
+16:         0   0 100   |          0   0   7
+32:         0   0 100   |          0   0   7
+64:         0   0 100   |          0   0   7
+128:         0   0 100   |          0   0   7
+256:         0   0 100   |        718   7  15
+512:         0   0 100   |       1386  14  29
+1024:         0   0 100   |       2205  23  52
+2048:         0   0 100   |       1429  15  67
+4096:         0   0 100   |       1103  11  79
+8192:         0   0 100   |       1942  20 100
+
+Can anyone please explain to me why the RPCs in flight shown in the
+rpc_stats could be higher than the max_rpcs_in_flight?
+
+Thanks,
+Md. Hasanur Rashid
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20211007/b127ef6d/attachment.html>
+
+From adilger at whamcloud.com  Thu Oct  7 14:45:09 2021
+From: adilger at whamcloud.com (Andreas Dilger)
+Date: Thu, 7 Oct 2021 21:45:09 +0000
+Subject: [lustre-discuss] Fwd: RPCs in Flight are more than the
+ max_rpcs_in_flight value
+In-Reply-To: <CAOgrjkinzXc8_uBYaE0hzy3uDG4uAEd5Z_eqTxxEXnNgBPeH3Q@mail.gmail.com>
+References: <CAOgrjkj4f-tyYB4OyWfxo71FVaU12uakboR-Hso-5pycv3fpZw@mail.gmail.com>
+ <CAOgrjkinzXc8_uBYaE0hzy3uDG4uAEd5Z_eqTxxEXnNgBPeH3Q@mail.gmail.com>
+Message-ID: <2EEE817C-69D2-451C-8091-8B22EE1E09AF@ddn.com>
+
+On Oct 7, 2021, at 13:19, Md Hasanur Rashid via lustre-discuss <lustre-discuss at lists.lustre.org<mailto:lustre-discuss at lists.lustre.org>> wrote:
+
+Hello Everyone,
+
+I am running the Filebench benchmark in my Lustre cluster. I set the max_rpcs_in_flight value to be 1. Before executing and after executing, I verified that the value of max_rpcs_in_flight is indeed 1. However, when I check the rpc_stats, the stat shows a much higher value for RPCs in flight.
+
+If by "much higher than 1" you mean "2", then yes it appears there are mostly (95%) 2 RPCs being processed concurrently on this OST.
+
+That might happen if you have 2 clients/mountpoints writing to the same OST, it might be an off-by-one logic error allowing an extra RPC in flight, it might be intentional for some reason (e.g. to avoid deadlock, memory pressure, etc), or it might be accounting error in the statistics (e.g. counting the next RPC to be sent before the first one is marked finished).
+
+Following is the value shown for one OSC just for reference:
+
+osc.hasanfs-OST0000-osc-ffff882fcf777000.rpc_stats=
+snapshot_time:         1632483604.967291 (secs.usecs)
+read RPCs in flight:  0
+write RPCs in flight: 0
+pending write pages:  0
+pending read pages:   0
+
+read write
+pages per rpc         rpcs   % cum % |       rpcs   % cum %
+1:         1 100 100   |          0   0   0
+2:         0   0 100   |          0   0   0
+4:         0   0 100   |          0   0   0
+8:         0   0 100   |          0   0   0
+16:         0   0 100   |          0   0   0
+32:         0   0 100   |          0   0   0
+64:         0   0 100   |          0   0   0
+128:         0   0 100   |          0   0   0
+256:         0   0 100   |       9508 100 100
+
+read write
+rpcs in flight        rpcs   % cum % |       rpcs   % cum %
+0:         0   0   0   |          0   0   0
+1:         1 100 100   |         10   0   0
+2:         0   0 100   |       9033  95  95
+3:         0   0 100   |        465   4 100
+
+read write
+offset                rpcs   % cum % |       rpcs   % cum %
+0:         1 100 100   |        725   7   7
+1:         0   0 100   |          0   0   7
+2:         0   0 100   |          0   0   7
+4:         0   0 100   |          0   0   7
+8:         0   0 100   |          0   0   7
+16:         0   0 100   |          0   0   7
+32:         0   0 100   |          0   0   7
+64:         0   0 100   |          0   0   7
+128:         0   0 100   |          0   0   7
+256:         0   0 100   |        718   7  15
+512:         0   0 100   |       1386  14  29
+1024:         0   0 100   |       2205  23  52
+2048:         0   0 100   |       1429  15  67
+4096:         0   0 100   |       1103  11  79
+8192:         0   0 100   |       1942  20 100
+
+Can anyone please explain to me why the RPCs in flight shown in the rpc_stats could be higher than the max_rpcs_in_flight?
+
+I do see a similar behavior with the statistics of my home system, which has the default osc.*.max_rpcs_in_flight=8, but shows many cases of 9 RPCs in flight in the statistics for both read and write, and in a few cases 10 or 11:
+
+read write
+rpcs in flight        rpcs   % cum % |       rpcs   % cum %
+1:        121   2   2   |      27831  93  93
+2:         23   0   3   |        108   0  93
+3:         22   0   3   |         19   0  93
+4:         24   0   4   |         15   0  93
+5:         19   0   5   |         10   0  93
+6:         26   0   5   |         13   0  93
+7:        176   4   9   |         39   0  93
+8:        933  22  32   |         75   0  94
+9:       2802  67  99   |       1207   4  98
+10:         10   0 100   |        543   1  99
+11:          0   0 100   |          1   0 100
+
+
+The good news is that Lustre is open source, so you can look into the lustre/osc code to see why this is happening.  The limit is set by cli->cl_max_rpcs_in_flight, and the stats are accounted by cli->cl_write_rpc_hist.
+
+Out of curiosity, you don't say _why_ this off-by-one error is of interest?  Definitely it seems like a bug that could be fixed, but it doesn't seem too critical to correct functionality.
+
+Cheers, Andreas
+--
+Andreas Dilger
+Lustre Principal Architect
+Whamcloud
+
+
+
+
+
+
+
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20211007/9b9366ab/attachment.html>
+
+From sid.young at gmail.com  Thu Oct  7 16:54:03 2021
+From: sid.young at gmail.com (Sid Young)
+Date: Fri, 8 Oct 2021 09:54:03 +1000
+Subject: [lustre-discuss] Missing OST's from 1 node only
+Message-ID: <CAEZ+gOyPoJ-iFZ8KQQ9N0q2TBKCS4d98MTFAbVjfoPkw6At-rg@mail.gmail.com>
+
+G'Day all,
+
+I have an odd situation where 1 compute node, mounts /home and /lustre but
+only half the OST's are present, while all the other nodes are fine.... not
+sure where to start on this one?
+
+Good node:
+[root at n02 ~]# lfs df
+UUID                   1K-blocks        Used   Available Use% Mounted on
+home-MDT0000_UUID     4473970688    30695424  4443273216   1% /home[MDT:0]
+home-OST0000_UUID    51097721856 39839794176 11257662464  78% /home[OST:0]
+home-OST0001_UUID    51097897984 40967138304 10130627584  81% /home[OST:1]
+home-OST0002_UUID    51097705472 37731089408 13366449152  74% /home[OST:2]
+home-OST0003_UUID    51097773056 41447411712  9650104320  82% /home[OST:3]
+
+filesystem_summary:  204391098368 159985433600 44404843520  79% /home
+
+UUID                   1K-blocks        Used   Available Use% Mounted on
+lustre-MDT0000_UUID   5368816128    28246656  5340567424   1% /lustre[MDT:0]
+lustre-OST0000_UUID  51098352640 10144093184 40954257408  20% /lustre[OST:0]
+lustre-OST0001_UUID  51098497024  9584398336 41514096640  19% /lustre[OST:1]
+lustre-OST0002_UUID  51098414080 11683002368 39415409664  23% /lustre[OST:2]
+lustre-OST0003_UUID  51098514432 10475310080 40623202304  21% /lustre[OST:3]
+lustre-OST0004_UUID  51098506240 11505326080 39593178112  23% /lustre[OST:4]
+lustre-OST0005_UUID  51098429440  9272059904 41826367488  19% /lustre[OST:5]
+
+filesystem_summary:  306590713856 62664189952 243926511616  21% /lustre
+
+[root at n02 ~]#
+
+
+
+The bad Node:
+
+ [root at n04 ~]# lfs df
+UUID                   1K-blocks        Used   Available Use% Mounted on
+home-MDT0000_UUID     4473970688    30726400  4443242240   1% /home[MDT:0]
+home-OST0002_UUID    51097703424 37732352000 13363446784  74% /home[OST:2]
+home-OST0003_UUID    51097778176 41449634816  9646617600  82% /home[OST:3]
+
+filesystem_summary:  102195481600 79181986816 23010064384  78% /home
+
+UUID                   1K-blocks        Used   Available Use% Mounted on
+lustre-MDT0000_UUID   5368816128    28246656  5340567424   1% /lustre[MDT:0]
+lustre-OST0003_UUID  51098514432 10475310080 40623202304  21% /lustre[OST:3]
+lustre-OST0004_UUID  51098511360 11505326080 39593183232  23% /lustre[OST:4]
+lustre-OST0005_UUID  51098429440  9272059904 41826367488  19% /lustre[OST:5]
+
+filesystem_summary:  153295455232 31252696064 122042753024  21% /lustre
+
+[root at n04 ~]#
+
+
+
+Sid Young
+Translational Research Institute
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20211008/5493acb7/attachment-0001.html>
+
+From cfaber at gmail.com  Fri Oct  8 07:23:32 2021
+From: cfaber at gmail.com (Colin Faber)
+Date: Fri, 8 Oct 2021 08:23:32 -0600
+Subject: [lustre-discuss] No soace left on device Error
+In-Reply-To: <CAB8BVvryEZz1HxeFs-6ht-TeT7jj3dLK6__DOx_QVURCTFUewg@mail.gmail.com>
+References: <CAB8BVvryEZz1HxeFs-6ht-TeT7jj3dLK6__DOx_QVURCTFUewg@mail.gmail.com>
+Message-ID: <CAJcXmBmHM81EauxkiVThR1s_EYmxFOnzTPiwune43QrYydp+5g@mail.gmail.com>
+
+There's many reasons why you might hit this error, can you provide a bit
+more information? What's the state of your OSS systems? Are all your OSTs
+online and available? Any error logging from these nodes you can share?
+
+-cf
+
+
+On Thu, Oct 7, 2021 at 10:04 AM Dilip Sathaye via lustre-discuss <
+lustre-discuss at lists.lustre.org> wrote:
+
+> Dear All,
+> We are running lustre 2.7.x  in our cluster, which was running stable for
+> few years. Suddenly a bug got triggered and basic copy command also fails
+> with message like no space left on device.
+> We were told to upgrade to lustre 2.10.  Could we know:
+>
+> 1. If there is any simpler work around available, as we want to avoid
+> upgrade. Upgrade can be complex process.
+>
+> 2. If upgrade is unavoidable, what is way to move from 2.7.x to 2.10 ?
+>
+> Thanks
+> Dilip G Sathayr
+> _______________________________________________
+> lustre-discuss mailing list
+> lustre-discuss at lists.lustre.org
+> http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org
+>
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20211008/c3ff5681/attachment.html>
+
+From woodystrash at hotmail.com  Sat Oct  9 17:59:49 2021
+From: woodystrash at hotmail.com (Scott Wood)
+Date: Sun, 10 Oct 2021 00:59:49 +0000
+Subject: [lustre-discuss] No soace left on device Error
+In-Reply-To: <CAB8BVvryEZz1HxeFs-6ht-TeT7jj3dLK6__DOx_QVURCTFUewg@mail.gmail.com>
+References: <CAB8BVvryEZz1HxeFs-6ht-TeT7jj3dLK6__DOx_QVURCTFUewg@mail.gmail.com>
+Message-ID: <PSXP216MB05015118EA065807ABA51AAAAAB49@PSXP216MB0501.KORP216.PROD.OUTLOOK.COM>
+
+Last time we had full OSTs that didn't look full it was due to running out of inodes because of a user who had tens of millions of files, all with a high stripe count. So "lfs df" reported heaps of space but "lfs df -i" showed the full devices. Might be worth a look.
+
+Scott
+________________________________
+From: lustre-discuss <lustre-discuss-bounces at lists.lustre.org> on behalf of Dilip Sathaye via lustre-discuss <lustre-discuss at lists.lustre.org>
+Sent: Friday, 8 October 2021 2:03 AM
+To: lustre-discuss at lists.lustre.org <lustre-discuss at lists.lustre.org>
+Subject: [lustre-discuss] No soace left on device Error
+
+Dear All,
+We are running lustre 2.7.x  in our cluster, which was running stable for few years. Suddenly a bug got triggered and basic copy command also fails with message like no space left on device.
+We were told to upgrade to lustre 2.10.  Could we know:
+
+1. If there is any simpler work around available, as we want to avoid upgrade. Upgrade can be complex process.
+
+2. If upgrade is unavoidable, what is way to move from 2.7.x to 2.10 ?
+
+Thanks
+Dilip G Sathayr
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20211010/1d00578e/attachment.html>
+
+From sid.young at gmail.com  Sun Oct 10 18:15:11 2021
+From: sid.young at gmail.com (Sid Young)
+Date: Mon, 11 Oct 2021 11:15:11 +1000
+Subject: [lustre-discuss] eviction timeout
+Message-ID: <CAEZ+gOwVaJwpznQZTcoUS0akMm1pL4PoJEqtp+Z4qrpWznQxMw@mail.gmail.com>
+
+I'm seeing a lot of these messages:
+
+Oct 11 11:12:09 hpc-mds-02 kernel: Lustre: lustre-MDT0000: Denying
+connection for new client b6df7eda-8ae1-617c-6ff1-406d1ffb6006 (at
+10.140.90.82 at tcp), waiting for 6 known clients (0 recovered, 0 in progress,
+and 0 evicted) to recover in 2:42
+
+It seems to be a 3minute timeout, is it possible to shorten this and even
+not log this message?
+
+Sid Young
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20211011/ef897da0/attachment.html>
+
+From sid.young at gmail.com  Sun Oct 10 23:07:56 2021
+From: sid.young at gmail.com (Sid Young)
+Date: Mon, 11 Oct 2021 16:07:56 +1000
+Subject: [lustre-discuss] Tools to check a lustre
+Message-ID: <CAEZ+gOx8i_KbpjWU91qgT_HQGchMqvW2nSFA0Wm0KM7Hd7x_tg@mail.gmail.com>
+
+I'm having trouble diagnosing where the problem lies in  my Lustre
+installation, clients are 2.12.6 and I have a /home and /lustre
+filesystems using Lustre.
+
+/home has 4 OSTs and /lustre is made up of 6 OSTs. lfs df shows all OSTs as
+ACTIVE.
+
+The /lustre file system appears fine, I can *ls *into every directory.
+
+When people log into the login node, it appears to lockup. I have shut down
+everything and remounted the OSTs and MDTs etc in order with no
+errors reporting but I'm getting the lockup issue soon after a few people
+log in.
+The backend network is 100G Ethernet using ConnectX5 cards and the OS is
+Cento 7.9, everything was installed as RPMs and updates are disabled in
+yum.conf
+
+Two questions to start with:
+Is there a command line tool to check each OST individually?
+Apart from /var/log/messages, is there a lustre specific log I can monitor
+on the login node to see errors when I hit /home...
+
+
+
+Sid Young
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20211011/9af2da66/attachment.html>
+
+From degremoa at amazon.com  Mon Oct 11 01:53:21 2021
+From: degremoa at amazon.com (Degremont, Aurelien)
+Date: Mon, 11 Oct 2021 08:53:21 +0000
+Subject: [lustre-discuss] eviction timeout
+In-Reply-To: <CAEZ+gOwVaJwpznQZTcoUS0akMm1pL4PoJEqtp+Z4qrpWznQxMw@mail.gmail.com>
+References: <CAEZ+gOwVaJwpznQZTcoUS0akMm1pL4PoJEqtp+Z4qrpWznQxMw@mail.gmail.com>
+Message-ID: <1007C20E-3107-4D77-AB64-3CE9988E2F92@amazon.com>
+
+Hello
+
+This message is appearing during MDT recovery, likely after a MDS restart. MDT tries to reconnect first all existing client when it stopped.
+It seems all these clients have been also rebooted. To avoid this message, try to stop your clients before the servers.
+
+If not possible, you can abort the recovery, either at start time (https://doc.lustre.org/lustre_manual.xhtml#lustremaint.abortRecovery) or when recovery is running with the following commands on the MDS host:
+
+lctl --device lustre-MDT0000 abort_recovery
+
+
+Aur?lien
+
+De : lustre-discuss <lustre-discuss-bounces at lists.lustre.org> au nom de Sid Young via lustre-discuss <lustre-discuss at lists.lustre.org>
+R?pondre ? : Sid Young <sid.young at gmail.com>
+Date : lundi 11 octobre 2021 ? 03:16
+? : lustre-discuss <lustre-discuss at lists.lustre.org>
+Objet : [EXTERNAL] [lustre-discuss] eviction timeout
+
+
+CAUTION: This email originated from outside of the organization. Do not click links or open attachments unless you can confirm the sender and know the content is safe.
+
+
+
+I'm seeing a lot of these messages:
+
+Oct 11 11:12:09 hpc-mds-02 kernel: Lustre: lustre-MDT0000: Denying connection for new client b6df7eda-8ae1-617c-6ff1-406d1ffb6006 (at 10.140.90.82 at tcp), waiting for 6 known clients (0 recovered, 0 in progress, and 0 evicted) to recover in 2:42
+
+It seems to be a 3minute timeout, is it possible to shorten this and even not log this message?
+
+Sid Young
+
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20211011/f7efee7c/attachment.html>
+
+From dnelson at ddn.com  Mon Oct 11 05:20:25 2021
+From: dnelson at ddn.com (Dennis Nelson)
+Date: Mon, 11 Oct 2021 12:20:25 +0000
+Subject: [lustre-discuss] Tools to check a lustre
+In-Reply-To: <CAEZ+gOx8i_KbpjWU91qgT_HQGchMqvW2nSFA0Wm0KM7Hd7x_tg@mail.gmail.com>
+References: <CAEZ+gOx8i_KbpjWU91qgT_HQGchMqvW2nSFA0Wm0KM7Hd7x_tg@mail.gmail.com>
+Message-ID: <77A9C28A-688E-497B-A940-9AF0FC29700C@ddn.com>
+
+Have you tried lfs check servers on the login node?
+
+Sent from my iPhone
+
+On Oct 11, 2021, at 2:58 AM, Sid Young via lustre-discuss <lustre-discuss at lists.lustre.org> wrote:
+
+?
+
+I'm having trouble diagnosing where the problem lies in  my Lustre installation, clients are 2.12.6 and I have a /home and /lustre filesystems using Lustre.
+
+/home has 4 OSTs and /lustre is made up of 6 OSTs. lfs df shows all OSTs as ACTIVE.
+
+The /lustre file system appears fine, I can ls into every directory.
+
+When people log into the login node, it appears to lockup. I have shut down everything and remounted the OSTs and MDTs etc in order with no errors reporting but I'm getting the lockup issue soon after a few people log in.
+The backend network is 100G Ethernet using ConnectX5 cards and the OS is Cento 7.9, everything was installed as RPMs and updates are disabled in yum.conf
+
+Two questions to start with:
+Is there a command line tool to check each OST individually?
+Apart from /var/log/messages, is there a lustre specific log I can monitor on the login node to see errors when I hit /home...
+
+
+
+Sid Young
+_______________________________________________
+lustre-discuss mailing list
+lustre-discuss at lists.lustre.org
+http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20211011/23533af1/attachment-0001.html>
+
+From sid.young at gmail.com  Mon Oct 11 15:18:36 2021
+From: sid.young at gmail.com (Sid Young)
+Date: Tue, 12 Oct 2021 08:18:36 +1000
+Subject: [lustre-discuss] Lustre /home lockup - how to check
+In-Reply-To: <mailman.934.1633954830.11181.lustre-discuss-lustre.org@lists.lustre.org>
+References: <mailman.934.1633954830.11181.lustre-discuss-lustre.org@lists.lustre.org>
+Message-ID: <CAEZ+gOwB9jzJ2LVfuR7qLXyaCZHd6f-GRoaOmU=XKXaoJjKOew@mail.gmail.com>
+
+>
+>
+>    2. Tools to check a lustre (Sid Young)
+>    4. Re: Tools to check a lustre (Dennis Nelson)
+>
+>
+> My key issue is why /home locks solid when you try to use it but /lustre
+is OK . The backend is ZFS used to manage the disks presented from the HP
+D8000 JBOD
+I'm at a loss after 6 months of 100% operation why this is suddenly
+occurring. If I do repeated "dd" tasks on lustre it works fine, start one
+on /home and it locks solid.
+
+I have started a ZFS scrub on two of the zfs pools. at 47T each it will
+take most of today to resolve, but that should rule out the actual storage
+(which is showing "NORMAL/ONLINE" and no errors.
+
+I'm seeing a lot of these in /var/log/messages
+kernel: LustreError: 6578:0:(events.c:200:client_bulk_callback()) event
+type 1, status -5, desc ffff89cdf3b9dc00
+A google search returned this:
+https://wiki.lustre.org/Lustre_Resiliency:_Understanding_Lustre_Message_Loss_and_Tuning_for_Resiliency
+
+Could it be a network issue? - the nodes are running the
+Centos7.9 drivers... the Mellanox one did not seam to make any difference
+when I originally tried it 6 months ago.
+
+Any help appreciated :)
+
+Sid
+
+
+>
+> ---------- Forwarded message ----------
+> From: Sid Young <sid.young at gmail.com>
+> To: lustre-discuss <lustre-discuss at lists.lustre.org>
+> Cc:
+> Bcc:
+> Date: Mon, 11 Oct 2021 16:07:56 +1000
+> Subject: [lustre-discuss] Tools to check a lustre
+>
+> I'm having trouble diagnosing where the problem lies in  my Lustre
+> installation, clients are 2.12.6 and I have a /home and /lustre
+> filesystems using Lustre.
+>
+> /home has 4 OSTs and /lustre is made up of 6 OSTs. lfs df shows all OSTs
+> as ACTIVE.
+>
+> The /lustre file system appears fine, I can *ls *into every directory.
+>
+> When people log into the login node, it appears to lockup. I have shut
+> down everything and remounted the OSTs and MDTs etc in order with no
+> errors reporting but I'm getting the lockup issue soon after a few people
+> log in.
+> The backend network is 100G Ethernet using ConnectX5 cards and the OS is
+> Cento 7.9, everything was installed as RPMs and updates are disabled in
+> yum.conf
+>
+> Two questions to start with:
+> Is there a command line tool to check each OST individually?
+> Apart from /var/log/messages, is there a lustre specific log I can monitor
+> on the login node to see errors when I hit /home...
+>
+>
+>
+> Sid Young
+>
+>
+>
+>
+>
+>
+>
+> ---------- Forwarded message ----------
+> From: Dennis Nelson <dnelson at ddn.com>
+> To: Sid Young <sid.young at gmail.com>
+>
+> Date: Mon, 11 Oct 2021 12:20:25 +0000
+> Subject: Re: [lustre-discuss] Tools to check a lustre
+> Have you tried lfs check servers on the login node?
+>
+
+Yes - one of the first things I did and this is what it always reports:
+
+]# lfs check servers
+home-OST0000-osc-ffff89adb7e5e000 active.
+home-OST0001-osc-ffff89adb7e5e000 active.
+home-OST0002-osc-ffff89adb7e5e000 active.
+home-OST0003-osc-ffff89adb7e5e000 active.
+lustre-OST0000-osc-ffff89cdd14a2000 active.
+lustre-OST0001-osc-ffff89cdd14a2000 active.
+lustre-OST0002-osc-ffff89cdd14a2000 active.
+lustre-OST0003-osc-ffff89cdd14a2000 active.
+lustre-OST0004-osc-ffff89cdd14a2000 active.
+lustre-OST0005-osc-ffff89cdd14a2000 active.
+home-MDT0000-mdc-ffff89adb7e5e000 active.
+lustre-MDT0000-mdc-ffff89cdd14a2000 active.
+[root at tri-minihub-01 ~]#
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20211012/47982a9a/attachment.html>
+
+From sid.young at gmail.com  Mon Oct 11 20:16:31 2021
+From: sid.young at gmail.com (Sid Young)
+Date: Tue, 12 Oct 2021 13:16:31 +1000
+Subject: [lustre-discuss] Lustre /home lockup - more info
+In-Reply-To: <CAEZ+gOwB9jzJ2LVfuR7qLXyaCZHd6f-GRoaOmU=XKXaoJjKOew@mail.gmail.com>
+References: <mailman.934.1633954830.11181.lustre-discuss-lustre.org@lists.lustre.org>
+ <CAEZ+gOwB9jzJ2LVfuR7qLXyaCZHd6f-GRoaOmU=XKXaoJjKOew@mail.gmail.com>
+Message-ID: <CAEZ+gOzm4XJJBFFV3Trs1-Np-ZWzuPFm6H2zxCKo1Uxgr2YTaQ@mail.gmail.com>
+
+I tried remounting the /home lustre file system to /mnt in read-only mode
+and when I try to ls the directory it locks up but I can escape it, how
+ever when I do a df command i get the completely wrong size (should be
+around 192TB):
+
+10.140.93.42 at o2ib:/home    6.0P  4.8P  1.3P  80% /mnt
+
+zfs scrub is still working and all disks physically report as OK in the ILO
+of the two OSS servers...
+
+When the scrub finishes later today I will unmount and remount the 4 OSTs
+and see if the remount changes the status... updates in about 8 hours.
+
+Sid Young
+
+On Tue, Oct 12, 2021 at 8:18 AM Sid Young <sid.young at gmail.com> wrote:
+
+>
+>>    2. Tools to check a lustre (Sid Young)
+>>    4. Re: Tools to check a lustre (Dennis Nelson)
+>>
+>>
+>> My key issue is why /home locks solid when you try to use it but /lustre
+> is OK . The backend is ZFS used to manage the disks presented from the HP
+> D8000 JBOD
+> I'm at a loss after 6 months of 100% operation why this is suddenly
+> occurring. If I do repeated "dd" tasks on lustre it works fine, start one
+> on /home and it locks solid.
+>
+> I have started a ZFS scrub on two of the zfs pools. at 47T each it will
+> take most of today to resolve, but that should rule out the actual storage
+> (which is showing "NORMAL/ONLINE" and no errors.
+>
+> I'm seeing a lot of these in /var/log/messages
+> kernel: LustreError: 6578:0:(events.c:200:client_bulk_callback()) event
+> type 1, status -5, desc ffff89cdf3b9dc00
+> A google search returned this:
+> https://wiki.lustre.org/Lustre_Resiliency:_Understanding_Lustre_Message_Loss_and_Tuning_for_Resiliency
+>
+> Could it be a network issue? - the nodes are running the
+> Centos7.9 drivers... the Mellanox one did not seam to make any difference
+> when I originally tried it 6 months ago.
+>
+> Any help appreciated :)
+>
+> Sid
+>
+>
+>>
+>> ---------- Forwarded message ----------
+>> From: Sid Young <sid.young at gmail.com>
+>> To: lustre-discuss <lustre-discuss at lists.lustre.org>
+>> Cc:
+>> Bcc:
+>> Date: Mon, 11 Oct 2021 16:07:56 +1000
+>> Subject: [lustre-discuss] Tools to check a lustre
+>>
+>> I'm having trouble diagnosing where the problem lies in  my Lustre
+>> installation, clients are 2.12.6 and I have a /home and /lustre
+>> filesystems using Lustre.
+>>
+>> /home has 4 OSTs and /lustre is made up of 6 OSTs. lfs df shows all OSTs
+>> as ACTIVE.
+>>
+>> The /lustre file system appears fine, I can *ls *into every directory.
+>>
+>> When people log into the login node, it appears to lockup. I have shut
+>> down everything and remounted the OSTs and MDTs etc in order with no
+>> errors reporting but I'm getting the lockup issue soon after a few people
+>> log in.
+>> The backend network is 100G Ethernet using ConnectX5 cards and the OS is
+>> Cento 7.9, everything was installed as RPMs and updates are disabled in
+>> yum.conf
+>>
+>> Two questions to start with:
+>> Is there a command line tool to check each OST individually?
+>> Apart from /var/log/messages, is there a lustre specific log I can
+>> monitor on the login node to see errors when I hit /home...
+>>
+>>
+>>
+>> Sid Young
+>>
+>>
+>>
+>>
+>>
+>>
+>>
+>> ---------- Forwarded message ----------
+>> From: Dennis Nelson <dnelson at ddn.com>
+>> To: Sid Young <sid.young at gmail.com>
+>>
+>> Date: Mon, 11 Oct 2021 12:20:25 +0000
+>> Subject: Re: [lustre-discuss] Tools to check a lustre
+>> Have you tried lfs check servers on the login node?
+>>
+>
+> Yes - one of the first things I did and this is what it always reports:
+>
+> ]# lfs check servers
+> home-OST0000-osc-ffff89adb7e5e000 active.
+> home-OST0001-osc-ffff89adb7e5e000 active.
+> home-OST0002-osc-ffff89adb7e5e000 active.
+> home-OST0003-osc-ffff89adb7e5e000 active.
+> lustre-OST0000-osc-ffff89cdd14a2000 active.
+> lustre-OST0001-osc-ffff89cdd14a2000 active.
+> lustre-OST0002-osc-ffff89cdd14a2000 active.
+> lustre-OST0003-osc-ffff89cdd14a2000 active.
+> lustre-OST0004-osc-ffff89cdd14a2000 active.
+> lustre-OST0005-osc-ffff89cdd14a2000 active.
+> home-MDT0000-mdc-ffff89adb7e5e000 active.
+> lustre-MDT0000-mdc-ffff89cdd14a2000 active.
+> [root at tri-minihub-01 ~]#
+>
+>
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20211012/a0fd4598/attachment.html>
+
+From harr1 at llnl.gov  Tue Oct 12 08:08:43 2021
+From: harr1 at llnl.gov (Cameron Harr)
+Date: Tue, 12 Oct 2021 08:08:43 -0700
+Subject: [lustre-discuss] Missing OST's from 1 node only
+In-Reply-To: <CAEZ+gOyPoJ-iFZ8KQQ9N0q2TBKCS4d98MTFAbVjfoPkw6At-rg@mail.gmail.com>
+References: <CAEZ+gOyPoJ-iFZ8KQQ9N0q2TBKCS4d98MTFAbVjfoPkw6At-rg@mail.gmail.com>
+Message-ID: <05e593d1-07eb-9227-987d-49ef4239e770@llnl.gov>
+
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20211012/cee6122a/attachment-0001.html>
+
+From sid.young at gmail.com  Wed Oct 13 00:37:48 2021
+From: sid.young at gmail.com (Sid Young)
+Date: Wed, 13 Oct 2021 17:37:48 +1000
+Subject: [lustre-discuss] /home remounted and running for 6 hours
+Message-ID: <CAEZ+gOwoQ0Gqu1KzvYw0W-jav0ZnGGzRQ=AO3_U-8KNcjH+bfw@mail.gmail.com>
+
+Well my saga with /home locking up was partially resolved for about 6 hours
+today. I rebooted the MDS and re mounted the MGS and lustre MDT and home
+MDT and after a while it all came good, then rebooted each compute node and
+we were operational for about 6 hours when it all locked up again, /lustre
+worked fine but /home just locked solid.. I'm suspecting corruption but I
+don't know how to fix it...
+
+I have found that once I restart the MDS I can do a remount of home and all
+the D state processes come good and we are up and running.
+
+Is there a tool that can specifically check an individual MDT / OST etc?
+
+
+
+Sid Young
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20211013/7081926e/attachment.html>
+
+From mrashid2 at uncc.edu  Wed Oct 13 05:36:52 2021
+From: mrashid2 at uncc.edu (Md Hasanur Rashid)
+Date: Wed, 13 Oct 2021 08:36:52 -0400
+Subject: [lustre-discuss] No read throughput shown for the sequential read
+ write Filebench workload
+Message-ID: <CAOgrjkj9h07ZbQ4W+6XcCRdffX9Wry05JH6tNnQvC0fBkwN75A@mail.gmail.com>
+
+Hello Everyone,
+
+I am running a Filebench workload which is provided below:
+
+define fileset name="testF",entries=100,filesize=16m,prealloc,path="/mnt/hasanfs/tmp1"
+
+define process name="readerP",instances=2 {
+  thread name="readerT",instances=4 {
+  flowop openfile name="openOP",filesetname="testF"
+  flowop writewholefile name="writeOP",iters=4,filesetname="testF"
+  flowop readwholefile name="readOP",iters=1,filesetname="testF"
+  flowop closefile name="closeOP"
+  }
+}
+
+create files
+system "sync"
+system "echo 3 > /proc/sys/vm/drop_caches"
+
+run 60
+
+I am running the workload in a Lustre cluster. When I check the log from
+the server-side, it shows the following (I have provided stats of one OSS):
+
+obdfilter.hasanfs-OST0000.stats=
+snapshot_time             1633361244.519122 secs.usecs
+read_bytes                1 samples [bytes] 4096 4096 4096
+write_bytes               8479 samples [bytes] 1048576 1048576 8890875904
+destroy                   13 samples [reqs]
+statfs                    76 samples [reqs]
+preprw                    8480 samples [reqs]
+commitrw                  8480 samples [reqs]
+ping                      57 samples [reqs]
+
+obdfilter.hasanfs-OST0000.brw_stats=
+snapshot_time:         1633361244.519588 (secs.usecs)
+
+                           read      |     write
+pages per bulk r/w     rpcs  % cum % |  rpcs        % cum %
+256:		         0   0   0   | 8479 100 100
+
+                           read      |     write
+discontiguous pages    rpcs  % cum % |  rpcs        % cum %
+0:		         0   0   0   | 8479 100 100
+
+                           read      |     write
+discontiguous blocks   rpcs  % cum % |  rpcs        % cum %
+0:		         0   0   0   | 8479 100 100
+
+                           read      |     write
+disk fragmented I/Os   ios   % cum % |  ios         % cum %
+1:		         0   0   0   | 7499  88  88
+2:		         0   0   0   |  980  11 100
+
+                           read      |     write
+disk I/Os in flight    ios   % cum % |  ios         % cum %
+1:		         0   0   0   | 7921  83  83
+2:		         0   0   0   | 1407  14  98
+3:		         0   0   0   |  116   1  99
+4:		         0   0   0   |   15   0 100
+
+                           read      |     write
+I/O time (1/1000s)     ios   % cum % |  ios         % cum %
+2:		         0   0   0   | 1963  23  23
+4:		         0   0   0   | 5627  66  89
+8:		         0   0   0   |  837   9  99
+16:		         0   0   0   |   25   0  99
+32:		         0   0   0   |   27   0 100
+
+                           read      |     write
+disk I/O size          ios   % cum % |  ios         % cum %
+4K:		         0   0   0   |   62   0   0
+8K:		         0   0   0   |  127   1   1
+16K:		         0   0   0   |  113   1   3
+32K:		         0   0   0   |    0   0   3
+64K:		         0   0   0   |    0   0   3
+128K:		         0   0   0   |   65   0   3
+256K:		         0   0   0   |    0   0   3
+512K:		         0   0   0   | 1127  11  15
+1M:		         0   0   0   | 7965  84 100
+
+*Can anyone please explain to me why I am not seeing any read operations in
+the stats?*
+
+Thanks,
+Md. Hasanur Rashid
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20211013/8cc0f16a/attachment.html>
+
+From mrashid2 at uncc.edu  Wed Oct 13 08:54:40 2021
+From: mrashid2 at uncc.edu (Md Hasanur Rashid)
+Date: Wed, 13 Oct 2021 11:54:40 -0400
+Subject: [lustre-discuss] [EXTERNAL] Re: No read throughput shown for
+ the sequential read write Filebench workload
+In-Reply-To: <DM6PR19MB32280CF90F055A9D46982617C9B79@DM6PR19MB3228.namprd19.prod.outlook.com>
+References: <CAOgrjkj9h07ZbQ4W+6XcCRdffX9Wry05JH6tNnQvC0fBkwN75A@mail.gmail.com>
+ <DM6PR19MB32280CF90F055A9D46982617C9B79@DM6PR19MB3228.namprd19.prod.outlook.com>
+Message-ID: <CAOgrjkgC16qtTZ=M-9U-B7sW31ZXjgajmK9Cpetk_gNmTLbdmA@mail.gmail.com>
+
+Even with clearing the locks (clear all the LDLM locks on the client after
+the sync and drop caches commands), the stats look just the same as before.
+
+For extents_stats, the stats look like these:
+
+llite.hasanfs-ffff882fdc929800.extents_stats=
+snapshot_time:         1634138089.122870 (secs.usecs)
+                               read       |                write
+      extents            calls    % cum%  |          calls    % cum%
+   0K -    4K :            450  100  100  |              0    0    0
+   4K -    8K :              0    0  100  |              0    0    0
+   8K -   16K :              0    0  100  |              0    0    0
+  16K -   32K :              0    0  100  |              0    0    0
+  32K -   64K :              0    0  100  |              0    0    0
+  64K -  128K :              0    0  100  |              0    0    0
+ 128K -  256K :              0    0  100  |              0    0    0
+ 256K -  512K :              0    0  100  |              0    0    0
+ 512K - 1024K :              0    0  100  |              0    0    0
+   1M -    2M :              0    0  100  |           1600   46   46
+   2M -    4M :              0    0  100  |              0    0   46
+   4M -    8M :              0    0  100  |              0    0   46
+   8M -   16M :              0    0  100  |              0    0   46
+  16M -   32M :              0    0  100  |           1826   53  100
+
+If we take a look at the client-side rpc_stats following are observed:
+
+osc.hasanfs-OST0000-osc-ffff882fdc929800.rpc_stats=
+snapshot_time:         1634137979.38657 (secs.usecs)
+read RPCs in flight:  0
+write RPCs in flight: 0
+pending write pages:  0
+pending read pages:   0
+
+			read			write
+pages per rpc         rpcs   % cum % |       rpcs   % cum %
+1:		         0   0   0   |          0   0   0
+2:		         0   0   0   |          0   0   0
+4:		         0   0   0   |          0   0   0
+8:		         0   0   0   |          0   0   0
+16:		         0   0   0   |          0   0   0
+32:		         0   0   0   |          0   0   0
+64:		         0   0   0   |          0   0   0
+128:		         0   0   0   |          0   0   0
+256:		         0   0   0   |       3648 100 100
+
+			read			write
+rpcs in flight        rpcs   % cum % |       rpcs   % cum %
+0:		         0   0   0   |          0   0   0
+1:		         0   0   0   |         47   1   1
+2:		         0   0   0   |         47   1   2
+3:		         0   0   0   |         48   1   3
+4:		         0   0   0   |         49   1   5
+5:		         0   0   0   |         50   1   6
+6:		         0   0   0   |         59   1   8
+7:		         0   0   0   |         55   1   9
+8:		         0   0   0   |         68   1  11
+9:		         0   0   0   |       2209  60  72
+10:		         0   0   0   |       1015  27  99
+11:		         0   0   0   |          1   0 100
+
+			read			write
+offset                rpcs   % cum % |       rpcs   % cum %
+0:		         0   0   0   |         66   1   1
+1:		         0   0   0   |          0   0   1
+2:		         0   0   0   |          0   0   1
+4:		         0   0   0   |          0   0   1
+8:		         0   0   0   |          0   0   1
+16:		         0   0   0   |          0   0   1
+32:		         0   0   0   |          0   0   1
+64:		         0   0   0   |          0   0   1
+128:		         0   0   0   |          0   0   1
+256:		         0   0   0   |         66   1   3
+512:		         0   0   0   |        132   3   7
+1024:		         0   0   0   |        264   7  14
+2048:		         0   0   0   |        528  14  28
+4096:		         0   0   0   |        864  23  52
+8192:		         0   0   0   |       1728  47 100
+osc.hasanfs-OST0001-osc-ffff882fdc929800.rpc_stats=
+snapshot_time:         1634137979.39942 (secs.usecs)
+read RPCs in flight:  0
+write RPCs in flight: 0
+pending write pages:  0
+pending read pages:   0
+
+			read			write
+pages per rpc         rpcs   % cum % |       rpcs   % cum %
+1:		        61  93  93   |          0   0   0
+2:		         1   1  95   |          0   0   0
+4:		         0   0  95   |          0   0   0
+8:		         0   0  95   |          0   0   0
+16:		         0   0  95   |          0   0   0
+32:		         0   0  95   |          0   0   0
+64:		         0   0  95   |          0   0   0
+128:		         1   1  96   |          1   0   0
+256:		         2   3 100   |       3792  99 100
+
+			read			write
+rpcs in flight        rpcs   % cum % |       rpcs   % cum %
+0:		         0   0   0   |          0   0   0
+1:		        63  96  96   |         45   1   1
+2:		         2   3 100   |         45   1   2
+3:		         0   0 100   |         45   1   3
+4:		         0   0 100   |         45   1   4
+5:		         0   0 100   |         45   1   5
+6:		         0   0 100   |         49   1   7
+7:		         0   0 100   |         47   1   8
+8:		         0   0 100   |         57   1   9
+9:		         0   0 100   |       2235  58  68
+10:		         0   0 100   |       1180  31 100
+
+			read			write
+offset                rpcs   % cum % |       rpcs   % cum %
+0:		         1   1   1   |         69   1   1
+1:		         1   1   3   |          0   0   1
+2:		         4   6   9   |          0   0   1
+4:		         8  12  21   |          0   0   1
+8:		        13  20  41   |          0   0   1
+16:		        31  47  89   |          0   0   1
+32:		         7  10 100   |          0   0   1
+64:		         0   0 100   |          0   0   1
+128:		         0   0 100   |          0   0   1
+256:		         0   0 100   |         69   1   3
+512:		         0   0 100   |        139   3   7
+1024:		         0   0 100   |        276   7  14
+2048:		         0   0 100   |        552  14  29
+4096:		         0   0 100   |        896  23  52
+8192:		         0   0 100   |       1792  47 100
+osc.hasanfs-OST0002-osc-ffff882fdc929800.rpc_stats=
+snapshot_time:         1634137979.41185 (secs.usecs)
+read RPCs in flight:  0
+write RPCs in flight: 0
+pending write pages:  0
+pending read pages:   0
+
+			read			write
+pages per rpc         rpcs   % cum % |       rpcs   % cum %
+1:		         0   0   0   |          0   0   0
+2:		         0   0   0   |          0   0   0
+4:		         0   0   0   |          0   0   0
+8:		         0   0   0   |          0   0   0
+16:		         0   0   0   |          0   0   0
+32:		         0   0   0   |          0   0   0
+64:		         0   0   0   |          0   0   0
+128:		         0   0   0   |          0   0   0
+256:		         0   0   0   |       3776 100 100
+
+			read			write
+rpcs in flight        rpcs   % cum % |       rpcs   % cum %
+0:		         0   0   0   |          0   0   0
+1:		         0   0   0   |         43   1   1
+2:		         0   0   0   |         45   1   2
+3:		         0   0   0   |         46   1   3
+4:		         0   0   0   |         46   1   4
+5:		         0   0   0   |         47   1   6
+6:		         0   0   0   |         48   1   7
+7:		         0   0   0   |         48   1   8
+8:		         0   0   0   |         53   1   9
+9:		         0   0   0   |       2283  60  70
+10:		         0   0   0   |       1116  29  99
+11:		         0   0   0   |          1   0 100
+
+			read			write
+offset                rpcs   % cum % |       rpcs   % cum %
+0:		         0   0   0   |         68   1   1
+1:		         0   0   0   |          0   0   1
+2:		         0   0   0   |          0   0   1
+4:		         0   0   0   |          0   0   1
+8:		         0   0   0   |          0   0   1
+16:		         0   0   0   |          0   0   1
+32:		         0   0   0   |          0   0   1
+64:		         0   0   0   |          0   0   1
+128:		         0   0   0   |          0   0   1
+256:		         0   0   0   |         68   1   3
+512:		         0   0   0   |        136   3   7
+1024:		         0   0   0   |        272   7  14
+2048:		         0   0   0   |        544  14  28
+4096:		         0   0   0   |        896  23  52
+8192:		         0   0   0   |       1792  47 100
+osc.hasanfs-OST0003-osc-ffff882fdc929800.rpc_stats=
+snapshot_time:         1634137979.42422 (secs.usecs)
+read RPCs in flight:  0
+write RPCs in flight: 0
+pending write pages:  0
+pending read pages:   0
+
+			read			write
+pages per rpc         rpcs   % cum % |       rpcs   % cum %
+1:		         0   0   0   |          0   0   0
+2:		         0   0   0   |          0   0   0
+4:		         0   0   0   |          0   0   0
+8:		         0   0   0   |          0   0   0
+16:		         0   0   0   |          0   0   0
+32:		         0   0   0   |          0   0   0
+64:		         0   0   0   |          0   0   0
+128:		         0   0   0   |          0   0   0
+256:		         0   0   0   |       4048 100 100
+
+			read			write
+rpcs in flight        rpcs   % cum % |       rpcs   % cum %
+0:		         0   0   0   |          0   0   0
+1:		         0   0   0   |         44   1   1
+2:		         0   0   0   |         44   1   2
+3:		         0   0   0   |         44   1   3
+4:		         0   0   0   |         44   1   4
+5:		         0   0   0   |         46   1   5
+6:		         0   0   0   |         46   1   6
+7:		         0   0   0   |         48   1   7
+8:		         0   0   0   |         52   1   9
+9:		         0   0   0   |       2487  61  70
+10:		         0   0   0   |       1193  29 100
+
+			read			write
+offset                rpcs   % cum % |       rpcs   % cum %
+0:		         0   0   0   |         73   1   1
+1:		         0   0   0   |          0   0   1
+2:		         0   0   0   |          0   0   1
+4:		         0   0   0   |          0   0   1
+8:		         0   0   0   |          0   0   1
+16:		         0   0   0   |          0   0   1
+32:		         0   0   0   |          0   0   1
+64:		         0   0   0   |          0   0   1
+128:		         0   0   0   |          0   0   1
+256:		         0   0   0   |         73   1   3
+512:		         0   0   0   |        146   3   7
+1024:		         0   0   0   |        292   7  14
+2048:		         0   0   0   |        584  14  28
+4096:		         0   0   0   |        960  23  52
+8192:		         0   0   0   |       1920  47 100
+osc.hasanfs-OST0004-osc-ffff882fdc929800.rpc_stats=
+snapshot_time:         1634137979.43647 (secs.usecs)
+read RPCs in flight:  0
+write RPCs in flight: 0
+pending write pages:  0
+pending read pages:   0
+
+			read			write
+pages per rpc         rpcs   % cum % |       rpcs   % cum %
+1:		         0   0   0   |          0   0   0
+2:		         0   0   0   |          0   0   0
+4:		         0   0   0   |          0   0   0
+8:		         0   0   0   |          0   0   0
+16:		         0   0   0   |          0   0   0
+32:		         0   0   0   |          0   0   0
+64:		         0   0   0   |          0   0   0
+128:		         0   0   0   |          0   0   0
+256:		         0   0   0   |       4048 100 100
+
+			read			write
+rpcs in flight        rpcs   % cum % |       rpcs   % cum %
+0:		         0   0   0   |          0   0   0
+1:		         0   0   0   |         58   1   1
+2:		         0   0   0   |         60   1   2
+3:		         0   0   0   |         60   1   4
+4:		         0   0   0   |         60   1   5
+5:		         0   0   0   |         60   1   7
+6:		         0   0   0   |         61   1   8
+7:		         0   0   0   |         62   1  10
+8:		         0   0   0   |         69   1  12
+9:		         0   0   0   |       2553  63  75
+10:		         0   0   0   |       1005  24 100
+
+			read			write
+offset                rpcs   % cum % |       rpcs   % cum %
+0:		         0   0   0   |         73   1   1
+1:		         0   0   0   |          0   0   1
+2:		         0   0   0   |          0   0   1
+4:		         0   0   0   |          0   0   1
+8:		         0   0   0   |          0   0   1
+16:		         0   0   0   |          0   0   1
+32:		         0   0   0   |          0   0   1
+64:		         0   0   0   |          0   0   1
+128:		         0   0   0   |          0   0   1
+256:		         0   0   0   |         73   1   3
+512:		         0   0   0   |        146   3   7
+1024:		         0   0   0   |        292   7  14
+2048:		         0   0   0   |        584  14  28
+4096:		         0   0   0   |        960  23  52
+8192:		         0   0   0   |       1920  47 100
+osc.hasanfs-OST0005-osc-ffff882fdc929800.rpc_stats=
+snapshot_time:         1634137979.44994 (secs.usecs)
+read RPCs in flight:  0
+write RPCs in flight: 0
+pending write pages:  0
+pending read pages:   0
+
+			read			write
+pages per rpc         rpcs   % cum % |       rpcs   % cum %
+1:		         0   0   0   |          0   0   0
+2:		         0   0   0   |          0   0   0
+4:		         0   0   0   |          0   0   0
+8:		         0   0   0   |          0   0   0
+16:		         0   0   0   |          0   0   0
+32:		         0   0   0   |          0   0   0
+64:		         0   0   0   |          0   0   0
+128:		         0   0   0   |          0   0   0
+256:		         0   0   0   |       3840 100 100
+
+			read			write
+rpcs in flight        rpcs   % cum % |       rpcs   % cum %
+0:		         0   0   0   |          0   0   0
+1:		         0   0   0   |         38   0   0
+2:		         0   0   0   |         38   0   1
+3:		         0   0   0   |         38   0   2
+4:		         0   0   0   |         38   0   3
+5:		         0   0   0   |         38   0   4
+6:		         0   0   0   |         39   1   5
+7:		         0   0   0   |         39   1   6
+8:		         0   0   0   |         47   1   8
+9:		         0   0   0   |       2271  59  67
+10:		         0   0   0   |       1253  32  99
+11:		         0   0   0   |          1   0 100
+
+			read			write
+offset                rpcs   % cum % |       rpcs   % cum %
+0:		         0   0   0   |         69   1   1
+1:		         0   0   0   |          0   0   1
+2:		         0   0   0   |          0   0   1
+4:		         0   0   0   |          0   0   1
+8:		         0   0   0   |          0   0   1
+16:		         0   0   0   |          0   0   1
+32:		         0   0   0   |          0   0   1
+64:		         0   0   0   |          0   0   1
+128:		         0   0   0   |          0   0   1
+256:		         0   0   0   |         69   1   3
+512:		         0   0   0   |        138   3   7
+1024:		         0   0   0   |        276   7  14
+2048:		         0   0   0   |        552  14  28
+4096:		         0   0   0   |        912  23  52
+8192:		         0   0   0   |       1824  47 100
+osc.hasanfs-OST0006-osc-ffff882fdc929800.rpc_stats=
+snapshot_time:         1634137979.46277 (secs.usecs)
+read RPCs in flight:  0
+write RPCs in flight: 0
+pending write pages:  0
+pending read pages:   0
+
+			read			write
+pages per rpc         rpcs   % cum % |       rpcs   % cum %
+1:		         0   0   0   |          0   0   0
+2:		         0   0   0   |          0   0   0
+4:		         0   0   0   |          0   0   0
+8:		         0   0   0   |          0   0   0
+16:		         0   0   0   |          0   0   0
+32:		         0   0   0   |          0   0   0
+64:		         0   0   0   |          1   0   0
+128:		         0   0   0   |          0   0   0
+256:		         0   0   0   |       4016  99 100
+
+			read			write
+rpcs in flight        rpcs   % cum % |       rpcs   % cum %
+0:		         0   0   0   |          0   0   0
+1:		         0   0   0   |          2   0   0
+2:		         0   0   0   |          3   0   0
+3:		         0   0   0   |          4   0   0
+4:		         0   0   0   |          3   0   0
+5:		         0   0   0   |          4   0   0
+6:		         0   0   0   |          6   0   0
+7:		         0   0   0   |          9   0   0
+8:		         0   0   0   |         72   1   2
+9:		         0   0   0   |       2083  51  54
+10:		         0   0   0   |       1768  44  98
+11:		         0   0   0   |         56   1  99
+12:		         0   0   0   |          5   0  99
+13:		         0   0   0   |          1   0  99
+14:		         0   0   0   |          1   0 100
+
+			read			write
+offset                rpcs   % cum % |       rpcs   % cum %
+0:		         0   0   0   |         74   1   1
+1:		         0   0   0   |          0   0   1
+2:		         0   0   0   |          0   0   1
+4:		         0   0   0   |          0   0   1
+8:		         0   0   0   |          0   0   1
+16:		         0   0   0   |          0   0   1
+32:		         0   0   0   |          0   0   1
+64:		         0   0   0   |          0   0   1
+128:		         0   0   0   |          0   0   1
+256:		         0   0   0   |         74   1   3
+512:		         0   0   0   |        148   3   7
+1024:		         0   0   0   |        296   7  14
+2048:		         0   0   0   |        592  14  29
+4096:		         0   0   0   |        977  24  53
+8192:		         0   0   0   |       1856  46 100
+osc.hasanfs-OST0007-osc-ffff882fdc929800.rpc_stats=
+snapshot_time:         1634137979.47655 (secs.usecs)
+read RPCs in flight:  0
+write RPCs in flight: 0
+pending write pages:  0
+pending read pages:   0
+
+			read			write
+pages per rpc         rpcs   % cum % |       rpcs   % cum %
+1:		         0   0   0   |          0   0   0
+2:		         0   0   0   |          0   0   0
+4:		         0   0   0   |          0   0   0
+8:		         0   0   0   |          0   0   0
+16:		         0   0   0   |          0   0   0
+32:		         0   0   0   |          0   0   0
+64:		         0   0   0   |          0   0   0
+128:		         0   0   0   |          0   0   0
+256:		         0   0   0   |       3648 100 100
+
+			read			write
+rpcs in flight        rpcs   % cum % |       rpcs   % cum %
+0:		         0   0   0   |          0   0   0
+1:		         0   0   0   |          7   0   0
+2:		         0   0   0   |          8   0   0
+3:		         0   0   0   |          8   0   0
+4:		         0   0   0   |          9   0   0
+5:		         0   0   0   |         10   0   1
+6:		         0   0   0   |         13   0   1
+7:		         0   0   0   |         34   0   2
+8:		         0   0   0   |        134   3   6
+9:		         0   0   0   |       1929  52  58
+10:		         0   0   0   |       1434  39  98
+11:		         0   0   0   |         61   1  99
+12:		         0   0   0   |          1   0 100
+
+			read			write
+offset                rpcs   % cum % |       rpcs   % cum %
+0:		         0   0   0   |         66   1   1
+1:		         0   0   0   |          0   0   1
+2:		         0   0   0   |          0   0   1
+4:		         0   0   0   |          0   0   1
+8:		         0   0   0   |          0   0   1
+16:		         0   0   0   |          0   0   1
+32:		         0   0   0   |          0   0   1
+64:		         0   0   0   |          0   0   1
+128:		         0   0   0   |          0   0   1
+256:		         0   0   0   |         66   1   3
+512:		         0   0   0   |        132   3   7
+1024:		         0   0   0   |        264   7  14
+2048:		         0   0   0   |        528  14  28
+4096:		         0   0   0   |        864  23  52
+8192:		         0   0   0   |       1728  47 100
+
+- Md. Hasanur Rashid
+
+
+On Wed, Oct 13, 2021 at 10:40 AM Patrick Farrell <pfarrell at ddn.com> wrote:
+
+> [*Caution*: Email from External Sender. Do not click or open links or
+> attachments unless you know this sender.]
+>
+> Interesting!  Usually that would flush the cache, but sometimes drop
+> caches doesn't seem to cause recently written data to be flushed, even
+> after sync.  (There is probably a minor bug here.)  But try this:
+>
+> After your sync and drop caches commands, clear all the LDLM locks on the
+> client:
+>
+> lctl set_param ldlm.namespaces.*.lru_size=clear
+>
+> That removes the LDLM locks protecting the data, which should force it out
+> of cache.  Note that locks aren't cleared if there's dirty data, so sync
+> first is essential.
+>
+> -Patrick
+> ------------------------------
+> *From:* lustre-discuss <lustre-discuss-bounces at lists.lustre.org> on
+> behalf of Md Hasanur Rashid via lustre-discuss <
+> lustre-discuss at lists.lustre.org>
+> *Sent:* Wednesday, October 13, 2021 7:36 AM
+> *To:* lustre-discuss at lists.lustre.org <lustre-discuss at lists.lustre.org>
+> *Subject:* [lustre-discuss] No read throughput shown for the sequential
+> read write Filebench workload
+>
+> Hello Everyone,
+>
+> I am running a Filebench workload which is provided below:
+>
+> define fileset name="testF",entries=100,filesize=16m,prealloc,path="/mnt/hasanfs/tmp1"
+>
+> define process name="readerP",instances=2 {
+>   thread name="readerT",instances=4 {
+>   flowop openfile name="openOP",filesetname="testF"
+>   flowop writewholefile name="writeOP",iters=4,filesetname="testF"
+>   flowop readwholefile name="readOP",iters=1,filesetname="testF"
+>   flowop closefile name="closeOP"
+>   }
+> }
+>
+> create files
+> system "sync"
+> system "echo 3 > /proc/sys/vm/drop_caches"
+>
+> run 60
+>
+> I am running the workload in a Lustre cluster. When I check the log from
+> the server-side, it shows the following (I have provided stats of one OSS):
+>
+> obdfilter.hasanfs-OST0000.stats=
+> snapshot_time             1633361244.519122 secs.usecs
+> read_bytes                1 samples [bytes] 4096 4096 4096
+> write_bytes               8479 samples [bytes] 1048576 1048576 8890875904
+> destroy                   13 samples [reqs]
+> statfs                    76 samples [reqs]
+> preprw                    8480 samples [reqs]
+> commitrw                  8480 samples [reqs]
+> ping                      57 samples [reqs]
+>
+> obdfilter.hasanfs-OST0000.brw_stats=
+> snapshot_time:         1633361244.519588 (secs.usecs)
+>
+>                            read      |     write
+> pages per bulk r/w     rpcs  % cum % |  rpcs        % cum %
+> 256:		         0   0   0   | 8479 100 100
+>
+>                            read      |     write
+> discontiguous pages    rpcs  % cum % |  rpcs        % cum %
+> 0:		         0   0   0   | 8479 100 100
+>
+>                            read      |     write
+> discontiguous blocks   rpcs  % cum % |  rpcs        % cum %
+> 0:		         0   0   0   | 8479 100 100
+>
+>                            read      |     write
+> disk fragmented I/Os   ios   % cum % |  ios         % cum %
+> 1:		         0   0   0   | 7499  88  88
+> 2:		         0   0   0   |  980  11 100
+>
+>                            read      |     write
+> disk I/Os in flight    ios   % cum % |  ios         % cum %
+> 1:		         0   0   0   | 7921  83  83
+> 2:		         0   0   0   | 1407  14  98
+> 3:		         0   0   0   |  116   1  99
+> 4:		         0   0   0   |   15   0 100
+>
+>                            read      |     write
+> I/O time (1/1000s)     ios   % cum % |  ios         % cum %
+> 2:		         0   0   0   | 1963  23  23
+> 4:		         0   0   0   | 5627  66  89
+> 8:		         0   0   0   |  837   9  99
+> 16:		         0   0   0   |   25   0  99
+> 32:		         0   0   0   |   27   0 100
+>
+>                            read      |     write
+> disk I/O size          ios   % cum % |  ios         % cum %
+> 4K:		         0   0   0   |   62   0   0
+> 8K:		         0   0   0   |  127   1   1
+> 16K:		         0   0   0   |  113   1   3
+> 32K:		         0   0   0   |    0   0   3
+> 64K:		         0   0   0   |    0   0   3
+> 128K:		         0   0   0   |   65   0   3
+> 256K:		         0   0   0   |    0   0   3
+> 512K:		         0   0   0   | 1127  11  15
+> 1M:		         0   0   0   | 7965  84 100
+>
+> *Can anyone please explain to me why I am not seeing any read operations
+> in the stats?*
+>
+> Thanks,
+> Md. Hasanur Rashid
+>
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20211013/044aea6c/attachment-0001.html>
+
+From freny at nsc.liu.se  Wed Oct 13 14:30:36 2021
+From: freny at nsc.liu.se (=?UTF-8?Q?Fredrik_Nystr=c3=b6m?=)
+Date: Wed, 13 Oct 2021 23:30:36 +0200
+Subject: [lustre-discuss] dkms-2.8.6 breaks installation of
+ lustre-zfs-dkms-2.12.7-1.el7.noarch
+Message-ID: <dba5da5c-bb83-596b-9d47-7e021227d594@nsc.liu.se>
+
+dkms was recently updated to version 2.8.6 in epel/7.
+
+After this update installation of lustre-zfs-dkms-2.12.7-1.el7.noarch 
+fails with following error:
+
+./configure: line 33341: test: zfs: integer expression expected
+configure: error: 
+
+
+Breakage seems to be caused by following dkms commit:
+https://github.com/dell/dkms/commit/f83b758b6fb8ca67b1ab65df9e3d2a1e994eb483
+
+
+configure line 33341:
+if test x$enable_modules = xyes && test $ZFS_MAJOR -eq 0 && test $ZFS_MINOR -lt 8; then :
+
+Not sure exactly how but it ends up with ZFS_MAJOR=zfs, ZFS_MINOR=zfs 
+instead of: ZFS_MAJOR=0, ZFS_MINOR=7
+
+
+Downgrading to older dkms or manually reverting the commit mentioned 
+above solved this problem for me.
+
+
+Regards / Fredrik N.
+
+From riccardo.veraldi at cnaf.infn.it  Wed Oct 13 16:06:03 2021
+From: riccardo.veraldi at cnaf.infn.it (Riccardo Veraldi)
+Date: Wed, 13 Oct 2021 16:06:03 -0700
+Subject: [lustre-discuss] dkms-2.8.6 breaks installation of
+ lustre-zfs-dkms-2.12.7-1.el7.noarch
+In-Reply-To: <dba5da5c-bb83-596b-9d47-7e021227d594@nsc.liu.se>
+References: <dba5da5c-bb83-596b-9d47-7e021227d594@nsc.liu.se>
+Message-ID: <98f92e18-b827-61c2-a36a-995afeef6b89@cnaf.infn.it>
+
+yes, same problem for me, I Addressed this a few weeks go and I think I 
+Reported to the mailing list.
+
+This is my patch to make things works and build the lustre-dkms rpm
+
+
+diff -ru lustre-2.12.7/lustre-dkms_pre-build.sh 
+lustre-2.12.7-dkms-pcds/lustre-dkms_pre-build.sh
+--- lustre-2.12.7/lustre-dkms_pre-build.sh??? 2021-07-14 
+22:06:05.000000000 -0700
++++ lustre-2.12.7-dkms-pcds/lustre-dkms_pre-build.sh??? 2021-09-26 
+08:30:54.096000000 -0700
+@@ -20,18 +20,16 @@
+ ???? fi
+
+ ???? # ZFS and SPL are version locked
+-??? ZFS_VERSION=$(dkms status -m zfs -k $3 -a $5 | awk -F', ' '{print 
+$2; exit 0}' | grep -v ': added$')
++??? ZFS_VERSION=$(dkms status -m zfs | awk ' { print $1 } ' | sed -e 
+'s/zfs\///' -e 's/,//')
++
+ ???? if [ -z $ZFS_VERSION ] ; then
+ ???? ??? echo "zfs-dkms package must already be installed and built 
+under DKMS control"
+ ???? ??? exit 1
+ ???? fi
+
+ ???? SERVER="--enable-server $LDISKFS \
+-??? ??? --with-linux=$4 --with-linux-obj=$4 \
+-??? ??? --with-spl=$6/spl-${ZFS_VERSION} \
+-??? ??? --with-spl-obj=$7/spl/${ZFS_VERSION}/$3/$5 \
+-??? ??? --with-zfs=$6/zfs-${ZFS_VERSION} \
+-??? ??? --with-zfs-obj=$7/zfs/${ZFS_VERSION}/$3/$5"
++??? ??? --with-zfs=/usr/src/zfs-${ZFS_VERSION} \
++??? ??? --with-zfs-obj=/var/lib/dkms/zfs/${ZFS_VERSION}/$(uname -r)/x86_64"
+
+ ???? KERNEL_STUFF="--with-linux=$4 --with-linux-obj=$4"
+ ???? ;;
+
+
+
+
+On 10/13/21 2:30 PM, Fredrik Nystr?m via lustre-discuss wrote:
+> dkms was recently updated to version 2.8.6 in epel/7.
+>
+> After this update installation of lustre-zfs-dkms-2.12.7-1.el7.noarch
+> fails with following error:
+>
+> ./configure: line 33341: test: zfs: integer expression expected
+> configure: error:
+>
+>
+> Breakage seems to be caused by following dkms commit:
+> https://github.com/dell/dkms/commit/f83b758b6fb8ca67b1ab65df9e3d2a1e994eb483
+>
+>
+> configure line 33341:
+> if test x$enable_modules = xyes && test $ZFS_MAJOR -eq 0 && test $ZFS_MINOR -lt 8; then :
+>
+> Not sure exactly how but it ends up with ZFS_MAJOR=zfs, ZFS_MINOR=zfs
+> instead of: ZFS_MAJOR=0, ZFS_MINOR=7
+>
+>
+> Downgrading to older dkms or manually reverting the commit mentioned
+> above solved this problem for me.
+>
+>
+> Regards / Fredrik N.
+> _______________________________________________
+> lustre-discuss mailing list
+> lustre-discuss at lists.lustre.org
+> http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org
+>
+
+From diego.moreno at id.ethz.ch  Thu Oct 14 12:33:08 2021
+From: diego.moreno at id.ethz.ch (Moreno  Diego (ID SIS))
+Date: Thu, 14 Oct 2021 19:33:08 +0000
+Subject: [lustre-discuss] NRS TBF by UID and congestion
+Message-ID: <C83B7633-6DB1-4A85-885F-9DE04DCBA488@id.ethz.ch>
+
+ Hi Lustre friends,
+
+I'm wondering if someone has experience setting NRS TBF (by UID) on the OSTs (ost_io and ost service) in order to avoid congestion of the filesystem IOPS or bandwidth. All my tries during the last months have miserably failed into something that doesn?t look like QoS when the system has a high load. Once the system is under high load not even the TBF UID policy is saving us from slow response times for any user. So far, I have only tried setting it by UID so every user has their fair share of bandwidth. I tried different rate values for the default rule (5'000, 1'000 or 500). We have Lustre 2.12 in our cluster.
+
+Maybe there's any other setting that needs throttling (I see a parameter /sys/module/ptlrpc/parameters/tbf_rate that I could not find documented set to 10'000), is there anything I'm missing about this feature?
+
+Regards,
+
+Diego
+
+
+
+From sthiell at stanford.edu  Fri Oct 15 00:13:16 2021
+From: sthiell at stanford.edu (Stephane Thiell)
+Date: Fri, 15 Oct 2021 07:13:16 +0000
+Subject: [lustre-discuss] NRS TBF by UID and congestion
+In-Reply-To: <C83B7633-6DB1-4A85-885F-9DE04DCBA488@id.ethz.ch>
+References: <C83B7633-6DB1-4A85-885F-9DE04DCBA488@id.ethz.ch>
+Message-ID: <6001DB62-1DD3-4428-8C27-241C39466DCD@stanford.edu>
+
+Salut Diego!
+
+Yes, we have been using NRS TBF by UID on our Oak storage system for months now with Lustre 2.12. It?s a capacity-oriented, global filesystem, not designed for heavy workloads (unlike our scratch filesystem) but with many users and as such, a great candidate for NRS TBF UID. Since NRS, we have seen WAY fewer occurrences of single users abusing the system (which is always by mistake so we?re helping them too!). We use NRS TBF UID for all Lustre services on MDS and OSS.
+
+We have an ?exemption" rule for "root {0}" at 10000, and a default rule "default {*}? at a certain value. This value is per user and per CPT (it?s also a value per lustre service on the MDS for example, eg. mdt_readpage is a separate service). If you have large servers with many CPTs and set the value to 500, that?s 500 req/s per CPT per user, so perhaps it is still too high to be useful. The ideal value also probably depends on your default striping or other specifics.
+
+To set the NRS rate values right for the system, our approach is to monitor the active/queued values taken from the ?tbf uid? policy on each OSS with lctl get_param ost.OSS.ost_io.nrs_tbf_rule (same thing on MDS for each mdt service). We record these instant gauge-like values every minute, which seems to be enough to see trends. The ?queued' number is the most useful to me as I can easily see the impact of the rule by looking at the graph. Graphing these metrics over time allows us to adjust the rates so that queueing is not the norm, but the exception, while limiting heavy workloads.
+
+So it?s working for us on this system, the only thing now is that we would love to have a way to get additional NRS stats from Lustre, for example, the UIDs that have reached the rate limit over a period.
+
+Lastly, we tried to implement it on our scratch filesystem, but it?s more difficult. If a user has heavy duty jobs running on compute nodes and hit the rate limit, the user basically cannot transfer anything from a DTN or a login node (and will complain). I?ve opened LU-14567 to discuss wildcard support for ?uid" in NRS TBF policy (?tbf? and not ?tbf uid?) rules so that we could mix other, non-UID TBF rules with UID TBF rules. I don?t know how hard it is to implement.
+
+Hope that helps,
+
+Stephane
+
+
+> On Oct 14, 2021, at 12:33 PM, Moreno Diego (ID SIS) <diego.moreno at id.ethz.ch> wrote:
+> 
+> Hi Lustre friends,
+> 
+> I'm wondering if someone has experience setting NRS TBF (by UID) on the OSTs (ost_io and ost service) in order to avoid congestion of the filesystem IOPS or bandwidth. All my tries during the last months have miserably failed into something that doesn?t look like QoS when the system has a high load. Once the system is under high load not even the TBF UID policy is saving us from slow response times for any user. So far, I have only tried setting it by UID so every user has their fair share of bandwidth. I tried different rate values for the default rule (5'000, 1'000 or 500). We have Lustre 2.12 in our cluster.
+> 
+> Maybe there's any other setting that needs throttling (I see a parameter /sys/module/ptlrpc/parameters/tbf_rate that I could not find documented set to 10'000), is there anything I'm missing about this feature?
+> 
+> Regards,
+> 
+> Diego
+> 
+> 
+> _______________________________________________
+> lustre-discuss mailing list
+> lustre-discuss at lists.lustre.org
+> http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org
+
+
+From adilger at whamcloud.com  Sat Oct 16 00:47:05 2021
+From: adilger at whamcloud.com (Andreas Dilger)
+Date: Sat, 16 Oct 2021 07:47:05 +0000
+Subject: [lustre-discuss] dkms-2.8.6 breaks installation of
+ lustre-zfs-dkms-2.12.7-1.el7.noarch
+In-Reply-To: <98f92e18-b827-61c2-a36a-995afeef6b89@cnaf.infn.it>
+References: <dba5da5c-bb83-596b-9d47-7e021227d594@nsc.liu.se>
+ <98f92e18-b827-61c2-a36a-995afeef6b89@cnaf.infn.it>
+Message-ID: <C0985D34-BDCF-4564-87A6-1569CE1DED60@whamcloud.com>
+
+Riccardo,
+It would be great if you could submit your patch to Gerrit. 
+
+Cheers, Andreas
+
+> On Oct 13, 2021, at 17:06, Riccardo Veraldi <riccardo.veraldi at cnaf.infn.it> wrote:
+> 
+> ?yes, same problem for me, I Addressed this a few weeks go and I think I Reported to the mailing list.
+> 
+> This is my patch to make things works and build the lustre-dkms rpm
+> 
+> 
+> diff -ru lustre-2.12.7/lustre-dkms_pre-build.sh lustre-2.12.7-dkms-pcds/lustre-dkms_pre-build.sh
+> --- lustre-2.12.7/lustre-dkms_pre-build.sh    2021-07-14 22:06:05.000000000 -0700
+> +++ lustre-2.12.7-dkms-pcds/lustre-dkms_pre-build.sh    2021-09-26 08:30:54.096000000 -0700
+> @@ -20,18 +20,16 @@
+>      fi
+> 
+>      # ZFS and SPL are version locked
+> -    ZFS_VERSION=$(dkms status -m zfs -k $3 -a $5 | awk -F', ' '{print $2; exit 0}' | grep -v ': added$')
+> +    ZFS_VERSION=$(dkms status -m zfs | awk ' { print $1 } ' | sed -e 's/zfs\///' -e 's/,//')
+> +
+>      if [ -z $ZFS_VERSION ] ; then
+>          echo "zfs-dkms package must already be installed and built under DKMS control"
+>          exit 1
+>      fi
+> 
+>      SERVER="--enable-server $LDISKFS \
+> -        --with-linux=$4 --with-linux-obj=$4 \
+> -        --with-spl=$6/spl-${ZFS_VERSION} \
+> -        --with-spl-obj=$7/spl/${ZFS_VERSION}/$3/$5 \
+> -        --with-zfs=$6/zfs-${ZFS_VERSION} \
+> -        --with-zfs-obj=$7/zfs/${ZFS_VERSION}/$3/$5"
+> +        --with-zfs=/usr/src/zfs-${ZFS_VERSION} \
+> +        --with-zfs-obj=/var/lib/dkms/zfs/${ZFS_VERSION}/$(uname -r)/x86_64"
+> 
+>      KERNEL_STUFF="--with-linux=$4 --with-linux-obj=$4"
+>      ;;
+> 
+> 
+> 
+> 
+>> On 10/13/21 2:30 PM, Fredrik Nystr?m via lustre-discuss wrote:
+>> dkms was recently updated to version 2.8.6 in epel/7.
+>> 
+>> After this update installation of lustre-zfs-dkms-2.12.7-1.el7.noarch
+>> fails with following error:
+>> 
+>> ./configure: line 33341: test: zfs: integer expression expected
+>> configure: error:
+>> 
+>> 
+>> Breakage seems to be caused by following dkms commit:
+>> https://github.com/dell/dkms/commit/f83b758b6fb8ca67b1ab65df9e3d2a1e994eb483
+>> 
+>> 
+>> configure line 33341:
+>> if test x$enable_modules = xyes && test $ZFS_MAJOR -eq 0 && test $ZFS_MINOR -lt 8; then :
+>> 
+>> Not sure exactly how but it ends up with ZFS_MAJOR=zfs, ZFS_MINOR=zfs
+>> instead of: ZFS_MAJOR=0, ZFS_MINOR=7
+>> 
+>> 
+>> Downgrading to older dkms or manually reverting the commit mentioned
+>> above solved this problem for me.
+>> 
+>> 
+>> Regards / Fredrik N.
+>> _______________________________________________
+>> lustre-discuss mailing list
+>> lustre-discuss at lists.lustre.org
+>> http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org
+>> 
+> _______________________________________________
+> lustre-discuss mailing list
+> lustre-discuss at lists.lustre.org
+> http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org
+
+From adilger at whamcloud.com  Sat Oct 16 00:49:47 2021
+From: adilger at whamcloud.com (Andreas Dilger)
+Date: Sat, 16 Oct 2021 07:49:47 +0000
+Subject: [lustre-discuss] No read throughput shown for the sequential
+ read write Filebench workload
+In-Reply-To: <CAOgrjkj9h07ZbQ4W+6XcCRdffX9Wry05JH6tNnQvC0fBkwN75A@mail.gmail.com>
+References: <CAOgrjkj9h07ZbQ4W+6XcCRdffX9Wry05JH6tNnQvC0fBkwN75A@mail.gmail.com>
+Message-ID: <0C07D0A1-96C6-47D1-B58E-DA85714A8929@whamcloud.com>
+
+I would guess that all of the reads are handled from the client page cache?
+
+Cheers, Andreas
+
+On Oct 13, 2021, at 06:37, Md Hasanur Rashid via lustre-discuss <lustre-discuss at lists.lustre.org> wrote:
+
+?
+Hello Everyone,
+
+
+I am running a Filebench workload which is provided below:
+
+define fileset name="testF",entries=100,filesize=16m,prealloc,path="/mnt/hasanfs/tmp1"
+
+define process name="readerP",instances=2 {
+  thread name="readerT",instances=4 {
+  flowop openfile name="openOP",filesetname="testF"
+  flowop writewholefile name="writeOP",iters=4,filesetname="testF"
+  flowop readwholefile name="readOP",iters=1,filesetname="testF"
+  flowop closefile name="closeOP"
+  }
+}
+
+create files
+system "sync"
+system "echo 3 > /proc/sys/vm/drop_caches"
+
+run 60
+
+
+I am running the workload in a Lustre cluster. When I check the log from the server-side, it shows the following (I have provided stats of one OSS):
+
+obdfilter.hasanfs-OST0000.stats=
+snapshot_time             1633361244.519122 secs.usecs
+read_bytes                1 samples [bytes] 4096 4096 4096
+write_bytes               8479 samples [bytes] 1048576 1048576 8890875904
+destroy                   13 samples [reqs]
+statfs                    76 samples [reqs]
+preprw                    8480 samples [reqs]
+commitrw                  8480 samples [reqs]
+ping                      57 samples [reqs]
+
+obdfilter.hasanfs-OST0000.brw_stats=
+snapshot_time:         1633361244.519588 (secs.usecs)
+
+                           read      |     write
+pages per bulk r/w     rpcs  % cum % |  rpcs        % cum %
+256:                     0   0   0   | 8479 100 100
+
+                           read      |     write
+discontiguous pages    rpcs  % cum % |  rpcs        % cum %
+0:                       0   0   0   | 8479 100 100
+
+                           read      |     write
+discontiguous blocks   rpcs  % cum % |  rpcs        % cum %
+0:                       0   0   0   | 8479 100 100
+
+                           read      |     write
+disk fragmented I/Os   ios   % cum % |  ios         % cum %
+1:                       0   0   0   | 7499  88  88
+2:                       0   0   0   |  980  11 100
+
+                           read      |     write
+disk I/Os in flight    ios   % cum % |  ios         % cum %
+1:                       0   0   0   | 7921  83  83
+2:                       0   0   0   | 1407  14  98
+3:                       0   0   0   |  116   1  99
+4:                       0   0   0   |   15   0 100
+
+                           read      |     write
+I/O time (1/1000s)     ios   % cum % |  ios         % cum %
+2:                       0   0   0   | 1963  23  23
+4:                       0   0   0   | 5627  66  89
+8:                       0   0   0   |  837   9  99
+16:                      0   0   0   |   25   0  99
+32:                      0   0   0   |   27   0 100
+
+                           read      |     write
+disk I/O size          ios   % cum % |  ios         % cum %
+4K:                      0   0   0   |   62   0   0
+8K:                      0   0   0   |  127   1   1
+16K:                     0   0   0   |  113   1   3
+32K:                     0   0   0   |    0   0   3
+64K:                     0   0   0   |    0   0   3
+128K:                    0   0   0   |   65   0   3
+256K:                    0   0   0   |    0   0   3
+512K:                    0   0   0   | 1127  11  15
+1M:                      0   0   0   | 7965  84 100
+
+
+Can anyone please explain to me why I am not seeing any read operations in the stats?
+
+Thanks,
+Md. Hasanur Rashid
+
+_______________________________________________
+lustre-discuss mailing list
+lustre-discuss at lists.lustre.org
+http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20211016/87633a2a/attachment-0001.html>
+
+From mrashid2 at uncc.edu  Sat Oct 16 15:10:58 2021
+From: mrashid2 at uncc.edu (Md Hasanur Rashid)
+Date: Sat, 16 Oct 2021 18:10:58 -0400
+Subject: [lustre-discuss] [EXTERNAL] Re: Fwd: RPCs in Flight are more
+ than the max_rpcs_in_flight value
+In-Reply-To: <2EEE817C-69D2-451C-8091-8B22EE1E09AF@ddn.com>
+References: <CAOgrjkj4f-tyYB4OyWfxo71FVaU12uakboR-Hso-5pycv3fpZw@mail.gmail.com>
+ <CAOgrjkinzXc8_uBYaE0hzy3uDG4uAEd5Z_eqTxxEXnNgBPeH3Q@mail.gmail.com>
+ <2EEE817C-69D2-451C-8091-8B22EE1E09AF@ddn.com>
+Message-ID: <CAOgrjkiWiRj_C_pFCw0G9sa5gsC5kKErvbVRsNd6QDr9JdUO8w@mail.gmail.com>
+
+Hi Everyone,
+
+Thanks for getting back to me, Andreas and Patrick. The reason for me to
+experiment with max_rpcs_in_flight being 1 is that I have observed
+significant improvement over the default value when the workload is the
+following one:
+
+define fileset name="testF",entries=100,filesize=16m,prealloc,path="/mnt/hasanfs/tmp1"
+
+define process name="readerP",instances=2 {
+  thread name="readerT",instances=4 {
+  flowop openfile name="openOP",filesetname="testF"
+  flowop writewholefile name="writeOP",iters=4,filesetname="testF"
+  flowop readwholefile name="readOP",iters=1,filesetname="testF"
+  flowop closefile name="closeOP"
+  }
+}
+
+create files
+system "sync"
+system "echo 3 > /proc/sys/vm/drop_caches"
+
+run 60
+
+The performance when max_rpcs_in_flight has default value looks like the
+following:
+
+*max_rpcs_in_flight=8, max_pages_per_rpc=256, max_dirty_mb=2000*
+
+
+64.164: Per-Operation Breakdown
+
+closeOP              5612ops       94ops/s   0.0mb/s    0.581ms/op [0.278ms
+- 1.966ms]
+
+readOP               5612ops       94ops/s 5985.6mb/s   19.335ms/op
+[14.957ms - 83.853ms]
+
+writeOP              22462ops      374ops/s 5989.3mb/s   16.248ms/op
+[5.683ms - 626.451ms]
+
+openOP               5620ops       94ops/s   0.0mb/s    0.539ms/op [0.313ms
+- 27.266ms]
+
+64.164: IO Summary: 39306 ops 655.039 ops/s 94/374 rd/wr 11974.9mb/s
+12.206ms/op
+
+If we change the max_rpcs_in_flight value to 1, the performance is
+following:
+
+*max_rpcs_in_flight=1, max_pages_per_rpc=256, max_dirty_mb=2000*
+
+64.048: Per-Operation Breakdown
+
+closeOP              8631ops      144ops/s   0.0mb/s    0.593ms/op [0.273ms
+- 4.810ms]
+
+readOP               8631ops      144ops/s 9205.6mb/s   20.187ms/op
+[16.292ms - 37.513ms]
+
+writeOP              34545ops      576ops/s 9211.2mb/s    8.561ms/op
+[5.860ms - 55.334ms]
+
+openOP               8639ops      144ops/s   0.0mb/s    0.552ms/op [0.293ms
+- 10.132ms]
+
+64.048: IO Summary: 60446 ops 1007.344 ops/s 144/576 rd/wr 18416.8mb/s
+7.939ms/op
+
+As you can see from above the performance got improved when the value got
+changed to 1. Unfortunately, I am still not sure why such improvement is
+being observed. I ran the workload from a single client. The cluster setup
+looks like the following (5 server machines, 1 for MGS+MDS, and the other 4
+for OSSs where each one has 2 OSTs):
+
+UUID                       bytes        Used   Available Use% Mounted on
+
+hasanfs-MDT0000_UUID      144.8G       78.1M      134.8G   0%
+/mnt/hasanfs[MDT:0]
+
+hasanfs-OST0000_UUID      197.3G        1.1G      185.4G   1%
+/mnt/hasanfs[OST:0]
+
+hasanfs-OST0001_UUID      197.3G        1.2G      185.3G   1%
+/mnt/hasanfs[OST:1]
+
+hasanfs-OST0002_UUID      197.3G        1.2G      185.3G   1%
+/mnt/hasanfs[OST:2]
+
+hasanfs-OST0003_UUID      197.3G        1.2G      185.2G   1%
+/mnt/hasanfs[OST:3]
+
+hasanfs-OST0004_UUID      197.3G        1.2G      185.3G   1%
+/mnt/hasanfs[OST:4]
+
+hasanfs-OST0005_UUID      197.3G        1.2G      185.4G   1%
+/mnt/hasanfs[OST:5]
+
+hasanfs-OST0006_UUID      197.3G        1.2G      185.3G   1%
+/mnt/hasanfs[OST:6]
+
+hasanfs-OST0007_UUID      197.3G        1.2G      185.4G   1%
+/mnt/hasanfs[OST:7]
+
+
+filesystem summary:         1.5T        9.6G        1.4T   1% /mnt/hasanfs
+
+It would be really helpful for me and highly appreciated if you can share
+your intuitions or reasons regarding why such improvement may have been
+observed.
+
+Thanks,
+Md. Hasanur Rashid
+
+On Thu, Oct 7, 2021 at 5:45 PM Andreas Dilger <adilger at whamcloud.com> wrote:
+
+> [*Caution*: Email from External Sender. Do not click or open links or
+> attachments unless you know this sender.]
+>   On Oct 7, 2021, at 13:19, Md Hasanur Rashid via lustre-discuss <
+> lustre-discuss at lists.lustre.org> wrote:
+>
+>
+> Hello Everyone,
+>
+> I am running the Filebench benchmark in my Lustre cluster. I set the
+> max_rpcs_in_flight value to be 1. Before executing and after executing, I
+> verified that the value of max_rpcs_in_flight is indeed 1. However, when I
+> check the rpc_stats, the stat shows a much higher value for RPCs in flight.
+>
+>
+> If by "much higher than 1" you mean "2", then yes it appears there are
+> mostly (95%) 2 RPCs being processed concurrently on this OST.
+>
+> That might happen if you have 2 clients/mountpoints writing to the same
+> OST, it might be an off-by-one logic error allowing an extra RPC in flight,
+> it might be intentional for some reason (e.g. to avoid deadlock, memory
+> pressure, etc), or it might be accounting error in the statistics (e.g.
+> counting the next RPC to be sent before the first one is marked finished).
+>
+> Following is the value shown for one OSC just for reference:
+>
+> osc.hasanfs-OST0000-osc-ffff882fcf777000.rpc_stats=
+> snapshot_time:         1632483604.967291 (secs.usecs)
+> read RPCs in flight:  0
+> write RPCs in flight: 0
+> pending write pages:  0
+> pending read pages:   0
+>
+> read write
+> pages per rpc         rpcs   % cum % |       rpcs   % cum %
+> 1:         1 100 100   |          0   0   0
+> 2:         0   0 100   |          0   0   0
+> 4:         0   0 100   |          0   0   0
+> 8:         0   0 100   |          0   0   0
+> 16:         0   0 100   |          0   0   0
+> 32:         0   0 100   |          0   0   0
+> 64:         0   0 100   |          0   0   0
+> 128:         0   0 100   |          0   0   0
+> 256:         0   0 100   |       9508 100 100
+>
+> read write
+> rpcs in flight        rpcs   % cum % |       rpcs   % cum %
+> 0:         0   0   0   |          0   0   0
+> 1:         1 100 100   |         10   0   0
+> 2:         0   0 100   |       9033  95  95
+> 3:         0   0 100   |        465   4 100
+>
+> read write
+> offset                rpcs   % cum % |       rpcs   % cum %
+> 0:         1 100 100   |        725   7   7
+> 1:         0   0 100   |          0   0   7
+> 2:         0   0 100   |          0   0   7
+> 4:         0   0 100   |          0   0   7
+> 8:         0   0 100   |          0   0   7
+> 16:         0   0 100   |          0   0   7
+> 32:         0   0 100   |          0   0   7
+> 64:         0   0 100   |          0   0   7
+> 128:         0   0 100   |          0   0   7
+> 256:         0   0 100   |        718   7  15
+> 512:         0   0 100   |       1386  14  29
+> 1024:         0   0 100   |       2205  23  52
+> 2048:         0   0 100   |       1429  15  67
+> 4096:         0   0 100   |       1103  11  79
+> 8192:         0   0 100   |       1942  20 100
+>
+> Can anyone please explain to me why the RPCs in flight shown in the
+> rpc_stats could be higher than the max_rpcs_in_flight?
+>
+>
+> I do see a similar behavior with the statistics of my home system, which
+> has the default osc.*.max_rpcs_in_flight=8, but shows many cases of 9 RPCs
+> in flight in the statistics for both read and write, and in a few cases 10
+> or 11:
+>
+> read write
+> rpcs in flight        rpcs   % cum % |       rpcs   % cum %
+> 1:        121   2   2   |      27831  93  93
+> 2:         23   0   3   |        108   0  93
+> 3:         22   0   3   |         19   0  93
+> 4:         24   0   4   |         15   0  93
+> 5:         19   0   5   |         10   0  93
+> 6:         26   0   5   |         13   0  93
+> 7:        176   4   9   |         39   0  93
+> 8:        933  22  32   |         75   0  94
+> 9:       2802  67  99   |       1207   4  98
+> 10:         10   0 100   |        543   1  99
+> 11:          0   0 100   |          1   0 100
+>
+>
+> The good news is that Lustre is open source, so you can look into the
+> lustre/osc code to see why this is happening.  The limit is set by
+> cli->cl_max_rpcs_in_flight, and the stats are accounted by
+> cli->cl_write_rpc_hist.
+>
+> Out of curiosity, you don't say _why_ this off-by-one error is of
+> interest?  Definitely it seems like a bug that could be fixed, but it
+> doesn't seem too critical to correct functionality.
+>
+> Cheers, Andreas
+> --
+> Andreas Dilger
+> Lustre Principal Architect
+> Whamcloud
+>
+>
+>
+>
+>
+>
+>
+>
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20211016/4fd594fc/attachment-0001.html>
+
+From sid.young at gmail.com  Sat Oct 16 17:06:12 2021
+From: sid.young at gmail.com (Sid Young)
+Date: Sun, 17 Oct 2021 10:06:12 +1000
+Subject: [lustre-discuss] Best ways to backup a Lustre file system?
+Message-ID: <CAEZ+gOw+xN5RCw_Xkod6ptQTmuggi2fueDTLSPLXDxY9zZ6trQ@mail.gmail.com>
+
+G'Day all,
+
+Apart from rsync'ing all the data on a mounted lustre filesystem to another
+server, what backup systems are people using to backup Lustre?
+
+
+Sid Young
+M: 0458 396300
+W: https://off-grid-engineering.com
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20211017/acff3401/attachment.html>
+
+From adilger at whamcloud.com  Sun Oct 17 00:54:03 2021
+From: adilger at whamcloud.com (Andreas Dilger)
+Date: Sun, 17 Oct 2021 07:54:03 +0000
+Subject: [lustre-discuss] [EXTERNAL] Re: Fwd: RPCs in Flight are more
+ than the max_rpcs_in_flight value
+In-Reply-To: <CAOgrjkiWiRj_C_pFCw0G9sa5gsC5kKErvbVRsNd6QDr9JdUO8w@mail.gmail.com>
+References: <CAOgrjkj4f-tyYB4OyWfxo71FVaU12uakboR-Hso-5pycv3fpZw@mail.gmail.com>
+ <CAOgrjkinzXc8_uBYaE0hzy3uDG4uAEd5Z_eqTxxEXnNgBPeH3Q@mail.gmail.com>
+ <2EEE817C-69D2-451C-8091-8B22EE1E09AF@ddn.com>
+ <CAOgrjkiWiRj_C_pFCw0G9sa5gsC5kKErvbVRsNd6QDr9JdUO8w@mail.gmail.com>
+Message-ID: <ECEC3E18-01C0-4649-B59C-95D23358E244@whamcloud.com>
+
+It seems likely if you are using spinning disks (HDD)  that using max_rpcs_in_flight=1 will reduce the seeking on the OSTs, especially with large RPC sizes (16MB).
+
+Cheers, Andreas
+
+On Oct 16, 2021, at 16:11, Md Hasanur Rashid <mrashid2 at uncc.edu> wrote:
+
+?
+Hi Everyone,
+
+Thanks for getting back to me, Andreas and Patrick. The reason for me to experiment with max_rpcs_in_flight being 1 is that I have observed significant improvement over the default value when the workload is the following one:
+
+define fileset name="testF",entries=100,filesize=16m,prealloc,path="/mnt/hasanfs/tmp1"
+
+define process name="readerP",instances=2 {
+  thread name="readerT",instances=4 {
+  flowop openfile name="openOP",filesetname="testF"
+  flowop writewholefile name="writeOP",iters=4,filesetname="testF"
+  flowop readwholefile name="readOP",iters=1,filesetname="testF"
+  flowop closefile name="closeOP"
+  }
+}
+
+create files
+system "sync"
+system "echo 3 > /proc/sys/vm/drop_caches"
+
+run 60
+
+The performance when max_rpcs_in_flight has default value looks like the following:
+
+
+max_rpcs_in_flight=8, max_pages_per_rpc=256, max_dirty_mb=2000
+
+
+64.164: Per-Operation Breakdown
+
+closeOP              5612ops       94ops/s   0.0mb/s    0.581ms/op [0.278ms - 1.966ms]
+
+readOP               5612ops       94ops/s 5985.6mb/s   19.335ms/op [14.957ms - 83.853ms]
+
+writeOP              22462ops      374ops/s 5989.3mb/s   16.248ms/op [5.683ms - 626.451ms]
+
+openOP               5620ops       94ops/s   0.0mb/s    0.539ms/op [0.313ms - 27.266ms]
+
+64.164: IO Summary: 39306 ops 655.039 ops/s 94/374 rd/wr 11974.9mb/s 12.206ms/op
+
+If we change the max_rpcs_in_flight value to 1, the performance is following:
+
+max_rpcs_in_flight=1, max_pages_per_rpc=256, max_dirty_mb=2000
+
+
+64.048: Per-Operation Breakdown
+
+closeOP              8631ops      144ops/s   0.0mb/s    0.593ms/op [0.273ms - 4.810ms]
+
+readOP               8631ops      144ops/s 9205.6mb/s   20.187ms/op [16.292ms - 37.513ms]
+
+writeOP              34545ops      576ops/s 9211.2mb/s    8.561ms/op [5.860ms - 55.334ms]
+
+openOP               8639ops      144ops/s   0.0mb/s    0.552ms/op [0.293ms - 10.132ms]
+
+64.048: IO Summary: 60446 ops 1007.344 ops/s 144/576 rd/wr 18416.8mb/s 7.939ms/op
+
+As you can see from above the performance got improved when the value got changed to 1. Unfortunately, I am still not sure why such improvement is being observed. I ran the workload from a single client. The cluster setup looks like the following (5 server machines, 1 for MGS+MDS, and the other 4 for OSSs where each one has 2 OSTs):
+
+
+UUID                       bytes        Used   Available Use% Mounted on
+
+hasanfs-MDT0000_UUID      144.8G       78.1M      134.8G   0% /mnt/hasanfs[MDT:0]
+
+hasanfs-OST0000_UUID      197.3G        1.1G      185.4G   1% /mnt/hasanfs[OST:0]
+
+hasanfs-OST0001_UUID      197.3G        1.2G      185.3G   1% /mnt/hasanfs[OST:1]
+
+hasanfs-OST0002_UUID      197.3G        1.2G      185.3G   1% /mnt/hasanfs[OST:2]
+
+hasanfs-OST0003_UUID      197.3G        1.2G      185.2G   1% /mnt/hasanfs[OST:3]
+
+hasanfs-OST0004_UUID      197.3G        1.2G      185.3G   1% /mnt/hasanfs[OST:4]
+
+hasanfs-OST0005_UUID      197.3G        1.2G      185.4G   1% /mnt/hasanfs[OST:5]
+
+hasanfs-OST0006_UUID      197.3G        1.2G      185.3G   1% /mnt/hasanfs[OST:6]
+
+hasanfs-OST0007_UUID      197.3G        1.2G      185.4G   1% /mnt/hasanfs[OST:7]
+
+
+filesystem summary:         1.5T        9.6G        1.4T   1% /mnt/hasanfs
+
+It would be really helpful for me and highly appreciated if you can share your intuitions or reasons regarding why such improvement may have been observed.
+
+Thanks,
+Md. Hasanur Rashid
+
+On Thu, Oct 7, 2021 at 5:45 PM Andreas Dilger <adilger at whamcloud.com<mailto:adilger at whamcloud.com>> wrote:
+[Caution: Email from External Sender. Do not click or open links or attachments unless you know this sender.]
+  On Oct 7, 2021, at 13:19, Md Hasanur Rashid via lustre-discuss <lustre-discuss at lists.lustre.org<mailto:lustre-discuss at lists.lustre.org>> wrote:
+
+Hello Everyone,
+
+I am running the Filebench benchmark in my Lustre cluster. I set the max_rpcs_in_flight value to be 1. Before executing and after executing, I verified that the value of max_rpcs_in_flight is indeed 1. However, when I check the rpc_stats, the stat shows a much higher value for RPCs in flight.
+
+If by "much higher than 1" you mean "2", then yes it appears there are mostly (95%) 2 RPCs being processed concurrently on this OST.
+
+That might happen if you have 2 clients/mountpoints writing to the same OST, it might be an off-by-one logic error allowing an extra RPC in flight, it might be intentional for some reason (e.g. to avoid deadlock, memory pressure, etc), or it might be accounting error in the statistics (e.g. counting the next RPC to be sent before the first one is marked finished).
+
+Following is the value shown for one OSC just for reference:
+
+osc.hasanfs-OST0000-osc-ffff882fcf777000.rpc_stats=
+snapshot_time:         1632483604.967291 (secs.usecs)
+read RPCs in flight:  0
+write RPCs in flight: 0
+pending write pages:  0
+pending read pages:   0
+
+read write
+pages per rpc         rpcs   % cum % |       rpcs   % cum %
+1:         1 100 100   |          0   0   0
+2:         0   0 100   |          0   0   0
+4:         0   0 100   |          0   0   0
+8:         0   0 100   |          0   0   0
+16:         0   0 100   |          0   0   0
+32:         0   0 100   |          0   0   0
+64:         0   0 100   |          0   0   0
+128:         0   0 100   |          0   0   0
+256:         0   0 100   |       9508 100 100
+
+read write
+rpcs in flight        rpcs   % cum % |       rpcs   % cum %
+0:         0   0   0   |          0   0   0
+1:         1 100 100   |         10   0   0
+2:         0   0 100   |       9033  95  95
+3:         0   0 100   |        465   4 100
+
+read write
+offset                rpcs   % cum % |       rpcs   % cum %
+0:         1 100 100   |        725   7   7
+1:         0   0 100   |          0   0   7
+2:         0   0 100   |          0   0   7
+4:         0   0 100   |          0   0   7
+8:         0   0 100   |          0   0   7
+16:         0   0 100   |          0   0   7
+32:         0   0 100   |          0   0   7
+64:         0   0 100   |          0   0   7
+128:         0   0 100   |          0   0   7
+256:         0   0 100   |        718   7  15
+512:         0   0 100   |       1386  14  29
+1024:         0   0 100   |       2205  23  52
+2048:         0   0 100   |       1429  15  67
+4096:         0   0 100   |       1103  11  79
+8192:         0   0 100   |       1942  20 100
+
+Can anyone please explain to me why the RPCs in flight shown in the rpc_stats could be higher than the max_rpcs_in_flight?
+
+I do see a similar behavior with the statistics of my home system, which has the default osc.*.max_rpcs_in_flight=8, but shows many cases of 9 RPCs in flight in the statistics for both read and write, and in a few cases 10 or 11:
+
+read write
+rpcs in flight        rpcs   % cum % |       rpcs   % cum %
+1:        121   2   2   |      27831  93  93
+2:         23   0   3   |        108   0  93
+3:         22   0   3   |         19   0  93
+4:         24   0   4   |         15   0  93
+5:         19   0   5   |         10   0  93
+6:         26   0   5   |         13   0  93
+7:        176   4   9   |         39   0  93
+8:        933  22  32   |         75   0  94
+9:       2802  67  99   |       1207   4  98
+10:         10   0 100   |        543   1  99
+11:          0   0 100   |          1   0 100
+
+
+The good news is that Lustre is open source, so you can look into the lustre/osc code to see why this is happening.  The limit is set by cli->cl_max_rpcs_in_flight, and the stats are accounted by cli->cl_write_rpc_hist.
+
+Out of curiosity, you don't say _why_ this off-by-one error is of interest?  Definitely it seems like a bug that could be fixed, but it doesn't seem too critical to correct functionality.
+
+Cheers, Andreas
+--
+Andreas Dilger
+Lustre Principal Architect
+Whamcloud
+
+
+
+
+
+
+
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20211017/42239c3d/attachment-0001.html>
+
+From mrashid2 at uncc.edu  Sun Oct 17 19:28:34 2021
+From: mrashid2 at uncc.edu (Md Hasanur Rashid)
+Date: Sun, 17 Oct 2021 22:28:34 -0400
+Subject: [lustre-discuss] [EXTERNAL] Re: Fwd: RPCs in Flight are more
+ than the max_rpcs_in_flight value
+In-Reply-To: <ECEC3E18-01C0-4649-B59C-95D23358E244@whamcloud.com>
+References: <CAOgrjkj4f-tyYB4OyWfxo71FVaU12uakboR-Hso-5pycv3fpZw@mail.gmail.com>
+ <CAOgrjkinzXc8_uBYaE0hzy3uDG4uAEd5Z_eqTxxEXnNgBPeH3Q@mail.gmail.com>
+ <2EEE817C-69D2-451C-8091-8B22EE1E09AF@ddn.com>
+ <CAOgrjkiWiRj_C_pFCw0G9sa5gsC5kKErvbVRsNd6QDr9JdUO8w@mail.gmail.com>
+ <ECEC3E18-01C0-4649-B59C-95D23358E244@whamcloud.com>
+Message-ID: <CAOgrjkhj2PCAfWnuN4YL7ZR+9K5x68EmtmB1ODKnus2eEZqk1w@mail.gmail.com>
+
+All my OSS's are mounted on SSD. So, I think that wouldn't be the reason
+behind such improvements.
+
+Thanks,
+Hasan
+
+On Sun, Oct 17, 2021 at 3:54 AM Andreas Dilger <adilger at whamcloud.com>
+wrote:
+
+> It seems likely if you are using spinning disks (HDD)  that using
+> max_rpcs_in_flight=1 will reduce the seeking on the OSTs, especially with
+> large RPC sizes (16MB).
+>
+> Cheers, Andreas
+>
+> On Oct 16, 2021, at 16:11, Md Hasanur Rashid <mrashid2 at uncc.edu> wrote:
+>
+> ?
+> Hi Everyone,
+>
+> Thanks for getting back to me, Andreas and Patrick. The reason for me to
+> experiment with max_rpcs_in_flight being 1 is that I have observed
+> significant improvement over the default value when the workload is the
+> following one:
+>
+> define fileset name="testF",entries=100,filesize=16m,prealloc,path="/mnt/hasanfs/tmp1"
+>
+> define process name="readerP",instances=2 {
+>   thread name="readerT",instances=4 {
+>   flowop openfile name="openOP",filesetname="testF"
+>   flowop writewholefile name="writeOP",iters=4,filesetname="testF"
+>   flowop readwholefile name="readOP",iters=1,filesetname="testF"
+>   flowop closefile name="closeOP"
+>   }
+> }
+>
+> create files
+> system "sync"
+> system "echo 3 > /proc/sys/vm/drop_caches"
+>
+> run 60
+>
+> The performance when max_rpcs_in_flight has default value looks like the
+> following:
+>
+> *max_rpcs_in_flight=8, max_pages_per_rpc=256, max_dirty_mb=2000*
+>
+>
+> 64.164: Per-Operation Breakdown
+>
+> closeOP              5612ops       94ops/s   0.0mb/s    0.581ms/op
+> [0.278ms - 1.966ms]
+>
+> readOP               5612ops       94ops/s 5985.6mb/s   19.335ms/op
+> [14.957ms - 83.853ms]
+>
+> writeOP              22462ops      374ops/s 5989.3mb/s   16.248ms/op
+> [5.683ms - 626.451ms]
+>
+> openOP               5620ops       94ops/s   0.0mb/s    0.539ms/op
+> [0.313ms - 27.266ms]
+>
+> 64.164: IO Summary: 39306 ops 655.039 ops/s 94/374 rd/wr 11974.9mb/s
+> 12.206ms/op
+>
+> If we change the max_rpcs_in_flight value to 1, the performance is
+> following:
+>
+> *max_rpcs_in_flight=1, max_pages_per_rpc=256, max_dirty_mb=2000*
+>
+> 64.048: Per-Operation Breakdown
+>
+> closeOP              8631ops      144ops/s   0.0mb/s    0.593ms/op
+> [0.273ms - 4.810ms]
+>
+> readOP               8631ops      144ops/s 9205.6mb/s   20.187ms/op
+> [16.292ms - 37.513ms]
+>
+> writeOP              34545ops      576ops/s 9211.2mb/s    8.561ms/op
+> [5.860ms - 55.334ms]
+>
+> openOP               8639ops      144ops/s   0.0mb/s    0.552ms/op
+> [0.293ms - 10.132ms]
+>
+> 64.048: IO Summary: 60446 ops 1007.344 ops/s 144/576 rd/wr 18416.8mb/s
+> 7.939ms/op
+>
+> As you can see from above the performance got improved when the value got
+> changed to 1. Unfortunately, I am still not sure why such improvement is
+> being observed. I ran the workload from a single client. The cluster setup
+> looks like the following (5 server machines, 1 for MGS+MDS, and the other 4
+> for OSSs where each one has 2 OSTs):
+>
+> UUID                       bytes        Used   Available Use% Mounted on
+>
+> hasanfs-MDT0000_UUID      144.8G       78.1M      134.8G   0%
+> /mnt/hasanfs[MDT:0]
+>
+> hasanfs-OST0000_UUID      197.3G        1.1G      185.4G   1%
+> /mnt/hasanfs[OST:0]
+>
+> hasanfs-OST0001_UUID      197.3G        1.2G      185.3G   1%
+> /mnt/hasanfs[OST:1]
+>
+> hasanfs-OST0002_UUID      197.3G        1.2G      185.3G   1%
+> /mnt/hasanfs[OST:2]
+>
+> hasanfs-OST0003_UUID      197.3G        1.2G      185.2G   1%
+> /mnt/hasanfs[OST:3]
+>
+> hasanfs-OST0004_UUID      197.3G        1.2G      185.3G   1%
+> /mnt/hasanfs[OST:4]
+>
+> hasanfs-OST0005_UUID      197.3G        1.2G      185.4G   1%
+> /mnt/hasanfs[OST:5]
+>
+> hasanfs-OST0006_UUID      197.3G        1.2G      185.3G   1%
+> /mnt/hasanfs[OST:6]
+>
+> hasanfs-OST0007_UUID      197.3G        1.2G      185.4G   1%
+> /mnt/hasanfs[OST:7]
+>
+>
+> filesystem summary:         1.5T        9.6G        1.4T   1% /mnt/hasanfs
+>
+> It would be really helpful for me and highly appreciated if you can share
+> your intuitions or reasons regarding why such improvement may have been
+> observed.
+>
+> Thanks,
+> Md. Hasanur Rashid
+>
+> On Thu, Oct 7, 2021 at 5:45 PM Andreas Dilger <adilger at whamcloud.com>
+> wrote:
+>
+>> [*Caution*: Email from External Sender. Do not click or open links or
+>> attachments unless you know this sender.]
+>>   On Oct 7, 2021, at 13:19, Md Hasanur Rashid via lustre-discuss <
+>> lustre-discuss at lists.lustre.org> wrote:
+>>
+>>
+>> Hello Everyone,
+>>
+>> I am running the Filebench benchmark in my Lustre cluster. I set the
+>> max_rpcs_in_flight value to be 1. Before executing and after executing, I
+>> verified that the value of max_rpcs_in_flight is indeed 1. However, when I
+>> check the rpc_stats, the stat shows a much higher value for RPCs in flight.
+>>
+>>
+>> If by "much higher than 1" you mean "2", then yes it appears there are
+>> mostly (95%) 2 RPCs being processed concurrently on this OST.
+>>
+>> That might happen if you have 2 clients/mountpoints writing to the same
+>> OST, it might be an off-by-one logic error allowing an extra RPC in flight,
+>> it might be intentional for some reason (e.g. to avoid deadlock, memory
+>> pressure, etc), or it might be accounting error in the statistics (e.g.
+>> counting the next RPC to be sent before the first one is marked finished).
+>>
+>> Following is the value shown for one OSC just for reference:
+>>
+>> osc.hasanfs-OST0000-osc-ffff882fcf777000.rpc_stats=
+>> snapshot_time:         1632483604.967291 (secs.usecs)
+>> read RPCs in flight:  0
+>> write RPCs in flight: 0
+>> pending write pages:  0
+>> pending read pages:   0
+>>
+>> read write
+>> pages per rpc         rpcs   % cum % |       rpcs   % cum %
+>> 1:         1 100 100   |          0   0   0
+>> 2:         0   0 100   |          0   0   0
+>> 4:         0   0 100   |          0   0   0
+>> 8:         0   0 100   |          0   0   0
+>> 16:         0   0 100   |          0   0   0
+>> 32:         0   0 100   |          0   0   0
+>> 64:         0   0 100   |          0   0   0
+>> 128:         0   0 100   |          0   0   0
+>> 256:         0   0 100   |       9508 100 100
+>>
+>> read write
+>> rpcs in flight        rpcs   % cum % |       rpcs   % cum %
+>> 0:         0   0   0   |          0   0   0
+>> 1:         1 100 100   |         10   0   0
+>> 2:         0   0 100   |       9033  95  95
+>> 3:         0   0 100   |        465   4 100
+>>
+>> read write
+>> offset                rpcs   % cum % |       rpcs   % cum %
+>> 0:         1 100 100   |        725   7   7
+>> 1:         0   0 100   |          0   0   7
+>> 2:         0   0 100   |          0   0   7
+>> 4:         0   0 100   |          0   0   7
+>> 8:         0   0 100   |          0   0   7
+>> 16:         0   0 100   |          0   0   7
+>> 32:         0   0 100   |          0   0   7
+>> 64:         0   0 100   |          0   0   7
+>> 128:         0   0 100   |          0   0   7
+>> 256:         0   0 100   |        718   7  15
+>> 512:         0   0 100   |       1386  14  29
+>> 1024:         0   0 100   |       2205  23  52
+>> 2048:         0   0 100   |       1429  15  67
+>> 4096:         0   0 100   |       1103  11  79
+>> 8192:         0   0 100   |       1942  20 100
+>>
+>> Can anyone please explain to me why the RPCs in flight shown in the
+>> rpc_stats could be higher than the max_rpcs_in_flight?
+>>
+>>
+>> I do see a similar behavior with the statistics of my home system, which
+>> has the default osc.*.max_rpcs_in_flight=8, but shows many cases of 9 RPCs
+>> in flight in the statistics for both read and write, and in a few cases 10
+>> or 11:
+>>
+>> read write
+>> rpcs in flight        rpcs   % cum % |       rpcs   % cum %
+>> 1:        121   2   2   |      27831  93  93
+>> 2:         23   0   3   |        108   0  93
+>> 3:         22   0   3   |         19   0  93
+>> 4:         24   0   4   |         15   0  93
+>> 5:         19   0   5   |         10   0  93
+>> 6:         26   0   5   |         13   0  93
+>> 7:        176   4   9   |         39   0  93
+>> 8:        933  22  32   |         75   0  94
+>> 9:       2802  67  99   |       1207   4  98
+>> 10:         10   0 100   |        543   1  99
+>> 11:          0   0 100   |          1   0 100
+>>
+>>
+>> The good news is that Lustre is open source, so you can look into the
+>> lustre/osc code to see why this is happening.  The limit is set by
+>> cli->cl_max_rpcs_in_flight, and the stats are accounted by
+>> cli->cl_write_rpc_hist.
+>>
+>> Out of curiosity, you don't say _why_ this off-by-one error is of
+>> interest?  Definitely it seems like a bug that could be fixed, but it
+>> doesn't seem too critical to correct functionality.
+>>
+>> Cheers, Andreas
+>> --
+>> Andreas Dilger
+>> Lustre Principal Architect
+>> Whamcloud
+>>
+>>
+>>
+>>
+>>
+>>
+>>
+>>
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20211017/7de77630/attachment-0001.html>
+
+From diego.moreno at id.ethz.ch  Mon Oct 18 07:55:30 2021
+From: diego.moreno at id.ethz.ch (Moreno  Diego (ID SIS))
+Date: Mon, 18 Oct 2021 14:55:30 +0000
+Subject: [lustre-discuss] NRS TBF by UID and congestion
+In-Reply-To: <6001DB62-1DD3-4428-8C27-241C39466DCD@stanford.edu>
+References: <C83B7633-6DB1-4A85-885F-9DE04DCBA488@id.ethz.ch>
+ <6001DB62-1DD3-4428-8C27-241C39466DCD@stanford.edu>
+Message-ID: <1BDADE1E-4FC6-458D-B1F5-ABD30DD456AF@id.ethz.ch>
+
+Salut Stephane!
+
+Thanks a lot for this. I guess this is the kind of helpful answer I was looking for when I posted. All in all it seems we will need to find the right value that works for us. I have the impression that changing also the settings in the middle of a very high load might not be the best idea since the queues are already filled. We see some kind of blocked filesystem during some minutes after we enable it but afterwards it seems to work better. Have you also tried to enable it on LDLM services? I was advised in the past to never enable any kind of throttling on LDLM so locks are cancelled as fast as possible, otherwise we would have high CPU and memory usage on the MDS side.
+
+I agree that it would be very useful to know which users have long waiting queues, this could eventually help to create dynamic and more complex rules for throttling.
+
+Regards,
+
+Diego
+ 
+
+?On 15.10.21, 09:13, "Stephane Thiell" <sthiell at stanford.edu> wrote:
+
+    Salut Diego!
+
+    Yes, we have been using NRS TBF by UID on our Oak storage system for months now with Lustre 2.12. It?s a capacity-oriented, global filesystem, not designed for heavy workloads (unlike our scratch filesystem) but with many users and as such, a great candidate for NRS TBF UID. Since NRS, we have seen WAY fewer occurrences of single users abusing the system (which is always by mistake so we?re helping them too!). We use NRS TBF UID for all Lustre services on MDS and OSS.
+
+    We have an ?exemption" rule for "root {0}" at 10000, and a default rule "default {*}? at a certain value. This value is per user and per CPT (it?s also a value per lustre service on the MDS for example, eg. mdt_readpage is a separate service). If you have large servers with many CPTs and set the value to 500, that?s 500 req/s per CPT per user, so perhaps it is still too high to be useful. The ideal value also probably depends on your default striping or other specifics.
+
+    To set the NRS rate values right for the system, our approach is to monitor the active/queued values taken from the ?tbf uid? policy on each OSS with lctl get_param ost.OSS.ost_io.nrs_tbf_rule (same thing on MDS for each mdt service). We record these instant gauge-like values every minute, which seems to be enough to see trends. The ?queued' number is the most useful to me as I can easily see the impact of the rule by looking at the graph. Graphing these metrics over time allows us to adjust the rates so that queueing is not the norm, but the exception, while limiting heavy workloads.
+
+    So it?s working for us on this system, the only thing now is that we would love to have a way to get additional NRS stats from Lustre, for example, the UIDs that have reached the rate limit over a period.
+
+    Lastly, we tried to implement it on our scratch filesystem, but it?s more difficult. If a user has heavy duty jobs running on compute nodes and hit the rate limit, the user basically cannot transfer anything from a DTN or a login node (and will complain). I?ve opened LU-14567 to discuss wildcard support for ?uid" in NRS TBF policy (?tbf? and not ?tbf uid?) rules so that we could mix other, non-UID TBF rules with UID TBF rules. I don?t know how hard it is to implement.
+
+    Hope that helps,
+
+    Stephane
+
+
+    > On Oct 14, 2021, at 12:33 PM, Moreno Diego (ID SIS) <diego.moreno at id.ethz.ch> wrote:
+    > 
+    > Hi Lustre friends,
+    > 
+    > I'm wondering if someone has experience setting NRS TBF (by UID) on the OSTs (ost_io and ost service) in order to avoid congestion of the filesystem IOPS or bandwidth. All my tries during the last months have miserably failed into something that doesn?t look like QoS when the system has a high load. Once the system is under high load not even the TBF UID policy is saving us from slow response times for any user. So far, I have only tried setting it by UID so every user has their fair share of bandwidth. I tried different rate values for the default rule (5'000, 1'000 or 500). We have Lustre 2.12 in our cluster.
+    > 
+    > Maybe there's any other setting that needs throttling (I see a parameter /sys/module/ptlrpc/parameters/tbf_rate that I could not find documented set to 10'000), is there anything I'm missing about this feature?
+    > 
+    > Regards,
+    > 
+    > Diego
+    > 
+    > 
+    > _______________________________________________
+    > lustre-discuss mailing list
+    > lustre-discuss at lists.lustre.org
+    > http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org
+
+
+
+From sid.young at gmail.com  Mon Oct 18 20:40:41 2021
+From: sid.young at gmail.com (Sid Young)
+Date: Tue, 19 Oct 2021 13:40:41 +1000
+Subject: [lustre-discuss] df shows wrong size of lustre file system (on all
+ nodes).
+Message-ID: <CAEZ+gOyGZqpsCREgBfoVDqrwoLFjGcnucim9cTZv1Mnax-01ZA@mail.gmail.com>
+
+I have some stability in my lustre installation after many days of testing,
+however df- h now reports the /home filesystem incorrectly.
+
+After mounting the /home I get:
+[root at n04 ~]# df -h
+10.140.90.42 at tcp:/lustre  286T   59T  228T  21% /lustre
+10.140.90.42 at tcp:/home    191T  153T   38T  81% /home
+
+doing it again straight after, I get:
+
+[root at n04 ~]# df -h
+10.140.90.42 at tcp:/lustre  286T   59T  228T  21% /lustre
+10.140.90.42 at tcp:/home     48T   40T  7.8T  84% /home
+
+The 4 OSTs report as active and present:
+
+[root at n04 ~]# lfs df
+....
+UUID                   1K-blocks        Used   Available Use% Mounted on
+home-MDT0000_UUID     4473805696    41784064  4432019584   1% /home[MDT:0]
+home-OST0000_UUID    51097753600 40560842752 10536908800  80% /home[OST:0]
+home-OST0001_UUID    51097896960 42786978816  8310916096  84% /home[OST:1]
+home-OST0002_UUID    51097687040 38293322752 12804362240  75% /home[OST:2]
+home-OST0003_UUID    51097765888 42293640192  8804123648  83% /home[OST:3]
+
+filesystem_summary:  204391103488 163934784512 40456310784  81% /home
+
+[root at n04 ~]#
+[root at n04 ~]# lfs osts
+OBDS:
+0: lustre-OST0000_UUID ACTIVE
+1: lustre-OST0001_UUID ACTIVE
+2: lustre-OST0002_UUID ACTIVE
+3: lustre-OST0003_UUID ACTIVE
+4: lustre-OST0004_UUID ACTIVE
+5: lustre-OST0005_UUID ACTIVE
+OBDS:
+0: home-OST0000_UUID ACTIVE
+1: home-OST0001_UUID ACTIVE
+2: home-OST0002_UUID ACTIVE
+3: home-OST0003_UUID ACTIVE
+[root at n04 ~]#
+
+Anyone seen this before? Reboots and remounts do not appear to change the
+value. zfs pool is reporting as online and a scrub returns 0 errors.
+
+Sid Young
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20211019/336b4543/attachment.html>
+
+From jaeki.hong at samsung.com  Tue Oct 19 03:31:14 2021
+From: jaeki.hong at samsung.com (=?UTF-8?B?7ZmN7J6s6riw?=)
+Date: Tue, 19 Oct 2021 19:31:14 +0900
+Subject: [lustre-discuss] LNet supports IB HDR(200Gb) network?
+References: <CGME20211019103114epcms2p3d343a890318c9b377dfce7e2e21cd9b4@epcms2p3>
+Message-ID: <20211019103114epcms2p3d343a890318c9b377dfce7e2e21cd9b4@epcms2p3>
+
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20211019/1e254df0/attachment-0001.html>
+-------------- next part --------------
+A non-text attachment was scrubbed...
+Name: not available
+Type: image/gif
+Size: 13402 bytes
+Desc: not available
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20211019/1e254df0/attachment-0001.gif>
+
+From knut.franke at atos.net  Thu Oct 21 11:38:19 2021
+From: knut.franke at atos.net (Franke, Knut)
+Date: Thu, 21 Oct 2021 18:38:19 +0000
+Subject: [lustre-discuss] dkms-2.8.6 breaks installation of
+ lustre-zfs-dkms-2.12.7-1.el7.noarch
+In-Reply-To: <98f92e18-b827-61c2-a36a-995afeef6b89@cnaf.infn.it>
+References: <dba5da5c-bb83-596b-9d47-7e021227d594@nsc.liu.se>
+ <98f92e18-b827-61c2-a36a-995afeef6b89@cnaf.infn.it>
+Message-ID: <5853c5df8fe945266c1b06c5d00c6bb1953e5059.camel@atos.net>
+
+Hi,
+
+Am Mittwoch, dem 13.10.2021 um 16:06 -0700 schrieb Riccardo Veraldi:
+> 
+> This is my patch to make things works and build the lustre-dkms rpm
+
+Thank you! I just ran into the exact same problem. Two comments on the
+patch:
+
+> -	ZFS_VERSION=$(dkms status -m zfs -k $3 -a $5 | awk -F', ' '{print $2; exit 0}' | grep -v ': added$')
+> +	ZFS_VERSION=$(dkms status -m zfs | awk ' { print $1 } ' | sed -e 's/zfs\///' -e 's/,//')
+
+This produces an incorrect result if the dkms module is already built
+for multiple kernel versions. I would suggest picking the largest zfs
+version for simplicity's sake:
+
++	ZFS_VERSION=$(dkms status -m zfs | awk ' { print $1 } ' | sed
+-e 's/zfs\///' -e 's/,//' | sort -V | tail -n1)
+
+Secondly,
+
+> + 	SERVER="--enable-server $LDISKFS \
+> +-		--with-linux=$4 --with-linux-obj=$4 \
+> +-		--with-spl=$6/spl-${ZFS_VERSION} \
+> +-		--with-spl-obj=$7/spl/${ZFS_VERSION}/$3/$5 \
+> +-		--with-zfs=$6/zfs-${ZFS_VERSION} \
+> +-		--with-zfs-obj=$7/zfs/${ZFS_VERSION}/$3/$5"
+> ++		--with-zfs=/usr/src/zfs-${ZFS_VERSION} \
+> ++		--with-zfs-obj=/var/lib/dkms/zfs/${ZFS_VERSION}/$3/$5"
+
+This fails if we're building for a newly installed kernel we haven't
+rebooted to yet (or rather, any kernel version other than the one
+that's currently booted). Also, we might want to keep open the
+possibility of building for non-x86 that was present in the original
+(though I don't now whether Luster even supports non-x86). So:
+
++		--with-zfs-obj=/var/lib/dkms/zfs/${ZFS_VERSION}/$3/$5"
+
+To be honest, I don't understand why this second block of changes is
+necessary at all; but I currently don't have the time to do any more
+experiments..
+
+Cheers,
+Knut
+
+
+From heathp at HPC.MsState.Edu  Thu Oct 21 11:53:00 2021
+From: heathp at HPC.MsState.Edu (Peeples, Heath)
+Date: Thu, 21 Oct 2021 18:53:00 +0000
+Subject: [lustre-discuss] project quota way off
+Message-ID: <BN0PR01MB70566D5435EB31F33E9A25D59CBF9@BN0PR01MB7056.prod.exchangelabs.com>
+
+We have a weird problem with project quotas.
+
+We have a project contained in a specific directory.  A du of that directory returns 71T.  However lfs project shows only 1.8 TB used.  Just to make sure everything was assigned correctly we ran lfs project -p <id> -s -r <dir> on the directory to try to recalculate.  That did not change any of the numbers.  Any ideas as to why these numbers could be so different?  Thanks in advance.
+
+Heath
+
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20211021/e00e1f38/attachment.html>
+
+From emyr.james at crg.eu  Thu Oct 21 13:28:54 2021
+From: emyr.james at crg.eu (Emyr James)
+Date: Thu, 21 Oct 2021 20:28:54 +0000
+Subject: [lustre-discuss] Lustre Client on Ubuntu 20.04
+Message-ID: <DB7PR09MB2411368F39C8AE6E72290097EFBF9@DB7PR09MB2411.eurprd09.prod.outlook.com>
+
+Dear all,
+
+We currently have a lustre 2.7 system running on redhat 6.7.
+The 2.10.8 client has been tested on redhat 6.7 and works fine (using Mellanox OFED).
+I'd like to get a 2.10.8 client running on Ubuntu 20.04 which is compatible with Mellanox OFED.
+I haven't found any instructions on how to build just the client side on Ubuntu. Does anyone have instructions or can point me to a howto somewhere?
+
+
+Many thanks.
+
+Emyr James
+Head of IT
+CRG - Centre for Genomic Regulation
+C/ Dr. Aiguader, 88
+Edif. PRBB
+08003 Barcelona, Spain
+Phone Ext: #1098
+
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20211021/3225e801/attachment.html>
+
+From emyr.james at crg.eu  Thu Oct 21 14:04:24 2021
+From: emyr.james at crg.eu (Emyr James)
+Date: Thu, 21 Oct 2021 21:04:24 +0000
+Subject: [lustre-discuss] Lustre Client on Ubuntu 20.04
+In-Reply-To: <DM6PR19MB3228DC9DFB55393A6AF878F4C9BF9@DM6PR19MB3228.namprd19.prod.outlook.com>
+References: <DB7PR09MB2411368F39C8AE6E72290097EFBF9@DB7PR09MB2411.eurprd09.prod.outlook.com>
+ <DM6PR19MB3228DC9DFB55393A6AF878F4C9BF9@DM6PR19MB3228.namprd19.prod.outlook.com>
+Message-ID: <DB7PR09MB24110A852AE00916B9716443EFBF9@DB7PR09MB2411.eurprd09.prod.outlook.com>
+
+Hi,
+
+Thanks for the info. Our server side will get upgraded to 2.12.7 LTS in a few months so looking for a more modern OS than redhat 6.7!
+
+Does the 2.14 client work with the 2.12.7 LTS...and even with 2.7?
+
+Many thanks,
+
+Emyr James
+Head of IT
+CRG - Centre for Genomic Regulation
+C/ Dr. Aiguader, 88
+Edif. PRBB
+08003 Barcelona, Spain
+Phone Ext: #1098
+
+
+________________________________
+From: Patrick Farrell <pfarrell at ddn.com>
+Sent: 21 October 2021 22:57
+To: Emyr James <emyr.james at crg.eu>; lustre-discuss at lists.lustre.org <lustre-discuss at lists.lustre.org>
+Subject: Re: Lustre Client on Ubuntu 20.04
+
+Emyr,
+
+2.10.8 is a fairly old version and I am pretty sure it won't build for Ubuntu 20.04.  The most recent kernel it's known to build for is Linux 4.4.x, and Ubuntu 20.04 is at least 5.4.x.
+
+The only version which officially has support for 20.04 is Lustre 2.14 (and the upcoming 2.15).
+
+For Ubuntu builds, the instructions here give the basic steps:
+https://wiki.lustre.org/Compiling_Lustre
+
+And the other sections have instructions which will help you with adding in MOFED.
+
+Just bear in mind the comments about version compatibility.
+
+-Patrick
+________________________________
+From: lustre-discuss <lustre-discuss-bounces at lists.lustre.org> on behalf of Emyr James <emyr.james at crg.eu>
+Sent: Thursday, October 21, 2021 3:28 PM
+To: lustre-discuss at lists.lustre.org <lustre-discuss at lists.lustre.org>
+Subject: [lustre-discuss] Lustre Client on Ubuntu 20.04
+
+Dear all,
+
+We currently have a lustre 2.7 system running on redhat 6.7.
+The 2.10.8 client has been tested on redhat 6.7 and works fine (using Mellanox OFED).
+I'd like to get a 2.10.8 client running on Ubuntu 20.04 which is compatible with Mellanox OFED.
+I haven't found any instructions on how to build just the client side on Ubuntu. Does anyone have instructions or can point me to a howto somewhere?
+
+
+Many thanks.
+
+Emyr James
+Head of IT
+CRG - Centre for Genomic Regulation
+C/ Dr. Aiguader, 88
+Edif. PRBB
+08003 Barcelona, Spain
+Phone Ext: #1098
+
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20211021/ce017627/attachment.html>
+
+From riccardo.veraldi at cnaf.infn.it  Thu Oct 21 16:23:39 2021
+From: riccardo.veraldi at cnaf.infn.it (Riccardo Veraldi)
+Date: Thu, 21 Oct 2021 16:23:39 -0700
+Subject: [lustre-discuss] dkms-2.8.6 breaks installation of
+ lustre-zfs-dkms-2.12.7-1.el7.noarch
+In-Reply-To: <5853c5df8fe945266c1b06c5d00c6bb1953e5059.camel@atos.net>
+References: <dba5da5c-bb83-596b-9d47-7e021227d594@nsc.liu.se>
+ <98f92e18-b827-61c2-a36a-995afeef6b89@cnaf.infn.it>
+ <5853c5df8fe945266c1b06c5d00c6bb1953e5059.camel@atos.net>
+Message-ID: <b8ba186e-b30e-32b8-9ab1-dca7e3536825@cnaf.infn.it>
+
+thanks a lot, and thanks for the corrections.
+
+Anyway I never use more than one dkms module built for different kernel 
+versions and usually I build the lustre dkms module always on the 
+current version of the running kernel, but yes your fixes will address 
+correctly the issues you mentioned and it is a more general approach.
+
+
+On 10/21/21 11:38 AM, Franke, Knut wrote:
+> Hi,
+>
+> Am Mittwoch, dem 13.10.2021 um 16:06 -0700 schrieb Riccardo Veraldi:
+>> This is my patch to make things works and build the lustre-dkms rpm
+> Thank you! I just ran into the exact same problem. Two comments on the
+> patch:
+>
+>> -	ZFS_VERSION=$(dkms status -m zfs -k $3 -a $5 | awk -F', ' '{print $2; exit 0}' | grep -v ': added$')
+>> +	ZFS_VERSION=$(dkms status -m zfs | awk ' { print $1 } ' | sed -e 's/zfs\///' -e 's/,//')
+> This produces an incorrect result if the dkms module is already built
+> for multiple kernel versions. I would suggest picking the largest zfs
+> version for simplicity's sake:
+>
+> +	ZFS_VERSION=$(dkms status -m zfs | awk ' { print $1 } ' | sed
+> -e 's/zfs\///' -e 's/,//' | sort -V | tail -n1)
+>
+> Secondly,
+>
+>> + 	SERVER="--enable-server $LDISKFS \
+>> +-		--with-linux=$4 --with-linux-obj=$4 \
+>> +-		--with-spl=$6/spl-${ZFS_VERSION} \
+>> +-		--with-spl-obj=$7/spl/${ZFS_VERSION}/$3/$5 \
+>> +-		--with-zfs=$6/zfs-${ZFS_VERSION} \
+>> +-		--with-zfs-obj=$7/zfs/${ZFS_VERSION}/$3/$5"
+>> ++		--with-zfs=/usr/src/zfs-${ZFS_VERSION} \
+>> ++		--with-zfs-obj=/var/lib/dkms/zfs/${ZFS_VERSION}/$3/$5"
+> This fails if we're building for a newly installed kernel we haven't
+> rebooted to yet (or rather, any kernel version other than the one
+> that's currently booted). Also, we might want to keep open the
+> possibility of building for non-x86 that was present in the original
+> (though I don't now whether Luster even supports non-x86). So:
+>
+> +		--with-zfs-obj=/var/lib/dkms/zfs/${ZFS_VERSION}/$3/$5"
+>
+> To be honest, I don't understand why this second block of changes is
+> necessary at all; but I currently don't have the time to do any more
+> experiments..
+>
+> Cheers,
+> Knut
+>
+
+From tyler at cinnamon.is  Sat Oct 23 22:53:16 2021
+From: tyler at cinnamon.is (=?UTF-8?B?VHJ1bmcgxJDhurduZyDEkGluaCBRdeG7kWM=?=)
+Date: Sun, 24 Oct 2021 12:53:16 +0700
+Subject: [lustre-discuss] [Lustre] How to remove stale mount in client?
+Message-ID: <CAM5nNQWSVLTiJycrt1r8MWSNzD7ORoTydqUvKMdA0KnsFjgyEg@mail.gmail.com>
+
+Hello,
+
+I am new to Lustre, and I just use it for my work.
+During working with Lustre, I made a mistake when I unmount the file system.
+After that, I think my Lustre client suffers from the previous stale mount.
+
+This is the output of "*lfs check servers":*
+
+> lfs check: error: check 'home-OST0000-osc-ffff8c18cfdcd000': Cannot send
+> after transport endpoint shutdown (108)
+> home-OST0000-osc-ffff8c18d3c4c000 active.
+> lfs check: error: check 'home-OST0001-osc-ffff8c18cfdcd000': Cannot send
+> after transport endpoint shutdown (108)
+> home-OST0001-osc-ffff8c18d3c4c000 active.
+> lfs check: error: check 'home-OST0002-osc-ffff8c18cfdcd000': Cannot send
+> after transport endpoint shutdown (108)
+> home-OST0002-osc-ffff8c18d3c4c000 active.
+> lfs check: error: check 'home-OST0003-osc-ffff8c18cfdcd000': Cannot send
+> after transport endpoint shutdown (108)
+> home-OST0003-osc-ffff8c18d3c4c000 active.
+> lfs check: error: check 'home-MDT0000-mdc-ffff8c18cfdcd000': Cannot send
+> after transport endpoint shutdown (108)
+> home-MDT0000-mdc-ffff8c18d3c4c000 active.
+> lfs check: error: check 'home-MDT0001-mdc-ffff8c18cfdcd000': Cannot send
+> after transport endpoint shutdown (108)
+> home-MDT0001-mdc-ffff8c18d3c4c000 active.
+
+
+What should I do in order to remove the stale subsystem (*ffff8c18cfdcd000*)
+from my client?
+Thank you very much.
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20211024/bba3e803/attachment.html>
+
+From t.roth at gsi.de  Sun Oct 24 00:01:18 2021
+From: t.roth at gsi.de (Thomas Roth)
+Date: Sun, 24 Oct 2021 09:01:18 +0200
+Subject: [lustre-discuss] [Lustre] How to remove stale mount in client?
+In-Reply-To: <CAM5nNQWSVLTiJycrt1r8MWSNzD7ORoTydqUvKMdA0KnsFjgyEg@mail.gmail.com>
+References: <CAM5nNQWSVLTiJycrt1r8MWSNzD7ORoTydqUvKMdA0KnsFjgyEg@mail.gmail.com>
+Message-ID: <e63ad083-0a88-3ad5-67d9-57b4a34f396f@gsi.de>
+
+Hi,
+
+on a different client, what is the output of 'lfs check servers' ?
+If it is similar, there is an issue with the connectivity to your servers.
+If there are no error on the second client, you might consider rebooting the first client?
+
+Best,
+Thomas
+
+On 10/24/21 07:53, Trung ??ng ?inh Qu?c via lustre-discuss wrote:
+> Hello,
+> 
+> I am new to Lustre, and I just use it for my work.
+> During working with Lustre, I made a mistake when I unmount the file system.
+> After that, I think my Lustre client suffers from the previous stale mount.
+> 
+> This is the output of "*lfs check servers":*
+> 
+>> lfs check: error: check 'home-OST0000-osc-ffff8c18cfdcd000': Cannot send
+>> after transport endpoint shutdown (108)
+>> home-OST0000-osc-ffff8c18d3c4c000 active.
+>> lfs check: error: check 'home-OST0001-osc-ffff8c18cfdcd000': Cannot send
+>> after transport endpoint shutdown (108)
+>> home-OST0001-osc-ffff8c18d3c4c000 active.
+>> lfs check: error: check 'home-OST0002-osc-ffff8c18cfdcd000': Cannot send
+>> after transport endpoint shutdown (108)
+>> home-OST0002-osc-ffff8c18d3c4c000 active.
+>> lfs check: error: check 'home-OST0003-osc-ffff8c18cfdcd000': Cannot send
+>> after transport endpoint shutdown (108)
+>> home-OST0003-osc-ffff8c18d3c4c000 active.
+>> lfs check: error: check 'home-MDT0000-mdc-ffff8c18cfdcd000': Cannot send
+>> after transport endpoint shutdown (108)
+>> home-MDT0000-mdc-ffff8c18d3c4c000 active.
+>> lfs check: error: check 'home-MDT0001-mdc-ffff8c18cfdcd000': Cannot send
+>> after transport endpoint shutdown (108)
+>> home-MDT0001-mdc-ffff8c18d3c4c000 active.
+> 
+> 
+> What should I do in order to remove the stale subsystem (*ffff8c18cfdcd000*)
+> from my client?
+> Thank you very much.
+> 
+> 
+> _______________________________________________
+> lustre-discuss mailing list
+> lustre-discuss at lists.lustre.org
+> http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org
+> 
+
+
+From Travis.Ross at kla.com  Mon Oct 25 21:50:07 2021
+From: Travis.Ross at kla.com (Ross, Travis)
+Date: Tue, 26 Oct 2021 04:50:07 +0000
+Subject: [lustre-discuss] Building Lustre - kmod-lustre-osd-zfs
+ compatibility
+In-Reply-To: <BYAPR03MB43281B7262E28040574861F8C7849@BYAPR03MB4328.namprd03.prod.outlook.com>
+References: <BYAPR03MB4328B53723A30436C69AA2A8C7849@BYAPR03MB4328.namprd03.prod.outlook.com>
+ <BYAPR03MB43281B7262E28040574861F8C7849@BYAPR03MB4328.namprd03.prod.outlook.com>
+Message-ID: <BYAPR03MB432871DE8897C47046678F2BC7849@BYAPR03MB4328.namprd03.prod.outlook.com>
+
+Follow up.
+
+It seems that mostly my issue revolves around liblnetconfig...
+
+I'm watching the build process and during my last run I verified that all the libraries that are complaining about installing do exist during the build process:
+
+[root at A2M13-MACHDFS002 .libs]# ls
+liblnetconfig.a  liblnetconfig.la  liblnetconfig_la-cyaml.o  liblnetconfig.lai  liblnetconfig_la-liblnetconfig_lnd.o  liblnetconfig_la-liblnetconfig_netlink.o  liblnetconfig_la-liblnetconfig.o  liblnetconfig_la-liblnetconfig_udsp.o  liblnetconfig.so  liblnetconfig.so.4  liblnetconfig.so.4.0.0
+
+Something I'm also trying to identify is what all the configure options are, and what do they do?
+
+I've noticed there's a -enable-shared and also a -enable-static and trying to understand what's the difference between these.
+Also I'm seeing these lines in the lsutre.spec which seem to dictate which versions of these files to use, except now I've tried building with both -enable-shared and -enable-static with change in behaviour either way with my installation.
+
+Also - I don't know enough about this... but why would it delete anything in here?
+
+rm -f $RPM_BUILD_ROOT%{_libdir}/liblnetconfig.la
+%if %{with static}
+echo '%attr(-, root, root) %{_libdir}/liblnetconfig.a' >>lustre.files
+%endif
+%if %{with shared}
+echo '%attr(-, root, root) %{_libdir}/liblnetconfig.so' >>lustre.files
+echo '%attr(-, root, root) %{_libdir}/liblnetconfig.so.*' >>lustre.files
+%endif
+Thanks,
+-Travis
+
+From: Ross, Travis
+Sent: Monday, October 25, 2021 10:35 PM
+To: lustre-discuss at lists.lustre.org
+Subject: Building Lustre - kmod-lustre-osd-zfs compatibility
+
+I know!  Another "Building Lustre - Unsuccessfully" Thread!
+
+I'm fairly new to building out and installing my own home grown Lustre, and so far I've been having some issues with my final deployment.
+
+So far I have gone through and compiled the Lustre Kernel Patch, Installed MOFED w/ --add-kernel-support -kmp, compiled zfs for the Lustre Kernel Patch, then Compiled and built Lustre based on all of the above.  Through all the compilations I'm not getting any glaringly obvious errors or failures that would indicate why when I attempt to install, I'm getting the traditional ksym dependency errors.
+
+I want to reach out to see if maybe I'm being too aggressive with my product versions (latest Master from GIT) and if I should step back and "decide" on a particular version of all these packages, and then - does anyone have any recommendations on a nice platform to "standardize" on.  Versions of ZFS+Lustre that play nicely together?
+
+I'm not sure if attachments are coming through, if so - I've attached my yum output from installing my *.rpm's for Lustre, as well as the "Make" output from my
+
+Environment Details:
+
+Patched Kernel:
+4.18.0-240.22.1.el8_lustre.x86_64
+
+MLNX:
+mlnx-ofa_kernel-5.4-OFED.5.4.1.0.3.1.rhel8u3.x86_64
+
+ZFS:
+zfs-2.1.99-485_gec64fdb93.el8.x86_64.rpm
+
+LUSTRE:
+lustre-2.14.55_43_g6a08df2-1.el8.x86_64.rpm
+
+
+Also before I sent this I also attempted to build the following environment unsuccessfully:
+
+
+Patched Kernel:
+4.18.0-240.22.1.el8_lustre.x86_64
+
+MLNX:
+mlnx-ofa_kernel-5.4-OFED.5.4.1.0.3.1.rhel8u3.x86_64
+
+ZFS:
+zfs-2.0.6-1.el8.x86_64
+
+LUSTRE:
+lustre-2.14.55_43_g6a08df2-1.el8.x86_64.rpm
+
+
+Also my configure syntax for reference:
+
+MLNX:
+./mlnxofedinstall --add-kernel-support --skip-repo -kmp
+
+ZFS:
+./configure --with-linux=/lib/modules/4.18.0-240.22.1.el8_lustre.x86_64/source --with-linux-obj=/lib/modules/4.18.0-240.22.1.el8_lustre.x86_64/source
+
+LUSTRE:
+./configure --enable-server  --disable-ldiskfs   --with-linux=/usr/src/kernels/4.18.0-240.22.1.el8_lustre.x86_64   --with-linux-obj=/usr/src/kernels/4.18.0-240.22.1.el8_lustre.x86_64   --with-o2ib=/usr/src/ofa_kernel/default   --with-zfs=/usr/src/zfs-2.0.6  --with-spl=/usr/src/spl-2.0.6
+
+Any potential compatibility you could recommend would be greatly appreciated.  Should I just scale back entirely to 2.12 on RHEL7.9?  I was hoping to be closer to latest on a new cluster, but maybe it would be better to scale back to a more stable platform entirely, or have I missed something important and I would experience similar issues running on an older platform?
+
+Thanks,
+-Travis
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20211026/1747b8b6/attachment.html>
+
+From rehr at science.ku.dk  Tue Oct 26 04:54:21 2021
+From: rehr at science.ku.dk (Martin Rehr)
+Date: Tue, 26 Oct 2021 13:54:21 +0200
+Subject: [lustre-discuss] MDS kernel taunt when accessing snapshot files
+Message-ID: <321B238B-07DD-452C-B70D-A87220518FAD@science.ku.dk>
+
+Greetings,
+
+We are running a lustre setup on top of ZFS.
+
+Mounting a lustre snapshot on a client and thereafter running:
+'lfs data_version -n SNAPSHOT_FILEPATH'
+
+Makes the MDS server fail with a kernel taunt (dump_stack call) thrown from 'lustre/osd-zfs/osd_handler.c : osd_trans_create':
+------------------------------------------------------------------------------------
+    if (dt->dd_rdonly) {
+        CERROR("%s: someone try to start transaction under "
+               "readonly mode, should be disabled.\n",
+               osd_name(osd_dt_dev(dt)));
+        dump_stack();
+        RETURN(ERR_PTR(-EROFS));
+    }
+------------------------------------------------------------------------------------
+
+In the above (lfs dataversion) example we can prevent the kernel taunt by mounting the snapshot (client side) with 'noatime', but that doesn't help us if we try to run:
+`lfs getstripe -d SNAPSHOT_FILEPATH'
+
+We have traced the problem and found that it is the function calls 'mdt_open.c : mo_attr_set' and 'mdt_open.c : mo_xattr_set' that triggers the kernel taunt.
+
+Our MDS crashed hard after running the above tests on millions of (snapshot) files simultaneously and we had to restore it from generic ZFS snapshots.
+
+Is this a know issue ?
+
+Best Regards,
+   Martin
+-------------- next part --------------
+A non-text attachment was scrubbed...
+Name: signature.asc
+Type: application/pgp-signature
+Size: 873 bytes
+Desc: Message signed with OpenPGP
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20211026/deb95abc/attachment-0001.sig>
+
+From Travis.Ross at kla.com  Mon Oct 25 19:34:40 2021
+From: Travis.Ross at kla.com (Ross, Travis)
+Date: Tue, 26 Oct 2021 02:34:40 +0000
+Subject: [lustre-discuss] Building Lustre - kmod-lustre-osd-zfs compatibility
+In-Reply-To: <BYAPR03MB4328B53723A30436C69AA2A8C7849@BYAPR03MB4328.namprd03.prod.outlook.com>
+References: <BYAPR03MB4328B53723A30436C69AA2A8C7849@BYAPR03MB4328.namprd03.prod.outlook.com>
+Message-ID: <BYAPR03MB43281B7262E28040574861F8C7849@BYAPR03MB4328.namprd03.prod.outlook.com>
+
+I know!  Another "Building Lustre - Unsuccessfully" Thread!
+
+I'm fairly new to building out and installing my own home grown Lustre, and so far I've been having some issues with my final deployment.
+
+So far I have gone through and compiled the Lustre Kernel Patch, Installed MOFED w/ --add-kernel-support -kmp, compiled zfs for the Lustre Kernel Patch, then Compiled and built Lustre based on all of the above.  Through all the compilations I'm not getting any glaringly obvious errors or failures that would indicate why when I attempt to install, I'm getting the traditional ksym dependency errors.
+
+I want to reach out to see if maybe I'm being too aggressive with my product versions (latest Master from GIT) and if I should step back and "decide" on a particular version of all these packages, and then - does anyone have any recommendations on a nice platform to "standardize" on.  Versions of ZFS+Lustre that play nicely together?
+
+I'm not sure if attachments are coming through, if so - I've attached my yum output from installing my *.rpm's for Lustre, as well as the "Make" output from my
+
+Environment Details:
+
+Patched Kernel:
+4.18.0-240.22.1.el8_lustre.x86_64
+
+MLNX:
+mlnx-ofa_kernel-5.4-OFED.5.4.1.0.3.1.rhel8u3.x86_64
+
+ZFS:
+zfs-2.1.99-485_gec64fdb93.el8.x86_64.rpm
+
+LUSTRE:
+lustre-2.14.55_43_g6a08df2-1.el8.x86_64.rpm
+
+
+Also before I sent this I also attempted to build the following environment unsuccessfully:
+
+
+Patched Kernel:
+4.18.0-240.22.1.el8_lustre.x86_64
+
+MLNX:
+mlnx-ofa_kernel-5.4-OFED.5.4.1.0.3.1.rhel8u3.x86_64
+
+ZFS:
+zfs-2.0.6-1.el8.x86_64
+
+LUSTRE:
+lustre-2.14.55_43_g6a08df2-1.el8.x86_64.rpm
+
+
+Also my configure syntax for reference:
+
+MLNX:
+./mlnxofedinstall --add-kernel-support --skip-repo -kmp
+
+ZFS:
+./configure --with-linux=/lib/modules/4.18.0-240.22.1.el8_lustre.x86_64/source --with-linux-obj=/lib/modules/4.18.0-240.22.1.el8_lustre.x86_64/source
+
+LUSTRE:
+./configure --enable-server  --disable-ldiskfs   --with-linux=/usr/src/kernels/4.18.0-240.22.1.el8_lustre.x86_64   --with-linux-obj=/usr/src/kernels/4.18.0-240.22.1.el8_lustre.x86_64   --with-o2ib=/usr/src/ofa_kernel/default   --with-zfs=/usr/src/zfs-2.0.6  --with-spl=/usr/src/spl-2.0.6
+
+Any potential compatibility you could recommend would be greatly appreciated.  Should I just scale back entirely to 2.12 on RHEL7.9?  I was hoping to be closer to latest on a new cluster, but maybe it would be better to scale back to a more stable platform entirely, or have I missed something important and I would experience similar issues running on an older platform?
+
+Thanks,
+-Travis
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20211026/2166dc95/attachment-0001.html>
+-------------- next part --------------
+A non-text attachment was scrubbed...
+Name: make_output_zfs
+Type: application/octet-stream
+Size: 877850 bytes
+Desc: make_output_zfs
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20211026/2166dc95/attachment-0003.obj>
+-------------- next part --------------
+A non-text attachment was scrubbed...
+Name: make_output_lustre
+Type: application/octet-stream
+Size: 467169 bytes
+Desc: make_output_lustre
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20211026/2166dc95/attachment-0004.obj>
+-------------- next part --------------
+A non-text attachment was scrubbed...
+Name: yum_output
+Type: application/octet-stream
+Size: 78895 bytes
+Desc: yum_output
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20211026/2166dc95/attachment-0005.obj>
+
+From anton at ciam.ru  Wed Oct 27 10:08:26 2021
+From: anton at ciam.ru (=?koi8-r?B?8sHey88g4c7Uz84g88XSx8XF18ne?=)
+Date: Wed, 27 Oct 2021 17:08:26 +0000
+Subject: [lustre-discuss] Failed to mount MDT
+Message-ID: <ae2f952aac3b4f72b17fb5f82bb5d0bd@ciam.ru>
+
+Hi all,
+suddenly (I doesn't know after what), MDT on my lustrefs is failed to mount:
+
+mount -t lustre /dev/mapper/mpatha /mnt/mdt
+
+dmesg:
+
+[  466.192839] LustreError: 26789:0:(osd_scrub.c:1758:osd_ios_lookup_one_len()) Fail to find lustre/srpc-client in CONFIGS (163577857/3480975961): rc = -13
+[  466.193234] LustreError: 26789:0:(osd_scrub.c:1758:osd_ios_lookup_one_len()) Skipped 925006 previous similar messages
+
+I use lustre ver. 2.12.2
+
+
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20211027/c84550e3/attachment.html>
+
+From jongwoohan at gmail.com  Wed Oct 27 20:11:18 2021
+From: jongwoohan at gmail.com (Jongwoo Han)
+Date: Thu, 28 Oct 2021 12:11:18 +0900
+Subject: [lustre-discuss] Failed to mount MDT
+In-Reply-To: <ae2f952aac3b4f72b17fb5f82bb5d0bd@ciam.ru>
+References: <ae2f952aac3b4f72b17fb5f82bb5d0bd@ciam.ru>
+Message-ID: <CALz2ZjkaByoc8T2BKOVTwXrJ_jsYZn9sc+zQOL3qPmr=rNfs+Q@mail.gmail.com>
+
+It seems your CONFIG directory in MDT is corrupt.
+
+I suggest that mount MDT as plain ext2fs ( # mount  /dev/mapper/mpatha
+/mnt/tmp ) , backup CONFIG directory, and erase contents of CONFIG
+directory then mount as lustre filesystem.
+
+Regards,
+Jongwoo Han
+
+2021? 10? 28? (?) ?? 2:08, ????? ????? ????????? <anton at ciam.ru>?? ??:
+
+> Hi all,
+>
+> suddenly (I doesn?t know after what), MDT on my lustrefs is failed to
+> mount:
+>
+>
+>
+> mount -t lustre /dev/mapper/mpatha /mnt/mdt
+>
+>
+>
+> dmesg:
+>
+>
+>
+> [  466.192839] LustreError:
+> 26789:0:(osd_scrub.c:1758:osd_ios_lookup_one_len()) Fail to find
+> lustre/srpc-client in CONFIGS (163577857/3480975961): rc = -13
+>
+> [  466.193234] LustreError:
+> 26789:0:(osd_scrub.c:1758:osd_ios_lookup_one_len()) Skipped 925006 previous
+> similar messages
+>
+>
+>
+> I use lustre ver. 2.12.2
+>
+>
+>
+>
+> _______________________________________________
+> lustre-discuss mailing list
+> lustre-discuss at lists.lustre.org
+> http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org
+>
+
+
+-- 
+Jongwoo Han
++82-505-227-6108
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20211028/4ca273b8/attachment.html>
+
+From anton at ciam.ru  Thu Oct 28 00:45:22 2021
+From: anton at ciam.ru (=?utf-8?B?0KDQsNGH0LrQviDQkNC90YLQvtC9INCh0LXRgNCz0LXQtdCy0LjRhw==?=)
+Date: Thu, 28 Oct 2021 07:45:22 +0000
+Subject: [lustre-discuss] Failed to mount MDT
+In-Reply-To: <CALz2ZjkaByoc8T2BKOVTwXrJ_jsYZn9sc+zQOL3qPmr=rNfs+Q@mail.gmail.com>
+References: <ae2f952aac3b4f72b17fb5f82bb5d0bd@ciam.ru>
+ <CALz2ZjkaByoc8T2BKOVTwXrJ_jsYZn9sc+zQOL3qPmr=rNfs+Q@mail.gmail.com>
+Message-ID: <ce66538e821a421aa57d5b4e348dcf0d@ciam.ru>
+
+I try, but
+
+[30711.329673] EXT4-fs (dm-1): couldn't mount as ext2 due to feature incompatibilities
+
+From: Jongwoo Han <jongwoohan at gmail.com>
+Sent: Thursday, October 28, 2021 6:11 AM
+To: ????? ????? ????????? <anton at ciam.ru>
+Cc: lustre-discuss at lists.lustre.org; lustre-discuss <lustre-discuss-bounces at lists.lustre.org>
+Subject: Re: [lustre-discuss] Failed to mount MDT
+
+It seems your CONFIG directory in MDT is corrupt.
+
+I suggest that mount MDT as plain ext2fs ( # mount  /dev/mapper/mpatha /mnt/tmp ) , backup CONFIG directory, and erase contents of CONFIG directory then mount as lustre filesystem.
+
+Regards,
+Jongwoo Han
+
+2021? 10? 28? (?) ?? 2:08, ????? ????? ????????? <anton at ciam.ru<mailto:anton at ciam.ru>>?? ??:
+Hi all,
+suddenly (I doesn?t know after what), MDT on my lustrefs is failed to mount:
+
+mount -t lustre /dev/mapper/mpatha /mnt/mdt
+
+dmesg:
+
+[  466.192839] LustreError: 26789:0:(osd_scrub.c:1758:osd_ios_lookup_one_len()) Fail to find lustre/srpc-client in CONFIGS (163577857/3480975961): rc = -13
+[  466.193234] LustreError: 26789:0:(osd_scrub.c:1758:osd_ios_lookup_one_len()) Skipped 925006 previous similar messages
+
+I use lustre ver. 2.12.2
+
+
+_______________________________________________
+lustre-discuss mailing list
+lustre-discuss at lists.lustre.org<mailto:lustre-discuss at lists.lustre.org>
+http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org
+
+
+--
+Jongwoo Han
++82-505-227-6108
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20211028/d280064f/attachment.html>
+
+From tyler at cinnamon.is  Thu Oct 28 01:32:30 2021
+From: tyler at cinnamon.is (=?UTF-8?B?VHJ1bmcgxJDhurduZyDEkGluaCBRdeG7kWM=?=)
+Date: Thu, 28 Oct 2021 15:32:30 +0700
+Subject: [lustre-discuss] Does Lustre client cause bus error when running
+ code?
+Message-ID: <CAM5nNQU9zTh=xMTHe6bzRUjNtwTSTv5_gpKvJefR-mEi+OiBvA@mail.gmail.com>
+
+Hello,
+
+After working with Lustre, I observed that my running code might encounter
+bus errors sometimes.
+The details shown in *"sudo dmesg -T"* is as follows:
+
+> INFO: task python:29299 blocked for more than 120 seconds.
+
+     Tainted: P      OE        4.19.0-9-cloud-amd64 #1 Debian
+> 4.19.118-2+deb10u1
+> "echo 0 > /proc/sys/kernel/hung_task_timeout_secs" distables this message.
+
+python          D         29299             14931                0x80000000
+> Call Trace:
+> ? __schedule+0x2a2/0x870
+> ? _cond_resched+0x15/0x30
+> schedule+0x28/0x80
+> rwsem_down_read_failed+0x111/0x180
+> call_rwsem_down_read_failed+0x14/0x30
+> down_read+0x1c/0x30
+> do_exit+0x22d/0xb90
+> ? lprocfs_counter_add+0xd2/0x140 [obdclass]
+> do_group_exit+0x3a/0xa0
+> get_signal+0x36/0x610
+> ? handle_mm_fault+0xd6/0x200
+> ? up_read+0x1b/0x20
+> ? __do_page_fault+0x26c/0x4f0
+> ? page_fault+0x8/0x30
+> exit_to_usermode_loop+0x89/0xf0
+> prepare_exit_to_usermode+0x55/0x60
+> retint_user+0x8/0x8
+> RIP: 0033:0x7fa2612f73a0
+> Code: Bad RIP value.
+
+
+The details shown in Python faulthandler is as follows:
+
+> Fatal Python error: Bus error
+> RuntimeError: DataLoader worker (pid 4882) is killed by signal: Bus error.
+> It is possible that dataloader's workers are out of shared memory. Please
+> try to raise your shared memory limit.
+
+
+I'm not sure whether the cause of this error is related to the Lustre
+client, or whether it is related to memory issues. However, I read
+somewhere that storing executables on Lustre filesystem (in my case,
+Anaconda and Python executables) may lead to bus error.
+
+For more information,
+My Lustre server version is *2.10.8*, on CentOS 7.9 systems, kernel
+*3.10.0-957.1.3.el7_lustre.x86_64*.
+My Lustre client version is *2.14.54*, on Debian 10 systems, kernel
+*4.19.0-9-cloud-amd64*.
+
+May I have some confirmation on this issue? In addition, in case the cause
+of this error is related to the Lustre client, what should I do to solve
+this problem?
+Thank you very much.
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20211028/8c4e259f/attachment-0001.html>
+
+From anton at ciam.ru  Thu Oct 28 02:00:45 2021
+From: anton at ciam.ru (=?koi8-r?B?8sHey88g4c7Uz84g88XSx8XF18ne?=)
+Date: Thu, 28 Oct 2021 09:00:45 +0000
+Subject: [lustre-discuss] Failed to mount MDT
+Message-ID: <ed29e96aae7f4e4e91382a83a71f00ea@ciam.ru>
+
+Fuf, I resolved problem:
+
+e2fsck -f /de v/mapper/mpatha
+
+Now I know what is a happiness
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20211028/d00d5eaf/attachment.html>
+
+From jongwoohan at gmail.com  Thu Oct 28 03:49:53 2021
+From: jongwoohan at gmail.com (Jongwoo Han)
+Date: Thu, 28 Oct 2021 19:49:53 +0900
+Subject: [lustre-discuss] LNet supports IB HDR(200Gb) network?
+In-Reply-To: <20211019103114epcms2p3d343a890318c9b377dfce7e2e21cd9b4@epcms2p3>
+References: <CGME20211019103114epcms2p3d343a890318c9b377dfce7e2e21cd9b4@epcms2p3>
+ <20211019103114epcms2p3d343a890318c9b377dfce7e2e21cd9b4@epcms2p3>
+Message-ID: <CALz2Zj=-evn87Pxhqv7B_ThDyNA4A9Try2ETy6zfN8o9ETDjfw@mail.gmail.com>
+
+One possible cause of bandwidth limitation might come from PCIE slot
+limitation - HDR200 will require at least PCIE 4.0 16x lanes to work at
+maximum bandwidth, while many x86 servers give only 8x lanes to IO adapters.
+
+Generally 100Gb bandwidth limitation will not be be problem, because most
+of OST configurations available today cannot endure such workloads.  Yet
+when 200Gb throughput must be provided to OSS, there is an alternative such
+as dynamic load balancing on multi-rail configuration ( using 2 x 100Gb
+ports links for OSSes).
+
+regards,
+Jongwoo Han
+
+2021? 10? 19? (?) ?? 7:31, ??? via lustre-discuss <
+lustre-discuss at lists.lustre.org>?? ??:
+
+> Hi, all
+>
+>
+>
+> I am setting up Lustre on local cluster based on infiniband HDR(200Gb,
+> single port) network.
+>
+> I could successfuly setup Lustre using 5 servers(1-MDS, 4-OSS)
+>
+>
+>
+> Even though I have verified the IB HDR bandwidth(200Gb/s) with
+> 'ib_read_bw' or 'ib_write_bw' tools, (I used CPU#0 for the test)
+>
+> when I run LNet-Selftest between servers, *it only shows around
+> 100Gb/s(around 12GB/s, just half of maximum bandwidth)*
+>
+> (~12GB/s in case of read, ~13GB/s for write test)
+>
+>
+>
+> so I tried to change LNet tunables and fixed the CPT: "[0]" for IB with
+> the following kernel module options.
+>
+> but it doesn't show big difference in lnet-self test.
+>
+>
+>
+> It seems like LNet is not fully compatible with HDR or PCIe gen4
+> interfaces.
+>
+> Is there anyone who can give me advice why the LNet performance is not
+> reaching HDR BW?
+>
+> or, Are there specific options or tunables that I have to modify?
+>
+> Please share your experience if you have setup Lustre with HDR network.
+>
+>
+>
+> Thank you.
+>
+>
+>
+> -----------lustre.conf---------------
+>
+> options lnet networks=o2ib0(ib0)*[0]*
+>
+>
+>
+> -----------ko2iblnd.conf-------------
+>
+> options ko2iblnd peer_credits=256 peer_credits_hiw=64 credits=1024
+> concurrent_sends=256 ntx=2048 map_on_demand=0 fmr_pool_size=2048
+> fmr_flush_trigger=512 fmr_cache=1 conns_per_peer=1
+>
+>
+>
+> ----------lnet tunables--------------
+>
+> tunables:
+>               peer_timeout: 180
+>               peer_credits: 255
+>               peer_buffer_credits: 0
+>               credits: 1024
+>               peercredits_hiw: 127
+>               map_on_demand: 0
+>               concurrent_sends: 256
+>               fmr_pool_size: 2048
+>               fmr_flush_trigger: 512
+>               fmr_cache: 1
+>               ntx: 2048
+>               conns_per_peer: 1
+>
+>
+>
+> I listed up some HW/SW environment that I used.
+>
+>
+>
+> ------------------------------------------------------------
+>
+> [Environment]
+>
+> - CPUs: Epyc 7302 *2 socket, supports PCIe Gen4
+>
+> - OS: CentOS 8.3 (kernel: 4.18.0-240.1.1.el8_lustre.x86_64)
+>
+> - Lustre: 2.14.0 (downloaded from repository
+> https://downloads.whamcloud.com/public/lustre/lustre-2.14.0-ib/ )
+>
+> - OFED driver: tried 2 different versions MLNX_OFED_LINUX-5.2-1.0.4.0,
+> MLNX_OFED_LINUX-5.4-1.0.3.0
+>
+>
+>
+> Finally, I used the following LNet selftest script for test.
+>
+> I tried to change concurrency, but the bandwidth is saturated when CN>=4
+>
+>
+>
+>
+>
+> ----------------------------------------------------------
+>
+> # Concurrency
+> CN=32
+> #Size
+> SZ=1M
+> # Length of time to run test (secs)
+> TM=20
+> # Which BRW test to run (read or write)
+> BRW=read
+> # Checksum calculation (simple or full)
+> CKSUM=simple
+>
+> # The LST "from" list -- e.g. Lustre clients. Space separated list of NIDs.
+> LFROM="192.168.8.4 at o2ib0"
+> #LFROM=${LFROM:?ERROR: the LFROM variable is not set}
+> # The LST "to" list -- e.g. Lustre servers. Space separated list of NIDs.
+> LTO="192.168.8.6 at o2ib0"
+> #LTO=${LTO:?ERROR: the LTO variable is not set}
+>
+> ### End of customisation.
+>
+> export LST_SESSION=$$
+> echo LST_SESSION = ${LST_SESSION}
+> lst new_session lst${BRW}
+> lst add_group lfrom ${LFROM}
+> lst add_group lto ${LTO}
+> lst add_batch bulk_${BRW}
+> lst add_test --batch bulk_${BRW} --distribute 3:1 --from lfrom --to lto
+> brw ${BRW} \
+>   --concurrency=${CN} check=${CKSUM} size=${SZ}
+> lst run bulk_${BRW}
+> echo -n "Capturing statistics for ${TM} secs "
+> lst stat --mbs lfrom lto &
+> LSTPID=$!
+> # Delay loop with interval markers displayed every 5 secs.
+> # Test time is rounded up to the nearest 5 seconds.
+> i=1
+> j=$((${TM}/5))
+> if [ $((${TM}%5)) -ne 0 ]; then let j++; fi
+> while [ $i -le $j ]; do
+>   sleep 5
+>   let i++
+> done
+> kill ${LSTPID} && wait ${LISTPID} >/dev/null 2>&1
+> echo
+> lst show_error lfrom lto
+> lst stop bulk_${BRW}
+> lst end_session
+>
+>
+>
+>
+>
+>
+> _______________________________________________
+> lustre-discuss mailing list
+> lustre-discuss at lists.lustre.org
+> http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org
+>
+
+
+-- 
+Jongwoo Han
++82-505-227-6108
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20211028/81f14caa/attachment-0001.html>
+-------------- next part --------------
+A non-text attachment was scrubbed...
+Name: noname
+Type: image/gif
+Size: 13402 bytes
+Desc: not available
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20211028/81f14caa/attachment-0001.gif>
+
+From jongwoohan at gmail.com  Thu Oct 28 03:57:47 2021
+From: jongwoohan at gmail.com (Jongwoo Han)
+Date: Thu, 28 Oct 2021 19:57:47 +0900
+Subject: [lustre-discuss] Best ways to backup a Lustre file system?
+In-Reply-To: <CAEZ+gOw+xN5RCw_Xkod6ptQTmuggi2fueDTLSPLXDxY9zZ6trQ@mail.gmail.com>
+References: <CAEZ+gOw+xN5RCw_Xkod6ptQTmuggi2fueDTLSPLXDxY9zZ6trQ@mail.gmail.com>
+Message-ID: <CALz2Zjmp8GKmuVOr9gUjPXCvM53V-9iRq1jWXc1CW4io8_x74Q@mail.gmail.com>
+
+I think the first thing to plan a backup of a lustre filesystem, is to find
+out if there is a suitable tape or virtual tape backup system that
+satisfies RPO/RTO to the corresponding filesystem size. There are not many
+when a lustre filesystem is more than 1PB, as far as I know.  So when my
+customer asks me about backup, I recommend putting files into AWS glacier.
+
+Thanks,
+Jongwoo Han
+
+2021? 10? 17? (?) ?? 9:06, Sid Young via lustre-discuss <
+lustre-discuss at lists.lustre.org>?? ??:
+
+> G'Day all,
+>
+> Apart from rsync'ing all the data on a mounted lustre filesystem to
+> another server, what backup systems are people using to backup Lustre?
+>
+>
+> Sid Young
+> M: 0458 396300
+> W: https://off-grid-engineering.com
+>
+> _______________________________________________
+> lustre-discuss mailing list
+> lustre-discuss at lists.lustre.org
+> http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org
+>
+
+
+-- 
+Jongwoo Han
++82-505-227-6108
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20211028/09654180/attachment.html>
+
+From julien.rey at univ-paris-diderot.fr  Fri Oct 29 06:05:11 2021
+From: julien.rey at univ-paris-diderot.fr (Julien Rey)
+Date: Fri, 29 Oct 2021 15:05:11 +0200
+Subject: [lustre-discuss] SLUB: Unable to allocate memory on node -1
+Message-ID: <32f04350-afb2-cfed-a0d8-6e2545d234ed@u-paris.fr>
+
+Hello,
+
+This may not be related directly to Lustre, but here's what I get when I 
+try to mount our Lustre filesystem on one of our compute node running 
+CentOS 7:
+
+
+Oct 29 14:30:20 gpu-node8 kernel: SLUB: Unable to allocate memory on 
+node -1 (gfp=0x8050)
+Oct 29 14:30:20 gpu-node8 kernel:? cache: dm_rq_target_io, object size: 
+136, buffer size: 136, default order: 0, min order: 0
+Oct 29 14:30:20 gpu-node8 kernel:? node 1: slabs: 2, objs: 60, free: 0
+Oct 29 14:30:20 gpu-node8 kernel: LustreError: 
+3097:0:(niobuf.c:994:ptlrpc_register_rqbd()) LNetMDAttach failed: -12;
+Oct 29 14:30:20 gpu-node8 kernel: LustreError: 
+3097:0:(service.c:2551:ptlrpc_main()) Failed to post rqbd for ldlm_cbd 
+on CPT 0: -1
+Oct 29 14:30:20 gpu-node8 kernel: LustreError: 
+3091:0:(service.c:2917:ptlrpc_start_threads()) cannot start ldlm_cb 
+thread #0_0: rc -1
+Oct 29 14:30:20 gpu-node8 kernel: LustreError: 
+3091:0:(service.c:837:ptlrpc_register_service()) Failed to start threads 
+for service ldlm_cbd: -1
+Oct 29 14:30:20 gpu-node8 kernel: LustreError: 
+3091:0:(ldlm_lockd.c:3077:ldlm_setup()) failed to start service
+Oct 29 14:30:20 gpu-node8 kernel: LustreError: 
+3091:0:(ldlm_lib.c:462:client_obd_setup()) ldlm_get_ref failed: -1
+Oct 29 14:30:20 gpu-node8 kernel: LustreError: 
+3091:0:(obd_config.c:559:class_setup()) setup MGC10.0.1.70 at tcp failed (-1)
+Oct 29 14:30:20 gpu-node8 kernel: LustreError: 
+3091:0:(obd_mount.c:202:lustre_start_simple()) MGC10.0.1.70 at tcp setup 
+error -1
+Oct 29 14:30:20 gpu-node8 kernel: LustreError: 
+3091:0:(obd_mount.c:1608:lustre_fill_super()) Unable to mount (-1)
+
+
+I've been scratching my head on this one because this could just be a 
+kernel bug but we have 3 other identical servers running the exact same 
+versions of CentOS 7 and Lustre client and I got no problem with them.
+
+Some more info:
+
+[root at gpu-node8 ~]# uname -r
+3.10.0-1160.el7.x86_64
+
+[root at gpu-node8 ~]# lctl --version
+lctl 2.12.7
+
+[root at gpu-node8 ~]# vmstat -m |grep dm_rq_target_io
+dm_rq_target_io????????????? 60???? 60??? 136???? 30
+
+[root at gpu-node8 ~]# free -h
+ ????????????? total??????? used??????? free????? shared buff/cache?? 
+available
+Mem:??????????? 31G??????? 1.4G???????? 29G???????? 10M 117M???????? 29G
+Swap:?????????? 15G????????? 0B???????? 15G
+
+
+I've been playing with the sysctl parameters but I don't really know 
+what I'm doing and got no result anyway:
+
+sysctl vm.overcommit_memory=1
+
+sysctl vm.min_free_kbytes=90112
+
+sysctl vm.overcommit_kbytes=90112
+
+
+Any help would be greetly appreciated.
+
+Thanks!
+
+-- 
+Julien Rey
+
+Plate-forme RPBS
+Unit? BFA - CMPLI
+Universit? de Paris
+tel: 01 57 27 83 95
+
+
+From julienrey76 at gmail.com  Fri Oct 29 06:39:03 2021
+From: julienrey76 at gmail.com (Julien Rey)
+Date: Fri, 29 Oct 2021 15:39:03 +0200
+Subject: [lustre-discuss] SLUB: Unable to allocate memory on node -1
+Message-ID: <5c9738fb-7f49-2c90-844d-c2f57b79e87c@gmail.com>
+
+Hello,
+
+This may not be related directly to Lustre, but here's what I get when I 
+try to mount our Lustre filesystem on one of our compute node running 
+CentOS 7:
+
+
+Oct 29 14:30:20 gpu-node8 kernel: SLUB: Unable to allocate memory on 
+node -1 (gfp=0x8050)
+Oct 29 14:30:20 gpu-node8 kernel:? cache: dm_rq_target_io, object size: 
+136, buffer size: 136, default order: 0, min order: 0
+Oct 29 14:30:20 gpu-node8 kernel:? node 1: slabs: 2, objs: 60, free: 0
+Oct 29 14:30:20 gpu-node8 kernel: LustreError: 
+3097:0:(niobuf.c:994:ptlrpc_register_rqbd()) LNetMDAttach failed: -12;
+Oct 29 14:30:20 gpu-node8 kernel: LustreError: 
+3097:0:(service.c:2551:ptlrpc_main()) Failed to post rqbd for ldlm_cbd 
+on CPT 0: -1
+Oct 29 14:30:20 gpu-node8 kernel: LustreError: 
+3091:0:(service.c:2917:ptlrpc_start_threads()) cannot start ldlm_cb 
+thread #0_0: rc -1
+Oct 29 14:30:20 gpu-node8 kernel: LustreError: 
+3091:0:(service.c:837:ptlrpc_register_service()) Failed to start threads 
+for service ldlm_cbd: -1
+Oct 29 14:30:20 gpu-node8 kernel: LustreError: 
+3091:0:(ldlm_lockd.c:3077:ldlm_setup()) failed to start service
+Oct 29 14:30:20 gpu-node8 kernel: LustreError: 
+3091:0:(ldlm_lib.c:462:client_obd_setup()) ldlm_get_ref failed: -1
+Oct 29 14:30:20 gpu-node8 kernel: LustreError: 
+3091:0:(obd_config.c:559:class_setup()) setup MGC10.0.1.70 at tcp failed (-1)
+Oct 29 14:30:20 gpu-node8 kernel: LustreError: 
+3091:0:(obd_mount.c:202:lustre_start_simple()) MGC10.0.1.70 at tcp setup 
+error -1
+Oct 29 14:30:20 gpu-node8 kernel: LustreError: 
+3091:0:(obd_mount.c:1608:lustre_fill_super()) Unable to mount (-1)
+
+
+I've been scratching my head on this one because this could just be a 
+kernel bug but we have 3 other identical servers running the exact same 
+versions of CentOS 7 and Lustre client and I got no problem with them.
+
+Some more info:
+
+[root at gpu-node8 ~]# uname -r
+3.10.0-1160.el7.x86_64
+
+[root at gpu-node8 ~]# lctl --version
+lctl 2.12.7
+
+[root at gpu-node8 ~]# vmstat -m |grep dm_rq_target_io
+dm_rq_target_io????????????? 60???? 60??? 136???? 30
+
+[root at gpu-node8 ~]# free -h
+ ????????????? total??????? used??????? free????? shared buff/cache?? 
+available
+Mem:??????????? 31G??????? 1.4G???????? 29G???????? 10M 117M???????? 29G
+Swap:?????????? 15G????????? 0B???????? 15G
+
+
+I've been playing with the sysctl parameters but I don't really know 
+what I'm doing and got no result anyway:
+
+sysctl vm.overcommit_memory=1
+
+sysctl vm.min_free_kbytes=90112
+
+sysctl vm.overcommit_kbytes=90112
+
+
+Any help would be greetly appreciated.
+
+Thanks!
+
+-- 
+Julien REY
+
+Plate-forme RPBS
+Mod?lisation Computationnelle des Interactions Prot?ines-Ligand (CMPLI)
+Universit? de Paris
+tel : 01 57 27 83 95
+
+
+From adilger at whamcloud.com  Fri Oct 29 17:46:49 2021
+From: adilger at whamcloud.com (Andreas Dilger)
+Date: Sat, 30 Oct 2021 00:46:49 +0000
+Subject: [lustre-discuss] SLUB: Unable to allocate memory on node -1
+In-Reply-To: <5c9738fb-7f49-2c90-844d-c2f57b79e87c@gmail.com>
+References: <5c9738fb-7f49-2c90-844d-c2f57b79e87c@gmail.com>
+Message-ID: <1A43B64B-7498-44B3-AB1D-69FFAA195F75@ddn.com>
+
+On Oct 29, 2021, at 07:39, Julien Rey via lustre-discuss <lustre-discuss at lists.lustre.org<mailto:lustre-discuss at lists.lustre.org>> wrote:
+
+Hello,
+
+This may not be related directly to Lustre, but here's what I get when I try to mount our Lustre filesystem on one of our compute node running CentOS 7:
+
+
+Oct 29 14:30:20 gpu-node8 kernel: SLUB: Unable to allocate memory on node -1 (gfp=0x8050)
+
+There doesn't look to be anything "wrong" here, -1 means "no specific node", and the GFP mask is __GFP_ZERO | __GFP_IO | __GFP_WAIT for this kernel.
+
+One time I saw problems like this, it was because all the DIMMs were installed on one socket of a dual-socket NUMA motherboard, and no memory was available on the other socket, but only some allocations failed.
+
+Cheers, Andreas
+
+Oct 29 14:30:20 gpu-node8 kernel:  cache: dm_rq_target_io, object size: 136, buffer size: 136, default order: 0, min order: 0
+Oct 29 14:30:20 gpu-node8 kernel:  node 1: slabs: 2, objs: 60, free: 0
+Oct 29 14:30:20 gpu-node8 kernel: LustreError: 3097:0:(niobuf.c:994:ptlrpc_register_rqbd()) LNetMDAttach failed: -12;
+Oct 29 14:30:20 gpu-node8 kernel: LustreError: 3097:0:(service.c:2551:ptlrpc_main()) Failed to post rqbd for ldlm_cbd on CPT 0: -1
+Oct 29 14:30:20 gpu-node8 kernel: LustreError: 3091:0:(service.c:2917:ptlrpc_start_threads()) cannot start ldlm_cb thread #0_0: rc -1
+Oct 29 14:30:20 gpu-node8 kernel: LustreError: 3091:0:(service.c:837:ptlrpc_register_service()) Failed to start threads for service ldlm_cbd: -1
+Oct 29 14:30:20 gpu-node8 kernel: LustreError: 3091:0:(ldlm_lockd.c:3077:ldlm_setup()) failed to start service
+Oct 29 14:30:20 gpu-node8 kernel: LustreError: 3091:0:(ldlm_lib.c:462:client_obd_setup()) ldlm_get_ref failed: -1
+Oct 29 14:30:20 gpu-node8 kernel: LustreError: 3091:0:(obd_config.c:559:class_setup()) setup MGC10.0.1.70 at tcp failed (-1)
+Oct 29 14:30:20 gpu-node8 kernel: LustreError: 3091:0:(obd_mount.c:202:lustre_start_simple()) MGC10.0.1.70 at tcp setup error -1
+Oct 29 14:30:20 gpu-node8 kernel: LustreError: 3091:0:(obd_mount.c:1608:lustre_fill_super()) Unable to mount (-1)
+
+
+I've been scratching my head on this one because this could just be a kernel bug but we have 3 other identical servers running the exact same versions of CentOS 7 and Lustre client and I got no problem with them.
+
+Some more info:
+
+[root at gpu-node8 ~]# uname -r
+3.10.0-1160.el7.x86_64
+
+[root at gpu-node8 ~]# lctl --version
+lctl 2.12.7
+
+[root at gpu-node8 ~]# vmstat -m |grep dm_rq_target_io
+dm_rq_target_io              60     60    136     30
+
+[root at gpu-node8 ~]# free -h
+              total        used        free      shared buff/cache   available
+Mem:            31G        1.4G         29G         10M 117M         29G
+Swap:           15G          0B         15G
+
+
+I've been playing with the sysctl parameters but I don't really know what I'm doing and got no result anyway:
+
+sysctl vm.overcommit_memory=1
+
+sysctl vm.min_free_kbytes=90112
+
+sysctl vm.overcommit_kbytes=90112
+
+
+Any help would be greetly appreciated.
+
+Thanks!
+
+--
+Julien REY
+
+Plate-forme RPBS
+Mod?lisation Computationnelle des Interactions Prot?ines-Ligand (CMPLI)
+Universit? de Paris
+tel : 01 57 27 83 95
+
+_______________________________________________
+lustre-discuss mailing list
+lustre-discuss at lists.lustre.org<mailto:lustre-discuss at lists.lustre.org>
+http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org
+
+Cheers, Andreas
+--
+Andreas Dilger
+Lustre Principal Architect
+Whamcloud
+
+
+
+
+
+
+
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20211030/a77b5fbc/attachment.html>
+
+From julienrey76 at gmail.com  Sat Oct 30 03:03:33 2021
+From: julienrey76 at gmail.com (Julien Rey)
+Date: Sat, 30 Oct 2021 12:03:33 +0200
+Subject: [lustre-discuss] SLUB: Unable to allocate memory on node -1
+In-Reply-To: <1A43B64B-7498-44B3-AB1D-69FFAA195F75@ddn.com>
+References: <5c9738fb-7f49-2c90-844d-c2f57b79e87c@gmail.com>
+ <1A43B64B-7498-44B3-AB1D-69FFAA195F75@ddn.com>
+Message-ID: <4faeea56-f46f-a0b4-d463-60c5d52f3fd3@gmail.com>
+
+Hello Andreas,
+
+Thank you for your prompt response. In the end I was also thinking about 
+a hardware issue. I will try to play with the DIMMs and will be sure to 
+get back to you if the the issue is resolved.
+
+Cheers, Julien.
+
+Le 30/10/2021 ? 02:46, Andreas Dilger a ?crit?:
+> On Oct 29, 2021, at 07:39, Julien Rey via lustre-discuss 
+> <lustre-discuss at lists.lustre.org 
+> <mailto:lustre-discuss at lists.lustre.org>> wrote:
+>>
+>> Hello,
+>>
+>> This may not be related directly to Lustre, but here's what I get 
+>> when I try to mount our Lustre filesystem on one of our compute node 
+>> running CentOS 7:
+>>
+>>
+>> Oct 29 14:30:20 gpu-node8 kernel: SLUB: Unable to allocate memory on 
+>> node -1 (gfp=0x8050)
+>
+> There doesn't look to be anything "wrong" here, -1 means "no specific 
+> node", and the GFP mask is __GFP_ZERO | __GFP_IO | __GFP_WAIT for this 
+> kernel.
+>
+> One time I saw problems like this, it was because all the DIMMs were 
+> installed on one socket of a dual-socket NUMA motherboard, and no 
+> memory was available on the other socket, but only some allocations 
+> failed.
+>
+> Cheers, Andreas
+>
+>> Oct 29 14:30:20 gpu-node8 kernel:? cache: dm_rq_target_io, object 
+>> size: 136, buffer size: 136, default order: 0, min order: 0
+>> Oct 29 14:30:20 gpu-node8 kernel:? node 1: slabs: 2, objs: 60, free: 0
+>> Oct 29 14:30:20 gpu-node8 kernel: LustreError: 
+>> 3097:0:(niobuf.c:994:ptlrpc_register_rqbd()) LNetMDAttach failed: -12;
+>> Oct 29 14:30:20 gpu-node8 kernel: LustreError: 
+>> 3097:0:(service.c:2551:ptlrpc_main()) Failed to post rqbd for 
+>> ldlm_cbd on CPT 0: -1
+>> Oct 29 14:30:20 gpu-node8 kernel: LustreError: 
+>> 3091:0:(service.c:2917:ptlrpc_start_threads()) cannot start ldlm_cb 
+>> thread #0_0: rc -1
+>> Oct 29 14:30:20 gpu-node8 kernel: LustreError: 
+>> 3091:0:(service.c:837:ptlrpc_register_service()) Failed to start 
+>> threads for service ldlm_cbd: -1
+>> Oct 29 14:30:20 gpu-node8 kernel: LustreError: 
+>> 3091:0:(ldlm_lockd.c:3077:ldlm_setup()) failed to start service
+>> Oct 29 14:30:20 gpu-node8 kernel: LustreError: 
+>> 3091:0:(ldlm_lib.c:462:client_obd_setup()) ldlm_get_ref failed: -1
+>> Oct 29 14:30:20 gpu-node8 kernel: LustreError: 
+>> 3091:0:(obd_config.c:559:class_setup()) setup MGC10.0.1.70 at tcp failed 
+>> (-1)
+>> Oct 29 14:30:20 gpu-node8 kernel: LustreError: 
+>> 3091:0:(obd_mount.c:202:lustre_start_simple()) MGC10.0.1.70 at tcp setup 
+>> error -1
+>> Oct 29 14:30:20 gpu-node8 kernel: LustreError: 
+>> 3091:0:(obd_mount.c:1608:lustre_fill_super()) Unable to mount (-1)
+>>
+>>
+>> I've been scratching my head on this one because this could just be a 
+>> kernel bug but we have 3 other identical servers running the exact 
+>> same versions of CentOS 7 and Lustre client and I got no problem with 
+>> them.
+>>
+>> Some more info:
+>>
+>> [root at gpu-node8 ~]# uname -r
+>> 3.10.0-1160.el7.x86_64
+>>
+>> [root at gpu-node8 ~]# lctl --version
+>> lctl 2.12.7
+>>
+>> [root at gpu-node8 ~]# vmstat -m |grep dm_rq_target_io
+>> dm_rq_target_io????????????? 60???? 60??? 136???? 30
+>>
+>> [root at gpu-node8 ~]# free -h
+>> ????????????? total??????? used??????? free????? shared buff/cache?? 
+>> available
+>> Mem:??????????? 31G??????? 1.4G???????? 29G???????? 10M 117M???????? 29G
+>> Swap:?????????? 15G????????? 0B???????? 15G
+>>
+>>
+>> I've been playing with the sysctl parameters but I don't really know 
+>> what I'm doing and got no result anyway:
+>>
+>> sysctl vm.overcommit_memory=1
+>>
+>> sysctl vm.min_free_kbytes=90112
+>>
+>> sysctl vm.overcommit_kbytes=90112
+>>
+>>
+>> Any help would be greetly appreciated.
+>>
+>> Thanks!
+>>
+>> -- 
+>> Julien REY
+>>
+>> Plate-forme RPBS
+>> Mod?lisation Computationnelle des Interactions Prot?ines-Ligand (CMPLI)
+>> Universit? de Paris
+>> tel : 01 57 27 83 95
+>>
+>> _______________________________________________
+>> lustre-discuss mailing list
+>> lustre-discuss at lists.lustre.org <mailto:lustre-discuss at lists.lustre.org>
+>> http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org
+>
+> Cheers, Andreas
+> --
+> Andreas Dilger
+> Lustre?Principal Architect
+> Whamcloud
+>
+>
+>
+>
+>
+>
+>
+-- 
+Julien REY
+
+Plate-forme RPBS
+Mod?lisation Computationnelle des Interactions Prot?ines-Ligand (CMPLI)
+Universit? de Paris
+tel : 01 57 27 83 95
+
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20211030/d44f945d/attachment-0001.html>
+
+From sid.young at gmail.com  Sun Oct 31 18:28:26 2021
+From: sid.young at gmail.com (Sid Young)
+Date: Mon, 1 Nov 2021 11:28:26 +1000
+Subject: [lustre-discuss] OST "D" status - only 1 OSS mounting
+Message-ID: <CAEZ+gOxEDeyKREyQ5mAMXvMKJiGnNJ77na__+PeF8FiRf0J3cA@mail.gmail.com>
+
+Hi all,
+
+I have a really odd issue, only 1 OST appears to mount despite there being
+4 OSTS available and ACTIVE.
+
+[root at hpc-login-01 home]# lfs df -h
+UUID                       bytes        Used   Available Use% Mounted on
+home-MDT0000_UUID           4.2T       40.2G        4.1T   1% /home[MDT:0]
+home-OST0000_UUID          47.6T       37.8T        9.8T  80% /home[OST:0]
+home-OST0001_UUID          47.6T       47.2T      413.4G 100% /home[OST:1] D
+home-OST0002_UUID          47.6T       35.7T       11.9T  75% /home[OST:2]
+home-OST0003_UUID          47.6T       39.4T        8.2T  83% /home[OST:3]
+
+filesystem_summary:       190.4T      160.0T       30.3T  85% /home
+
+[root at hpc-login-01 home]# lfs check osts
+home-OST0000-osc-ffffa10c8f483800 active.
+home-OST0001-osc-ffffa10c8f483800 active.
+home-OST0002-osc-ffffa10c8f483800 active.
+home-OST0003-osc-ffffa10c8f483800 active.
+
+Should be 191TB... only shows 1 OST..
+
+10.140.93.42 at o2ib:/home     *48T *  48T  414G 100% /home
+
+Where should I look?
+
+
+
+
+
+Sid Young
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20211101/8d62fe26/attachment.html>
+
+From adilger at whamcloud.com  Sun Oct 31 21:11:57 2021
+From: adilger at whamcloud.com (Andreas Dilger)
+Date: Mon, 1 Nov 2021 04:11:57 +0000
+Subject: [lustre-discuss] OST "D" status - only 1 OSS mounting
+In-Reply-To: <CAEZ+gOxEDeyKREyQ5mAMXvMKJiGnNJ77na__+PeF8FiRf0J3cA@mail.gmail.com>
+References: <CAEZ+gOxEDeyKREyQ5mAMXvMKJiGnNJ77na__+PeF8FiRf0J3cA@mail.gmail.com>
+Message-ID: <B7D3E2C3-63D8-4E77-8344-14C2C964800D@ddn.com>
+
+The "D" status means the OST is marked in "Degraded" mode, see the lfs-df(1) man page.  The "lfs check osts" is only checking the client connection to the OSTs, but whether the MDS creates objects on those OSTs really depends on how the MDS is feeling about them.
+
+On Oct 31, 2021, at 19:28, Sid Young via lustre-discuss <lustre-discuss at lists.lustre.org<mailto:lustre-discuss at lists.lustre.org>> wrote:
+
+Hi all,
+
+I have a really odd issue, only 1 OST appears to mount despite there being 4 OSTS available and ACTIVE.
+
+[root at hpc-login-01 home]# lfs df -h
+UUID                       bytes        Used   Available Use% Mounted on
+home-MDT0000_UUID           4.2T       40.2G        4.1T   1% /home[MDT:0]
+home-OST0000_UUID          47.6T       37.8T        9.8T  80% /home[OST:0]
+home-OST0001_UUID          47.6T       47.2T      413.4G 100% /home[OST:1] D
+home-OST0002_UUID          47.6T       35.7T       11.9T  75% /home[OST:2]
+home-OST0003_UUID          47.6T       39.4T        8.2T  83% /home[OST:3]
+
+filesystem_summary:       190.4T      160.0T       30.3T  85% /home
+
+[root at hpc-login-01 home]# lfs check osts
+home-OST0000-osc-ffffa10c8f483800 active.
+home-OST0001-osc-ffffa10c8f483800 active.
+home-OST0002-osc-ffffa10c8f483800 active.
+home-OST0003-osc-ffffa10c8f483800 active.
+
+Should be 191TB... only shows 1 OST..
+
+10.140.93.42 at o2ib:/home     48T   48T  414G 100% /home
+
+Where should I look?
+
+Cheers, Andreas
+--
+Andreas Dilger
+Lustre Principal Architect
+Whamcloud
+
+
+
+
+
+
+
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20211101/91663f55/attachment.html>
+

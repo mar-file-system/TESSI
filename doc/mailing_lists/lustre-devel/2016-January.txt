@@ -1,0 +1,739 @@
+From alexey.lyashkov at seagate.com  Fri Jan 22 01:08:49 2016
+From: alexey.lyashkov at seagate.com (Alexey Lyashkov)
+Date: Fri, 22 Jan 2016 12:08:49 +0300
+Subject: [lustre-devel] Multi-rail networking for Lustre
+In-Reply-To: <56A13FDB.2050902@sgi.com>
+References: <5620CE13.8020706@sgi.com>
+	<CAAqp6i1mJf3i+6e7_s2FNy9FmQNJQD3v85EHw9ECTA_GUvEgJg@mail.gmail.com>
+	<569E5BCA.5030705@sgi.com>
+	<CAJ2e-W2hVPfq1fT_43tAWM1eE7Ue8qD3RsswBXr+Fzwv39kyCQ@mail.gmail.com>
+	<569FDCC0.90004@sgi.com>
+	<CAJ2e-W0cFuzNDda4fWm-Sd=wmyjYnRyXx9PSLWGAHX5KQO1PGQ@mail.gmail.com>
+	<569FF198.5040207@sgi.com>
+	<CAJ2e-W3x-O8pWkg8vT40D2g6hbworabsc8MraqGZPw1QSbCFdg@mail.gmail.com>
+	<56A10B37.60709@sgi.com>
+	<CAJ2e-W2q2JPBuye6gLfPYYqU1vk8YgBqE4=_u7Jdsu-vt8JdCw@mail.gmail.com>
+	<56A13FDB.2050902@sgi.com>
+Message-ID: <CAJ2e-W1rGCimMaEmdG3h2+PLJvcggZBV6j8sV+hfb04Q2qkvEg@mail.gmail.com>
+
+On Thu, Jan 21, 2016 at 11:30 PM, Olaf Weber <olaf at sgi.com> wrote:
+
+> On 21-01-16 20:16, Alexey Lyashkov wrote:
+>
+>>
+>>         why uuid can't be used as we have already such type of identifier
+>>         for the peer?
+>>
+>>
+>>     Rechecking the code to see how UUIDs are generated and where they are
+>>     used, as far as I can tell Lustre doesn't have true per-peer UUIDs.
+>>
+>>
+>>     A client doesn't identify itself by UUID to the servers. Instead it
+>>     identifies a mount of a lustre filesystem by UUID. If it mounts two
+>>     filesystems it will use different UUIDs for each.
+>>
+>> Client is identify by UUID. if server want to send something to client -
+>> it
+>> uses an export and client uuid.
+>> none NID's uses in that case. if you check code again - you will don't see
+>> any NID's until ptlrpc_send_reply issued. So it's single function where
+>> NID
+>> from connection present.
+>>
+>
+> The UUID does not identify a client. The UUID identifies a client+mount.
+> If the client mounts more than one filesystem, there will be different UUID
+> for each mount on that client.
+>
+> In lustre terms each mount point is separated client. It have own cache,
+own structures, and completely separated each from an other.
+One exceptions it's ldlm cache which live on global object id space.
+
+
+
+> At PtlRPC level, these are different connections. At LNet level, the same
+> set of NIDs is used. It is that LNet level that I work on.
+>
+>
+
+
+
+>     And the UUID used for servers is derived from the first NID of the list
+>>     of NIDs for that server. If the same server shows up in multiple lists
+>>     (for different objects) with the NIDs in different orders, then
+>>     different UUIDs will be generated.
+>>
+>>
+>> really?
+>> LustreError: 137-5: lustre-OST0000_UUID: not available for connect from
+>> 0 at lo
+>> (no target). If you are running an HA pair check that the target is
+>> mounted
+>> on the other server.
+>>
+>> where is NID present at UUID from that message ?
+>>
+>
+> The NID 'req->rq_peer.nid' is translated to '0 at lo' in this message.
+>
+
+I say about NID substring in UUID message, it's not exist for long time.
+
+
+>
+> The "lustre-OST0000_UUID" is more interesting. Note that it identifies an
+> OST, as opposed to an OSS. Which is the point I am trying to make: this
+> UUID identifies an OST; it does not identify an OSS.
+
+
+All lustre stack operate with UUID, and it have none differences when it
+UUID live. We may migrate service / client from one network address to
+another, without logical reconnect. It's my main objections against you
+ideas.
+If none have a several addresses LNet should be responsible to reliability
+delivery a one-way requests. which is logically connect to PtlRPC. If node
+will be need to use different routing and different NID's for communication
+- it's should be hide in LNet, and LNet should provide as high api as
+possible.
+
+
+
+
+>
+>
+>>
+>> I expect you know about situation when one DNS name have several addresses
+>> like several 'A' records in dns zone file.
+>>
+>
+> Sure, but when one name points to several machines, it does not help me
+> balance traffic over the interfaces of just one machine.
+
+
+Simple balance may be DNS based - just round robin, as we have now on IB /
+sock lnd. it isn't balance?
+If you talk about more serious you should start from good flow control
+between nodes. Probably Ideas from RIP and LACK protocols will help.
+
+
+
+
+
+>
+>
+>     I want something that identifies the machine -- as opposed to a single
+>>     interface on the machine -- so that LNet can make an intelligent
+>> choice
+>>     between the interfaces. And I want PtlRPC to supply hints as to which
+>>     interface it expects to be best: PtlRPC is the one layer that knows
+>>     which Get and Put calls are part of the same RPC, which is required to
+>>     be able to generate these hints.
+>>
+>>
+>> It have none differences how you will deliver a reply to same XID. I may
+>> construct a network when request will send with IB but reply will accept
+>> via
+>> TCP and it's will work. how PtlRPC will help in that case? how one side
+>> will
+>> know which path is better for different ?
+>> Why you think moving low level network knowleage to high level of ptlrpc
+>> will good?
+>> it's totally different levels - LNet must response to routing and finding
+>> "which is best", but PtlRPC connect from two one-way messages into
+>> request-reply protocol with high level processing.
+>>
+>
+> A PtlRPC RPC has structure. The first LNetPut() transmits just the header
+> information. Then one or more LNetPut() or LNetGet() messages are done to
+> transmit the rest of the request. Then the response follows, which also
+> consists of several LNetPut() or LNetGet() messages.
+>
+It's wrong. Looks you mix an RPC and bulk transfers.
+
+in RPC case - it's logical connect from two one-way messages. Each send via
+single LNetPut call (first from Client side, second from server side). It's
+have a connected via ME (XID) data on LNet layer.
+PtlRPC register an ME entry and send that information as part of request
+message to the server. Server take that info from request and post send
+with pointing to that ME (XID), none else.
+
+but if you talk about bulk transfer - situation slightly different. Client
+send an XID to server and mark ME / MD as remote controlled.
+in that case server may call LNetGet/LNetPut to transfer a data from client
+based on XID (XID range in multi bulk case).
+but again - it's just connection on XID / ME / match bits (different name
+for one object).
+
+
+
+
+
+> The key word is "heuristic": have a server assume that traffic related to
+> a request should prefer to use the source NID of that request. This is a
+> simple way for a node that cares about these things to have a server do the
+> right thing, without requiring that the server know how the internals of
+> how the node is put together.
+>
+> For some reason you seem hung up on the idea that it does not matter which
+> interfaces are used by network traffic. Our experience at SGI is that it
+> does matter on big computers. Therefore we take it into account in the
+> design. Therefore there is this apparent layer violation in the design.
+>
+> Memory place
+
+
+
+>                      And there is also a catch, because there are cases
+>>         where PtlRPC
+>>                      has a valid interest in declaring not just that it
+>>         wants to talk
+>>                      to a node, but also that it wants to talk to a
+>> specific
+>>         NID on
+>>                      that node.
+>>
+>>
+>>                  None valid scenario for it. Looks you think PtlRPC is
+>> good
+>>         place for
+>>                  routing
+>>                  information if think it correct.
+>>
+>>
+>>              For this case I'm thinking in particular of memory and CPU
+>>         locality in
+>>              big systems. (Think of a big system as itself being built
+>> from
+>>         nodes
+>>              connected by a network.)
+>>
+>>         I don't say something about memory and CPU. I say about network
+>> routing.
+>>         PtlRPC choose a new connection and it connection have a
+>>         source<>destination
+>>         NIDs relation inside, so each new LNetPut will use that NID's to
+>>         send info
+>>         to such UUID. it's say some of network routing code is on PtlRPC
+>> but
+>>         should
+>>         be on LNet layer. Where CPU and Memory is?
+>>
+>>
+>>     The thread that initiates an RPC runs on a specific CPU, and may well
+>> be
+>>     bound there by a cpuset. This is common practice on big systems. The
+>>     memory buffers involved in the RPC live on a specific part of the
+>>     system, and are closer to some CPUs and some interfaces than others.
+>>     That's where CPU and memory locality comes in, from my perspective.
+>>
+>> I mean about network distance, but you are connect local and non local
+>> memory to that discussions.
+>> Why? local and non local memory problem is outside of Multi rail problem.
+>>
+>
+> For me, at SGI, local and non local memory is an integral part of the
+> multi rail problem.
+
+
+Multi rail (bounding) may work without any knowledge about local and non
+local memory?
+I think so. as it's just a network transport. So local and non local memory
+is different problem and good to separate it in different design, to make
+each design as simple as possible. It will help with developing a code,
+testing and integrating.
+
+
+
+>
+>
+> int ptlrpc_uuid_to_peer (struct obd_uuid *uuid,
+>>                           lnet_process_id_t *peer, lnet_nid_t *self)
+>> {
+>>          int               best_dist = 0;
+>>          __u32             best_order = 0;
+>>          int               count = 0;
+>>          int               rc = -ENOENT;
+>>          int               portals_compatibility;
+>>          int               dist;
+>>          __u32             order;
+>>          lnet_nid_t        dst_nid;
+>>          lnet_nid_t        src_nid;
+>>
+>>          portals_compatibility = LNetCtl(IOC_LIBCFS_PORTALS_COMPATIBILITY,
+>> NULL);
+>>
+>>          peer->pid = LNET_PID_LUSTRE;
+>>
+>>          /* Choose the matching UUID that's closest */
+>>          while (lustre_uuid_to_peer(uuid->uuid, &dst_nid, count++) == 0) {
+>>                  dist = LNetDist(dst_nid, &src_nid, &order);
+>>                  if (dist < 0)
+>>                          continue;
+>>
+>> this code will don't work for you if you introduce a some abstract NID, as
+>> PtlRPC will not able to find best distance.
+>>
+>
+> The lustre_uuid_to_peer() function enumerates all NIDs associated with the
+> UUID. This includes the primary NID, but also includes the other NIDs. So
+> we find a preferred peer NID based on that. Then we modify the code like
+> this:
+>
+Why PtlRPC should be know that low level details? Currently we have a
+problems - when one of destination NID's is unreachable and transfer
+initiator need a full ptlrpc reconnect to resend to different NID. But as
+you should be have a resend
+
+
+>
+> The call of LNetPrimaryNID() gives the primary peer NID for the peer NID.
+> For this to work a handful of calls to LNetPrimaryNID() must be added.
+> After that it is up to LNet to find the best route.
+>
+
+Per our's comment PrimaryNID will changed after we will find a best, did
+you think it loop usefull if you replace loop result at anycases ?
+from other view ptlrpc_uuid_to_peer called only in few cases, all other
+time ptlrpc have a cache a results in ptlrpc connection info.
+
+
+
+>
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20160122/dd976904/attachment-0001.htm>
+
+From olaf at sgi.com  Fri Jan 22 06:31:14 2016
+From: olaf at sgi.com (Olaf Weber)
+Date: Fri, 22 Jan 2016 15:31:14 +0100
+Subject: [lustre-devel] Multi-rail networking for Lustre
+In-Reply-To: <CAJ2e-W1rGCimMaEmdG3h2+PLJvcggZBV6j8sV+hfb04Q2qkvEg@mail.gmail.com>
+References: <5620CE13.8020706@sgi.com>
+	<CAAqp6i1mJf3i+6e7_s2FNy9FmQNJQD3v85EHw9ECTA_GUvEgJg@mail.gmail.com>
+	<569E5BCA.5030705@sgi.com>
+	<CAJ2e-W2hVPfq1fT_43tAWM1eE7Ue8qD3RsswBXr+Fzwv39kyCQ@mail.gmail.com>
+	<569FDCC0.90004@sgi.com>
+	<CAJ2e-W0cFuzNDda4fWm-Sd=wmyjYnRyXx9PSLWGAHX5KQO1PGQ@mail.gmail.com>
+	<569FF198.5040207@sgi.com>
+	<CAJ2e-W3x-O8pWkg8vT40D2g6hbworabsc8MraqGZPw1QSbCFdg@mail.gmail.com>
+	<56A10B37.60709@sgi.com>
+	<CAJ2e-W2q2JPBuye6gLfPYYqU1vk8YgBqE4=_u7Jdsu-vt8JdCw@mail.gmail.com>
+	<56A13FDB.2050902@sgi.com>
+	<CAJ2e-W1rGCimMaEmdG3h2+PLJvcggZBV6j8sV+hfb04Q2qkvEg@mail.gmail.com>
+Message-ID: <56A23D32.9080508@sgi.com>
+
+On 22-01-16 10:08, Alexey Lyashkov wrote:
+>
+>
+> On Thu, Jan 21, 2016 at 11:30 PM, Olaf Weber <olaf at sgi.com
+> <mailto:olaf at sgi.com>> wrote:
+>
+>     On 21-01-16 20:16, Alexey Lyashkov wrote:
+
+[...]
+
+> In lustre terms each mount point is separated client. It have own cache, own
+> structures, and completely separated each from an other.
+> One exceptions it's ldlm cache which live on global object id space.
+
+Another exception is flock deadlock detection, which is always a global 
+operation. This is why ldlm_flock_deadlock() inspects c_peer.nid.
+
+[...]
+
+> All lustre stack operate with UUID, and it have none differences when it
+> UUID live. We may migrate service / client from one network address to
+> another, without logical reconnect. It's my main objections against you ideas.
+> If none have a several addresses LNet should be responsible to reliability
+> delivery a one-way requests. which is logically connect to PtlRPC. If node
+> will be need to use different routing and different NID's for communication
+> - it's should be hide in LNet, and LNet should provide as high api as possible.
+
+The basic idea behind the multi-rail design is that LNet figures out how to 
+send a message to a peer. But the user of LNet can provide a hint to 
+indicate that for a specific message a specific path is preferred.
+
+One of our goals is to keep changes to the LNet API small.
+
+>         I expect you know about situation when one DNS name have several
+>         addresses
+>         like several 'A' records in dns zone file.
+>
+>
+>     Sure, but when one name points to several machines, it does not help me
+>     balance traffic over the interfaces of just one machine.
+>
+>
+> Simple balance may be DNS based - just round robin, as we have now on IB /
+> sock lnd. it isn't balance?
+ > If you talk about more serious you should start from good flow control
+ > between nodes. Probably Ideas from RIP and LACK protocols will help.
+
+There is bonding/balancing in socklnd. There is none in o2iblnd.
+
+[...]
+
+>     A PtlRPC RPC has structure. The first LNetPut() transmits just the
+>     header information. Then one or more LNetPut() or LNetGet() messages are
+>     done to transmit the rest of the request. Then the response follows,
+>     which also consists of several LNetPut() or LNetGet() messages.
+>
+> It's wrong. Looks you mix an RPC and bulk transfers.
+
+Difference in terminology: I tend to think of an RPC as a request/response 
+pair (if there is a response), and these in turn include all traffic related 
+to the RPC, including any bulk transfers.
+
+[...]
+
+>     The lustre_uuid_to_peer() function enumerates all NIDs associated with
+>     the UUID. This includes the primary NID, but also includes the other
+>     NIDs. So we find a preferred peer NID based on that. Then we modify the
+>     code like this:
+>
+> Why PtlRPC should be know that low level details? Currently we have a
+> problems - when one of destination NID's is unreachable and transfer
+> initiator need a full ptlrpc reconnect to resend to different NID. But as
+> you should be have a resend
+
+Within LNet a resend can be triggered from lnet_finalize() after a failed 
+attempt to send the message has been decommitted. (Otherwise multiple send 
+attempts will need to be tracked at the same time.)
+
+>     The call of LNetPrimaryNID() gives the primary peer NID for the peer
+>     NID. For this to work a handful of calls to LNetPrimaryNID() must be
+>     added. After that it is up to LNet to find the best route.
+>
+>
+> Per our's comment PrimaryNID will changed after we will find a best, did you
+> think it loop usefull if you replace loop result at anycases ?
+> from other view ptlrpc_uuid_to_peer called only in few cases, all other time
+> ptlrpc have a cache a results in ptlrpc connection info.
+
+The main benefit of the loop becomes detecting whether the node is sending 
+to itself, in which case the loopback interface must be used. Though I do 
+worry about degenerate or bad configurations where not all the IP addresses 
+belong to the same node.
+
+-- 
+Olaf Weber                 SGI               Phone:  +31(0)30-6696796
+                            Veldzigt 2b       Fax:    +31(0)30-6696799
+Sr Software Engineer       3454 PW de Meern  Vnet:   955-6796
+Storage Software           The Netherlands   Email:  olaf at sgi.com
+
+From alexey.lyashkov at seagate.com  Fri Jan 22 12:06:13 2016
+From: alexey.lyashkov at seagate.com (Alexey Lyashkov)
+Date: Fri, 22 Jan 2016 23:06:13 +0300
+Subject: [lustre-devel] Multi-rail networking for Lustre
+In-Reply-To: <56A23D32.9080508@sgi.com>
+References: <5620CE13.8020706@sgi.com>
+	<CAAqp6i1mJf3i+6e7_s2FNy9FmQNJQD3v85EHw9ECTA_GUvEgJg@mail.gmail.com>
+	<569E5BCA.5030705@sgi.com>
+	<CAJ2e-W2hVPfq1fT_43tAWM1eE7Ue8qD3RsswBXr+Fzwv39kyCQ@mail.gmail.com>
+	<569FDCC0.90004@sgi.com>
+	<CAJ2e-W0cFuzNDda4fWm-Sd=wmyjYnRyXx9PSLWGAHX5KQO1PGQ@mail.gmail.com>
+	<569FF198.5040207@sgi.com>
+	<CAJ2e-W3x-O8pWkg8vT40D2g6hbworabsc8MraqGZPw1QSbCFdg@mail.gmail.com>
+	<56A10B37.60709@sgi.com>
+	<CAJ2e-W2q2JPBuye6gLfPYYqU1vk8YgBqE4=_u7Jdsu-vt8JdCw@mail.gmail.com>
+	<56A13FDB.2050902@sgi.com>
+	<CAJ2e-W1rGCimMaEmdG3h2+PLJvcggZBV6j8sV+hfb04Q2qkvEg@mail.gmail.com>
+	<56A23D32.9080508@sgi.com>
+Message-ID: <CAJ2e-W0JCGA3pZ6SkQW24G_FzA9DW7z12wSduEtxgkNTYa08iA@mail.gmail.com>
+
+On Fri, Jan 22, 2016 at 5:31 PM, Olaf Weber <olaf at sgi.com> wrote:
+
+> On 22-01-16 10:08, Alexey Lyashkov wrote:
+>
+>>
+>>
+>> On Thu, Jan 21, 2016 at 11:30 PM, Olaf Weber <olaf at sgi.com
+>> <mailto:olaf at sgi.com>> wrote:
+>>
+>>     On 21-01-16 20:16, Alexey Lyashkov wrote:
+>>
+>
+> [...]
+>
+> In lustre terms each mount point is separated client. It have own cache,
+>> own
+>> structures, and completely separated each from an other.
+>> One exceptions it's ldlm cache which live on global object id space.
+>>
+>
+> Another exception is flock deadlock detection, which is always a global
+> operation. This is why ldlm_flock_deadlock() inspects c_peer.nid.
+>
+> flock is part of ldlm.
+
+
+
+
+> [...]
+>
+> All lustre stack operate with UUID, and it have none differences when it
+>> UUID live. We may migrate service / client from one network address to
+>> another, without logical reconnect. It's my main objections against you
+>> ideas.
+>> If none have a several addresses LNet should be responsible to reliability
+>> delivery a one-way requests. which is logically connect to PtlRPC. If node
+>> will be need to use different routing and different NID's for
+>> communication
+>> - it's should be hide in LNet, and LNet should provide as high api as
+>> possible.
+>>
+>
+> The basic idea behind the multi-rail design is that LNet figures out how
+> to send a message to a peer. But the user of LNet can provide a hint to
+> indicate that for a specific message a specific path is preferred.
+>
+> it's good idea, but routing is part it idea. Routing may changed at any
+time but ptlrpc should avoid resending request as it will be need a full
+logical reconnect and it operation isn't fast and isn't light for a server.
+What hint you want from PtlRPC? it have a single responsible - send to some
+UUID a some buffer.
+PtlRPC (or some upper code) may send QoS hint, probably it may send hint
+about local memory, to avoid access from other NUMA node, what else?
+
+
+> One of our goals is to keep changes to the LNet API small.
+
+
+And to avoid it you add one more conversion UUID -> abstract NID -> ...
+real NID.
+while a direct conversion UUID -> .. real NID is possible and provide
+better result in case you need a hide a network topology changes.
+
+
+
+
+>
+>
+>         I expect you know about situation when one DNS name have several
+>>         addresses
+>>         like several 'A' records in dns zone file.
+>>
+>>
+>>     Sure, but when one name points to several machines, it does not help
+>> me
+>>     balance traffic over the interfaces of just one machine.
+>>
+>>
+>> Simple balance may be DNS based - just round robin, as we have now on IB /
+>> sock lnd. it isn't balance?
+>>
+> > If you talk about more serious you should start from good flow control
+> > between nodes. Probably Ideas from RIP and LACK protocols will help.
+>
+> There is bonding/balancing in socklnd. There is none in o2iblnd.
+>
+> you are one of inspectors for an http://review.whamcloud.com/#/c/14625/.
+and i don't see any architecture objections except an fix a some bugs in
+code. So I may say - it's exist and Fujitsu's uses it in production (it was
+present on LAD devel summit).
+
+
+> [...]
+>
+>     A PtlRPC RPC has structure. The first LNetPut() transmits just the
+>>     header information. Then one or more LNetPut() or LNetGet() messages
+>> are
+>>     done to transmit the rest of the request. Then the response follows,
+>>     which also consists of several LNetPut() or LNetGet() messages.
+>>
+>> It's wrong. Looks you mix an RPC and bulk transfers.
+>>
+>
+> Difference in terminology: I tend to think of an RPC as a request/response
+> pair (if there is a response), and these in turn include all traffic
+> related to the RPC, including any bulk transfers.
+
+
+"The first LNetPut() transmits just the header information." what you mean
+about "header". If we talk about bulk transfer protocol - first LNetPut
+will transfer an RPC body which uses to setup an bulk transfer.
+
+
+
+> [...]
+>
+>     The lustre_uuid_to_peer() function enumerates all NIDs associated with
+>>     the UUID. This includes the primary NID, but also includes the other
+>>     NIDs. So we find a preferred peer NID based on that. Then we modify
+>> the
+>>     code like this:
+>>
+>> Why PtlRPC should be know that low level details? Currently we have a
+>> problems - when one of destination NID's is unreachable and transfer
+>> initiator need a full ptlrpc reconnect to resend to different NID. But as
+>> you should be have a resend
+>>
+>
+> Within LNet a resend can be triggered from lnet_finalize() after a failed
+> attempt to send the message has been decommitted. (Otherwise multiple send
+> attempts will need to be tracked at the same time.)
+
+PtlRPC and LNet may have a different timeout window for now. So timeout on
+PtlRPC can smaller then LNet LND.
+in that case you will have a lots TX in flight where is new TX allocated.
+That is tracking a multiple send attempts in same time.
+But it's not a good from request latency perspective but easy way to change
+a routing for now.
+With single "Primary NID" you will lack this functionality or need to
+implement something similar.
+
+
+
+
+>
+>
+>     The call of LNetPrimaryNID() gives the primary peer NID for the peer
+>>     NID. For this to work a handful of calls to LNetPrimaryNID() must be
+>>     added. After that it is up to LNet to find the best route.
+>>
+>>
+>> Per our's comment PrimaryNID will changed after we will find a best, did
+>> you
+>> think it loop usefull if you replace loop result at anycases ?
+>> from other view ptlrpc_uuid_to_peer called only in few cases, all other
+>> time
+>> ptlrpc have a cache a results in ptlrpc connection info.
+>>
+>
+> The main benefit of the loop becomes detecting whether the node is sending
+> to itself, in which case the loopback interface must be used. Though I do
+> worry about degenerate or bad configurations where not all the IP addresses
+> belong to the same node.
+>
+> You can work without loopback driver - it was checked with socklnd and
+work fine. But currently it loop used to make connection sorting in right
+order. Fast connections on top. But it have assumption - network topology
+have a no changes at run time.
+
+
+
+-- 
+Alexey Lyashkov *?* Technical lead for a Morpheus team
+Seagate Technology, LLC
+www.seagate.com
+www.lustre.org
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20160122/86eafe7e/attachment.htm>
+
+From bhumirks at gmail.com  Sat Jan 23 05:11:53 2016
+From: bhumirks at gmail.com (Bhumika Goyal)
+Date: Sat, 23 Jan 2016 18:41:53 +0530
+Subject: [lustre-devel] [PATCH] Staging:lustre:lustre:llite:Remove explicit
+	NULL comparision
+Message-ID: <1453554713-6895-1-git-send-email-bhumirks@gmail.com>
+
+Replaced explicit NULL comparision with its simplier form.
+Found using coccinelle:
+
+@replace_rule@
+expression e;
+@@
+
+-e == NULL
++ !e
+
+Signed-off-by: Bhumika Goyal <bhumirks at gmail.com>
+---
+ drivers/staging/lustre/lustre/llite/dcache.c | 10 +++++-----
+ 1 file changed, 5 insertions(+), 5 deletions(-)
+
+diff --git a/drivers/staging/lustre/lustre/llite/dcache.c b/drivers/staging/lustre/lustre/llite/dcache.c
+index 3d6745e..bc179e5 100644
+--- a/drivers/staging/lustre/lustre/llite/dcache.c
++++ b/drivers/staging/lustre/lustre/llite/dcache.c
+@@ -62,7 +62,7 @@ static void ll_release(struct dentry *de)
+ 
+ 	LASSERT(de != NULL);
+ 	lld = ll_d2d(de);
+-	if (lld == NULL) /* NFS copies the de->d_op methods (bug 4655) */
++	if (!lld) /* NFS copies the de->d_op methods (bug 4655) */
+ 		return;
+ 
+ 	if (lld->lld_it) {
+@@ -131,7 +131,7 @@ static int find_cbdata(struct inode *inode)
+ 		return rc;
+ 
+ 	lsm = ccc_inode_lsm_get(inode);
+-	if (lsm == NULL)
++	if (!lsm)
+ 		return rc;
+ 
+ 	rc = obd_find_cbdata(sbi->ll_dt_exp, lsm, return_if_equal, NULL);
+@@ -184,13 +184,13 @@ int ll_d_init(struct dentry *de)
+ 		de, de, de->d_parent, d_inode(de),
+ 		d_count(de));
+ 
+-	if (de->d_fsdata == NULL) {
++	if (!de->d_fsdata) {
+ 		struct ll_dentry_data *lld;
+ 
+ 		lld = kzalloc(sizeof(*lld), GFP_NOFS);
+ 		if (likely(lld)) {
+ 			spin_lock(&de->d_lock);
+-			if (likely(de->d_fsdata == NULL)) {
++			if (likely(!de->d_fsdata)) {
+ 				de->d_fsdata = lld;
+ 				__d_lustre_invalidate(de);
+ 			} else {
+@@ -328,7 +328,7 @@ static int ll_revalidate_dentry(struct dentry *dentry,
+ 	if (lookup_flags & LOOKUP_RCU)
+ 		return -ECHILD;
+ 
+-	do_statahead_enter(dir, &dentry, d_inode(dentry) == NULL);
++	do_statahead_enter(dir, &dentry, !d_inode(dentry));
+ 	ll_statahead_mark(dir, dentry);
+ 	return 1;
+ }
+-- 
+1.9.1
+
+
+From bhumirks at gmail.com  Fri Jan 29 00:44:26 2016
+From: bhumirks at gmail.com (Bhumika Goyal)
+Date: Fri, 29 Jan 2016 14:14:26 +0530
+Subject: [lustre-devel] [PATCH] Staging:lustre:lclient:Remove unused function
+Message-ID: <1454057066-16834-1-git-send-email-bhumirks@gmail.com>
+
+Discard the function ccc_vmpage_page_transient as it is not used
+anywhere in the kernel.
+Used grep to find occurences.
+Problem found using sparse.
+
+Signed-off-by: Bhumika Goyal <bhumirks at gmail.com>
+---
+ drivers/staging/lustre/lustre/lclient/lcommon_cl.c | 11 -----------
+ 1 file changed, 11 deletions(-)
+
+diff --git a/drivers/staging/lustre/lustre/lclient/lcommon_cl.c b/drivers/staging/lustre/lustre/lclient/lcommon_cl.c
+index 34dde7d..4dfeb4e 100644
+--- a/drivers/staging/lustre/lustre/lclient/lcommon_cl.c
++++ b/drivers/staging/lustre/lustre/lclient/lcommon_cl.c
+@@ -986,17 +986,6 @@ struct inode *ccc_object_inode(const struct cl_object *obj)
+ }
+ 
+ /**
+- * Returns a pointer to cl_page associated with \a vmpage, without acquiring
+- * additional reference to the resulting page. This is an unsafe version of
+- * cl_vmpage_page() that can only be used under vmpage lock.
+- */
+-struct cl_page *ccc_vmpage_page_transient(struct page *vmpage)
+-{
+-	KLASSERT(PageLocked(vmpage));
+-	return (struct cl_page *)vmpage->private;
+-}
+-
+-/**
+  * Initialize or update CLIO structures for regular files when new
+  * meta-data arrives from the server.
+  *
+-- 
+1.9.1
+
+

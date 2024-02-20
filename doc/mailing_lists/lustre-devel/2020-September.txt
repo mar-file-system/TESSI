@@ -1,0 +1,928 @@
+From degremoa at amazon.com  Tue Sep  1 00:41:39 2020
+From: degremoa at amazon.com (Degremont, Aurelien)
+Date: Tue, 1 Sep 2020 07:41:39 +0000
+Subject: [lustre-devel] Error checking for llapi_hsm_action_progress().
+In-Reply-To: <87k0xeqo9u.fsf@notabene.neil.brown.name>
+References: <87pn77qx60.fsf@notabene.neil.brown.name>
+ <DA0C2761-A024-4D7D-8E78-37649812D037@ddn.com>
+ <87k0xeqo9u.fsf@notabene.neil.brown.name>
+Message-ID: <377DBC36-B8E2-478E-BAA8-B59577EC29D2@amazon.com>
+
+My understanding of the different use cases was:
+- Copytool I/O could be done in parallel and acknowledge write range in any order.
+- Having a map of what have been copied and what haven't been was done thinking of implementing partial restore in the future. I'm not sure when this feature will be implemented it will really need this from the coordinator.
+
+You can verify some existing copytools in case some of them acknowledge I/O with a specific pattern:
+- posix copytool in lustre source
+- S3 copytool Lemur (https://github.com/whamcloud/lemur)
+- TSM copytools (https://github.com/tstibor/ltsm, and Simon linked this one recently: https://github.com/guilbaults/ct_tsm/)
+
+I would be in favor of not raising an error if acknowledging overlaps an existing extent. 
+
+Aur?lien
+
+?Le 01/09/2020 03:28, ? lustre-devel au nom de NeilBrown ? <lustre-devel-bounces at lists.lustre.org au nom de neilb at suse.de> a ?crit :
+
+    CAUTION: This email originated from outside of the organization. Do not click links or open attachments unless you can confirm the sender and know the content is safe.
+
+
+
+    "code deleted in code debugged" is my preferred outcome.  I haven't
+    heard anyone clamouring to keep the current behaviour, so I'm leaning
+    more in that direction.
+
+    Thanks,
+    NeilBrown
+
+    On Mon, Aug 31 2020, Joseph Benjamin Evans wrote:
+
+    > I don't think anything is actually monitoring or using the results of those extents, specifically.  "bytes copied" would be equally useful to the end user, I'd think.  Others may have better data on real-world usage, though.  So this might be a "code deleted is code debugged" situation.
+    >
+    > -Ben
+    >
+    > On 8/31/20, 12:03 AM, "lustre-devel on behalf of NeilBrown" <lustre-devel-bounces at lists.lustre.org on behalf of neilb at suse.de> wrote:
+    >
+    >
+    >
+    >     I have a question about llapi_hsm_action_progress().  The documentation
+    >     says that every interval sent "must" be unique, and must not overlap
+    >     (which not exactly the same as 'unique').  The code (on server side)
+    >     only partially enforces this.  It causes any request for an empty
+    >     interval (start>end) to fail, but otherwise accepts any interval.  If it
+    >     gets two identical intervals (not just overlapping, but identical), it
+    >     ignores the second.  This seems weird.
+    >
+    >     It would make some sense to just accept any interval - all it does is
+    >     sum the lengths, and use this to report status, so no corruption would
+    >     result.  It would also make sense to return an error if an interval
+    >     overlaps any previous interval, as this violates the spec.  It might
+    >     make sense to accept any interval, but only count the overlapped length
+    >     once.  But the current behaviour of only ignoring exact duplicates is
+    >     weird.  I tried removing that check, but there is a test (hsm_test 108)
+    >     which checks for repeating identical intervals.
+    >
+    >     I want to clean up this code as I'm converting all users of the lustre
+    >     interval-tree to use the upstream-linux interval tree code.  What should
+    >     I do?
+    >
+    >     Should I remove test 108 because it is only testing one particular
+    >     corner case, or should I improve the code to handle all overlaps
+    >     consistently?  Would it be OK to fail an overlap (I'd need to change
+    >     test 108), it must they be quietly accepted?
+    >
+    >     Thanks,
+    >     NeilBrown
+
+
+From quentin.bouget at cea.fr  Tue Sep  1 02:33:37 2020
+From: quentin.bouget at cea.fr (quentin.bouget at cea.fr)
+Date: Tue, 1 Sep 2020 11:33:37 +0200
+Subject: [lustre-devel] Error checking for llapi_hsm_action_progress().
+In-Reply-To: <87mu2aqpnp.fsf@notabene.neil.brown.name>
+References: <87pn77qx60.fsf@notabene.neil.brown.name>
+ <2659fe05-9cd7-afd3-e1ce-c1726129e354@cea.fr>
+ <87mu2aqpnp.fsf@notabene.neil.brown.name>
+Message-ID: <3df93cf2-1a94-f7bf-e073-29bf0c8c985a@cea.fr>
+
+On 01/09/2020 02:58, NeilBrown wrote:
+> On Mon, Aug 31 2020, quentin.bouget at cea.fr wrote:
+>> On 31/08/2020 06:03, NeilBrown wrote:
+>>> I tried removing that check, but there is a test (hsm_test 108)
+>>> which checks for repeating identical intervals.
+>> test108 handles a "growing" extent (offset=0, length=1, 2, 3, ...).
+> test108_progress() in llapi_hsm_test.c sets:
+> 		he.offset = 0;
+> 		he.length = length;
+> where 'length' is 1000.  It reports progress for this extent 1000 times.
+> Then complains if the total progress isn't 1000.
+
+My bad, I read that wrong. You are right.
+
+>> test112 handles acknowledging non-overlapping extents twice each.
+> Yep.  10 non-overlapping extents, then sends the same 10 again.
+>
+>> I wrote a test to check what happens if you acknowledge overlapping extents:
+>>
+>>    * (offset=0, length=256)
+>>    * (offset=128, length=256)
+>>
+>> And surely enough mdt_cdt_get_work_done() returns "512" rather than the
+>> expected "384" (ie. 128 + 256).
+>>
+>> Even worse, when acknowledging a "shrinking" extent (offset=0, length=N,
+>> N - 1, N - 2, ...), only the last value is kept in store.
+> Does that even mean anything?  It seems to be saying "I've done N amount
+> of work" and then "Sorry, I lied, I've only done N-1"...
+
+I think it could happen if a copytool spreads HSM actions to multiple 
+workers, one of the worker stalls, its work is resubmitted to another 
+worker, and both of them acknowledge extents with different lengths.
+
+But yes, this is at best a weird/bad corner case.
+
+> But I'm surprised at your result that only the last is kept.  Reading
+> the code strongly suggests that it would report the sum of all these
+> regions.  N^2/2 if you continued to  N-N.
+
+That was me being wrong again. It behaves just like you say.
+
+> How do you perform these tests?  Is there a command-line tool, or would
+> I need to write some code?
+
+I copied test112 in llapi_hsm_test.c and edited the code (and read the 
+error message wrong =/).
+
+>> From this, I think that exact duplicates are not really ignored, 
+>> rather, intervals that share the same starting point overwrite one 
+>> another, until only the last one remains. Bug or feature? I don't 
+>> really know.
+>>
+>>
+>>> I want to clean up this code as I'm converting all users of the lustre
+>>> interval-tree to use the upstream-linux interval tree code.  What should
+>>> I do?
+>> How does the upstream-linux interval tree compares to Lustre's?
+> The interesting difference is that the lustre interval-tree refuses to
+> store exact duplicates (same start, same end), while the Linux
+> interval-tree will accept any new interval.
+> I think this made some sense for the first user for interval-trees in
+> lustre, which was LDLM extent locking, but some other users need to
+> jump through hoops to handle duplicates correctly.
+>
+> For hsm_update_work(), it just tries to store the interval it was given
+> and if that fails, it say "oh well, too bad".
+
+Yes, there is a comment saying : "it can happen if ct sends 2 times the 
+same progress".
+
+ From "git blame", this seems to be coming from one of the earliest HSM 
+commits, so I don't know if this was ever useful in practice or just an 
+instance of defensive programming.
+
+>> If their behaviours match, there should not be any issue (so far as the
+>> current behaviour can be considered issue-free).
+> Certainly I could preserve exactly the same behaviour, but I find it
+> hard to write code that doesn't make any sense.
+> If I *were* to keep exactly the same behaviour as current, I wouldn't use
+> an interval tree, as (if I understand it correctly), the intervals
+> aren't really relevant.  It just stores discrete "start+length"
+> pairs and rejects duplicates.  I'd probably use an rhashtable for that.
+
+Assuming duplicated extents, but otherwise non-overlapping, I agree.
+
+Ideally, there would be a standard data structure that automatically 
+merges overlapping/contiguous extents.
+But I don't know any, and I don't think it is worth coding one from scratch.
+
+>> Otherwise, I think it would be OK to just assume sending overlapping
+>> extents is a programming error and the server does not need to protect
+>> itself against it.
+>> In terms of security, this isn't very good, but the problem already
+>> exists, and copytools are supposedly trusted binaries run as root.
+>> You could then remove test108 as it is itself a programming error,
+>> test112 as well, and maybe others.
+>>
+>> Just to be sure, you could open a new issue on Jira, and let others rule
+>> how much of a bug/feature the whole thing is.
+> I guess the key question here is: who are those "others" ??
+> Jira has a "Component/s" field, but it seems to be fixed at "None".
+> How would I ensure that the Jira issue got to the right people?
+
+There is a "label" field that can take "HSM" as a value.
+
+Other than that, I agree with Ben that removing the feature would be the 
+easiest way to fix all this.
+I am just worried that someone somewhere uses it. For example, I can 
+imagine a monitoring script that polls the coordinator's active request 
+procfile to detect stalled HSM actions.
+
+I'll check with our admins, but I don't think we use it at CEA. Maybe if 
+Cray & DDN confirm that they don't know anyone using it, it will be 
+enough to remove the code, like Ben suggests. Or maybe we axe the 
+feature and wait to see if anyone complains.
+
+ From the repos linked by Aur?lien, every copytool seems to mind the 
+constraint of not sending overlapping extents (not even duplicates). I 
+also have access to the sources of a different copytool that uses 
+llapi_hsm_action_progress() as a heartbeat (offset=0, length=0).
+
+Sorry about the earlier mistakes.
+
+Have a good day,
+Quentin
+
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20200901/2ddc421a/attachment-0001.html>
+
+From degremoa at amazon.com  Tue Sep  1 05:07:28 2020
+From: degremoa at amazon.com (Degremont, Aurelien)
+Date: Tue, 1 Sep 2020 12:07:28 +0000
+Subject: [lustre-devel] Error checking for llapi_hsm_action_progress().
+In-Reply-To: <3df93cf2-1a94-f7bf-e073-29bf0c8c985a@cea.fr>
+References: <87pn77qx60.fsf@notabene.neil.brown.name>
+ <2659fe05-9cd7-afd3-e1ce-c1726129e354@cea.fr>
+ <87mu2aqpnp.fsf@notabene.neil.brown.name>
+ <3df93cf2-1a94-f7bf-e073-29bf0c8c985a@cea.fr>
+Message-ID: <A658F804-B0E6-4F4E-BFB7-0DC54FFDFAA2@amazon.com>
+
+
+
+
+I also have access to the sources of a different copytool that uses llapi_hsm_action_progress() as a heartbeat (offset=0, length=0).
+
+
+
+This should still be supported, this is a feature. Copytool are considered stale if no progress is received for a while. Copytools which are not making any progress (waiting for a tape to be mounted by example) are supposed to send progress for length=0 to avoid timeout.
+
+
+
+Aur?lien
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20200901/c1df6e4e/attachment.html>
+
+From beevans at whamcloud.com  Tue Sep  1 06:10:04 2020
+From: beevans at whamcloud.com (Joseph Benjamin Evans)
+Date: Tue, 1 Sep 2020 13:10:04 +0000
+Subject: [lustre-devel] Error checking for llapi_hsm_action_progress().
+In-Reply-To: <377DBC36-B8E2-478E-BAA8-B59577EC29D2@amazon.com>
+References: <87pn77qx60.fsf@notabene.neil.brown.name>
+ <DA0C2761-A024-4D7D-8E78-37649812D037@ddn.com>
+ <87k0xeqo9u.fsf@notabene.neil.brown.name>
+ <377DBC36-B8E2-478E-BAA8-B59577EC29D2@amazon.com>
+Message-ID: <8103393F-7BCF-4D50-92AC-A914DE12A63A@ddn.com>
+
+If we implement partial restore, there should definitely be code in the coordinator to handle it.  But right now, I don't see anyone working on it.
+
+As to parallel I/O, I know of a few copytools that do that already, and they coordinate among themselves (using MPI or other frameworks) to specify what data gets copied by which clients rather than use Lustre to do it.  To Lustre that should be opaque.
+
+?On 9/1/20, 3:41 AM, "Degremont, Aurelien" <degremoa at amazon.com> wrote:
+
+    My understanding of the different use cases was:
+    - Copytool I/O could be done in parallel and acknowledge write range in any order.
+    - Having a map of what have been copied and what haven't been was done thinking of implementing partial restore in the future. I'm not sure when this feature will be implemented it will really need this from the coordinator.
+
+    You can verify some existing copytools in case some of them acknowledge I/O with a specific pattern:
+    - posix copytool in lustre source
+    - S3 copytool Lemur (https://github.com/whamcloud/lemur)
+    - TSM copytools (https://github.com/tstibor/ltsm, and Simon linked this one recently: https://github.com/guilbaults/ct_tsm/)
+
+    I would be in favor of not raising an error if acknowledging overlaps an existing extent. 
+
+    Aur?lien
+
+    Le 01/09/2020 03:28, ? lustre-devel au nom de NeilBrown ? <lustre-devel-bounces at lists.lustre.org au nom de neilb at suse.de> a ?crit :
+
+        CAUTION: This email originated from outside of the organization. Do not click links or open attachments unless you can confirm the sender and know the content is safe.
+
+
+
+        "code deleted in code debugged" is my preferred outcome.  I haven't
+        heard anyone clamouring to keep the current behaviour, so I'm leaning
+        more in that direction.
+
+        Thanks,
+        NeilBrown
+
+        On Mon, Aug 31 2020, Joseph Benjamin Evans wrote:
+
+        > I don't think anything is actually monitoring or using the results of those extents, specifically.  "bytes copied" would be equally useful to the end user, I'd think.  Others may have better data on real-world usage, though.  So this might be a "code deleted is code debugged" situation.
+        >
+        > -Ben
+        >
+        > On 8/31/20, 12:03 AM, "lustre-devel on behalf of NeilBrown" <lustre-devel-bounces at lists.lustre.org on behalf of neilb at suse.de> wrote:
+        >
+        >
+        >
+        >     I have a question about llapi_hsm_action_progress().  The documentation
+        >     says that every interval sent "must" be unique, and must not overlap
+        >     (which not exactly the same as 'unique').  The code (on server side)
+        >     only partially enforces this.  It causes any request for an empty
+        >     interval (start>end) to fail, but otherwise accepts any interval.  If it
+        >     gets two identical intervals (not just overlapping, but identical), it
+        >     ignores the second.  This seems weird.
+        >
+        >     It would make some sense to just accept any interval - all it does is
+        >     sum the lengths, and use this to report status, so no corruption would
+        >     result.  It would also make sense to return an error if an interval
+        >     overlaps any previous interval, as this violates the spec.  It might
+        >     make sense to accept any interval, but only count the overlapped length
+        >     once.  But the current behaviour of only ignoring exact duplicates is
+        >     weird.  I tried removing that check, but there is a test (hsm_test 108)
+        >     which checks for repeating identical intervals.
+        >
+        >     I want to clean up this code as I'm converting all users of the lustre
+        >     interval-tree to use the upstream-linux interval tree code.  What should
+        >     I do?
+        >
+        >     Should I remove test 108 because it is only testing one particular
+        >     corner case, or should I improve the code to handle all overlaps
+        >     consistently?  Would it be OK to fail an overlap (I'd need to change
+        >     test 108), it must they be quietly accepted?
+        >
+        >     Thanks,
+        >     NeilBrown
+
+
+
+From neilb at suse.de  Tue Sep  1 17:36:24 2020
+From: neilb at suse.de (NeilBrown)
+Date: Wed, 02 Sep 2020 10:36:24 +1000
+Subject: [lustre-devel] Error checking for llapi_hsm_action_progress().
+In-Reply-To: <3df93cf2-1a94-f7bf-e073-29bf0c8c985a@cea.fr>
+References: <87pn77qx60.fsf@notabene.neil.brown.name>
+ <2659fe05-9cd7-afd3-e1ce-c1726129e354@cea.fr>
+ <87mu2aqpnp.fsf@notabene.neil.brown.name>
+ <3df93cf2-1a94-f7bf-e073-29bf0c8c985a@cea.fr>
+Message-ID: <87imcxxbef.fsf@notabene.neil.brown.name>
+
+On Tue, Sep 01 2020, quentin.bouget at cea.fr wrote:
+>
+> Ideally, there would be a standard data structure that automatically 
+> merges overlapping/contiguous extents.
+> But I don't know any, and I don't think it is worth coding one from scratch.
+>
+
+An interval tree is close enough that it would take .. uhmm....
+
+ while ((overlap = interval_iter_first(
+                        &crp->crp_root,
+ 			node->start == 0 ? 0 : node->start - 1,
+                        node->end == LUSTRE_EOF ? LUSTRE_EOF : node->end + 1))
+        != NULL) {
+	node->start = min(node->start, overlap->start);
+        node->end = max(node->end, overlap->end);
+        interval_remove(node, &crp->crp_root);
+ }
+ interval_insert(node, &crp->crp_root);
+
+... 10 lines of code to merge overlapping regions.
+
+Maybe I'll do that.
+
+I get the general impression that while people don't see it as very
+important to keep track of the reported ranges, they would probably feel
+a little happier if we kept track than if we didn't.
+Reporting errors on overlaps is definitely out, but merging overlaps
+is widely seen as sensible.
+
+Thanks everyone for the feedback.
+
+NeilBrown
+-------------- next part --------------
+A non-text attachment was scrubbed...
+Name: signature.asc
+Type: application/pgp-signature
+Size: 853 bytes
+Desc: not available
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20200902/5a48ce37/attachment.sig>
+
+From quentin.bouget at cea.fr  Thu Sep 17 08:09:20 2020
+From: quentin.bouget at cea.fr (quentin.bouget at cea.fr)
+Date: Thu, 17 Sep 2020 17:09:20 +0200
+Subject: [lustre-devel] [LAD'20] Registration & agenda
+Message-ID: <e6af3f0b-5d85-0f48-4957-5aedbd569a3d@cea.fr>
+
+Dear Lustre community,
+
+Registration for LAD'20 is now open! And a draft of the agenda is 
+available on the event's website <https://www.eofs.eu/events/lad20>.
+
+LAD'20 is a virtual event. To ensure maximum coverage, each session is 
+broadcast once at 8AM (UTC), and another time at 4PM (UTC).
+This is why there are two registration links: one for the "morning"/#1 
+session 
+<https://zoom.us/webinar/register/5016002711948/WN_99ynkxvaTse1V5OSE1vuvw>, 
+and another one for the "afternoon"/#2 session 
+<https://zoom.us/webinar/register/6016002712219/WN_MPj_qU7NQc6xOJjkxAnyAQ>.
+
+Once you register on Zoom, you will receive an invitation to the chat 
+platform which we will use for Q&As.
+We send those invites manually, so expect a delay of a few days (a week 
+at most).
+
+By the way! Even though the submission deadline has now passed, we are 
+still looking for a few more presentations.
+If you are interested, post a summary of your talk here 
+<https://easychair.org/conferences/?conf=lad20>. Submission guidelines 
+are available in the call for paper <https://easychair.org/cfp/lad20>.
+
+Cheers,
+Quentin
+
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20200917/990a46a4/attachment.html>
+
+From cory.spitz at hpe.com  Thu Sep 17 14:58:01 2020
+From: cory.spitz at hpe.com (Spitz, Cory James)
+Date: Thu, 17 Sep 2020 21:58:01 +0000
+Subject: [lustre-devel] lfs usage with OST pool quota flags
+Message-ID: <108068A0-8A57-481F-BC8B-F9F913DC3428@hpe.com>
+
+Hello, Gian-Carlo DeFazio.
+
+Sergey Chermencev is the developer who implemented OST Pool Quotas.  I?ve copied him so that he may answer your questions in more detail.  For now, I can say that you can use the following as resources:
+
+https://opensfs.org/wp-content/uploads/2019/07/LUG2019-Introducing_Pool_Quotas-Spitz.pdf
+https://vimeo.com/showcase/6042401/video/342817244
+
+And yes, you can use the --pool option in conjunction with the default value flags.  See slide 11 from the referenced pdf as an example.
+
+> Is that already happening? I see that there?s LUDOC-467 to add OST pool quotas to the manual
+Yes, https://review.whamcloud.com/#/c/38414 is for it, but it hasn?t landed yet.
+
+-Cory
+
+
+On 8/31/20, 1:29 PM, "lustre-devel on behalf of Defazio, Gian-Carlo" <lustre-devel-bounces at lists.lustre.org<mailto:lustre-devel-bounces at lists.lustre.org> on behalf of defazio1 at llnl.gov<mailto:defazio1 at llnl.gov>> wrote:
+
+I?m planning to add a feature to lfs-quota (a relatively quick check for EDQUOT)
+and I have some questions about how the new OST pool quota feature will change things
+with regards to how the quota system works internally and how the lfs-quota options will change.
+
+For how the system actually works internally:
+The struct lquota_entry (lqe) now has 2 edquot flags,  lqe_edquot and lge_edquot.
+Does lqe_edquot still represent the QMT?s current knowledge about whether or not
+an entity has exceeded a quota for the pool associated with the lqe, or do the
+lge_edquot flags need to be checked as well to make this determination?
+
+For how lfs-quota works:
+There is now a ?pool option. Can this flag be used in conjunction with the default value flags
+(-U|-G|-P)? Such as
+lfs quota -U ?pool qpool1 /mnt/lustre
+To check the default user quota values for OST pool qpool1?
+
+I?ll need to update lfs-quota.1, lfs-setquota.1, and the lfs.c help section for my feature, but since
+the flag I add will have to interact with the ?pool flag in some cases, I also need to update those files
+for the OST pool quotas. Is that already happening? I see that there?s LUDOC-467 to add OST pool quotas to the manual.
+
+Thanks,
+Gian-Carlo DeFazio
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20200917/2078e41c/attachment.html>
+
+From nrutman at gmail.com  Fri Sep 18 10:33:46 2020
+From: nrutman at gmail.com (Nathan Rutman)
+Date: Fri, 18 Sep 2020 10:33:46 -0700
+Subject: [lustre-devel] Error checking for llapi_hsm_action_progress().
+Message-ID: <CAA4iDz6wy1J+qv3WA4NtYSLWD0zMHTxTtD9Np3BpDNtfBz4MQA@mail.gmail.com>
+
+As I've presented before, I really think Lustre should get out of the
+business of tracking HSM requests and progress completely for scalability
+reasons. External tools should do their thing, and simply let Lustre know
+when to atomically change the file's layout (released, restored, migrated,
+mirrored, etc). (All this work is in the "externalized coordinator" and
+"hsm as layout" patches up at WC.)
+
+Anyhow, to that end, I vote in favor of resolving by removal this
+apparently unused feature. Liblustre could silently drop the extent info
+for a trivial "fix".
+
+
+My understanding of the different use cases was:
+
+- Copytool I/O could be done in parallel and acknowledge write range
+in any order.
+
+- Having a map of what have been copied and what haven't been was done
+thinking of implementing partial restore in the future. I'm not sure
+when this feature will be implemented it will really need this from
+the coordinator.
+
+You can verify some existing copytools in case some of them
+acknowledge I/O with a specific pattern:
+
+- posix copytool in lustre source
+
+- S3 copytool Lemur (https://github.com/whamcloud/lemur)
+
+- TSM copytools (https://github.com/tstibor/ltsm, and Simon linked
+this one recently: https://github.com/guilbaults/ct_tsm/)
+
+I would be in favor of not raising an error if acknowledging overlaps
+an existing extent.
+
+Aur?lien
+
+?Le 01/09/2020 03:28, ? lustre-devel au nom de NeilBrown ?
+<lustre-devel-bounces at lists.lustre.org
+<http://lists.lustre.org/listinfo.cgi/lustre-devel-lustre.org> au nom
+de neilb at suse.de
+<http://lists.lustre.org/listinfo.cgi/lustre-devel-lustre.org>> a
+?crit :
+
+    CAUTION: This email originated from outside of the organization.
+Do not click links or open attachments unless you can confirm the
+sender and know the content is safe.
+
+    "code deleted in code debugged" is my preferred outcome.  I haven't
+
+    heard anyone clamouring to keep the current behaviour, so I'm leaning
+
+    more in that direction.
+
+    Thanks,
+
+    NeilBrown
+
+    On Mon, Aug 31 2020, Joseph Benjamin Evans wrote:
+
+    > I don't think anything is actually monitoring or using the
+results of those extents, specifically.  "bytes copied" would be
+equally useful to the end user, I'd think.  Others may have better
+data on real-world usage, though.  So this might be a "code deleted is
+code debugged" situation.
+
+    >
+
+    > -Ben
+
+    >
+
+    > On 8/31/20, 12:03 AM, "lustre-devel on behalf of NeilBrown"
+<lustre-devel-bounces at lists.lustre.org
+<http://lists.lustre.org/listinfo.cgi/lustre-devel-lustre.org> on
+behalf of neilb at suse.de
+<http://lists.lustre.org/listinfo.cgi/lustre-devel-lustre.org>> wrote:
+
+    >
+
+    >
+
+    >
+
+    >     I have a question about llapi_hsm_action_progress().  The
+documentation
+
+    >     says that every interval sent "must" be unique, and must not overlap
+
+    >     (which not exactly the same as 'unique').  The code (on server side)
+
+    >     only partially enforces this.  It causes any request for an empty
+
+    >     interval (start>end) to fail, but otherwise accepts any
+interval.  If it
+
+    >     gets two identical intervals (not just overlapping, but identical), it
+
+    >     ignores the second.  This seems weird.
+
+    >
+
+    >     It would make some sense to just accept any interval - all it does is
+
+    >     sum the lengths, and use this to report status, so no corruption would
+
+    >     result.  It would also make sense to return an error if an interval
+
+    >     overlaps any previous interval, as this violates the spec.  It might
+
+    >     make sense to accept any interval, but only count the
+overlapped length
+
+    >     once.  But the current behaviour of only ignoring exact duplicates is
+
+    >     weird.  I tried removing that check, but there is a test
+(hsm_test 108)
+
+    >     which checks for repeating identical intervals.
+
+    >
+
+    >     I want to clean up this code as I'm converting all users of the lustre
+
+    >     interval-tree to use the upstream-linux interval tree code.
+What should
+
+    >     I do?
+
+    >
+
+    >     Should I remove test 108 because it is only testing one particular
+
+    >     corner case, or should I improve the code to handle all overlaps
+
+    >     consistently?  Would it be OK to fail an overlap (I'd need to change
+
+    >     test 108), it must they be quietly accepted?
+
+    >
+
+    >     Thanks,
+
+    >     NeilBrown
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20200918/36b186f4/attachment-0001.html>
+
+From sergey.cheremencev at hpe.com  Fri Sep 18 12:17:32 2020
+From: sergey.cheremencev at hpe.com (Cheremencev, Sergey)
+Date: Fri, 18 Sep 2020 19:17:32 +0000
+Subject: [lustre-devel] lfs usage with OST pool quota flags
+In-Reply-To: <108068A0-8A57-481F-BC8B-F9F913DC3428@hpe.com>
+References: <108068A0-8A57-481F-BC8B-F9F913DC3428@hpe.com>
+Message-ID: <60AAD02C-7000-4364-9140-94950557B3E0@hpe.com>
+
+Hello, Gian-Carlo DeFazio.
+
+?The struct lquota_entry (lqe) now has 2 edquot flags,  lqe_edquot and lge_edquot.
+Does lqe_edquot still represent the QMT?s current knowledge about whether or not
+an entity has exceeded a quota for the pool associated with the lqe, or do the
+lge_edquot flags need to be checked as well to make this determination??
+
+I think you shouldn?t care about this if you write something for usermode utils.
+But if you are interesting In details I would try to explain. Each id(user/group/project) is still described by lqe.
+lqe that describes all data targets in a system is called ?global lqe?. This lqe has a pointer to array of entries that describe each OST state(lqeg_arr).
+So now we can have different edquot(lge_edquot) for each target. In a system without pools all lge_edquot in array are always equal and also equal with lqe->lqe_edquot.
+Each Pool Quotas has its own lqe per id. Pool Quotas lqes don?t have pointer to lqe_global_array. These lqes represent state (edquot, qunit, limits) only OSTs from the pool.
+So, each id has one global lqe and one lqe per pool where it has quota limits.
+When QMT get quota acquire request from an OST, it finds global lqe and ?pool? lqes(only pools that include this OST). It goes through these lqes to decide if edquot or new qunit should be set.
+If yes, it also reseeds lqeg_array.
+
+?There is now a ?pool option. Can this flag be used in conjunction with the default value flags (-U|-G|-P)??
+default Pool Quotas feature is under review - https://review.whamcloud.com/#/c/39873/ (LU-13952).
+
+If your code will interact with pool quotas, please add me as reviewer.
+
+Thanks,
+Sergey
+From: "Spitz, Cory James" <cory.spitz at hpe.com>
+Date: Friday, September 18, 2020 at 12:58 AM
+To: "Defazio, Gian-Carlo" <defazio1 at llnl.gov>, "lustre-devel at lists.lustre.org" <lustre-devel at lists.lustre.org>, "Cheremencev, Sergey" <sergey.cheremencev at hpe.com>
+Subject: Re: [lustre-devel] lfs usage with OST pool quota flags
+
+Hello, Gian-Carlo DeFazio.
+
+Sergey Chermencev is the developer who implemented OST Pool Quotas.  I?ve copied him so that he may answer your questions in more detail.  For now, I can say that you can use the following as resources:
+
+https://opensfs.org/wp-content/uploads/2019/07/LUG2019-Introducing_Pool_Quotas-Spitz.pdf
+https://vimeo.com/showcase/6042401/video/342817244
+
+And yes, you can use the --pool option in conjunction with the default value flags.  See slide 11 from the referenced pdf as an example.
+
+> Is that already happening? I see that there?s LUDOC-467 to add OST pool quotas to the manual
+Yes, https://review.whamcloud.com/#/c/38414 is for it, but it hasn?t landed yet.
+
+-Cory
+
+
+On 8/31/20, 1:29 PM, "lustre-devel on behalf of Defazio, Gian-Carlo" <lustre-devel-bounces at lists.lustre.org<mailto:lustre-devel-bounces at lists.lustre.org> on behalf of defazio1 at llnl.gov<mailto:defazio1 at llnl.gov>> wrote:
+
+I?m planning to add a feature to lfs-quota (a relatively quick check for EDQUOT)
+and I have some questions about how the new OST pool quota feature will change things
+with regards to how the quota system works internally and how the lfs-quota options will change.
+
+For how the system actually works internally:
+The struct lquota_entry (lqe) now has 2 edquot flags,  lqe_edquot and lge_edquot.
+Does lqe_edquot still represent the QMT?s current knowledge about whether or not
+an entity has exceeded a quota for the pool associated with the lqe, or do the
+lge_edquot flags need to be checked as well to make this determination?
+
+For how lfs-quota works:
+There is now a ?pool option. Can this flag be used in conjunction with the default value flags
+(-U|-G|-P)? Such as
+lfs quota -U ?pool qpool1 /mnt/lustre
+To check the default user quota values for OST pool qpool1?
+
+I?ll need to update lfs-quota.1, lfs-setquota.1, and the lfs.c help section for my feature, but since
+the flag I add will have to interact with the ?pool flag in some cases, I also need to update those files
+for the OST pool quotas. Is that already happening? I see that there?s LUDOC-467 to add OST pool quotas to the manual.
+
+Thanks,
+Gian-Carlo DeFazio
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20200918/74b4acab/attachment.html>
+
+From green at whamcloud.com  Fri Sep 25 10:31:43 2020
+From: green at whamcloud.com (Oleg Drokin)
+Date: Fri, 25 Sep 2020 17:31:43 +0000
+Subject: [lustre-devel] New tag 2.13.56
+Message-ID: <7F35CD3A-3631-4DA2-B550-D9F512EC7BA5@whamcloud.com>
+
+Hello!
+
+   I just tagged Lustre development branch with 2.13.56 tag. The changelog is below
+
+Alex Zhuravlev (5):
+      LU-13676 tools: awk script to find unique backtraces
+      LU-13827 utils: ofd_access_batch to print top hot files
+      LU-13918 lfs: let lfs mirror extend to use prefer flag
+      LU-13921 utils: new output format for ofd_access_log_reader
+      LU-13013 osd: do not count credits for mapped blocks
+
+Alexander Boyko (2):
+      LU-13617 tests: check client deadlock selinux
+      LU-13608 out: don't return einprogress error
+
+Alexander Zarochentsev (3):
+      LU-13784 tests: allow QUOTA_TYPE to be set
+      LU-13809 mdc: fix lovea for replay
+      LU-13899 tgt: drop old epoch request
+
+Alexey Lyashkov (1):
+      LU-13645 ldlm: don't use a locks without l_ast_data
+
+Amir Shehata (2):
+      LU-13750 lnet: Fix peer add command
+      LU-10360 mgc: Use IR for client->MDS/OST connections
+
+Andreas Dilger (8):
+      LU-13127 ptlrpc: don't require CONFIG_CRYPTO_CRC32
+      LU-13687 llite: return -ENODATA if no default layout
+      LU-10934 tests: increase timeout for sanityn test_51b
+      LU-13127 ptlrpc: prefer crc32_le() over CryptoAPI
+      LU-13314 utils: fix lfs find time calculation margin
+      LU-12661 tests: skip sanity 817 for kernel 4.12+
+      LU-13909 tests: get lustre_inode_cache count from sysfs
+      LU-13019 tests: replace usleep in test scripts
+
+Andrew Perepechko (1):
+      LU-13935 ofd: object removal is not handled properly
+
+Artem Blagodarenko (1):
+      LU-13533 utils: ext4lazyinit should be disabled
+
+Chris Horn (13):
+      LU-13502 lnet: Add param to control response tracking
+      LU-13502 lnet: Ensure LNet pings and pushes are always tracked
+      LU-13712 lnet: Preferred NI logic breaks MR routing
+      LU-13734 lnet: Allow duplicate nets in ip2nets syntax
+      LU-13764 lnet: Clear lp_dc_error when discovery completes
+      LU-13782 lnet: Have LNet routers monitor the ni_fatal flag
+      LU-13736 lnet: Do not set preferred NI for MR peer
+      LU-13836 lnet: Display correct route aliveness
+      LU-13502 lnet: Conditionally attach rspt in LNetPut & LNetGet
+      LU-13735 lnet: Loosen restrictions on LNet Health params
+      LU-13896 lnet: Fix reference leak in lnet_select_pathway
+      LU-13502 lnet: Add response tracking param to lnetctl
+      LU-13605 lnet: Do not overwrite destination when routing
+
+Elena Gryaznova (2):
+      LU-13943 tests: load modules for list_nids getting
+      LU-13944 tests: add ability to set clients parameters
+
+Emoly Liu (1):
+      LU-13910 mdt: 0 for success in mdt_path_current()
+
+James Nunez (6):
+      LU-13773 tests: use TESTLOG_PREFIX in run_one_logged
+      LU-13773 tests: subscript failure propagation
+      LU-1538 tests: standardize test script init ? parallel-scale
+      LU-1538 tests: standardize test script init ? misc tests
+      LU-13960 tests: correct usage of _var variable
+      LU-1538 tests: standardize test script init ? full group
+
+James Simmons (6):
+      LU-13787 build: fix snmp / libcfs build order
+      LU-13740 build: update changelog for ubuntu kernel
+      LU-9325 fld: replace simple_strto* with kstr* functions
+      LU-11986 lnet: don't read debugfs lnet stats when shutting down
+      LU-6142 libcfs: remove last use of container_of0
+      LU-13740 ldiskfs: add Ubuntu 20.04 LTS support
+
+Jinshan Xiong (1):
+      LU-11518 ldlm: control lru_size for extent lock
+
+John L. Hammond (2):
+      LU-13945 utils: add includes for copy_file_range()
+      LU-13376 utils: add batching to ofd_access_log_reader
+
+Lai Siyao (8):
+      LU-13437 llite: pack parent FID in getattr
+      LU-13700 test: increase sanity 230o/230p wait time
+      LU-13791 sec: enable FS capabilities
+      LU-13481 test: run sanity 33h with more files
+      LU-13909 llite: prune invalid dentries
+      LU-12295 mdd: don't LBUG() if dir nlink is wrong
+      LU-13922 osd-ldiskfs: no need to add OI cache in readdir
+      LU-11631 obdclass: nlink is not set in struct obdo
+
+Lee Ochoa (1):
+      LU-13969 - Updates to lustre-release yaml.sh
+
+Li Dongyang (1):
+      LU-13187 osd-ldiskfs: don't enforce max dir size limit on IAM objects
+
+Mikhail Pershin (6):
+      LU-13759 dom: lock cancel to drop pages
+      LU-13759 test: make sanityn test_20 repeatable
+      LU-13599 mdt: add test for rs_lock limit exceeding
+      LU-13127 ptlrpc: avoid ISO C90 mixed declaration
+      LU-10810 osd: implement lseek method in OSD
+      LU-13763 osc: don't allow negative grants
+
+Minh Diep (1):
+      LU-13818 build: use libsnmp-dev instead of libsnmp30
+
+Mr NeilBrown (26):
+      LU-6142 socklnd: remove declarations of missing functions.
+      LU-6142 lnet: discard unused lnet_print_hdr()
+      LU-12678 lnet: clarify initialization of lpni_refcount
+      LU-12275 sec: use memchr_inv() to check if page is zero.
+      LU-6142 lustre: use init_wait(), not init_waitqueue_entry()
+      LU-6142 obdclass: make obd_psdev static
+      LU-6142 lov: make various lov_object.c function static.
+      LU-6142 lmv: make various functions static.
+      LU-9859 libcfs: rename CFS_TCD_TYPE_MAX to CFS_TCD_TYPE_CNT
+      LU-9859 libcfs: don't save journal_info in dumplog thread.
+      LU-11310 ldiskfs: Fix suse15/ext4-max-dir-size.patch
+      LU-8522 tests: improve slabinfo accuracy when slub is used.
+      LU-10428 lnet: call event handlers without res_lock
+      LU-12780 osd: use native kthreads for scrub.
+      LU-13903 tests: skip test_410 if modules weren't built
+      LU-4671 tests: give multiop a chance to exit.
+      LU-13359 quota: call rhashtable_lookup near params decl
+      LU-6142 lov: don't use inline for operations functions.
+      LU-6142 lustre: all rhashtable_params should be static.
+      LU-8066 osc: restore cur_dirty_grant_bytes
+      LU-13783 osc: handle removal of NR_UNSTABLE_NFS
+      LU-13904 tests: don't assume echo_client is a module.
+      LU-13902 config: add test for /usr/include/libiberty/
+      LU-6142 lov: discard unused lov_dump_lmm* functions
+      LU-6142 lov: guard against class_exp2obd() returning NULL.
+      LU-6142 lustre: don't take spinlock to read a 'long'.
+
+Nathaniel Clark (1):
+      LU-13819 build: Update ZFS version to 0.8.4
+
+Nikitas Angelinas (3):
+      LU-13688 tests: remove duplicate HSM functions
+      LU-13688 hsm: handle in-tree executed copytools correctly
+      LU-13151 mdt: add parent FID to Changelog recordss
+
+Oleg Drokin (2):
+      LU-13931 Revert "LU-13688 hsm: handle in-tree executed copytools correctly"
+      New tag 2.13.56
+
+Patrick Farrell (1):
+      LU-11518 osc: Do ELC on locks with no OSC object
+
+Sebastien Buisson (5):
+      LU-12275 sec: O_DIRECT for encrypted file
+      LU-12275 sec: restrict fallocate on encrypted files
+      LU-12275 sec: ldiskfs not aware of client-side encryption
+      LU-12275 sec: encryption with different client PAGE_SIZE
+      LU-12275 sec: verify dir is empty when setting enc policy
+
+Sergey Cheremencev (6):
+      LU-13359 quota: make used for pool correct
+      LU-13686 utils: pool_add/remove error code fix
+      LU-13810 tests: OST Pool Quotas with wide striping
+      LU-12397 osp: always set opd_new_connection
+      LU-13840 utils: --pool instead of -o with lfs setquota
+      LU-13967 quota: change warning to cdebug
+
+Sergey Gorenko (1):
+      LU-13761 o2ib: Fix compilation with MOFED 5.1
+
+Serguei Smirnov (2):
+      LU-13790 socklnd: NID to interface mapping issues
+      LU-12233 lnet: deadlock on LNet shutdown
+
+Shaun Tancheff (3):
+      LU-13742 llite: do not bypass selinux xattr handling
+      LU-13940 llite: it_lock_bits should be bit-wise tested
+      LU-13941 test: Restrict create_count to valid range
+
+Vikentsi Lapa (1):
+      LU-13718 tests: add LU numbers to skipped tests
+
+Vitaly Fertman (5):
+      LU-13645 ldlm: re-process ldlm lock cleanup
+      LU-11518 ldlm: lru code cleanup
+      LU-11518 ldlm: cancel LRU improvement
+      LU-11518 ldlm: pool fixes
+      LU-11518 ldlm: pool recalc forceful call
+
+Wang Shilong (5):
+      LU-13775 target: fix memory copy in tgt_pages2shortio()
+      LU-13835 llite: reuse same cl_dio_aio for one IO
+      LU-13846 llite: move iov iter forward by ourself
+      LU-13733 llite: report client stats sumsq
+      LU-13900 clio: don't call aio_complete() in lustre upon errors
+
+Yang Sheng (1):
+      LU-13915 ldiskfs: Avoid atomic operation while bitmap prefetch
+
+From maixuchang at nobleprog.cn  Sat Sep 26 23:25:16 2020
+From: maixuchang at nobleprog.cn (=?utf-8?B?TWFpeHVjaGFuZw==?=)
+Date: Sun, 27 Sep 2020 14:25:16 +0800
+Subject: [lustre-devel] Does lustre support reflink?
+Message-ID: <tencent_30F86FF11DA69E7061A0F031@qq.com>
+
+Hey? Guys
+
+
+Does lustre support reflink? Is it under development?
+
+
+best regards
+Connor
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20200927/57bb5186/attachment.html>
+

@@ -1,0 +1,4007 @@
+From Peter.Braam at Sun.COM  Mon May  5 07:41:19 2008
+From: Peter.Braam at Sun.COM (Peter Braam)
+Date: Mon, 05 May 2008 08:41:19 -0600
+Subject: [Lustre-devel] Replication
+Message-ID: <C44478AF.3F60%peter.braam@sun.com>
+
+Hi Nathan -
+
+I talked through the design with Nikita.  After he had understood our
+constraints and I had understood his issues it all narrowed down to one
+important improvement that Nikita suggests:  we must get a fast way to
+compute the pathname of a FID.  The scanning and searching I suggested
+without an index is not tenable.
+
+We had a couple of suggestions, such as storing parent fid and a name in the
+EA, or storing similar information in a large directory file.
+
+Can you connect with Nikita and do this?
+
+Peter
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20080505/23025d10/attachment.htm>
+
+From Peter.Braam at Sun.COM  Tue May  6 22:57:33 2008
+From: Peter.Braam at Sun.COM (Peter Braam)
+Date: Tue, 06 May 2008 23:57:33 -0600
+Subject: [Lustre-devel] Replication
+In-Reply-To: <482098C9.4020403@sun.com>
+Message-ID: <C446A0ED.405C%peter.braam@sun.com>
+
+On 5/6/08 11:43 AM, "Nathaniel Rutman" <Nathan.Rutman at Sun.COM> wrote:
+
+> Peter Braam wrote:
+>> Hi Nathan -
+>> 
+>> I talked through the design with Nikita.  After he had understood our
+>> constraints and I had understood his issues it all narrowed down to
+>> one important improvement that Nikita suggests:  we must get a fast
+>> way to compute the pathname of a FID.  The scanning and searching I
+>> suggested without an index is not tenable.
+>> 
+>> We had a couple of suggestions, such as storing parent fid and a name
+>> in the EA, or storing similar information in a large directory file.
+>> 
+>> Can you connect with Nikita and do this?
+> 
+> We talked yesterday afternoon.
+> Nikita has three concerns:
+> 
+> 1. Global lock on namespace during pathname reconstruction.
+> I think we can eliminate this the following way:
+> a. lookup full path from fid, parent fid (remember the list of fids for
+> the entire path also)
+> b. lookup last transno
+> c. verify traversing down the full path name results in the same branch
+> and leaf fids all the way back down
+>  i. if they don't match, repeat from a
+>  ii. if they do match, we can backtrack starting from the transno in b
+> to regenerate the original name
+> 
+> 2. Directory name lookup given the parent fid - this may be inefficient
+> if we have to read the parent directory in order to get the name (parent
+> object is not likely to be cached at lookup time).
+> 
+> 3. Someone deletes one of the parents of a hardlinked file.  If we only
+> store one parent, there's no way to regenerate a pathname if that parent
+> is the one that gets removed.
+> 
+> For 2 and 3, we could store the directory name for each directory in an
+> EA, and all the fids for all the parents in some other manner.
+> But it seems to make more sense at this point to put all this
+> information (fid, name, parent list) in a database file stored on the
+> MDT.  Then we just look through this database to generate our full path
+> information; no need to lookup info in the file objects or EAs.
+> Generating this database should be no more time consuming than writing
+> the changelogs themselves, assuming a reasonable database structure like
+> IAM.
+> 
+
+Yes I agree with all of this.
+
+Peter
+
+
+
+
+From Nikita.Danilov at Sun.COM  Thu May  8 07:48:01 2008
+From: Nikita.Danilov at Sun.COM (Nikita Danilov)
+Date: Thu, 08 May 2008 18:48:01 +0400
+Subject: [Lustre-devel] Replication
+In-Reply-To: <C446A0ED.405C%peter.braam@sun.com>
+References: <482098C9.4020403@sun.com> <C446A0ED.405C%peter.braam@sun.com>
+Message-ID: <18467.4769.687089.205938@gargle.gargle.HOWL>
+
+Peter Braam writes:
+ > On 5/6/08 11:43 AM, "Nathaniel Rutman" <Nathan.Rutman at Sun.COM> wrote:
+
+[...]
+
+ > > 
+ > > For 2 and 3, we could store the directory name for each directory in an
+ > > EA, and all the fids for all the parents in some other manner.
+ > > But it seems to make more sense at this point to put all this
+ > > information (fid, name, parent list) in a database file stored on the
+ > > MDT.  Then we just look through this database to generate our full path
+
+One advantage EA has over global data-base is that the former is more
+resilient against file system corruption. This becomes more important if
+we ever plan to use (parent-fid, name) information for things like fsck.
+
+ > > information; no need to lookup info in the file objects or EAs.
+ > > Generating this database should be no more time consuming than writing
+ > > the changelogs themselves, assuming a reasonable database structure like
+ > > IAM.
+
+On a lower level note, I think that changelogs and parent-database are
+better to be implemented as a new layer separate from mdd:
+
+    - mdd code is already complicated enough,
+
+    - separate layer can be inserted into stack optionally, avoiding
+    run-time cost if change-logs are not needed (currently there is no
+    way to insert a layer after initial configuration completes though).
+
+ > > 
+ > 
+ > Yes I agree with all of this.
+ > 
+ > Peter
+ > 
+
+Nikita.
+
+
+From Peter.Braam at Sun.COM  Thu May  8 07:57:04 2008
+From: Peter.Braam at Sun.COM (Peter Braam)
+Date: Thu, 08 May 2008 08:57:04 -0600
+Subject: [Lustre-devel] Replication
+In-Reply-To: <18467.4769.687089.205938@gargle.gargle.HOWL>
+Message-ID: <C44870E0.410B%peter.braam@sun.com>
+
+
+
+
+On 5/8/08 8:48 AM, "Nikita Danilov" <Nikita.Danilov at Sun.COM> wrote:
+
+> Peter Braam writes:
+>> On 5/6/08 11:43 AM, "Nathaniel Rutman" <Nathan.Rutman at Sun.COM> wrote:
+> 
+> [...]
+> 
+>>> 
+>>> For 2 and 3, we could store the directory name for each directory in an
+>>> EA, and all the fids for all the parents in some other manner.
+>>> But it seems to make more sense at this point to put all this
+>>> information (fid, name, parent list) in a database file stored on the
+>>> MDT.  Then we just look through this database to generate our full path
+> 
+> One advantage EA has over global data-base is that the former is more
+> resilient against file system corruption. This becomes more important if
+> we ever plan to use (parent-fid, name) information for things like fsck.
+> 
+>>> information; no need to lookup info in the file objects or EAs.
+>>> Generating this database should be no more time consuming than writing
+>>> the changelogs themselves, assuming a reasonable database structure like
+>>> IAM.
+> 
+> On a lower level note, I think that changelogs and parent-database are
+> better to be implemented as a new layer separate from mdd:
+> 
+>     - mdd code is already complicated enough,
+> 
+>     - separate layer can be inserted into stack optionally, avoiding
+>     run-time cost if change-logs are not needed (currently there is no
+>     way to insert a layer after initial configuration completes though).
+
+Yes, find a good place.
+
+Just remember that things like pNFS integrated with the Lustre servers also
+need to replicate.  In fact having this log purely at the DMU / ZFS level
+would be a valuable feature - there are no good replication solutions even
+for laptops today!
+
+Peter
+
+
+> 
+>>> 
+>> 
+>> Yes I agree with all of this.
+>> 
+>> Peter
+>> 
+> 
+> Nikita.
+
+
+
+
+From Peter.Braam at Sun.COM  Thu May  8 21:55:56 2008
+From: Peter.Braam at Sun.COM (Peter Braam)
+Date: Thu, 08 May 2008 22:55:56 -0600
+Subject: [Lustre-devel] Wide area use of Lustre and client caches
+Message-ID: <C449357C.4160%peter.braam@sun.com>
+
+During the LUG I was approached by a customer who wants to use a Lustre file
+system at the far end of a WAN link.  Since the situation may be of general
+interest, I thought I would post a short report of the discussion here.
+
+His use pattern was interesting ? a number of Windows clients must be
+browsing files stored in Lustre in this remote location.  It was expected
+that the files would be fairly large, would be viewed by multiple clients,
+and that few or no modifications would be made.
+
+After some discussion we proposed a solution that involved a deployment as
+follows:
+
+1. A single Lustre client with lots of RAM.  The settings on the client
+would be (1) that the memory available for caching by lustre is large (2)
+that the number of locks that can be held by this client is fairly large (3)
+that this client uses the ?open cache?.
+2. A samba server on this Lustre client.
+
+With the settings above, we can expect that many of the files can be cached
+in the Lustre client, hence after the initial read, I/O would be local in
+the remote site.  With the open file cache enabled, even the open and close
+traffic will not go to the servers, but can be handled by the client.   We
+think that this will lead to a very good solution, that can work today.
+
+A refinement is possible, that requires some development.  There is a
+feature in the Linux kernel to use a disk partition as a cache for a file
+system ? it is called cachefs.   This requires a few hooks in Lustre to
+store chunks of files that are transferred to the client into this cache,
+and cache invalidation calls to remove them.  It allows us to achieve the
+same performance as with the solution above, except that the disk will be a
+bit slower than memory, but it can also be much larger.
+
+We are eagerly awaiting the results of testing this configuration!
+
+- peter -
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20080508/480a7bd2/attachment.htm>
+
+From Brian.Murrell at Sun.COM  Fri May  9 07:25:10 2008
+From: Brian.Murrell at Sun.COM (Brian J. Murrell)
+Date: Fri, 09 May 2008 10:25:10 -0400
+Subject: [Lustre-devel] Wide area use of Lustre and client caches
+In-Reply-To: <C449357C.4160%peter.braam@sun.com>
+References: <C449357C.4160%peter.braam@sun.com>
+Message-ID: <1210343110.23307.203.camel@pc.ilinx>
+
+On Thu, 2008-05-08 at 22:55 -0600, Peter Braam wrote:
+> 
+> His use pattern was interesting ? a number of Windows clients must be
+> browsing files stored in Lustre in this remote location.  It was
+> expected that the files would be fairly large, would be viewed by
+> multiple clients, and that few or no modifications would be made.
+
+Even still it's useful during implementation to think of the use case of
+that remote client having read a file and caching and holding a read
+lock on that file, say 1GB in size, and then another client wanting to
+update say, 1KB in the middle of the file.  It would be beneficial for
+that 1GB file to have a small (but still practical) stripe size so that
+the amount of cache that needs to be thrown away to accommodate the
+write is relatively small.
+
+b.
+
+-------------- next part --------------
+A non-text attachment was scrubbed...
+Name: not available
+Type: application/pgp-signature
+Size: 189 bytes
+Desc: This is a digitally signed message part
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20080509/554406bd/attachment.pgp>
+
+From Peter.Braam at Sun.COM  Fri May  9 08:08:05 2008
+From: Peter.Braam at Sun.COM (Peter Braam)
+Date: Fri, 09 May 2008 09:08:05 -0600
+Subject: [Lustre-devel] Wide area use of Lustre and client caches
+In-Reply-To: <1210343110.23307.203.camel@pc.ilinx>
+Message-ID: <C449C4F5.418F%peter.braam@sun.com>
+
+Nono - striping should only be used to get more bandwidth from servers.  The
+correct solution to the problem you point out is a lock conversion, planned
+long ago, still far away maybe (Nikita?).
+
+Peter
+
+
+On 5/9/08 8:25 AM, "Brian J. Murrell" <Brian.Murrell at Sun.COM> wrote:
+
+> On Thu, 2008-05-08 at 22:55 -0600, Peter Braam wrote:
+>> 
+>> His use pattern was interesting ? a number of Windows clients must be
+>> browsing files stored in Lustre in this remote location.  It was
+>> expected that the files would be fairly large, would be viewed by
+>> multiple clients, and that few or no modifications would be made.
+> 
+> Even still it's useful during implementation to think of the use case of
+> that remote client having read a file and caching and holding a read
+> lock on that file, say 1GB in size, and then another client wanting to
+> update say, 1KB in the middle of the file.  It would be beneficial for
+> that 1GB file to have a small (but still practical) stripe size so that
+> the amount of cache that needs to be thrown away to accommodate the
+> write is relatively small.
+> 
+> b.
+> 
+> _______________________________________________
+> Lustre-devel mailing list
+> Lustre-devel at lists.lustre.org
+> http://lists.lustre.org/mailman/listinfo/lustre-devel
+
+
+
+
+From Brian.Murrell at Sun.COM  Fri May  9 10:08:22 2008
+From: Brian.Murrell at Sun.COM (Brian J. Murrell)
+Date: Fri, 09 May 2008 13:08:22 -0400
+Subject: [Lustre-devel] Wide area use of Lustre and client caches
+In-Reply-To: <C449C4F5.418F%peter.braam@sun.com>
+References: <C449C4F5.418F%peter.braam@sun.com>
+Message-ID: <1210352902.23307.242.camel@pc.ilinx>
+
+On Fri, 2008-05-09 at 09:08 -0600, Peter Braam wrote:
+> Nono - striping should only be used to get more bandwidth from servers.  The
+> correct solution to the problem you point out is a lock conversion,
+
+Indeed, I have heard that term being used and figured that that is what
+it was all about, however...
+
+> planned
+> long ago, still far away maybe (Nikita?).
+
+Given that it's not yet available and won't be for some time, isn't
+breaking a file up into many objects via striping a sufficient
+alternative to the problem?
+
+Are there other problems caused by striping a file (that technically
+doesn't need more bandwidth) that outweigh the benefits of not having to
+toss so much cache away when a file is written to (i.e. assuming the
+cost of reading the file is high such as it would be on a WAN link)?
+
+b.
+
+-------------- next part --------------
+A non-text attachment was scrubbed...
+Name: not available
+Type: application/pgp-signature
+Size: 189 bytes
+Desc: This is a digitally signed message part
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20080509/2051fccf/attachment.pgp>
+
+From Nikita.Danilov at Sun.COM  Fri May  9 11:17:28 2008
+From: Nikita.Danilov at Sun.COM (Nikita Danilov)
+Date: Fri, 09 May 2008 22:17:28 +0400
+Subject: [Lustre-devel] Wide area use of Lustre and client caches
+In-Reply-To: <C449C4F5.418F%peter.braam@sun.com>
+References: <1210343110.23307.203.camel@pc.ilinx>
+	<C449C4F5.418F%peter.braam@sun.com>
+Message-ID: <18468.38200.651406.598372@gargle.gargle.HOWL>
+
+Peter Braam writes:
+ > Nono - striping should only be used to get more bandwidth from servers.  The
+ > correct solution to the problem you point out is a lock conversion, planned
+ > long ago, still far away maybe (Nikita?).
+
+Yes, it's far away. Interestingly, similar lock "conversion" for
+meta-data locks is required for write-back cache, when a sub-tree lock
+is split into a set of sub-sub-tree sub-locks.
+
+ > 
+ > Peter
+
+Nikita.
+
+
+From adilger at sun.com  Fri May  9 16:01:15 2008
+From: adilger at sun.com (Andreas Dilger)
+Date: Fri, 09 May 2008 17:01:15 -0600
+Subject: [Lustre-devel] Wide area use of Lustre and client caches
+In-Reply-To: <C449C4F5.418F%peter.braam@sun.com>
+References: <1210343110.23307.203.camel@pc.ilinx>
+	<C449C4F5.418F%peter.braam@sun.com>
+Message-ID: <20080509230115.GO3627@webber.adilger.int>
+
+On May 09, 2008  09:08 -0600, Peter J. Braam wrote:
+> Nono - striping should only be used to get more bandwidth from servers.  The
+> correct solution to the problem you point out is a lock conversion, planned
+> long ago, still far away maybe (Nikita?).
+
+This task is something that Oleg has been working on occasionally,
+I think there are patches around but fairly old (though not as bad
+as might be expected, because LDLM code changes relatively slowly).
+
+> On 5/9/08 8:25 AM, "Brian J. Murrell" <Brian.Murrell at Sun.COM> wrote:
+> > Even still it's useful during implementation to think of the use case of
+> > that remote client having read a file and caching and holding a read
+> > lock on that file, say 1GB in size, and then another client wanting to
+> > update say, 1KB in the middle of the file.  It would be beneficial for
+> > that 1GB file to have a small (but still practical) stripe size so that
+> > the amount of cache that needs to be thrown away to accommodate the
+> > write is relatively small.
+
+Having multiple stripes would save invalidation of (nstripes - 1) / nstripes
+of the file, but in general the "update in the middle" paradigm is very
+rare in real life, so in practise I don't think this will help much.
+
+Even the "add a byte in the middle of a text file" case always causes
+the whole file to be rewritten because of backing up the old file.
+
+The only common applications I'm aware of that do partial-file read/write
+operations are databases and peer-to-peer file sharing.
+
+Cheers, Andreas
+--
+Andreas Dilger
+Sr. Staff Engineer, Lustre Group
+Sun Microsystems of Canada, Inc.
+
+
+
+From Peter.Braam at Sun.COM  Tue May 20 15:10:07 2008
+From: Peter.Braam at Sun.COM (Peter Braam)
+Date: Tue, 20 May 2008 16:10:07 -0600
+Subject: [Lustre-devel] Replication for NRL/NGA
+In-Reply-To: <483211F2.5090305@sun.com>
+Message-ID: <C458A85F.469E%peter.braam@sun.com>
+
+>
+> ps: Nathan, to build the changelog ZFS exploits a tree structure for
+> objects, directories and blocks ? the tree structure allows the file
+> system to be searched fast for changes (log based). A missing element
+> is a fast object to path lookup. To get an approximation of the
+> metadata changelog, ZFS would use the difference on changed
+> directories at the beginning and ending snapshot (the tree structure
+> will help you to find pages that have seen insertions and removals ?
+> this function would be called zapdiff).
+
+Hi Nathan -
+
+> At first glance I am interpreting this very similar to the "zfs send"
+> output stream, but the format of the stream would be
+> 1. a fixed user API
+
+Hmm, don't understand this part.
+
+> 2. include full path names (or enough info to generate full path names)
+> The stream would then be passed to a userland replicator (our current
+> replication plan, and not "zfs recv")
+
+Yes, including policy processing, like only syncing certain subtrees.
+
+> 
+> Is that about right? So we're just moving the MDT changelog generating
+> part into ZFS
+
+Yup, but careful, this is a changeset (not an ordered log) but with
+snapshots and you can change it into some kind of log that performs the same
+changes.
+
+, and assuming data changes are reflected in mtime updates
+> on the MDT's znodes (i.e. we still are only paying attention to the
+> MDTs, and not the OSTs).
+
+We use the same mechanism to make an OST change set.
+
+> 
+> And for the efficient pathname generation, the plan would still be a
+> (fid,name,parent list) database on the MDT, or something new / ZFS
+> specific? I haven't really dug into ZFS much, but I assume we could go
+> back to the "store parent znode in file EAs, store dirname in dir EAs" idea.
+> The snapshots give us a way to avoid the dynamic "current path" issue,
+> so this would be a little easier.
+
+Jeff Bonwick has extremely clear ideas about how he wants to do this (email
+him and cc me, he'll explain, should he miss this line here).
+
+
+> 
+> But a big question is are we delivering zfs-based Lustre this fall? Not
+> that I know anything about it, but aren't there licence problems with
+> zfs and Linux?
+
+My proposal is that we demo ZFS replication first and then put it in Lustre
+(and pNFS etc).
+
+BTW, we discussed other exciting things, namely that ZFS can just do the
+rollback for CMD and that it can do metadata only snapshots to avoid
+consuming lots of free space with the snapshotting of data, and Jeff even
+came up with an idea to not snapshot at all but retain a few transactions to
+roll back to.
+
+
+- Peter -
+
+
+
+
+From Nathan.Rutman at Sun.COM  Tue May 20 16:47:11 2008
+From: Nathan.Rutman at Sun.COM (Nathaniel Rutman)
+Date: Tue, 20 May 2008 16:47:11 -0700
+Subject: [Lustre-devel] Replication for NRL/NGA
+In-Reply-To: <C458A85F.469E%peter.braam@sun.com>
+References: <C458A85F.469E%peter.braam@sun.com>
+Message-ID: <483362FF.3050504@sun.com>
+
+Peter Braam wrote:
+>> ps: Nathan, to build the changelog ZFS exploits a tree structure for
+>> objects, directories and blocks ? the tree structure allows the file
+>> system to be searched fast for changes (log based). A missing element
+>> is a fast object to path lookup. To get an approximation of the
+>> metadata changelog, ZFS would use the difference on changed
+>> directories at the beginning and ending snapshot (the tree structure
+>> will help you to find pages that have seen insertions and removals ?
+>> this function would be called zapdiff).
+>>     
+>
+> Hi Nathan -
+>
+>   
+>> At first glance I am interpreting this very similar to the "zfs send"
+>> output stream, but the format of the stream would be
+>> 1. a fixed user API
+>>     
+>
+> Hmm, don't understand this part.
+>   
+I meant a stream that a user can read/interpret, as opposed to a closed 
+proprietary form that only "zfs receive" can understand.
+>   
+>> 2. include full path names (or enough info to generate full path names)
+>> The stream would then be passed to a userland replicator (our current
+>> replication plan, and not "zfs recv")
+>>     
+>
+> Yes, including policy processing, like only syncing certain subtrees.
+>
+>   
+>> Is that about right? So we're just moving the MDT changelog generating
+>> part into ZFS
+>>     
+>
+> Yup, but careful, this is a changeset (not an ordered log) but with
+> snapshots and you can change it into some kind of log that performs the same
+> changes.
+>   
+Right, it is a set of deltas between two snapshots, not a series of 
+steps from A to B.  Once again, this makes things easier for us, because 
+we don't care about intermediary states; we can just look up "original 
+filename" and "final filename" for all changed objects.
+> , and assuming data changes are reflected in mtime updates
+>   
+>> on the MDT's znodes (i.e. we still are only paying attention to the
+>> MDTs, and not the OSTs).
+>>     
+>
+> We use the same mechanism to make an OST change set.
+>   
+I'm not sure we ever got this straight between us: I was (am) planning 
+on using the SOM feature to give me solid mtime data on the MDT, for any 
+OST writes.  Thus I see no need to involve changelogs on the OSTs at 
+all.  I just do an efficient copy (rsync) of my modified files list 
+(from the MDT), and all is good.  (Yes, we could do a more efficient 
+copy of only changed data blocks with the OST data, but is this worth 
+the extra synchronization effort?)
+>   
+>> And for the efficient pathname generation, the plan would still be a
+>> (fid,name,parent list) database on the MDT, or something new / ZFS
+>> specific? I haven't really dug into ZFS much, but I assume we could go
+>> back to the "store parent znode in file EAs, store dirname in dir EAs" idea.
+>> The snapshots give us a way to avoid the dynamic "current path" issue,
+>> so this would be a little easier.
+>>     
+>
+> Jeff Bonwick has extremely clear ideas about how he wants to do this (email
+> him and cc me, he'll explain, should he miss this line here).
+>   
+looking forward to it.
+>
+>   
+>> But a big question is are we delivering zfs-based Lustre this fall? Not
+>> that I know anything about it, but aren't there licence problems with
+>> zfs and Linux?
+>>     
+>
+> My proposal is that we demo ZFS replication first and then put it in Lustre
+> (and pNFS etc).
+>   
+I'm going to let Bryon sell that bridge.
+> BTW, we discussed other exciting things, namely that ZFS can just do the
+> rollback for CMD and that it can do metadata only snapshots to avoid
+> consuming lots of free space with the snapshotting of data, 
+although presumably we're doing small incremental snapshots and erasing 
+them when done; shouldn't be too big in general.  I suppose we can 
+always come up with a pathologic case.
+> and Jeff even
+> came up with an idea to not snapshot at all but retain a few transactions to
+> roll back to.
+>   
+
+
+
+
+From Peter.Braam at Sun.COM  Tue May 20 17:23:56 2008
+From: Peter.Braam at Sun.COM (Peter Braam)
+Date: Wed, 21 May 2008 08:23:56 +0800
+Subject: [Lustre-devel] Replication for NRL/NGA
+In-Reply-To: <483362FF.3050504@sun.com>
+Message-ID: <C4598C9C.46DA%peter.braam@sun.com>
+
+
+
+
+On 5/20/08 5:47 PM, "Nathaniel Rutman" <Nathan.Rutman at Sun.COM> wrote:
+
+> Peter Braam wrote:
+>>> ps: Nathan, to build the changelog ZFS exploits a tree structure for
+>>> objects, directories and blocks ? the tree structure allows the file
+>>> system to be searched fast for changes (log based). A missing element
+>>> is a fast object to path lookup. To get an approximation of the
+>>> metadata changelog, ZFS would use the difference on changed
+>>> directories at the beginning and ending snapshot (the tree structure
+>>> will help you to find pages that have seen insertions and removals ?
+>>> this function would be called zapdiff).
+>>>     
+>> 
+>> Hi Nathan -
+>> 
+>>   
+>>> At first glance I am interpreting this very similar to the "zfs send"
+>>> output stream, but the format of the stream would be
+>>> 1. a fixed user API
+>>>     
+>> 
+>> Hmm, don't understand this part.
+>>   
+> I meant a stream that a user can read/interpret, as opposed to a closed
+> proprietary form that only "zfs receive" can understand.
+
+Ah, but that's merely a matter of adding API.  And while you are at it, you
+might as well ensure that the stream is rich enough for the search
+requirements we are discussing elsewhere.
+
+>>   
+>>> 2. include full path names (or enough info to generate full path names)
+>>> The stream would then be passed to a userland replicator (our current
+>>> replication plan, and not "zfs recv")
+>>>     
+>> 
+>> Yes, including policy processing, like only syncing certain subtrees.
+>> 
+>>   
+>>> Is that about right? So we're just moving the MDT changelog generating
+>>> part into ZFS
+>>>     
+>> 
+>> Yup, but careful, this is a changeset (not an ordered log) but with
+>> snapshots and you can change it into some kind of log that performs the same
+>> changes.
+>>   
+> Right, it is a set of deltas between two snapshots, not a series of
+> steps from A to B.  Once again, this makes things easier for us, because
+> we don't care about intermediary states; we can just look up "original
+> filename" and "final filename" for all changed objects.
+
+Hmm.  You need to detect renames from the feed, and order these right to
+avoid clobbering files?
+
+>> , and assuming data changes are reflected in mtime updates
+>>   
+>>> on the MDT's znodes (i.e. we still are only paying attention to the
+>>> MDTs, and not the OSTs).
+>>>     
+>> 
+>> We use the same mechanism to make an OST change set.
+>>   
+> I'm not sure we ever got this straight between us: I was (am) planning
+> on using the SOM feature to give me solid mtime data on the MDT, for any
+> OST writes.
+
+No.  We are going to use parallel data movements using all the OSS logs
+independently to avoid a bottleneck that you would create by looking at the
+MDS log.
+
+Given that the ZFS log has the exact blocks in objects that need to be
+moved, we would be silly not to exploit that immediately.
+
+Peter
+
+
+>  Thus I see no need to involve changelogs on the OSTs at
+> all.  I just do an efficient copy (rsync) of my modified files list
+> (from the MDT), and all is good.  (Yes, we could do a more efficient
+> copy of only changed data blocks with the OST data, but is this worth
+> the extra synchronization effort?)
+
+
+
+>>   
+>>> And for the efficient pathname generation, the plan would still be a
+>>> (fid,name,parent list) database on the MDT, or something new / ZFS
+>>> specific? I haven't really dug into ZFS much, but I assume we could go
+>>> back to the "store parent znode in file EAs, store dirname in dir EAs" idea.
+>>> The snapshots give us a way to avoid the dynamic "current path" issue,
+>>> so this would be a little easier.
+>>>     
+>> 
+>> Jeff Bonwick has extremely clear ideas about how he wants to do this (email
+>> him and cc me, he'll explain, should he miss this line here).
+>>   
+> looking forward to it.
+>> 
+>>   
+>>> But a big question is are we delivering zfs-based Lustre this fall? Not
+>>> that I know anything about it, but aren't there licence problems with
+>>> zfs and Linux?
+>>>     
+>> 
+>> My proposal is that we demo ZFS replication first and then put it in Lustre
+>> (and pNFS etc).
+>>   
+> I'm going to let Bryon sell that bridge.
+>> BTW, we discussed other exciting things, namely that ZFS can just do the
+>> rollback for CMD and that it can do metadata only snapshots to avoid
+>> consuming lots of free space with the snapshotting of data,
+> although presumably we're doing small incremental snapshots and erasing
+> them when done; shouldn't be too big in general.  I suppose we can
+> always come up with a pathologic case.
+>> and Jeff even
+>> came up with an idea to not snapshot at all but retain a few transactions to
+>> roll back to.
+>>   
+> 
+> 
+> _______________________________________________
+> Lustre-devel mailing list
+> Lustre-devel at lists.lustre.org
+> http://lists.lustre.org/mailman/listinfo/lustre-devel
+
+
+
+
+From Peter.Braam at Sun.COM  Mon May 26 16:28:10 2008
+From: Peter.Braam at Sun.COM (Peter Braam)
+Date: Tue, 27 May 2008 07:28:10 +0800
+Subject: [Lustre-devel] Moving forward on Quotas
+In-Reply-To: <18490.63940.619731.992500@gargle.gargle.HOWL>
+Message-ID: <C461688A.5460%peter.braam@sun.com>
+
+[please send original message to Lustre devel also]
+
+Hi 
+
+
+On 5/27/08 1:56 AM, "Nikita Danilov" <Nikita.Danilov at Sun.COM> wrote:
+
+> Johann Lombardi writes:
+>> Hi all,
+>> 
+> 
+> [...]
+> 
+>> 
+>> * item #2: Supporting quotas with CMD
+>> 
+>> The quota master is the only one having a global overview of the quota usages
+>> and limits. On b1_6, the quota master is the MDS and the quota slaves are the
+>> OSSs. The code is designed in theory to support several MDT slaves too, but
+>> some
+>> shortcuts have been taken and some additional work is needed to support an
+>> architecture with 1 quota master (one of the MDT) and several OSTs/MDTs
+>> slaves.
+> 
+> From reading quota hld it is not clear that master has necessary be an
+> mdt server. Given that ost's are going to have mdt-like recovery in 2.0
+> it seems reasonable to hash uid/gid across all osts, that act as masters
+> (additionally, it seems logical to handle disk block allocation on ost's
+> rather than mdt's). Or am I missing something here?
+
+Yes - and this being possible was part of the plan originally.
+
+
+> 
+>> 
+>> * item #3: Supporting quotas with DMU
+>> 
+>> ZFS does not support standard Unix quotas. Instead, it relies on fileset
+>> quotas.
+>> This is a problem because Lustre quotas are set on a per-uid/gid basis.
+>> To support ZFS, we are going to have to put OST objects in a dataset matching
+>> a
+>> dataset on the MDS.
+>> We also have to decide what kind of quota interface we want to have at the
+>> lustre level (do we still set quotas on uid/gid or do we switch to the
+>> dataset
+>> framework?). Things get more complicated if we want to support a MDS using
+>> ldiskfs and OSSs using ZFS (do we have to support this?).
+>> IMHO, in the future, Lustre will want to take advantage of the ZFS space
+>> reservation feature and since this also relies on dataset, I think we should
+>> adopt the ZFS quota framework at the lustre level too.
+>> That being said, my understanding of ZFS quotas is limited to this webpage:
+>> http://docs.huihoo.com/opensolaris/solaris-zfs-administration-guide/html/ch05
+>> s06.html
+>> and I haven't had the time to dig further.
+> 
+> As per discussion with ZFS team, they are going to implement per-user
+> and per-group block quotas in ZFS (inode quotas make little sense for
+> ZFS).
+
+Why do they not need file quota - what if someone wants to control file
+count?
+ 
+> Going aside, if I were designing quota from the scratch right now, I
+> would implement it completely inside of Lustre. All that is needed for
+> such an implementation is a set of call-backs that local file-system
+> invokes when it allocates/frees blocks (or inodes) for a given
+> object. Lustre would use these call-backs to transactionally update
+> local quota in its own format. That would save us a lot of hassle we
+> have dealing with the changing kernel quota interfaces, uid re-mappings,
+> and subtle differences between quota implementations on a different file
+> systems.
+
+======> IMPORTANT: get in touch with Jeff Bonwick now, let's get quota
+implemented in this way in DMU then.
+ 
+> Additionally, this is better aligned with the way we handle access
+> control: MDT implements access control checks completely within MDD,
+> without relying on underlying file system.
+> 
+>> 
+> 
+> [...]
+> 
+>> 
+>> * issue #2: Quota accuracy
+>> 
+>> When a slave runs out of its local quota, it sends an acquire request to the
+>> quota master. As I said earlier, the quota master is the only one having a
+>> global overview of what has been granted to slaves. If the master can satisfy
+>> the request, it grants a qunit (can be a number of blocks or inodes) to the
+>> slave. The problem is that an OST can return "quota exceeded" (=EDQUOT)
+>> whereas
+>> another OST is still having quotas. There is currently no callback to claim
+>> back the quota space that has been granted to a slave.
+
+Hmm - the slave should release quota.  Arguing about the last qunit of quota
+is pointless, we are NOT interested in quota that are absurdly small I
+think, they would interfere with performance and the whole architecture of
+quota uses qunits to leave performance unaffected.
+
+> 
+> What strikes me in this description is how this is similar to DLM. It
+> almost looks like quota can be easily implemented as a special type of
+> lock, and DLM conflict resolution mechanism with cancellation AST's can
+> be used to reclaim quota.
+
+The slave should release.  That doesn't address the issue of all OST's
+consistently reporting EDQUOT.  However, doing that in a persistent way has
+its own troubles maybe, namely, how would that be released and recovery
+after power off on servers.  If not persistent, it would be pointless
+because after server reboots, since OSS's with space left would still give
+the wrong answer.
+
+Peter
+
+
+> 
+>> 
+> 
+> [...]
+> 
+>> 
+>> Cheers,
+>> Johann
+> 
+> Nikita.
+
+
+
+
+From Peter.Braam at Sun.COM  Mon May 26 16:28:54 2008
+From: Peter.Braam at Sun.COM (Peter Braam)
+Date: Tue, 27 May 2008 07:28:54 +0800
+Subject: [Lustre-devel] FW: Moving forward on Quotas
+In-Reply-To: <20080526113530.GA3582@lore>
+Message-ID: <C46168B8.5461%peter.braam@sun.com>
+
+
+------ Forwarded Message
+From: Johann Lombardi <johann at sun.com>
+Date: Mon, 26 May 2008 13:35:30 +0200
+To: Nikita Danilov <Nikita.Danilov at Sun.COM>
+Cc: "Jessica A. Johnson" <Jessica.Johnson at Sun.COM>, Bryon Neitzel
+<Bryon.Neitzel at Sun.COM>, Eric Barton <eeb at bartonsoftware.com>, Peter Bojanic
+<Peter.Bojanic at Sun.COM>, <Peter.Braam at Sun.COM>
+Subject: Re: Moving forward on Quotas
+
+Hi all,
+
+On Sat, May 24, 2008 at 01:33:36AM +0400, Nikita Danilov wrote:
+> I think that to understand to what extent current quota architecture,
+> design, and implementation need to be changed, we have --among other
+> things-- to enumerate the problems that the current implementation has.
+
+For the record, I did a quota review with Peter Braam (report attached) back
+in
+March.
+
+> It would be very useful to get a list of issues from Johann (and maybe
+> Andrew?).
+
+Sure. Actually, they are several aspects to consider:
+
+**************************************************************
+* Changes required to quotas because of architecture changes *
+**************************************************************
+
+* item #1: Supporting quotas on HEAD (no CMD)
+
+The MDT has been rewritten, but the quota code must be modified to support
+the new framework. In addition, we were said not to land quota patches on
+HEAD
+until this gets fix (it was a mistake IMHO). So, we also have to port all
+quota
+patches from b1_6 to HEAD.
+I don't expect this task to take a lot of time since there is no fundamental
+changes in the quota logic. IIRC, Fanyong is already working on this.
+
+* item #2: Supporting quotas with CMD
+
+The quota master is the only one having a global overview of the quota
+usages
+and limits. On b1_6, the quota master is the MDS and the quota slaves are
+the
+OSSs. The code is designed in theory to support several MDT slaves too, but
+some
+shortcuts have been taken and some additional work is needed to support an
+architecture with 1 quota master (one of the MDT) and several OSTs/MDTs
+slaves.
+
+* item #3: Supporting quotas with DMU
+
+ZFS does not support standard Unix quotas. Instead, it relies on fileset
+quotas.
+This is a problem because Lustre quotas are set on a per-uid/gid basis.
+To support ZFS, we are going to have to put OST objects in a dataset
+matching a
+dataset on the MDS.
+We also have to decide what kind of quota interface we want to have at the
+lustre level (do we still set quotas on uid/gid or do we switch to the
+dataset
+framework?). Things get more complicated if we want to support a MDS using
+ldiskfs and OSSs using ZFS (do we have to support this?).
+IMHO, in the future, Lustre will want to take advantage of the ZFS space
+reservation feature and since this also relies on dataset, I think we should
+adopt the ZFS quota framework at the lustre level too.
+That being said, my understanding of ZFS quotas is limited to this webpage:
+http://docs.huihoo.com/opensolaris/solaris-zfs-administration-guide/html/ch0
+5s06.html
+and I haven't had the time to dig further.
+
+****************************************************
+* Shortcomings of the current quota implementation *
+****************************************************
+
+* issue #1: Performance scalability
+
+Performance with quotas enabled are currently good because a single quota
+master
+is powerful enough to process the quota acquire/release requests. However,
+we
+know that the quota master is going to become a bottleneck when increasing
+the
+number of OSTs.
+e.g.: 500 OSTs doing 2GB/s (~tera10) with a quota unit size of 100MB
+requires
+10,000 quota RPCs to be processed by the quota master.
+Of course, we could decide to bump the default bunit, but the drawback is
+that
+it increases the granularity of quotas which is problematic given that quota
+space cannot be revoked (see issue #2).
+Another approach could be to take advantage of CMD and to spread the load
+across
+several quota masters. Distributing master could be done on a
+per-uid/gid/dataset
+basis, but we would still hit the same limitation if we want to reach
+100+GB/s
+with a single uid/gid/dataset. More complicated algorithms can also be
+considered,
+at the price of increasing complexity.
+
+* issue #2: Quota accuracy
+
+When a slave runs out of its local quota, it sends an acquire request to the
+quota master. As I said earlier, the quota master is the only one having a
+global overview of what has been granted to slaves. If the master can
+satisfy
+the request, it grants a qunit (can be a number of blocks or inodes) to the
+slave. The problem is that an OST can return "quota exceeded" (=EDQUOT)
+whereas
+another OST is still having quotas. There is currently no callback to claim
+back the quota space that has been granted to a slave.
+Of course, this hurts quota accuracy and usually disturbs users who are
+accustomed to use quotas with local filesystems (users do not understand why
+they are getting EDQUOT while the disk usage is below the limit).
+The dynamic qunit patch (bug 10600) has improved the situation by decreasing
+qunit when the master gets closer to the quota limit, but some cases are
+still
+not addressed because there is still no way to claim back quota space
+granted to
+the slaves.
+
+* issue #3: Quota overruns
+
+Quotas are handled on the server side and the problem is that there are
+currently no interactions between the grant cache and quotas. It means that
+a client node can continue caching dirty data while the corresponding user
+is over quota on the server side. When the data are written back, the server
+is told that the writes have already been acknowledged to the application
+(by
+checking if OBD_BRW_FROM_GRANT is set) and thus accepts the write request
+even
+if the user is over quota. The server mentions in the bulk reply that the
+user
+is over quota and the client is then supposed to stop caching dirty data
+(until
+the server reports that the user is no longer over quota). The problem is
+that
+those quota overruns can be really significant since it depends on the
+number of
+clients:
+max_quota_overruns = number of OSTs * number of clients * max_dirty_mb
+e.g.               = 500            * 1,000             * 32
+                   = 16TB :(
+For now, only OSTs are concerned by this problem, but we will have the same
+problem with inodes when we have a metadata writeback cache.
+Fortunately, not all applications can run into this problem, but this can
+happen
+(actually, it is quite easy to reproduce with IOR/1 file per task).
+I've been thinking of 2 approaches to tackle this problem:
+- introduce some quota knowledge on the client side and modify the grant
+cache
+  to take into account the uid/gid/dataset.
+- stop granting [0;EOF] locks when a user gets closer to the quota limit and
+  only grant locks covering a region which fits within the remaining quota
+space.
+  I'm discussing this solution with Oleg atm.
+
+Cheers,
+Johann
+
+------ End of Forwarded Message
+
+-------------- next part --------------
+A non-text attachment was scrubbed...
+Name: Quota.doc
+Type: application/octet-stream
+Size: 34304 bytes
+Desc: not available
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20080527/4b3743ef/attachment.obj>
+
+From Peter.Braam at Sun.COM  Mon May 26 16:29:52 2008
+From: Peter.Braam at Sun.COM (Peter Braam)
+Date: Tue, 27 May 2008 07:29:52 +0800
+Subject: [Lustre-devel] FW: Moving forward on Quotas
+In-Reply-To: <20080526224722.GE3582@lore>
+Message-ID: <C46168F0.5462%peter.braam@sun.com>
+
+
+------ Forwarded Message
+From: Johann Lombardi <johann at sun.com>
+Date: Tue, 27 May 2008 00:47:22 +0200
+To: Nikita Danilov <Nikita.Danilov at Sun.COM>
+Cc: "Jessica A. Johnson" <Jessica.Johnson at Sun.COM>, Bryon Neitzel
+<Bryon.Neitzel at Sun.COM>, Eric Barton <eeb at bartonsoftware.com>, Peter Bojanic
+<Peter.Bojanic at Sun.COM>, <Peter.Braam at Sun.COM>
+Subject: Re: Moving forward on Quotas
+
+On Mon, May 26, 2008 at 09:56:20PM +0400, Nikita Danilov wrote:
+> From reading quota hld it is not clear that master has necessary be an
+> mdt server.
+
+Indeed, the quota master could, in theory, be run on any nodes.
+The advantage of the MDS is that it already has a connection to each OST.
+
+> Given that ost's are going to have mdt-like recovery in 2.0
+> it seems reasonable to hash uid/gid across all osts, that act as masters
+> (additionally, it seems logical to handle disk block allocation on ost's
+> rather than mdt's). Or am I missing something here?
+
+It would mean that _each_ OSS has to establish a connection to all the OSTs.
+Do we already plan to do this in 2.0? I assume that it will probably be
+required
+anyway to support other striping patterns like RAID1 or RAID5.
+However, my concern is that, with OST pools, we should expect to see more
+and
+more configurations with heterogeneous OSSs. As a consequence, some uid/gid
+could end up with a very responsive quota master (connected to a fast
+network
+which can handle 10,000+ RPCs per second), whereas the quota master could
+become
+a bottleneck for others, depending on the hash function and the uid/gid
+number.
+
+> As per discussion with ZFS team, they are going to implement per-user
+> and per-group block quotas in ZFS (inode quotas make little sense for
+> ZFS).
+
+ah, great.
+
+> Going aside, if I were designing quota from the scratch right now, I
+> would implement it completely inside of Lustre. All that is needed for
+> such an implementation is a set of call-backs that local file-system
+> invokes when it allocates/frees blocks (or inodes) for a given
+> object. Lustre would use these call-backs to transactionally update
+> local quota in its own format. That would save us a lot of hassle we
+> have dealing with the changing kernel quota interfaces, uid re-mappings,
+> and subtle differences between quota implementations on a different file
+> systems.
+
+This would also mean that we have to rewrite many things that are provided
+by the kernel today (e.g. quotacheck, a tree to manage per-uid/gid quota
+data,
+...). IMO, we should really weigh the pros and cons before doing so.
+
+> Additionally, this is better aligned with the way we handle access
+> control: MDT implements access control checks completely within MDD,
+> without relying on underlying file system.
+
+ok.
+
+> What strikes me in this description is how this is similar to DLM. It
+> almost looks like quota can be easily implemented as a special type of
+> lock, and DLM conflict resolution mechanism with cancellation AST's can
+> be used to reclaim quota.
+
+Yes, that's what I think too. I've also been discussing this with Oleg.
+
+Johann
+
+------ End of Forwarded Message
+
+
+
+
+From Peter.Braam at Sun.COM  Tue May 27 03:44:18 2008
+From: Peter.Braam at Sun.COM (Peter Braam)
+Date: Tue, 27 May 2008 18:44:18 +0800
+Subject: [Lustre-devel] Commit on share
+Message-ID: <C4620704.5499%peter.braam@sun.com>
+
+This HLD is definitely not ready at all.  It is very short, lacks
+interaction diagrams and the arguments made are not sufficiently detailed.
+
+* the second sentence is not right.  Commit should happen before
+un-committed data coming from a client is shared with a 2nd client.
+* Is COS dependent on VBR ? no it is not, and can equally apply to normal
+recovery 
+* Section 3.2 is wrong: the recovery process will not fail with gaps in the
+sequence when there is VBR.  It only fails if there are gaps in the
+versions, and this is rare.
+* 3.3 parallel creations in one directory are protected with different,
+independent lock resources.  Isn?t that sufficient to allow parallel
+operations with COS?
+* 3.6 provide a detailed explanation please
+* GC thread is wrong mechanism this is what we have commit callbacks for
+* Why not use the DLM, then we can simply keep the client waiting ? the
+mechanism already exists for repack; I am not convinced at all by the
+reasoning that rep-ack is so different ? no real facts are quoted
+* It is left completely without explanation how the hash table (which I
+think we don?t need/want) is used
+
+Regards,
+
+Peter
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20080527/11a2ef8f/attachment.htm>
+-------------- next part --------------
+A non-text attachment was scrubbed...
+Name: commit-on-sharing-simple-tracking-hld.pdf
+Type: application/octet-stream
+Size: 63433 bytes
+Desc: not available
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20080527/11a2ef8f/attachment.obj>
+
+From Mikhail.Pershin at Sun.COM  Tue May 27 08:43:57 2008
+From: Mikhail.Pershin at Sun.COM (Mikhail Pershin)
+Date: Tue, 27 May 2008 19:43:57 +0400
+Subject: [Lustre-devel] Commit on share
+In-Reply-To: <C4620704.5499%peter.braam@sun.com>
+References: <C4620704.5499%peter.braam@sun.com>
+Message-ID: <op.ubtknjyjatmt0c@goga>
+
+Hello Peter,
+
+Thanks for review. Alexander is on vacation so I will answer as co-author.
+
+On Tue, 27 May 2008 14:44:18 +0400, Peter Braam <Peter.Braam at Sun.COM>  
+wrote:
+
+> This HLD is definitely not ready at all.  It is very short, lacks
+> interaction diagrams and the arguments made are not sufficiently  
+> detailed.
+>
+> * the second sentence is not right.  Commit should happen before
+> un-committed data coming from a client is shared with a 2nd client.
+
+Can you provide any issues with that? Committing data after but not before  
+current operation has following benefits:
+1) no need in starting/commiting separate transaction, simple code due to  
+that
+2) less syncs. E.g. if we are committing current operation too then we  
+resolve possible share case related to current operation and later commit  
+will not needed. Therefore we will have less synced operations.
+E.g. the worst case for COS is:
+client1 operation
+client2 operation -> sync
+client1 op -> sync
+client2 op -> sync
+...
+COS will do commit for each operation if they are on the same object and  
+sync is happened before current operation.
+But including the current operation in commit will reduce number of  
+commits in twice:
+client1 operation
+client2 op -> sync (including this op)
+client1 op - no sync because no uncommitted shared data
+client2 op -> sync
+...
+
+> * Is COS dependent on VBR ? no it is not, and can equally apply to normal
+> recovery
+
+Agree, COS is like just lever to turn sync commit on/off depending on some  
+conditions. These conditions maybe quite simple like now - just  
+comparision of clients - or maybe more complex and include checking of  
+operation types, etc.
+
+But COS was requested initially as optional feature of VBR, so we didn't  
+review COS-only configuration. Without VBR any missed client will invoke  
+the eviction of all clients with replays after the gap. Therefore COS will  
+not helps until we will change current recovery to don't evict clients if  
+COS is enabled. But we should know actually was COS enabled before the  
+server failure to be sure that the excluding gap transactions is safe. Do  
+we need COS-only use-case actually?
+
+> * Section 3.2 is wrong: the recovery process will not fail with gaps in  
+> the
+> sequence when there is VBR.  It only fails if there are gaps in the
+> versions, and this is rare.
+
+the 3.2 section is talking only about gap in versions. Maybe it is not  
+correct grammatically though.
+"... Highly probably we have non-trivial gaps version in the sequence and  
+the recovery process fails"
+Could you mark what is wrong with 3.2? just rewrite the sentence to make  
+it more clear about what gaps we mean?
+
+> * 3.3 parallel creations in one directory are protected with different,
+> independent lock resources.  Isn?t that sufficient to allow parallel
+> operations with COS?
+
+it is HEAD feature, but this design is for 1.8 (1.6-based) Lustre with one  
+dir lock. If this is not mentioned in HLD then it should be fixed.
+But the issue is not about the lock only.
+The 'simple' COS checks only clients nids to determine the dependency.  
+Therefore if two clients are creating objects in the same directory then  
+we will have frequent syncs due to COS (operations from different nids)  
+although there is no need for sync at all becase the operations are not  
+dependent.
+The same will be with parallel locking if we will not check type of  
+operation to determine the dependency.
+
+> * 3.6 provide a detailed explanation please
+"When enabled, COS makes REP-ACK not needed."
+Basically the COS is about two things:
+1) dependency tracking. This functionality which try to determine is  
+current operation depending on some other uncommitted one. It may be  
+simple and check only nids of clients, maybe more sophisticated and  
+include type of operation checking or any other additional data.
+2) COS itself, the doing sync commit of current operation if there is  
+dependency.
+
+So if we have 1) and 2) we have only the following cases:
+- there is dependency determined and commit is needed to remove it. No ACK  
+is needed.
+- there is no dependency and we don't need no ACK and lock nor commit  
+because client's replays are not dependent
+Therefore the ACK is not needed in both cases. The COS don't need to wait  
+on repack lock, it determine the share case and do commit.
+
+how ACK is related to 'simple' COS (the only client NIDs are matter):
+1) client1 did operation and lock object until ACK from it will come to  
+server
+2) client2 is waiting for ACK or commit to access the object
+3) if there was no commit yet, then client2 determine the sharing exists  
+and force commit
+
+The only positive effect of ACK is delay before doing sync, that give us  
+the chance to wait for commit without doing force sync. But that can be  
+done with timer to get the same results.
+
+In HLD we propose the following:
+1) client1 got lock, did operation, unlock object after operation is done
+2) client2 got lock on object and check was there the dependency
+3) if dependency then force commit (or wait for it as alternative way)
+4) otherwise update dependency info for next check, unlock object when  
+operation is done
+
+This is generic way and will work with any dependency tracking (on NIDs,  
+on types of operations, etc.)
+
+> * GC thread is wrong mechanism this is what we have commit callbacks for
+
+Well, with callbacks we have to scan through all hash to find data to  
+delete on each callback. As alex said there can be about 10K uncommitted  
+transactions in high load easily, therefore using callback may become the  
+bottlneck. There was discussion recently in devel@ about that originated  
+by zam. Although I agree the HLD should be clear about why we choose that  
+way and what is wrong with another.
+
+> * Why not use the DLM, then we can simply keep the client waiting ? the
+> mechanism already exists for repack; I am not convinced at all by the
+> reasoning that rep-ack is so different ? no real facts are quoted
+
+Let's estimate how RepACK lock is suitable as dependency tracking  
+functionality. In fact it is more like 'possible dependency prevention'  
+mechanism, and block object always because we can't predict the next  
+operation, so should keep lock taken for ALL modifying operations. It is  
+not 'tracking' but 'prediction' mechanism, it blocks access to the object  
+until client will got reply just because the conflicting operation is  
+possible but not because it really happen.
+Moreover it conflicts in general with dependency tracking we needed,  
+because it will serialize operations even when they may not depend.
+
+With RepACK lock we are entering in operation AFTER the checks and we  
+don't know the result of this check - was there operation from different  
+client? are changes committed? Should we do sync or not? RepACK lock  
+doesn't answer this question and we can't decide about sync is needed or  
+not.
+
+For example, the client2 will wait for commit or ACK before entering in  
+locked area.
+1) ACK is got but no commit yet. So client2 enter in locked area and now  
+should determine was commit done or not. How to do that? This is vital  
+because if there was no commit yet then we should do it. We may use  
+version of object possible and check it against last_committed, but this  
+will work only with VBR.
+So we need extra data per-object like transno.
+2) Commit was done. We should still do the same as for 1) to be sure about  
+was commit done or not because it is not known why lock was unlocked - due  
+to ACK or commit.
+3) But we don't know still is there conflict or not because we should  
+check client uuids, but we don't store such info anywhere and waiting on  
+lock is not reflected somehow. So we need extra data (or extra information  
+ from ldlm?) again to store uuid of client who did latest operation on that  
+object.
+
+The only way how dlm can work without any additional data is to unlock  
+only when commit. But in that case we don't need COS at all. Each  
+conflicting client will wait on lock until previous changes will be  
+committed. But this may lead to huge latency for requests, comparing with  
+commit interval and it is not what we need.
+
+> * It is left completely without explanation how the hash table (which I
+> think we don?t need/want) is used
+
+hash table store the following data per object:
+struct lu_dep_info {
+         struct ll_fid     di_object;
+         struct obd_uuid   di_client;
+         __u64             di_transno;
+};
+
+it contains uuid of client and transno of last change from this client.  
+The uuid is compared to determine is there is conflict of not, the transno  
+shows was that data committed already or not. I described above why it is  
+needed. It is 1.6-related issue because we have only inode of object and  
+no any extra structure. The HEAD has lu_object enveloping inodes, and hash  
+will not needed, the dependency info may be stored per lu_object.
+
+>
+> Regards,
+>
+> Peter
+
+
+
+-- 
+Mikhail Pershin
+Staff Engineer
+Lustre Group
+Sun Microsystems, Inc.
+
+
+From johann at sun.com  Wed May 28 01:06:13 2008
+From: johann at sun.com (Johann Lombardi)
+Date: Wed, 28 May 2008 10:06:13 +0200
+Subject: [Lustre-devel] Moving forward on Quotas
+In-Reply-To: <C461688A.5460%peter.braam@sun.com>
+References: <18490.63940.619731.992500@gargle.gargle.HOWL>
+	<C461688A.5460%peter.braam@sun.com>
+Message-ID: <20080528080613.GN3582@lore>
+
+Hello Peter,
+
+On Tue, May 27, 2008 at 07:28:10AM +0800, Peter Braam wrote:
+> >> When a slave runs out of its local quota, it sends an acquire request to the
+> >> quota master. As I said earlier, the quota master is the only one having a
+> >> global overview of what has been granted to slaves. If the master can satisfy
+> >> the request, it grants a qunit (can be a number of blocks or inodes) to the
+> >> slave. The problem is that an OST can return "quota exceeded" (=EDQUOT)
+> >> whereas
+> >> another OST is still having quotas. There is currently no callback to claim
+> >> back the quota space that has been granted to a slave.
+>
+> Hmm - the slave should release quota.
+
+I don't think that the slave can make such a decision by itself since it does
+not know that we are getting closer to the global quota limit. Only the master
+is aware of this.
+Actually, the scenario I described above can no longer happen - with recent
+lustre versions at least - thanks to the dynamic qunit patch because the
+master broadcasts to all the slaves the new qunit size when it is shrunk.
+
+Cheers,
+Johann
+
+
+From Ricardo.M.Correia at Sun.COM  Wed May 28 07:29:02 2008
+From: Ricardo.M.Correia at Sun.COM (Ricardo M. Correia)
+Date: Wed, 28 May 2008 15:29:02 +0100
+Subject: [Lustre-devel] Moving forward on Quotas
+In-Reply-To: <C461688A.5460%peter.braam@sun.com>
+References: <C461688A.5460%peter.braam@sun.com>
+Message-ID: <1211984942.11750.29.camel@localhost>
+
+On Ter, 2008-05-27 at 07:28 +0800, Peter Braam wrote:
+
+> > Going aside, if I were designing quota from the scratch right now, I
+> > would implement it completely inside of Lustre. All that is needed for
+> > such an implementation is a set of call-backs that local file-system
+> > invokes when it allocates/frees blocks (or inodes) for a given
+> > object. Lustre would use these call-backs to transactionally update
+> > local quota in its own format. That would save us a lot of hassle we
+> > have dealing with the changing kernel quota interfaces, uid re-mappings,
+> > and subtle differences between quota implementations on a different file
+> > systems.
+> 
+> ======> IMPORTANT: get in touch with Jeff Bonwick now, let's get quota
+> implemented in this way in DMU then.
+
+
+I think this was proposed by Alex before, but AFAIU the conclusion is
+that this was not possible to do with ZFS (or at least, not easy to do).
+
+The problem is that ZFS uses delayed allocations, i.e., allocations
+occur long after a transaction group has been closed, and therefore we
+can't transactionally keep track of allocated space because by the time
+the callbacks were called we are not allowed to write to the transaction
+group anymore, since another 2 txgs could have been opened already.
+
+Since this couldn't be done transactionally, if the node crashes, there
+would be no way of knowing how many blocks had been allocated on the
+latest (actually, the latest 2) committed transaction groups..
+
+Regards,
+Ricardo
+--
+
+Ricardo Manuel Correia
+Lustre Engineering
+
+Sun Microsystems, Inc.
+Portugal
+Phone +351.214134023 / x58723
+Mobile +351.912590825
+Email Ricardo.M.Correia at Sun.COM
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20080528/a7e653b2/attachment.htm>
+-------------- next part --------------
+A non-text attachment was scrubbed...
+Name: 6g_top.gif
+Type: image/gif
+Size: 1257 bytes
+Desc: not available
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20080528/a7e653b2/attachment.gif>
+
+From Nikita.Danilov at Sun.COM  Wed May 28 07:54:07 2008
+From: Nikita.Danilov at Sun.COM (Nikita Danilov)
+Date: Wed, 28 May 2008 18:54:07 +0400
+Subject: [Lustre-devel] Moving forward on Quotas
+In-Reply-To: <1211984942.11750.29.camel@localhost>
+References: <C461688A.5460%peter.braam@sun.com>
+	<1211984942.11750.29.camel@localhost>
+Message-ID: <18493.29199.765234.755534@gargle.gargle.HOWL>
+
+Ricardo M. Correia writes:
+ > On Ter, 2008-05-27 at 07:28 +0800, Peter Braam wrote:
+ > 
+ > > > Going aside, if I were designing quota from the scratch right now, I
+ > > > would implement it completely inside of Lustre. All that is needed for
+ > > > such an implementation is a set of call-backs that local file-system
+ > > > invokes when it allocates/frees blocks (or inodes) for a given
+ > > > object. Lustre would use these call-backs to transactionally update
+ > > > local quota in its own format. That would save us a lot of hassle we
+ > > > have dealing with the changing kernel quota interfaces, uid re-mappings,
+ > > > and subtle differences between quota implementations on a different file
+ > > > systems.
+ > > 
+ > > ======> IMPORTANT: get in touch with Jeff Bonwick now, let's get quota
+ > > implemented in this way in DMU then.
+ > 
+ > 
+ > I think this was proposed by Alex before, but AFAIU the conclusion is
+ > that this was not possible to do with ZFS (or at least, not easy to do).
+ > 
+ > The problem is that ZFS uses delayed allocations, i.e., allocations
+ > occur long after a transaction group has been closed, and therefore we
+ > can't transactionally keep track of allocated space because by the time
+ > the callbacks were called we are not allowed to write to the transaction
+ > group anymore, since another 2 txgs could have been opened already.
+
+But that problem has to be solved anyway to implement per-user quotas
+for ZFS, correct?
+
+One possible solution I see is to use something like ZIL to log
+operations in the context of current transaction group. This log can be
+replayed during mount to update quota file.
+
+ > 
+ > Since this couldn't be done transactionally, if the node crashes, there
+ > would be no way of knowing how many blocks had been allocated on the
+ > latest (actually, the latest 2) committed transaction groups..
+ > 
+ > Regards,
+ > Ricardo
+
+Nikita.
+
+
+From Ricardo.M.Correia at Sun.COM  Wed May 28 08:14:02 2008
+From: Ricardo.M.Correia at Sun.COM (Ricardo M. Correia)
+Date: Wed, 28 May 2008 16:14:02 +0100
+Subject: [Lustre-devel] Moving forward on Quotas
+In-Reply-To: <18493.29199.765234.755534@gargle.gargle.HOWL>
+References: <C461688A.5460%peter.braam@sun.com>
+	<1211984942.11750.29.camel@localhost>
+	<18493.29199.765234.755534@gargle.gargle.HOWL>
+Message-ID: <1211987642.4740.10.camel@localhost>
+
+On Qua, 2008-05-28 at 18:54 +0400, Nikita Danilov wrote:
+
+> But that problem has to be solved anyway to implement per-user quotas
+> for ZFS, correct?
+
+
+Indeed, but it's probably easier and more reliable to make the DMU
+itself update an internal quota/space accounting DMU object when a txg
+is syncing (updating internal objects during txg sync is something that
+the DMU already does, e.g., for spacemaps) than allow arbitrary
+modifications to a transaction group after it has been closed.
+
+
+> One possible solution I see is to use something like ZIL to log
+> operations in the context of current transaction group. This log can be
+> replayed during mount to update quota file.
+
+
+Hmm.. I'm not sure if it would be easy to figure out during replay how
+many blocks were freed, especially considering things like snapshots,
+clones and deferred frees (if frees are making a txg sync to take too
+long to converge, the DMU will add them to a freelist object, instead of
+freeing them immediately).
+
+I agree that quotas could be implemented in Lustre (independent of the
+backend filesystem), but IMHO I think it would make more sense for the
+space accounting to be done in the DMU itself due to the complexities
+associated with it's internal behaviour.
+
+Regards,
+Ricardo
+--
+
+Ricardo Manuel Correia
+Lustre Engineering
+
+Sun Microsystems, Inc.
+Portugal
+Phone +351.214134023 / x58723
+Mobile +351.912590825
+Email Ricardo.M.Correia at Sun.COM
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20080528/86bce9ae/attachment.htm>
+-------------- next part --------------
+A non-text attachment was scrubbed...
+Name: 6g_top.gif
+Type: image/gif
+Size: 1257 bytes
+Desc: not available
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20080528/86bce9ae/attachment.gif>
+
+From Nikita.Danilov at Sun.COM  Wed May 28 08:24:01 2008
+From: Nikita.Danilov at Sun.COM (Nikita Danilov)
+Date: Wed, 28 May 2008 19:24:01 +0400
+Subject: [Lustre-devel] Moving forward on Quotas
+In-Reply-To: <C461688A.5460%peter.braam@sun.com>
+References: <18490.63940.619731.992500@gargle.gargle.HOWL>
+	<C461688A.5460%peter.braam@sun.com>
+Message-ID: <18493.30993.371265.613200@gargle.gargle.HOWL>
+
+Peter Braam writes:
+ > 
+ > Why do they not need file quota - what if someone wants to control file
+ > count?
+
+Idea is that support for the inode quota is not necessary is DMU, as
+upper layer can implement it by itself. Compare this with block quotas
+that do require support from DMU, because upper layer cannot generally
+tell overwrite from new-write.
+
+ > > 
+
+Nikita.
+
+ > 
+
+
+From Nikita.Danilov at Sun.COM  Wed May 28 09:22:41 2008
+From: Nikita.Danilov at Sun.COM (Nikita Danilov)
+Date: Wed, 28 May 2008 20:22:41 +0400
+Subject: [Lustre-devel] Moving forward on Quotas
+In-Reply-To: <1211987642.4740.10.camel@localhost>
+References: <C461688A.5460%peter.braam@sun.com>
+	<1211984942.11750.29.camel@localhost>
+	<18493.29199.765234.755534@gargle.gargle.HOWL>
+	<1211987642.4740.10.camel@localhost>
+Message-ID: <18493.34513.370736.111492@gargle.gargle.HOWL>
+
+Ricardo M. Correia writes:
+ > On Qua, 2008-05-28 at 18:54 +0400, Nikita Danilov wrote:
+ > 
+ > > But that problem has to be solved anyway to implement per-user quotas
+ > > for ZFS, correct?
+ > 
+ > 
+ > Indeed, but it's probably easier and more reliable to make the DMU
+ > itself update an internal quota/space accounting DMU object when a txg
+ > is syncing (updating internal objects during txg sync is something that
+ > the DMU already does, e.g., for spacemaps) than allow arbitrary
+ > modifications to a transaction group after it has been closed.
+
+Even doing it internally looks rather involved. The problem, as I
+understand it, is that no new block can be allocated while transaction
+group is in sync state (?), so DMU would have to track all users and
+groups whose quota is affected by the current transaction group, and
+before closing the group, to allocate some kind of on-disk table with an
+entry for every updated quota, then to fill these entries later when
+actual disk space is allocated.
+
+Note that dmu has to know about users and groups to implement quota
+internally, which looks like a pervasive interface change.
+
+ > 
+ > I agree that quotas could be implemented in Lustre (independent of the
+ > backend filesystem), but IMHO I think it would make more sense for the
+ > space accounting to be done in the DMU itself due to the complexities
+ > associated with it's internal behaviour.
+
+I absolutely agree that DMU has to do space _accounting_ internally. The
+question is how to store results of this accounting, without bothering
+DMU with higher level concepts such as a user or a group identifier.
+
+I think that utility of DMU as a universal back-end would improve if it
+were to export an interface allowing its users to update, with certain
+restrictions, on-disk state when transaction group is in sync (i.e.,
+interface similar to one that is internally used for spacemaps).
+
+ > 
+ > Regards,
+ > Ricardo
+
+Nikita.
+
+
+From Ricardo.M.Correia at Sun.COM  Wed May 28 10:05:38 2008
+From: Ricardo.M.Correia at Sun.COM (Ricardo M. Correia)
+Date: Wed, 28 May 2008 18:05:38 +0100
+Subject: [Lustre-devel] Moving forward on Quotas
+In-Reply-To: <18493.34513.370736.111492@gargle.gargle.HOWL>
+References: <C461688A.5460%peter.braam@sun.com>
+	<1211984942.11750.29.camel@localhost>
+	<18493.29199.765234.755534@gargle.gargle.HOWL>
+	<1211987642.4740.10.camel@localhost>
+	<18493.34513.370736.111492@gargle.gargle.HOWL>
+Message-ID: <1211994338.14599.24.camel@localhost>
+
+On Qua, 2008-05-28 at 20:22 +0400, Nikita Danilov wrote:
+
+> Even doing it internally looks rather involved. The problem, as I
+> understand it, is that no new block can be allocated while transaction
+> group is in sync state (?)
+
+
+I'm not sure if you are describing it incorrectly or just using the same
+terms for different concepts, but in any case, blocks are allocated
+*while* the transaction group is syncing, and due to compression and
+online pool configuration changes it is impossible to know the exact
+on-disk space a given block will use until the transaction group is
+actually syncing.
+
+
+> so DMU would have to track all users and
+> groups whose quota is affected by the current transaction group, and
+> before closing the group, to allocate some kind of on-disk table with an
+> entry for every updated quota, then to fill these entries later when
+> actual disk space is allocated.
+
+
+Yes, that sounds correct.
+
+
+> Note that dmu has to know about users and groups to implement quota
+> internally, which looks like a pervasive interface change.
+
+
+No, AFAIK, the consensus we reached with the ZFS team is that, ?since
+the DMU does not have any concept of users or groups, it will track
+space usage associated with opaque identifiers, so that when we write to
+a file we would give it 2 identifiers which, for us, one of them would
+map to a user and the other one to a group.
+
+
+> I absolutely agree that DMU has to do space _accounting_ internally. The
+> question is how to store results of this accounting, without bothering
+> DMU with higher level concepts such as a user or a group identifier.
+
+
+I really don't think we should allow the consumer to write to a txg
+which is already in the syncing phase, I think the DMU should store the
+accounting itself.
+
+
+> I think that utility of DMU as a universal back-end would improve if it
+> were to export an interface allowing its users to update, with certain
+> restrictions, on-disk state when transaction group is in sync (i.e.,
+> interface similar to one that is internally used for spacemaps).
+
+
+
+Hmm.. I'm not sure if that would be very useful, why not write the data
+when the txg was open in the first place? ??Maybe you can give a better
+example?
+
+For things that requires knowledge of DMU internals (like space
+accounting, spacemaps, ...) it shouldn't be the DMU consumer that has to
+write during the txg sync phase, it should be the DMU because only the
+DMU should know about its internals.
+
+The example you have given (spacemaps) is the worst of all, because
+spacemap updates are rather involved. Due to ?COW and to the ZIO
+pipeline design, spacemap modifications lead to a chicken-and-egg
+problem with transactional updates:
+
+When you modify a space map, you create a ZIO which just before writing
+leads to an allocation (due to COW).  But since you need to do an
+allocation, you need to change the spacemap again, which leads to
+another allocation (and also leads to free the old just-written block),
+so you need to update the space map again, and so on and on.. (!)
+This is why txgs need to converge and why after a few phases it gives up
+freeing blocks, and starts re-using blocks which were freed on the same
+txg.
+
+Cheers,
+Ricardo
+
+--
+
+Ricardo Manuel Correia
+Lustre Engineering
+
+Sun Microsystems, Inc.
+Portugal
+Phone +351.214134023 / x58723
+Mobile +351.912590825
+Email Ricardo.M.Correia at Sun.COM
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20080528/ed189e64/attachment.htm>
+-------------- next part --------------
+A non-text attachment was scrubbed...
+Name: 6g_top.gif
+Type: image/gif
+Size: 1257 bytes
+Desc: not available
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20080528/ed189e64/attachment.gif>
+
+From Nikita.Danilov at Sun.COM  Wed May 28 13:06:59 2008
+From: Nikita.Danilov at Sun.COM (Nikita Danilov)
+Date: Thu, 29 May 2008 00:06:59 +0400
+Subject: [Lustre-devel] Moving forward on Quotas
+In-Reply-To: <1211994338.14599.24.camel@localhost>
+References: <C461688A.5460%peter.braam@sun.com>
+	<1211984942.11750.29.camel@localhost>
+	<18493.29199.765234.755534@gargle.gargle.HOWL>
+	<1211987642.4740.10.camel@localhost>
+	<18493.34513.370736.111492@gargle.gargle.HOWL>
+	<1211994338.14599.24.camel@localhost>
+Message-ID: <18493.47971.504225.694251@gargle.gargle.HOWL>
+
+Ricardo M. Correia writes:
+ > On Qua, 2008-05-28 at 20:22 +0400, Nikita Danilov wrote:
+
+[...]
+
+ > 
+ > I'm not sure if you are describing it incorrectly or just using the same
+ > terms for different concepts, but in any case, blocks are allocated
+ > *while* the transaction group is syncing, and due to compression and
+ > online pool configuration changes it is impossible to know the exact
+ > on-disk space a given block will use until the transaction group is
+ > actually syncing.
+
+I meant that the table mentioned below cannot grow, while transaction
+group is syncing, which means that dmu has to calculate size of the
+table in advance.
+
+[...]
+
+ > 
+ > > Note that dmu has to know about users and groups to implement quota
+ > > internally, which looks like a pervasive interface change.
+ > 
+ > 
+ > No, AFAIK, the consensus we reached with the ZFS team is that, ???since
+ > the DMU does not have any concept of users or groups, it will track
+ > space usage associated with opaque identifiers, so that when we write to
+ > a file we would give it 2 identifiers which, for us, one of them would
+ > map to a user and the other one to a group.
+
+Well... that's just renaming uid and gid into opaqueid0 and
+opaqueid1. :-)
+
+So on one hand we have to add a couple of parameters to all dmu entry
+points that can allocate disk space. On the other hand we have something
+like
+
+typedef void (*dmu_alloc_callback_t)(objset_t *os, uint64_t objid, long bytes);
+
+void dmu_alloc_callback_register(objset_t *os, dmu_alloc_callback_t cb);
+
+with dmu calling registered call-back when blocks are actually allocated
+to the object. Advantage of the later interface is that dmu implements
+only mechanism, and policy ("user quotas" and "group quotas") is left to
+the upper layers to implement.
+
+[...]
+
+ > 
+ > I really don't think we should allow the consumer to write to a txg
+ > which is already in the syncing phase, I think the DMU should store the
+ > accounting itself.
+
+One important aspect of lustre quota requirements that wasn't mentioned
+so far is that Lustre needs something more than -EDQUOT from the file
+system. For example, to integrate quotas with dirty cache grants, server
+has to know how much quota is left, to redistribute quota across ost's
+it has to modify quota, etc. If quota management and storage are
+completely encapsulated within dmu, then dmu has to provide full quota
+control interface too, and that interface has to be exported from osd
+upward. For one thing, implementation of this interface is going to take
+a lot of time.
+
+[...]
+
+ > 
+ > For things that requires knowledge of DMU internals (like space
+ > accounting, spacemaps, ...) it shouldn't be the DMU consumer that has to
+ > write during the txg sync phase, it should be the DMU because only the
+ > DMU should know about its internals.
+
+I don't quite understand this argument. DMU already has an interface to
+capture a buffer into a transaction and to modify it within this
+transaction. An interface to modify a buffer after transaction was
+closed, but before it is committed is no more "internal" than the first
+one. It is just places more restrictions on what consumer is allowed to
+do with the buffer.
+
+ > When you modify a space map, you create a ZIO which just before writing
+ > leads to an allocation (due to COW).  But since you need to do an
+ > allocation, you need to change the spacemap again, which leads to
+ > another allocation (and also leads to free the old just-written block),
+ > so you need to update the space map again, and so on and on.. (!)
+ > This is why txgs need to converge and why after a few phases it gives up
+ > freeing blocks, and starts re-using blocks which were freed on the same
+ > txg.
+
+Good heavens. :-)
+
+ > 
+ > Cheers,
+ > Ricardo
+
+Nikita.
+
+
+From Ricardo.M.Correia at Sun.COM  Wed May 28 14:07:13 2008
+From: Ricardo.M.Correia at Sun.COM (Ricardo M. Correia)
+Date: Wed, 28 May 2008 22:07:13 +0100
+Subject: [Lustre-devel] Moving forward on Quotas
+In-Reply-To: <18493.47971.504225.694251@gargle.gargle.HOWL>
+References: <C461688A.5460%peter.braam@sun.com>
+	<1211984942.11750.29.camel@localhost>
+	<18493.29199.765234.755534@gargle.gargle.HOWL>
+	<1211987642.4740.10.camel@localhost>
+	<18493.34513.370736.111492@gargle.gargle.HOWL>
+	<1211994338.14599.24.camel@localhost>
+	<18493.47971.504225.694251@gargle.gargle.HOWL>
+Message-ID: <1212008833.14599.84.camel@localhost>
+
+On Qui, 2008-05-29 at 00:06 +0400, Nikita Danilov wrote:
+
+> Well... that's just renaming uid and gid into opaqueid0 and
+> opaqueid1. :-)
+
+
+It may be simple for POSIX uids/gids, but maybe not for CIFS user ids
+(but since there is a mapping table it may be also be simple, I'm not
+sure).
+I think it would make sense to give it a list of opaque ids, instead of
+just opaqueid0 and opaqueid1 (maybe a file could belong to multiple
+groups or maybe we can think of other creative ideas in the future..).
+
+
+> So on one hand we have to add a couple of parameters to all dmu entry
+> points that can allocate disk space. On the other hand we have
+> something
+> like
+> 
+> typedef void (*dmu_alloc_callback_t)(objset_t *os, uint64_t objid,
+> long bytes);
+> 
+> void dmu_alloc_callback_register(objset_t *os, dmu_alloc_callback_t
+> cb);
+> 
+> with dmu calling registered call-back when blocks are actually
+> allocated
+> to the object. Advantage of the later interface is that dmu implements
+> only mechanism, and policy ("user quotas" and "group quotas") is left
+> to
+> the upper layers to implement.
+
+
+I don't see why that would be an advantage over what we had planned to
+do.
+The plan we discussed with the ZFS team was to make the DMU do space
+accounting internally by opaque ids, so the quota policy/enforcement
+would still be left to the upper layers to implement.
+
+
+> If quota management and storage are
+> completely encapsulated within dmu, then dmu has to provide full quota
+> control interface too, and that interface has to be exported from osd
+> upward. For one thing, implementation of this interface is going to take
+> a lot of time.
+
+
+Again, the plan was for the DMU to do only space accounting, the actual
+quota management and enforcement would be implemented in Lustre.
+
+
+
+>  > For things that requires knowledge of DMU internals (like space
+>  > accounting, spacemaps, ...) it shouldn't be the DMU consumer that has to
+>  > write during the txg sync phase, it should be the DMU because only the
+>  > DMU should know about its internals.
+> 
+> I don't quite understand this argument. DMU already has an interface to
+> capture a buffer into a transaction and to modify it within this
+> transaction. An interface to modify a buffer after transaction was
+> closed, but before it is committed is no more "internal" than the first
+> one. It is just places more restrictions on what consumer is allowed to
+> do with the buffer.
+
+
+What I mean is that IMO a consumer of a filesystem shouldn't have to
+know intimate details of how the filesystem (in this case, the DMU)
+works.
+For instance, so far Lustre had no idea that transactions are actually
+grouped into transaction groups and it had no idea about transaction
+group states.
+
+Allowing modification of buffers by an upper layer when a transaction
+group is already syncing is not a very elegant way to solve this IMHO
+(compared with our previous plan).. :-)
+
+Cheers,
+Ricardo
+
+--
+
+Ricardo Manuel Correia
+Lustre Engineering
+
+Sun Microsystems, Inc.
+Portugal
+Phone +351.214134023 / x58723
+Mobile +351.912590825
+Email Ricardo.M.Correia at Sun.COM
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20080528/c1d8c970/attachment.htm>
+-------------- next part --------------
+A non-text attachment was scrubbed...
+Name: 6g_top.gif
+Type: image/gif
+Size: 1257 bytes
+Desc: not available
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20080528/c1d8c970/attachment.gif>
+
+From Nikita.Danilov at Sun.COM  Wed May 28 14:11:22 2008
+From: Nikita.Danilov at Sun.COM (Nikita Danilov)
+Date: Thu, 29 May 2008 01:11:22 +0400
+Subject: [Lustre-devel] Moving forward on Quotas
+In-Reply-To: <1212008833.14599.84.camel@localhost>
+References: <C461688A.5460%peter.braam@sun.com>
+	<1211984942.11750.29.camel@localhost>
+	<18493.29199.765234.755534@gargle.gargle.HOWL>
+	<1211987642.4740.10.camel@localhost>
+	<18493.34513.370736.111492@gargle.gargle.HOWL>
+	<1211994338.14599.24.camel@localhost>
+	<18493.47971.504225.694251@gargle.gargle.HOWL>
+	<1212008833.14599.84.camel@localhost>
+Message-ID: <18493.51834.832400.315440@gargle.gargle.HOWL>
+
+Ricardo M. Correia writes:
+
+[...]
+
+ > The plan we discussed with the ZFS team was to make the DMU do space
+ > accounting internally by opaque ids, so the quota policy/enforcement
+ > would still be left to the upper layers to implement.
+
+Hm.. seems I am confused. If ZFS stores quota table internally, how this
+table is available to the upper layers, to implement policy?
+
+Nikita.
+
+
+From Ricardo.M.Correia at Sun.COM  Wed May 28 14:33:28 2008
+From: Ricardo.M.Correia at Sun.COM (Ricardo M. Correia)
+Date: Wed, 28 May 2008 22:33:28 +0100
+Subject: [Lustre-devel] Moving forward on Quotas
+In-Reply-To: <18493.51834.832400.315440@gargle.gargle.HOWL>
+References: <C461688A.5460%peter.braam@sun.com>
+	<1211984942.11750.29.camel@localhost>
+	<18493.29199.765234.755534@gargle.gargle.HOWL>
+	<1211987642.4740.10.camel@localhost>
+	<18493.34513.370736.111492@gargle.gargle.HOWL>
+	<1211994338.14599.24.camel@localhost>
+	<18493.47971.504225.694251@gargle.gargle.HOWL>
+	<1212008833.14599.84.camel@localhost>
+	<18493.51834.832400.315440@gargle.gargle.HOWL>
+Message-ID: <1212010408.14599.105.camel@localhost>
+
+On Qui, 2008-05-29 at 01:11 +0400, Nikita Danilov wrote:
+
+> Hm.. seems I am confused. If ZFS stores quota table internally, how this
+> table is available to the upper layers, to implement policy?
+
+
+uint64_t dmu_get_space_usage(objset, opaque_id)?
+
+--
+
+Ricardo Manuel Correia
+Lustre Engineering
+
+Sun Microsystems, Inc.
+Portugal
+Phone +351.214134023 / x58723
+Mobile +351.912590825
+Email Ricardo.M.Correia at Sun.COM
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20080528/87c8d71f/attachment.htm>
+-------------- next part --------------
+A non-text attachment was scrubbed...
+Name: 6g_top.gif
+Type: image/gif
+Size: 1257 bytes
+Desc: not available
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20080528/87c8d71f/attachment.gif>
+
+From Zhiyong.Tian at Sun.COM  Wed May 28 21:49:25 2008
+From: Zhiyong.Tian at Sun.COM (Landen tian)
+Date: Thu, 29 May 2008 12:49:25 +0800
+Subject: [Lustre-devel] FW: Moving forward on Quotas
+In-Reply-To: <C46168B8.5461%peter.braam@sun.com>
+References: <20080526113530.GA3582@lore> <C46168B8.5461%peter.braam@sun.com>
+Message-ID: <00c001c8c147$5f815790$1e8406b0$%tian@sun.com>
+
+Hi all:
+
+Besides what Johann said, current problems lquota faces are:
+Recovery:
+1. the current recovery for lquota is to do "lfs quotacheck", which will
+count all blocks and inodes for all uid/gid. We should have a more elegant
+method for this. I means we can only do recovery for quota reqs which
+haven't been synced between quota master and quota slaves.
+2. customer prefer a fine-grain quotacheck. That means they want sth like
+"lfs quotacheck -u uid/-g gid". It can't be done now because ldiskfs doesn't
+support this. I hope DMU could in the future.
+3. when quotacheck is running, users have many taboos, which are from
+ldiskfs. This is quoted from manual from "man 8 quotacheck"
+  "       It is strongly recommended to run quotacheck with quotas turned
+off for the filesystem. Oth-
+       erwise, possible damage or loss to data in the quota files can
+result.  It is also unwise to
+       run  quotacheck on a live filesystem as actual usage may change
+during the scan.  To prevent
+       this, quotacheck tries to remount the filesystem read-only before
+starting the scan.   After
+       the scan is done it remounts the filesystem read-write. You can
+disable this with option -m.
+       You can also make quotacheck ignore the failure to remount  the
+filesystem  read-only  with
+       option -M."
+
+
+Zhiyong Landen Tian
+
+Sun Microsystems, Inc.
+10/F Chuangxin Plaza, Tsinghua Science Park 
+Bei Jing 100084 CN
+Phone x28801/+86-10-68093801
+Email zhiyong.tian at Sun.COM
+
+
+>-----Original Message-----
+>From: lustre-devel-bounces at lists.lustre.org
+>[mailto:lustre-devel-bounces at lists.lustre.org] On Behalf Of Peter Braam
+>Sent: Tuesday, May 27, 2008 7:29 AM
+>To: lustre-devel at lists.lustre.org
+>Subject: [Lustre-devel] FW: Moving forward on Quotas
+>
+>
+>------ Forwarded Message
+>From: Johann Lombardi <johann at sun.com>
+>Date: Mon, 26 May 2008 13:35:30 +0200
+>To: Nikita Danilov <Nikita.Danilov at Sun.COM>
+>Cc: "Jessica A. Johnson" <Jessica.Johnson at Sun.COM>, Bryon Neitzel
+><Bryon.Neitzel at Sun.COM>, Eric Barton <eeb at bartonsoftware.com>, Peter
+>Bojanic
+><Peter.Bojanic at Sun.COM>, <Peter.Braam at Sun.COM>
+>Subject: Re: Moving forward on Quotas
+>
+>Hi all,
+>
+>On Sat, May 24, 2008 at 01:33:36AM +0400, Nikita Danilov wrote:
+>> I think that to understand to what extent current quota architecture,
+>> design, and implementation need to be changed, we have --among other
+>> things-- to enumerate the problems that the current implementation has.
+>
+>For the record, I did a quota review with Peter Braam (report attached)
+back
+>in
+>March.
+>
+>> It would be very useful to get a list of issues from Johann (and maybe
+>> Andrew?).
+>
+>Sure. Actually, they are several aspects to consider:
+>
+>**************************************************************
+>* Changes required to quotas because of architecture changes *
+>**************************************************************
+>
+>* item #1: Supporting quotas on HEAD (no CMD)
+>
+>The MDT has been rewritten, but the quota code must be modified to support
+>the new framework. In addition, we were said not to land quota patches on
+>HEAD
+>until this gets fix (it was a mistake IMHO). So, we also have to port all
+>quota
+>patches from b1_6 to HEAD.
+>I don't expect this task to take a lot of time since there is no
+fundamental
+>changes in the quota logic. IIRC, Fanyong is already working on this.
+>
+>* item #2: Supporting quotas with CMD
+>
+>The quota master is the only one having a global overview of the quota
+>usages
+>and limits. On b1_6, the quota master is the MDS and the quota slaves are
+>the
+>OSSs. The code is designed in theory to support several MDT slaves too, but
+>some
+>shortcuts have been taken and some additional work is needed to support an
+>architecture with 1 quota master (one of the MDT) and several OSTs/MDTs
+>slaves.
+>
+>* item #3: Supporting quotas with DMU
+>
+>ZFS does not support standard Unix quotas. Instead, it relies on fileset
+>quotas.
+>This is a problem because Lustre quotas are set on a per-uid/gid basis.
+>To support ZFS, we are going to have to put OST objects in a dataset
+>matching a
+>dataset on the MDS.
+>We also have to decide what kind of quota interface we want to have at the
+>lustre level (do we still set quotas on uid/gid or do we switch to the
+>dataset
+>framework?). Things get more complicated if we want to support a MDS using
+>ldiskfs and OSSs using ZFS (do we have to support this?).
+>IMHO, in the future, Lustre will want to take advantage of the ZFS space
+>reservation feature and since this also relies on dataset, I think we
+should
+>adopt the ZFS quota framework at the lustre level too.
+>That being said, my understanding of ZFS quotas is limited to this webpage:
+>http://docs.huihoo.com/opensolaris/solaris-zfs-administration-guide/html/ch
+0
+>5s06.html
+>and I haven't had the time to dig further.
+>
+>****************************************************
+>* Shortcomings of the current quota implementation *
+>****************************************************
+>
+>* issue #1: Performance scalability
+>
+>Performance with quotas enabled are currently good because a single quota
+>master
+>is powerful enough to process the quota acquire/release requests. However,
+>we
+>know that the quota master is going to become a bottleneck when increasing
+>the
+>number of OSTs.
+>e.g.: 500 OSTs doing 2GB/s (~tera10) with a quota unit size of 100MB
+>requires
+>10,000 quota RPCs to be processed by the quota master.
+>Of course, we could decide to bump the default bunit, but the drawback is
+>that
+>it increases the granularity of quotas which is problematic given that
+quota
+>space cannot be revoked (see issue #2).
+>Another approach could be to take advantage of CMD and to spread the load
+>across
+>several quota masters. Distributing master could be done on a
+>per-uid/gid/dataset
+>basis, but we would still hit the same limitation if we want to reach
+>100+GB/s
+>with a single uid/gid/dataset. More complicated algorithms can also be
+>considered,
+>at the price of increasing complexity.
+>
+>* issue #2: Quota accuracy
+>
+>When a slave runs out of its local quota, it sends an acquire request to
+the
+>quota master. As I said earlier, the quota master is the only one having a
+>global overview of what has been granted to slaves. If the master can
+>satisfy
+>the request, it grants a qunit (can be a number of blocks or inodes) to the
+>slave. The problem is that an OST can return "quota exceeded" (=EDQUOT)
+>whereas
+>another OST is still having quotas. There is currently no callback to claim
+>back the quota space that has been granted to a slave.
+>Of course, this hurts quota accuracy and usually disturbs users who are
+>accustomed to use quotas with local filesystems (users do not understand
+why
+>they are getting EDQUOT while the disk usage is below the limit).
+>The dynamic qunit patch (bug 10600) has improved the situation by
+decreasing
+>qunit when the master gets closer to the quota limit, but some cases are
+>still
+>not addressed because there is still no way to claim back quota space
+>granted to
+>the slaves.
+>
+>* issue #3: Quota overruns
+>
+>Quotas are handled on the server side and the problem is that there are
+>currently no interactions between the grant cache and quotas. It means that
+>a client node can continue caching dirty data while the corresponding user
+>is over quota on the server side. When the data are written back, the
+server
+>is told that the writes have already been acknowledged to the application
+>(by
+>checking if OBD_BRW_FROM_GRANT is set) and thus accepts the write request
+>even
+>if the user is over quota. The server mentions in the bulk reply that the
+>user
+>is over quota and the client is then supposed to stop caching dirty data
+>(until
+>the server reports that the user is no longer over quota). The problem is
+>that
+>those quota overruns can be really significant since it depends on the
+>number of
+>clients:
+>max_quota_overruns = number of OSTs * number of clients * max_dirty_mb
+>e.g.               = 500            * 1,000             * 32
+>                   = 16TB :(
+>For now, only OSTs are concerned by this problem, but we will have the same
+>problem with inodes when we have a metadata writeback cache.
+>Fortunately, not all applications can run into this problem, but this can
+>happen
+>(actually, it is quite easy to reproduce with IOR/1 file per task).
+>I've been thinking of 2 approaches to tackle this problem:
+>- introduce some quota knowledge on the client side and modify the grant
+>cache
+>  to take into account the uid/gid/dataset.
+>- stop granting [0;EOF] locks when a user gets closer to the quota limit
+and
+>  only grant locks covering a region which fits within the remaining quota
+>space.
+>  I'm discussing this solution with Oleg atm.
+>
+>Cheers,
+>Johann
+>
+>------ End of Forwarded Message
+
+
+
+
+From Nikita.Danilov at Sun.COM  Thu May 29 01:39:53 2008
+From: Nikita.Danilov at Sun.COM (Nikita Danilov)
+Date: Thu, 29 May 2008 12:39:53 +0400
+Subject: [Lustre-devel] Moving forward on Quotas
+In-Reply-To: <1212010408.14599.105.camel@localhost>
+References: <C461688A.5460%peter.braam@sun.com>
+	<1211984942.11750.29.camel@localhost>
+	<18493.29199.765234.755534@gargle.gargle.HOWL>
+	<1211987642.4740.10.camel@localhost>
+	<18493.34513.370736.111492@gargle.gargle.HOWL>
+	<1211994338.14599.24.camel@localhost>
+	<18493.47971.504225.694251@gargle.gargle.HOWL>
+	<1212008833.14599.84.camel@localhost>
+	<18493.51834.832400.315440@gargle.gargle.HOWL>
+	<1212010408.14599.105.camel@localhost>
+Message-ID: <18494.27609.986096.752687@gargle.gargle.HOWL>
+
+Ricardo M. Correia writes:
+ > On Qui, 2008-05-29 at 01:11 +0400, Nikita Danilov wrote:
+ > 
+ > > Hm.. seems I am confused. If ZFS stores quota table internally, how this
+ > > table is available to the upper layers, to implement policy?
+ > 
+ > 
+ > uint64_t dmu_get_space_usage(objset, opaque_id)?
+
+It is not immediately clear how chown and chgrp can be implemented on
+top of this. Plus an interface to iterate over this table is most likely
+required for quota tools.
+
+To return to the question why using call-backs notifying about object
+space allocation changes is preferable to maintaining space allocation
+per-id in file system: opaqueid's have to be visible not only in the dmu
+interface, but also in osd interface, because quota policy is
+implemented above osd. But 
+
+    - osd knows nothing about users and groups (it uses capability-based
+      access control), and its interface has to be expanded to pass
+      through identifiers that it doesn't understand and doesn't
+      use. This looks wrong. osd operates on objects, identified by
+      fids, and it would be much more natural to do space accounting on
+      the object granularity.
+
+    - osd interface is identical on all platforms, so, in effect, zfs
+      space accounting interface is enforced on ldiskfs (and on all
+      possible future back-ends).
+
+ > Ricardo Manuel Correia
+ > Lustre Engineering
+
+Nikita.
+
+
+From Mikhail.Pershin at Sun.COM  Thu May 29 10:42:40 2008
+From: Mikhail.Pershin at Sun.COM (Mikhail Pershin)
+Date: Thu, 29 May 2008 21:42:40 +0400
+Subject: [Lustre-devel] Commit on share
+In-Reply-To: <C4620704.5499%peter.braam@sun.com>
+References: <C4620704.5499%peter.braam@sun.com>
+Message-ID: <op.ubxfheh9atmt0c@goga>
+
+Hi,
+
+It seems this mail wasn't received by subscribers though it is in  
+lustre-devel archive already. I paste the original answer below.
+
+----
+
+Hello Peter,
+
+Thanks for review. Alexander is on vacation so I will answer as co-author.
+
+On Tue, 27 May 2008 14:44:18 +0400, Peter Braam <Peter.Braam at Sun.COM>
+wrote:
+
+> This HLD is definitely not ready at all.  It is very short, lacks
+> interaction diagrams and the arguments made are not sufficiently  
+> detailed.
+>
+> * the second sentence is not right.  Commit should happen before
+> un-committed data coming from a client is shared with a 2nd client.
+
+Can you provide any issues with that? Committing data after but not before
+current operation has following benefits:
+1) no need in starting/commiting separate transaction, simple code due to
+that
+2) less syncs. E.g. if we are committing current operation too then we
+resolve possible share case related to current operation and later commit
+will not needed. Therefore we will have less synced operations.
+E.g. the worst case for COS is:
+client1 operation
+client2 operation -> sync
+client1 op -> sync
+client2 op -> sync
+...
+COS will do commit for each operation if they are on the same object and
+sync is happened before current operation.
+But including the current operation in commit will reduce number of
+commits in twice:
+client1 operation
+client2 op -> sync (including this op)
+client1 op - no sync because no uncommitted shared data
+client2 op -> sync
+...
+
+> * Is COS dependent on VBR ? no it is not, and can equally apply to normal
+> recovery
+
+Agree, COS is like just lever to turn sync commit on/off depending on some
+conditions. These conditions maybe quite simple like now - just
+comparision of clients - or maybe more complex and include checking of
+operation types, etc.
+
+But COS was requested initially as optional feature of VBR, so we didn't
+review COS-only configuration. Without VBR any missed client will invoke
+the eviction of all clients with replays after the gap. Therefore COS will
+not helps until we will change current recovery to don't evict clients if
+COS is enabled. But we should know actually was COS enabled before the
+server failure to be sure that the excluding gap transactions is safe. Do
+we need COS-only use-case actually?
+
+> * Section 3.2 is wrong: the recovery process will not fail with gaps in  
+> the
+> sequence when there is VBR.  It only fails if there are gaps in the
+> versions, and this is rare.
+
+the 3.2 section is talking only about gap in versions. Maybe it is not
+correct grammatically though.
+"... Highly probably we have non-trivial gaps version in the sequence and
+the recovery process fails"
+Could you mark what is wrong with 3.2? just rewrite the sentence to make
+it more clear about what gaps we mean?
+
+> * 3.3 parallel creations in one directory are protected with different,
+> independent lock resources.  Isn?t that sufficient to allow parallel
+> operations with COS?
+
+it is HEAD feature, but this design is for 1.8 (1.6-based) Lustre with one
+dir lock. If this is not mentioned in HLD then it should be fixed.
+But the issue is not about the lock only.
+The 'simple' COS checks only clients nids to determine the dependency.
+Therefore if two clients are creating objects in the same directory then
+we will have frequent syncs due to COS (operations from different nids)
+although there is no need for sync at all becase the operations are not
+dependent.
+The same will be with parallel locking if we will not check type of
+operation to determine the dependency.
+
+> * 3.6 provide a detailed explanation please
+"When enabled, COS makes REP-ACK not needed."
+Basically the COS is about two things:
+1) dependency tracking. This functionality which try to determine is
+current operation depending on some other uncommitted one. It may be
+simple and check only nids of clients, maybe more sophisticated and
+include type of operation checking or any other additional data.
+2) COS itself, the doing sync commit of current operation if there is
+dependency.
+
+So if we have 1) and 2) we have only the following cases:
+- there is dependency determined and commit is needed to remove it. No ACK
+is needed.
+- there is no dependency and we don't need no ACK and lock nor commit
+because client's replays are not dependent
+Therefore the ACK is not needed in both cases. The COS don't need to wait
+on repack lock, it determine the share case and do commit.
+
+how ACK is related to 'simple' COS (the only client NIDs are matter):
+1) client1 did operation and lock object until ACK from it will come to
+server
+2) client2 is waiting for ACK or commit to access the object
+3) if there was no commit yet, then client2 determine the sharing exists
+and force commit
+
+The only positive effect of ACK is delay before doing sync, that give us
+the chance to wait for commit without doing force sync. But that can be
+done with timer to get the same results.
+
+In HLD we propose the following:
+1) client1 got lock, did operation, unlock object after operation is done
+2) client2 got lock on object and check was there the dependency
+3) if dependency then force commit (or wait for it as alternative way)
+4) otherwise update dependency info for next check, unlock object when
+operation is done
+
+This is generic way and will work with any dependency tracking (on NIDs,
+on types of operations, etc.)
+
+> * GC thread is wrong mechanism this is what we have commit callbacks for
+
+Well, with callbacks we have to scan through all hash to find data to
+delete on each callback. As alex said there can be about 10K uncommitted
+transactions in high load easily, therefore using callback may become the
+bottlneck. There was discussion recently in devel@ about that originated
+by zam. Although I agree the HLD should be clear about why we choose that
+way and what is wrong with another.
+
+> * Why not use the DLM, then we can simply keep the client waiting ? the
+> mechanism already exists for repack; I am not convinced at all by the
+> reasoning that rep-ack is so different ? no real facts are quoted
+
+Let's estimate how RepACK lock is suitable as dependency tracking
+functionality. In fact it is more like 'possible dependency prevention'
+mechanism, and block object always because we can't predict the next
+operation, so should keep lock taken for ALL modifying operations. It is
+not 'tracking' but 'prediction' mechanism, it blocks access to the object
+until client will got reply just because the conflicting operation is
+possible but not because it really happen.
+Moreover it conflicts in general with dependency tracking we needed,
+because it will serialize operations even when they may not depend.
+
+With RepACK lock we are entering in operation AFTER the checks and we
+don't know the result of this check - was there operation from different
+client? are changes committed? Should we do sync or not? RepACK lock
+doesn't answer this question and we can't decide about sync is needed or
+not.
+
+For example, the client2 will wait for commit or ACK before entering in
+locked area.
+1) ACK is got but no commit yet. So client2 enter in locked area and now
+should determine was commit done or not. How to do that? This is vital
+because if there was no commit yet then we should do it. We may use
+version of object possible and check it against last_committed, but this
+will work only with VBR.
+So we need extra data per-object like transno.
+2) Commit was done. We should still do the same as for 1) to be sure about
+was commit done or not because it is not known why lock was unlocked - due
+to ACK or commit.
+3) But we don't know still is there conflict or not because we should
+check client uuids, but we don't store such info anywhere and waiting on
+lock is not reflected somehow. So we need extra data (or extra information
+  from ldlm?) again to store uuid of client who did latest operation on that
+object.
+
+The only way how dlm can work without any additional data is to unlock
+only when commit. But in that case we don't need COS at all. Each
+conflicting client will wait on lock until previous changes will be
+committed. But this may lead to huge latency for requests, comparing with
+commit interval and it is not what we need.
+
+> * It is left completely without explanation how the hash table (which I
+> think we don?t need/want) is used
+
+hash table store the following data per object:
+struct lu_dep_info {
+          struct ll_fid     di_object;
+          struct obd_uuid   di_client;
+          __u64             di_transno;
+};
+
+it contains uuid of client and transno of last change from this client.
+The uuid is compared to determine is there is conflict of not, the transno
+shows was that data committed already or not. I described above why it is
+needed. It is 1.6-related issue because we have only inode of object and
+no any extra structure. The HEAD has lu_object enveloping inodes, and hash
+will not needed, the dependency info may be stored per lu_object.
+
+>
+> Regards,
+>
+> Peter
+
+
+
+-- 
+Mikhail Pershin
+Staff Engineer
+Lustre Group
+Sun Microsystems, Inc.
+
+
+From adilger at sun.com  Fri May 30 19:45:24 2008
+From: adilger at sun.com (Andreas Dilger)
+Date: Fri, 30 May 2008 20:45:24 -0600
+Subject: [Lustre-devel] Commit on share
+In-Reply-To: <op.ubxfheh9atmt0c@goga>
+References: <C4620704.5499%peter.braam@sun.com> <op.ubxfheh9atmt0c@goga>
+Message-ID: <20080531024524.GB2992@webber.adilger.int>
+
+On May 29, 2008  21:42 +0400, Mike Pershin wrote:
+> It seems this mail wasn't received by subscribers though it is in  
+> lustre-devel archive already. I paste the original answer below.
+> 
+> Thanks for review. Alexander is on vacation so I will answer as co-author.
+
+Mike, can you please also archive this discussion in the bugzilla bug,
+so that it is available for future reference.
+
+> On Tue, 27 May 2008 14:44:18 +0400, Peter Braam <Peter.Braam at Sun.COM>
+> 
+> how ACK is related to 'simple' COS (the only client NIDs are matter):
+> 1) client1 did operation and lock object until ACK from it will come to
+> server
+> 2) client2 is waiting for ACK or commit to access the object
+> 3) if there was no commit yet, then client2 determine the sharing exists
+> and force commit
+> 
+> The only positive effect of ACK is delay before doing sync, that give us
+> the chance to wait for commit without doing force sync. But that can be
+> done with timer to get the same results.
+
+On a related note - I just came across bug 3621 - sync outstanding
+transaction instead of evicting client when a rep-ack isn't received.
+Could you please address this bug at the same time as COS.  With COS
+this will always happen, of course, but it should also happen without
+it to avoid client eviction if possible.
+
+> > * GC thread is wrong mechanism this is what we have commit callbacks for
+> 
+> Well, with callbacks we have to scan through all hash to find data to
+> delete on each callback. As alex said there can be about 10K uncommitted
+> transactions in high load easily, therefore using callback may become the
+> bottlneck. There was discussion recently in devel@ about that originated
+> by zam. Although I agree the HLD should be clear about why we choose that
+> way and what is wrong with another.
+
+Maybe I'm misunderstanding something (I didn't read HLD), but the commit
+callback can be set per Lustre transaction (in fact multiple callbacks
+can exist per transaction) so there should not be any need to do searching
+for finding per-transaction cleanup.  What state is the GC thread supposed
+to be cleaning up?  Doing GC is also searching, and that is undesirable in
+any case.
+
+> > * Why not use the DLM, then we can simply keep the client waiting ? the
+> > mechanism already exists for repack; I am not convinced at all by the
+> > reasoning that rep-ack is so different ? no real facts are quoted
+> 
+> Let's estimate how RepACK lock is suitable as dependency tracking
+> functionality. In fact it is more like 'possible dependency prevention'
+> mechanism, and block object always because we can't predict the next
+> operation, so should keep lock taken for ALL modifying operations. It is
+> not 'tracking' but 'prediction' mechanism, it blocks access to the object
+> until client will got reply just because the conflicting operation is
+> possible but not because it really happen.
+
+RepACK is currently needed for recovery.  I don't think it is a false
+conflict in most cases, though I agree in some cases it is.  If MDS
+thread is only e.g. passing through a directory to do some operation
+in a previously-existing subdirectory, or wants to stat a file that
+existed before the conflicting lock was taken then this is a false
+dependency.
+
+> Moreover it conflicts in general with dependency tracking we needed,
+> because it will serialize operations even when they may not depend.
+> 
+> With RepACK lock we are entering in operation AFTER the checks and we
+> don't know the result of this check - was there operation from different
+> client? are changes committed? Should we do sync or not? RepACK lock
+> doesn't answer this question and we can't decide about sync is needed or
+> not.
+
+That isn't quite true - if the changes ARE already committed, then the
+lock is no longer needed and dropped by the commit callback.  See
+ptlrpc_commit_replies->
+  schedule_difficult_replies-> (wakeup srv_waitq)
+    ptlrpc_main->
+      ptlrpc_server_handle_reply->
+      	ldlm_lock_decref()
+
+
+> For example, the client2 will wait for commit or ACK before entering in
+> locked area.
+> 1) ACK is got but no commit yet. So client2 enter in locked area and now
+> should determine was commit done or not. How to do that? This is vital
+> because if there was no commit yet then we should do it. We may use
+> version of object possible and check it against last_committed, but this
+> will work only with VBR. So we need extra data per-object like transno.
+
+Yes, this is definitely most efficient with VBR.
+
+> 2) Commit was done. We should still do the same as for 1) to be sure about
+> was commit done or not because it is not known why lock was unlocked - due
+> to ACK or commit.
+> 3) But we don't know still is there conflict or not because we should
+> check client uuids, but we don't store such info anywhere and waiting on
+> lock is not reflected somehow. So we need extra data (or extra information
+>   from ldlm?) again to store uuid of client who did latest operation on that
+> object.
+
+Wouldn't that be in the last_rcvd data for the current client?  If the
+req->rq_export->exp_mds_data->med_mcd->mcd_last_transno is the same as
+the VBR transno on object being modified then we know this client was
+the last one to modify the object and there is no external dependency.
+
+> The only way how dlm can work without any additional data is to unlock
+> only when commit. But in that case we don't need COS at all. Each
+> conflicting client will wait on lock until previous changes will be
+> committed. But this may lead to huge latency for requests, comparing with
+> commit interval and it is not what we need.
+> 
+> > * It is left completely without explanation how the hash table (which I
+> > think we don?t need/want) is used
+> 
+> hash table store the following data per object:
+> struct lu_dep_info {
+>           struct ll_fid     di_object;
+>           struct obd_uuid   di_client;
+>           __u64             di_transno;
+> };
+> 
+> it contains uuid of client and transno of last change from this client.
+> The uuid is compared to determine is there is conflict of not, the transno
+> shows was that data committed already or not. I described above why it is
+> needed. It is 1.6-related issue because we have only inode of object and
+> no any extra structure. The HEAD has lu_object enveloping inodes, and hash
+> will not needed, the dependency info may be stored per lu_object.
+
+I think the commit callbacks should be able to free this data, there
+should never be any such items on an object with di_transno > last_committed.
+Also, isn't it enough to store a single such item per object directly
+on the object?  Once we know there is ANY such conflict that is enough
+to invoke COS.  For per-object data this can be stored on 1.6 in the
+i_filterdata structure that we can attach onto every server inode.
+
+Cheers, Andreas
+--
+Andreas Dilger
+Sr. Staff Engineer, Lustre Group
+Sun Microsystems of Canada, Inc.
+
+
+
+From Alex.Zhuravlev at sun.com  Sat May 31 02:37:49 2008
+From: Alex.Zhuravlev at sun.com (Alex Zhuravlev)
+Date: Sat, 31 May 2008 13:37:49 +0400
+Subject: [Lustre-devel] Commit on share
+In-Reply-To: <20080531024524.GB2992@webber.adilger.int>
+References: <C4620704.5499%peter.braam@sun.com> <op.ubxfheh9atmt0c@goga>
+	<20080531024524.GB2992@webber.adilger.int>
+Message-ID: <48411C6D.5090306@sun.com>
+
+Andreas Dilger wrote:
+> Maybe I'm misunderstanding something (I didn't read HLD), but the commit
+> callback can be set per Lustre transaction (in fact multiple callbacks
+> can exist per transaction) so there should not be any need to do searching
+> for finding per-transaction cleanup.  What state is the GC thread supposed
+> to be cleaning up?  Doing GC is also searching, and that is undesirable in
+> any case.
+
+I think removal *few* (usually two, sometimes upto 4) deps from every callback
+is quite expensive as we need to take spinlock and in short period of time we
+have to remove thousands deps. for SMP it's not that good. even worse for NUMA.
+
+instead we can do lazy free - in many cases we have to scan whole bucket anyway
+as we search for possible dependency. so, under single spinlock instance and
+with free searching we can collect stale entries and free them (or move onto
+special list to free later).
+
+as entries are supposed to be distributed evenly, this algo should work in most
+cases. only if we see some bucket is getting too many stale entries we start GC.
+
+thanks, Alex
+
+
+
+From Peter.Braam at Sun.COM  Sat May 31 03:25:07 2008
+From: Peter.Braam at Sun.COM (Peter Braam)
+Date: Sat, 31 May 2008 18:25:07 +0800
+Subject: [Lustre-devel] Moving forward on Quotas
+In-Reply-To: <18493.30993.371265.613200@gargle.gargle.HOWL>
+Message-ID: <C4674883.55E4%peter.braam@sun.com>
+
+Regardless of how file quota has to be implemented, we do need file quota,
+just to be clear.
+
+Peter
+
+
+On 5/28/08 11:24 PM, "Nikita Danilov" <Nikita.Danilov at Sun.COM> wrote:
+
+> Peter Braam writes:
+>> 
+>> Why do they not need file quota - what if someone wants to control file
+>> count?
+> 
+> Idea is that support for the inode quota is not necessary is DMU, as
+> upper layer can implement it by itself. Compare this with block quotas
+> that do require support from DMU, because upper layer cannot generally
+> tell overwrite from new-write.
+> 
+>>> 
+> 
+> Nikita.
+> 
+>> 
+
+
+
+
+From Ricardo.M.Correia at Sun.COM  Sat May 31 08:31:19 2008
+From: Ricardo.M.Correia at Sun.COM (Ricardo M. Correia)
+Date: Sat, 31 May 2008 16:31:19 +0100
+Subject: [Lustre-devel] Moving forward on Quotas
+In-Reply-To: <18496.11672.844774.815457@gargle.gargle.HOWL>
+References: <C461688A.5460%peter.braam@sun.com>
+	<1211984942.11750.29.camel@localhost>
+	<18493.29199.765234.755534@gargle.gargle.HOWL>
+	<1211987642.4740.10.camel@localhost>
+	<18493.34513.370736.111492@gargle.gargle.HOWL>
+	<1211994338.14599.24.camel@localhost>
+	<18493.47971.504225.694251@gargle.gargle.HOWL>
+	<1212008833.14599.84.camel@localhost>
+	<18493.51834.832400.315440@gargle.gargle.HOWL>
+	<1212010408.14599.105.camel@localhost>
+	<18494.27609.986096.752687@gargle.gargle.HOWL>
+	<18496.11672.844774.815457@gargle.gargle.HOWL>
+Message-ID: <1212247880.21348.73.camel@localhost>
+
+Hi Nikita,
+
+On Sex, 2008-05-30 at 20:38 +0400, Nikita Danilov wrote: 
+
+> What about the following:
+> 
+>     - dmu tracks per-object `space usage', in addition to usual block
+>       count as reported by st_blocks.
+
+
+Currently, the space reported by st_blocks is calculated from
+dnode_phys_t->dn_used, which in recent SPA versions tracks the number of
+allocated bytes (not blocks) of a DMU object, which is accurate up to
+the last committed txg.
+Is this what you mean by "space usage"?
+
+
+> - when space is actually allocated during transaction sync, dmu
+>       notifies its user about changes in space usage by invoking some
+> 
+>           void (*space_usage)(objset_t *os, __u64 objid, __s64 delta);
+> 
+>       call-back, registered by user.
+
+
+Ok. 
+
+
+
+> - user updates its data-structures in the context of the currently
+>       open transaction.
+
+
+Ok.
+
+
+> - dmu internally updates space usage information in the context of
+>       transaction being synced.
+
+
+This is being done per-object already.
+
+
+> - it also records a list (let's call this "pending list") of all
+>       object whose space allocation changed in the context of the same
+>       transaction.
+
+
+
+Ok, this is where I am starting not to like.. :) 
+
+
+
+> - after a mount, dmu calls ->space_usage() against all objects in
+>       the pending lists of last committed transaction group, to update
+>       client's data-structures that are possibly stale due to the loss
+> 
+>       of next transaction group.
+
+
+What do you mean by mount? Do you mean when starting an OST?
+
+
+> Do you think that might work?
+
+
+?If I understood correctly, the pending list you propose sounds like a
+recovery mechanism (similar to a log) which I don't think is the right
+way to implement this.
+
+First of all, I think you would need to keep track of objects changed in
+the last 2 synced transaction groups, not just the last one. The reason
+is that when the DMU is syncing transaction group N, it is likely that
+you can only be writing to transaction group N+2, because transaction
+group N+1 may already be quiescing. This presents a challenge because if
+the machines crashes, you may lose data in 2 transaction groups, not
+just 1, which I think would make things harder to recover..
+
+Another problem it this: let's say the DMU is syncing a transaction
+group, and starts calling ->space_usage() for objects. Now the machine
+crashes, and comes up again.
+Now how do you distinguish between which objects were called
+->space_usage() in the transaction group that was syncing and which
+weren't (or how would you differentiate between ->space_usage() calls of
+txg N and those of txg N+1)? At a minimum, you would need a txg
+parameter in ->space_usage(), which again is leaking a bit internal
+knowledge of how the DMU works outside the DMU (and which we may not
+assume will always work the same way in future versions).
+
+?Another thing that comes to mind is that the pending list is something
+very problem-specific and that would only be useful for Lustre, not
+other consumers, so the ZFS team may object to this..
+For example, for implementing uid/gid quotas in ZFS, there is no need
+for such a mechanism..
+
+And furthermore, I think this kind of recovery could be better
+implemented using commit callbacks, which is an abstraction already
+designed for recovery purposes and which is backend-agnostic.
+
+Ok, now stepping outside of the pending list (which I may have not
+understood the purpose correctly at all :-), I think implementing quotas
+in ZFS is harder that it may look at first sight.
+
+For example, let's say you have 1 MB of quota left. How do you determine
+how much data you can write before the quota runs out?
+This may shock you, but depending on the pool configuration, filesystem
+properties and object block size, writing 1 MB of file data can take
+anywhere from exactly 0 bytes to 9.25 MB of allocated space (!!).
+
+Now let's scale this up and imagine you have 1 GB of quota left, and you
+write 1 GB of data (and you do this sufficiently fast enough). In the
+worst case scenario, you could end up going 8.25 GB over the limit,
+which goes against any possible wish of having fine-grained quotas.. :-)
+
+BTW, this reminds me to that I am almost sure our uOSS grants code is
+wrong (I have not been assigned as an inspector, so I can't say how bad
+it is..).
+
+Perhaps I am making concentrating too much on correctness.. maybe going
+over a quota is not too big of a deal, I remember some conversations
+between Andreas and the ZFS team which implied that not having 100%
+correctness is not too big of a problem. ?However, I am not so sure
+about grants.. :/
+
+Regards,
+Ricardo
+
+--
+
+Ricardo Manuel Correia
+Lustre Engineering
+
+Sun Microsystems, Inc.
+Portugal
+Phone +351.214134023 / x58723
+Mobile +351.912590825
+Email Ricardo.M.Correia at Sun.COM
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20080531/cd2f9f1f/attachment.htm>
+-------------- next part --------------
+A non-text attachment was scrubbed...
+Name: 6g_top.gif
+Type: image/gif
+Size: 1257 bytes
+Desc: not available
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20080531/cd2f9f1f/attachment.gif>
+
+From Ricardo.M.Correia at Sun.COM  Sat May 31 08:49:19 2008
+From: Ricardo.M.Correia at Sun.COM (Ricardo M. Correia)
+Date: Sat, 31 May 2008 16:49:19 +0100
+Subject: [Lustre-devel] Moving forward on Quotas
+In-Reply-To: <1212247880.21348.73.camel@localhost>
+References: <C461688A.5460%peter.braam@sun.com>
+	<1211984942.11750.29.camel@localhost>
+	<18493.29199.765234.755534@gargle.gargle.HOWL>
+	<1211987642.4740.10.camel@localhost>
+	<18493.34513.370736.111492@gargle.gargle.HOWL>
+	<1211994338.14599.24.camel@localhost>
+	<18493.47971.504225.694251@gargle.gargle.HOWL>
+	<1212008833.14599.84.camel@localhost>
+	<18493.51834.832400.315440@gargle.gargle.HOWL>
+	<1212010408.14599.105.camel@localhost>
+	<18494.27609.986096.752687@gargle.gargle.HOWL>
+	<18496.11672.844774.815457@gargle.gargle.HOWL>
+	<1212247880.21348.73.camel@localhost>
+Message-ID: <1212248959.21348.77.camel@localhost>
+
+On S?b, 2008-05-31 at 16:31 +0100, Ricardo M. Correia wrote:
+
+> This may shock you, but depending on the pool configuration,
+> filesystem properties and object block size, writing 1 MB of file data
+> can take anywhere from exactly 0 bytes to 9.25 MB of allocated space
+> (!!).
+
+
+Let me correct that: in the very worst case scenario, writing 1 MB of
+file data can actually consume (a bit more than) 11.25 MB of allocated
+space..
+
+--
+
+Ricardo Manuel Correia
+Lustre Engineering
+
+Sun Microsystems, Inc.
+Portugal
+Phone +351.214134023 / x58723
+Mobile +351.912590825
+Email Ricardo.M.Correia at Sun.COM
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20080531/4031336e/attachment.htm>
+-------------- next part --------------
+A non-text attachment was scrubbed...
+Name: 6g_top.gif
+Type: image/gif
+Size: 1257 bytes
+Desc: not available
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20080531/4031336e/attachment.gif>
+
+From Nikita.Danilov at Sun.COM  Sat May 31 09:19:25 2008
+From: Nikita.Danilov at Sun.COM (Nikita Danilov)
+Date: Sat, 31 May 2008 20:19:25 +0400
+Subject: [Lustre-devel] Moving forward on Quotas
+In-Reply-To: <1212247447.21348.70.camel@localhost>
+References: <C461688A.5460%peter.braam@sun.com>
+	<1211984942.11750.29.camel@localhost>
+	<18493.29199.765234.755534@gargle.gargle.HOWL>
+	<1211987642.4740.10.camel@localhost>
+	<18493.34513.370736.111492@gargle.gargle.HOWL>
+	<1211994338.14599.24.camel@localhost>
+	<18493.47971.504225.694251@gargle.gargle.HOWL>
+	<1212008833.14599.84.camel@localhost>
+	<18493.51834.832400.315440@gargle.gargle.HOWL>
+	<1212010408.14599.105.camel@localhost>
+	<18494.27609.986096.752687@gargle.gargle.HOWL>
+	<18496.11672.844774.815457@gargle.gargle.HOWL>
+	<1212247447.21348.70.camel@localhost>
+Message-ID: <18497.31373.726995.583695@gargle.gargle.HOWL>
+
+Ricardo M. Correia writes:
+ > Hi Nikita,
+
+Hello,
+
+(I reordered some of the comments below.)
+
+ > Currently, the space reported by st_blocks is calculated from
+ > dnode_phys_t->dn_used, which in recent SPA versions tracks the number of
+ > allocated bytes (not blocks) of a DMU object, which is accurate up to
+ > the last committed txg.
+ > Is this what you mean by "space usage"?
+
+I meant a counter of bytes or blocks that this object occupies for the
+quota purposes. I specifically don't want to identify `space usage' with
+st_blocks, because for the modern file systems there is no _the_ way to
+define what to include into quota: users want quota to be consistent
+with both df(1) and du(1) and in the presence of features like snapshots
+this is not generally possible.
+
+ > What do you mean by mount? Do you mean when starting an OST?
+
+Yes, OST or MDT.
+
+ > First of all, I think you would need to keep track of objects changed in
+ > the last 2 synced transaction groups, not just the last one. The reason
+
+Indeed, I omitted this for the sake of clarity.
+
+ > group N+1 may already be quiescing. This presents a challenge because if
+ > the machines crashes, you may lose data in 2 transaction groups, not
+ > just 1, which I think would make things harder to recover..
+
+Won't it be enough to record in the pending list object from two last
+transaction groups, if necessary?
+
+ > 
+ > Another problem it this: let's say the DMU is syncing a transaction
+ > group, and starts calling ->space_usage() for objects. Now the machine
+ > crashes, and comes up again.
+ > Now how do you distinguish between which objects were called
+ > ->space_usage() in the transaction group that was syncing and which
+ > weren't (or how would you differentiate between ->space_usage() calls of
+
+But we don't have to, if we make ->space_usage() idempotent, i.e.,
+taking an absolute space usage as a last argument, rather than delta. In
+that case, DMU is free to call it multiple times, and client has to cope
+with this. (Hmm... I am pretty sure this is what I was thinking about
+when composing previous message, but confusing signed __s64 delta
+somehow got in, sorry.)
+
+ > >     - dmu internally updates space usage information in the context of
+ > >       transaction being synced.
+ > 
+ > 
+ > This is being done per-object already.
+
+Aha, this simplifies the whole story significantly. If dmu already
+maintains for every object a space usage counter that is suitable for
+the quota, then `pending list' can be maintained by dmu client, without
+any additional support from dmu:
+
+    - when (as a part of open transaction), client does an operation
+      that can potentially modify space usage it adds object identifier
+      into pending list, implemented as a normal dmu object;
+
+    - when disk space is actually allocated (transaction group is in
+      sync mode), client gets ->space_usage() call-back as above;
+
+    - on a `mount' client scans pending list object, fetches space usage
+      from the dmu, updates client's internal data-structures, and
+      prunes the pending list.
+
+Of course, again, pending log has to keep track of objects modified in
+the last 2 transaction groups.
+
+With the help of commit call-back even ->space_usage() seems
+unnecessary, because on a commit time client can scan pending list (in
+memory). Heh, it seems that the quota can be implemented completely
+outside of the dmu.
+
+ > 
+ > And furthermore, I think this kind of recovery could be better
+ > implemented using commit callbacks, which is an abstraction already
+ > designed for recovery purposes and which is backend-agnostic.
+
+Sounds interesting, can you elaborate on this?
+
+ > Perhaps I am making concentrating too much on correctness.. maybe going
+ > over a quota is not too big of a deal, I remember some conversations
+ > between Andreas and the ZFS team which implied that not having 100%
+ > correctness is not too big of a problem. ???However, I am not so sure
+ > about grants.. :/
+
+It's my impression too that the agreement was to sacrifice some degree
+of correctness to simplify implementation.
+
+ > 
+ > Regards,
+ > Ricardo
+
+Nikita.
+
+
+From Ricardo.M.Correia at Sun.COM  Sat May 31 10:19:04 2008
+From: Ricardo.M.Correia at Sun.COM (Ricardo M. Correia)
+Date: Sat, 31 May 2008 18:19:04 +0100
+Subject: [Lustre-devel] Moving forward on Quotas
+In-Reply-To: <18497.31373.726995.583695@gargle.gargle.HOWL>
+References: <C461688A.5460%peter.braam@sun.com>
+	<1211984942.11750.29.camel@localhost>
+	<18493.29199.765234.755534@gargle.gargle.HOWL>
+	<1211987642.4740.10.camel@localhost>
+	<18493.34513.370736.111492@gargle.gargle.HOWL>
+	<1211994338.14599.24.camel@localhost>
+	<18493.47971.504225.694251@gargle.gargle.HOWL>
+	<1212008833.14599.84.camel@localhost>
+	<18493.51834.832400.315440@gargle.gargle.HOWL>
+	<1212010408.14599.105.camel@localhost>
+	<18494.27609.986096.752687@gargle.gargle.HOWL>
+	<18496.11672.844774.815457@gargle.gargle.HOWL>
+	<1212247447.21348.70.camel@localhost>
+	<18497.31373.726995.583695@gargle.gargle.HOWL>
+Message-ID: <1212254344.21348.116.camel@localhost>
+
+On S?b, 2008-05-31 at 20:19 +0400, Nikita Danilov wrote:
+
+> I meant a counter of bytes or blocks that this object occupies for the
+> quota purposes. I specifically don't want to identify `space usage' with
+> st_blocks, because for the modern file systems there is no _the_ way to
+> define what to include into quota: users want quota to be consistent
+> with both df(1) and du(1) and in the presence of features like snapshots
+> this is not generally possible.
+
+
+I think dnode_phys_t->dn_used can be used for this, because AFAICS it
+keeps track of allocated space referenced by the active filesystem (in
+other words, it does not include space which is referenced only by
+snapshots).
+
+I am assuming snapshots should not have any effect on quotas, right?
+
+
+>  > group N+1 may already be quiescing. This presents a challenge because if
+>  > the machines crashes, you may lose data in 2 transaction groups, not
+>  > just 1, which I think would make things harder to recover..
+> 
+> Won't it be enough to record in the pending list object from two last
+> transaction groups, if necessary?
+
+
+Hmm.. I think so, but I think we should not rely on this always being 2,
+I think we should allow the list to have an unbounded size, and let the
+commit callbacks notify when an entry can be pruned from the list.
+
+
+> But we don't have to, if we make ->space_usage() idempotent, i.e.,
+> taking an absolute space usage as a last argument, rather than delta. In
+> that case, DMU is free to call it multiple times, and client has to cope
+> with this. (Hmm... I am pretty sure this is what I was thinking about
+> when composing previous message, but confusing signed __s64 delta
+> somehow got in, sorry.)
+
+
+Ok, that clears my previous concern.
+But in this case, how do you know how much you need to add or subtract
+to a quota when an object changes size?
+I am guessing that you'd need to at least write the previous object size
+as part of the pending list, so that when you're recovering you'd know
+the delta..
+
+Heh, to me this whole thing sounds quite complicated to get right, but I
+think it could work (but of course, fine-grained hard quotas is another
+matter altogether..)..
+
+
+>  > And furthermore, I think this kind of recovery could be better
+>  > implemented using commit callbacks, which is an abstraction already
+>  > designed for recovery purposes and which is backend-agnostic.
+> 
+> Sounds interesting, can you elaborate on this?
+
+
+I was thinking that commit callbacks could be used by the DMU consumer
+to solve this problem instead of having an internal DMU list/log, and I
+guess you've already figured out how that could be done :)
+
+Cheers,
+Ricardo
+--
+
+Ricardo Manuel Correia
+Lustre Engineering
+
+Sun Microsystems, Inc.
+Portugal
+Phone +351.214134023 / x58723
+Mobile +351.912590825
+Email Ricardo.M.Correia at Sun.COM
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20080531/18819888/attachment.htm>
+-------------- next part --------------
+A non-text attachment was scrubbed...
+Name: 6g_top.gif
+Type: image/gif
+Size: 1257 bytes
+Desc: not available
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20080531/18819888/attachment.gif>
+
+From Nikita.Danilov at Sun.COM  Sat May 31 12:11:34 2008
+From: Nikita.Danilov at Sun.COM (Nikita Danilov)
+Date: Sat, 31 May 2008 23:11:34 +0400
+Subject: [Lustre-devel] Moving forward on Quotas
+In-Reply-To: <1212254344.21348.116.camel@localhost>
+References: <C461688A.5460%peter.braam@sun.com>
+	<1211984942.11750.29.camel@localhost>
+	<18493.29199.765234.755534@gargle.gargle.HOWL>
+	<1211987642.4740.10.camel@localhost>
+	<18493.34513.370736.111492@gargle.gargle.HOWL>
+	<1211994338.14599.24.camel@localhost>
+	<18493.47971.504225.694251@gargle.gargle.HOWL>
+	<1212008833.14599.84.camel@localhost>
+	<18493.51834.832400.315440@gargle.gargle.HOWL>
+	<1212010408.14599.105.camel@localhost>
+	<18494.27609.986096.752687@gargle.gargle.HOWL>
+	<18496.11672.844774.815457@gargle.gargle.HOWL>
+	<1212247447.21348.70.camel@localhost>
+	<18497.31373.726995.583695@gargle.gargle.HOWL>
+	<1212254344.21348.116.camel@localhost>
+Message-ID: <18497.41702.75481.956514@gargle.gargle.HOWL>
+
+Ricardo M. Correia writes:
+
+ > I am assuming snapshots should not have any effect on quotas, right?
+
+That's the problem: on the one hand, users want to use quota to control
+actual disk usage, e.g., to not run out of disk space. For this, one
+wants to include snapshots into quota. On the other hand, space in
+snapshots is not easily reclaimable, which is not very convenient,
+because user might be without a way to clean up space. Note that this
+situation is possible without snapshots: other user can hard-link your
+file from a directory to which you have no access.
+
+ > 
+ > Hmm.. I think so, but I think we should not rely on this always being 2,
+ > I think we should allow the list to have an unbounded size, and let the
+ > commit callbacks notify when an entry can be pruned from the list.
+
+Right.
+
+ > > But we don't have to, if we make ->space_usage() idempotent, i.e.,
+ > > taking an absolute space usage as a last argument, rather than delta. In
+ > > that case, DMU is free to call it multiple times, and client has to cope
+ > > with this. (Hmm... I am pretty sure this is what I was thinking about
+ > > when composing previous message, but confusing signed __s64 delta
+ > > somehow got in, sorry.)
+ > 
+ > 
+ > Ok, that clears my previous concern.
+ > But in this case, how do you know how much you need to add or subtract
+ > to a quota when an object changes size?
+ > I am guessing that you'd need to at least write the previous object size
+ > as part of the pending list, so that when you're recovering you'd know
+ > the delta..
+
+Yes, something similar to what data-bases do for redo logging, where the
+same log entry can be replayed multiple times.
+
+ > 
+ > Cheers,
+ > Ricardo
+ > --
+
+Nikita.
+
+
+From Peter.Braam at Sun.COM  Sat May 31 19:26:41 2008
+From: Peter.Braam at Sun.COM (Peter Braam)
+Date: Sun, 01 Jun 2008 10:26:41 +0800
+Subject: [Lustre-devel] Moving forward on Quotas
+In-Reply-To: <18493.29199.765234.755534@gargle.gargle.HOWL>
+Message-ID: <C46829E1.5610%peter.braam@sun.com>
+
+Jeff - 
+
+could you get in touch with Nikita and Ricardo and assist them with a draft
+of quota design for the DMU.  Nikita has some interesting API proposals, but
+there are some pretty deep ZFS issues involved where help would be welcome,
+as far as I can see.
+
+Just as a heads up, quota in systems like Lustre is quite a difficult issue,
+as many servers contribute to quota usage and this needs "acquire", and
+"release" of quota in reasonable chunks to avoid the server server protocol
+getting too chatty.
+
+Thank you for your help!
+
+Peter
+
+
+On 5/28/08 10:54 PM, "Nikita Danilov" <Nikita.Danilov at Sun.COM> wrote:
+
+> Ricardo M. Correia writes:
+>> On Ter, 2008-05-27 at 07:28 +0800, Peter Braam wrote:
+>> 
+>>>> Going aside, if I were designing quota from the scratch right now, I
+>>>> would implement it completely inside of Lustre. All that is needed for
+>>>> such an implementation is a set of call-backs that local file-system
+>>>> invokes when it allocates/frees blocks (or inodes) for a given
+>>>> object. Lustre would use these call-backs to transactionally update
+>>>> local quota in its own format. That would save us a lot of hassle we
+>>>> have dealing with the changing kernel quota interfaces, uid re-mappings,
+>>>> and subtle differences between quota implementations on a different file
+>>>> systems.
+>>> 
+>>> ======> IMPORTANT: get in touch with Jeff Bonwick now, let's get quota
+>>> implemented in this way in DMU then.
+>> 
+>> 
+>> I think this was proposed by Alex before, but AFAIU the conclusion is
+>> that this was not possible to do with ZFS (or at least, not easy to do).
+>> 
+>> The problem is that ZFS uses delayed allocations, i.e., allocations
+>> occur long after a transaction group has been closed, and therefore we
+>> can't transactionally keep track of allocated space because by the time
+>> the callbacks were called we are not allowed to write to the transaction
+>> group anymore, since another 2 txgs could have been opened already.
+> 
+> But that problem has to be solved anyway to implement per-user quotas
+> for ZFS, correct?
+> 
+> One possible solution I see is to use something like ZIL to log
+> operations in the context of current transaction group. This log can be
+> replayed during mount to update quota file.
+> 
+>> 
+>> Since this couldn't be done transactionally, if the node crashes, there
+>> would be no way of knowing how many blocks had been allocated on the
+>> latest (actually, the latest 2) committed transaction groups..
+>> 
+>> Regards,
+>> Ricardo
+> 
+> Nikita.
+
+
+
+
+From Peter.Braam at Sun.COM  Sat May 31 19:32:46 2008
+From: Peter.Braam at Sun.COM (Peter Braam)
+Date: Sun, 01 Jun 2008 10:32:46 +0800
+Subject: [Lustre-devel] Moving forward on Quotas
+In-Reply-To: <20080528080613.GN3582@lore>
+Message-ID: <C4682B4E.5615%peter.braam@sun.com>
+
+I am quite worried about the dynamic qunit patch.
+I am not convinced I want smaller qunits to stick around.
+
+Please PROVE RIGOROUSLY that qunits are grow large quickly again, otherwise
+they create too much server - server overhead.  The cost of 100MB of disk
+space is barely more than a cent now; what are we trying to address withtiny
+qunits?
+
+Plan for 5000 OSS servers at the minimum and 1,000,000 clients, and up to
+100TB/sec in I/O.  Calculate quota RPC traffic from that.  A server cannot
+handle more than 15,000 RPC's / sec.
+
+No arguing, or opinions here, numbers please.  The original design I did 4
+years ago limited quota calls from one OSS to the master to one per second.
+Qunits were made adaptive without solid reasoning or design.
+
+Peter
+
+
+On 5/28/08 4:06 PM, "Johann Lombardi" <johann at sun.com> wrote:
+
+> Hello Peter,
+> 
+> On Tue, May 27, 2008 at 07:28:10AM +0800, Peter Braam wrote:
+>>>> When a slave runs out of its local quota, it sends an acquire request to
+>>>> the
+>>>> quota master. As I said earlier, the quota master is the only one having a
+>>>> global overview of what has been granted to slaves. If the master can
+>>>> satisfy
+>>>> the request, it grants a qunit (can be a number of blocks or inodes) to the
+>>>> slave. The problem is that an OST can return "quota exceeded" (=EDQUOT)
+>>>> whereas
+>>>> another OST is still having quotas. There is currently no callback to claim
+>>>> back the quota space that has been granted to a slave.
+>> 
+>> Hmm - the slave should release quota.
+> 
+> I don't think that the slave can make such a decision by itself since it does
+> not know that we are getting closer to the global quota limit. Only the master
+> is aware of this.
+> Actually, the scenario I described above can no longer happen - with recent
+> lustre versions at least - thanks to the dynamic qunit patch because the
+> master broadcasts to all the slaves the new qunit size when it is shrunk.
+> 
+> Cheers,
+> Johann
+
+
+
+
+From Peter.Braam at Sun.COM  Sat May 31 19:36:33 2008
+From: Peter.Braam at Sun.COM (Peter Braam)
+Date: Sun, 01 Jun 2008 10:36:33 +0800
+Subject: [Lustre-devel] Moving forward on Quotas
+In-Reply-To: <1212008833.14599.84.camel@localhost>
+Message-ID: <C4682C31.5617%peter.braam@sun.com>
+
+For CIFS quota and user ids get in touch with Matt Wu and Mike Shapiro.
+There are special interfaces in ZFS/DMU for better windows support that we
+probably need to leverage.
+
+Peter
+
+
+On 5/29/08 5:07 AM, "Ricardo M. Correia" <Ricardo.M.Correia at Sun.COM> wrote:
+
+> On Qui, 2008-05-29 at 00:06 +0400, Nikita Danilov wrote:
+>> 
+>> Well... that's just renaming uid and gid into opaqueid0 and
+>> opaqueid1. :-)
+> 
+> It may be simple for POSIX uids/gids, but maybe not for CIFS user ids (but
+> since there is a mapping table it may be also be simple, I'm not sure).
+> I think it would make sense to give it a list of opaque ids, instead of just
+> opaqueid0 and opaqueid1 (maybe a file could belong to multiple groups or maybe
+> we can think of other creative ideas in the future..).
+> 
+>>  So on one hand we have to add a couple of parameters to all dmu entry
+>>  points that can allocate disk space. On the other hand we have something
+>>  like
+>>  
+>>  typedef void (*dmu_alloc_callback_t)(objset_t *os, uint64_t objid, long
+>> bytes);
+>>  
+>>  void dmu_alloc_callback_register(objset_t *os, dmu_alloc_callback_t cb);
+>>  
+>>  with dmu calling registered call-back when blocks are actually allocated
+>>  to the object. Advantage of the later interface is that dmu implements
+>>  only mechanism, and policy ("user quotas" and "group quotas") is left to
+>>  the upper layers to implement.
+> 
+> I don't see why that would be an advantage over what we had planned to do.
+> The plan we discussed with the ZFS team was to make the DMU do space
+> accounting internally by opaque ids, so the quota policy/enforcement would
+> still be left to the upper layers to implement.
+> 
+>> 
+>> If quota management and storage are
+>> completely encapsulated within dmu, then dmu has to provide full quota
+>> control interface too, and that interface has to be exported from osd
+>> upward. For one thing, implementation of this interface is going to take
+>> a lot of time.
+> 
+> Again, the plan was for the DMU to do only space accounting, the actual quota
+> management and enforcement would be implemented in Lustre.
+> 
+> 
+>> 
+>>>  > For things that requires knowledge of DMU internals (like space
+>>>  > accounting, spacemaps, ...) it shouldn't be the DMU consumer that has to
+>>>  > write during the txg sync phase, it should be the DMU because only the
+>>>  > DMU should know about its internals.
+>> 
+>> I don't quite understand this argument. DMU already has an interface to
+>> capture a buffer into a transaction and to modify it within this
+>> transaction. An interface to modify a buffer after transaction was
+>> closed, but before it is committed is no more "internal" than the first
+>> one. It is just places more restrictions on what consumer is allowed to
+>> do with the buffer.
+> 
+> What I mean is that IMO a consumer of a filesystem shouldn't have to know
+> intimate details of how the filesystem (in this case, the DMU) works.
+> For instance, so far Lustre had no idea that transactions are actually grouped
+> into transaction groups and it had no idea about transaction group states.
+> 
+> Allowing modification of buffers by an upper layer when a transaction group is
+> already syncing is not a very elegant way to solve this IMHO (compared with
+> our previous plan).. :-)
+> 
+> Cheers,
+> Ricardo
+> 
+> --
+> Ricardo Manuel Correia
+> Lustre Engineering
+> 
+> Sun Microsystems, Inc.
+> Portugal
+> Phone +351.214134023 / x58723
+> Mobile +351.912590825
+> Email Ricardo.M.Correia at Sun.COM
+> 
+> _______________________________________________
+> Lustre-devel mailing list
+> Lustre-devel at lists.lustre.org
+> http://lists.lustre.org/mailman/listinfo/lustre-devel
+
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20080601/3683b206/attachment.htm>
+-------------- next part --------------
+A non-text attachment was scrubbed...
+Name: image.gif
+Type: image/gif
+Size: 1257 bytes
+Desc: not available
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20080601/3683b206/attachment.gif>
+
+From Peter.Braam at Sun.COM  Sat May 31 19:44:27 2008
+From: Peter.Braam at Sun.COM (Peter Braam)
+Date: Sun, 01 Jun 2008 10:44:27 +0800
+Subject: [Lustre-devel] Moving forward on Quotas
+In-Reply-To: <92825021-D566-4805-9297-5EFBD3260D73@Sun.COM>
+Message-ID: <C4682E0B.561F%peter.braam@sun.com>
+
+That the total number of quota RPC's made by all OSS's (up to 5000 of them)
+should not exceed something like 1/3 of this, based on today's hardware,
+otherwise quota traffic will slow the cluster down.
+
+We have seen big servers do 15,000 updates/sec sustained, so that is a
+measure we can use at the moment.
+
+Peter
+
+
+On 6/1/08 10:41 AM, "Robert Gordon" <Robert.Gordon at Sun.COM> wrote:
+
+> 
+> On May 31, 2008, at 9:32 PM, Peter Braam wrote:
+> 
+>> A server cannot handle more than 15,000 RPC's / sec.
+> 
+> I'm curious (always ;) ) ..
+> 
+> what do you exactly mean by this statement ?
+> 
+> Thanks,
+> Robert.. 
+
+
+
+
+From mws at Sun.COM  Sat May 31 20:17:51 2008
+From: mws at Sun.COM (Mike Shapiro)
+Date: Sat, 31 May 2008 20:17:51 -0700
+Subject: [Lustre-devel] Moving forward on Quotas
+In-Reply-To: <C4682C31.5617%peter.braam@sun.com>
+References: <1212008833.14599.84.camel@localhost>
+	<C4682C31.5617%peter.braam@sun.com>
+Message-ID: <20080601031751.GA29401@sun.com>
+
+On Sun, Jun 01, 2008 at 10:36:33AM +0800, Peter Braam wrote:
+> For CIFS quota and user ids get in touch with Matt Wu and Mike Shapiro.
+> There are special interfaces in ZFS/DMU for better windows support that we
+> probably need to leverage.
+> 
+> Peter
+
+For the design doc of how we unified POSIX and Windows SIDs
+in the underlying filesystem and kernel see:
+
+opensolaris.org/os/community/arc/caselog/2007/064/final-materials/spec-txt/
+
+The FUID system described there is implemented in ZFS now.  If you are
+doing work to add user accounting to ZFS/DMU (which is wonderful news)
+all of that should be implemented using the FUID tables, which will
+result in it working transparently for both POSIX and Windows IDs.
+
+Any upstack expressions of this that are meant to be persistent for
+customers (i.e. a report) or sent over the wire should express the accounted-
+for entities using the generic string form of SIDs that I describe in there.
+
+-Mike
+
+-- 
+Mike Shapiro, Sun Microsystems Fishworks. blogs.sun.com/mws/
+
+
+From Peter.Braam at Sun.COM  Sat May 31 22:00:52 2008
+From: Peter.Braam at Sun.COM (Peter Braam)
+Date: Sun, 01 Jun 2008 13:00:52 +0800
+Subject: [Lustre-devel] Commit on share
+In-Reply-To: <op.ubtknjyjatmt0c@goga>
+Message-ID: <C4684E04.5626%peter.braam@sun.com>
+
+
+
+
+On 5/27/08 11:43 PM, "Mikhail Pershin" <Mikhail.Pershin at Sun.COM> wrote:
+
+> Hello Peter,
+> 
+> Thanks for review. Alexander is on vacation so I will answer as co-author.
+> 
+> On Tue, 27 May 2008 14:44:18 +0400, Peter Braam <Peter.Braam at Sun.COM>
+> wrote:
+> 
+>> This HLD is definitely not ready at all.  It is very short, lacks
+>> interaction diagrams and the arguments made are not sufficiently
+>> detailed.
+>> 
+>> * the second sentence is not right.  Commit should happen before
+>> un-committed data coming from a client is shared with a 2nd client.
+> 
+> Can you provide any issues with that? Committing data after but not before
+> current operation has following benefits:
+
+The document is written without any mention of read only interaction with
+the file system.  On top of that the language was insufficiently clear,
+meaning that I only understood what you wanted to do several pages further.
+That means other people will encounter the same difficulty.
+
+
+> 1) no need in starting/commiting separate transaction, simple code due to
+> that
+> 2) less syncs. E.g. if we are committing current operation too then we
+> resolve possible share case related to current operation and later commit
+> will not needed. Therefore we will have less synced operations.
+> E.g. the worst case for COS is:
+> client1 operation
+> client2 operation -> sync
+> client1 op -> sync
+> client2 op -> sync
+> ...
+> COS will do commit for each operation if they are on the same object and
+> sync is happened before current operation.
+> But including the current operation in commit will reduce number of
+> commits in twice:
+> client1 operation
+> client2 op -> sync (including this op)
+> client1 op - no sync because no uncommitted shared data
+> client2 op -> sync
+> ...
+> 
+
+This may not be a worthwhile optimization, although it seems correct.
+Please provide detailed use cases where it provides value.
+
+For example with 1000 clients creating each one file in a directory, what is
+the quantative benefit?
+
+With one client creating a file and 999 clients doing a getattr, you now
+have 999 locks blocking for completion - not convincing.
+
+>> * Is COS dependent on VBR ? no it is not, and can equally apply to normal
+>> recovery
+> 
+> Agree, COS is like just lever to turn sync commit on/off depending on some
+> conditions. These conditions maybe quite simple like now - just
+> comparision of clients - or maybe more complex and include checking of
+> operation types, etc.
+> 
+> But COS was requested initially as optional feature of VBR, so we didn't
+> review COS-only configuration. Without VBR any missed client will invoke
+> the eviction of all clients with replays after the gap. Therefore COS will
+> not helps until we will change current recovery to don't evict clients if
+> COS is enabled. But we should know actually was COS enabled before the
+> server failure to be sure that the excluding gap transactions is safe. Do
+> we need COS-only use-case actually?
+
+Yes, we need COS with traditional recovery and a precise explanation why COS
+with COS adds any value over COS with traditional recovery.  Again, use
+numbers and exact facts.
+
+
+> 
+>> * Section 3.2 is wrong: the recovery process will not fail with gaps in
+>> the
+>> sequence when there is VBR.  It only fails if there are gaps in the
+>> versions, and this is rare.
+> 
+> the 3.2 section is talking only about gap in versions. Maybe it is not
+> correct grammatically though.
+> "... Highly probably we have non-trivial gaps version in the sequence and
+> the recovery process fails"
+> Could you mark what is wrong with 3.2? just rewrite the sentence to make
+> it more clear about what gaps we mean?
+
+Exact detail, example use cases, no mumbling of complex ideas.
+
+I also want to see precise flow charts of interactions upon reconnection
+(this perhaps belongs in the VBR HLD), how does the system transition from
+one recovery type to the next.
+
+> 
+>> * 3.3 parallel creations in one directory are protected with different,
+>> independent lock resources.  Isn?t that sufficient to allow parallel
+>> operations with COS?
+> 
+> it is HEAD feature, but this design is for 1.8 (1.6-based) Lustre with one
+> dir lock. If this is not mentioned in HLD then it should be fixed.
+> But the issue is not about the lock only.
+> The 'simple' COS checks only clients nids to determine the dependency.
+> Therefore if two clients are creating objects in the same directory then
+> we will have frequent syncs due to COS (operations from different nids)
+> although there is no need for sync at all becase the operations are not
+> dependent.
+
+If they are not dependent then there should be no commits.  But, you have
+not defined dependency in a precise way, so the HLD is hand-waving instead
+of designing.
+
+In any case I absolutely don't want the hash.  This has to be done with
+commit callbacks unless the reasons not to do so become one order of
+magnitude clearer.
+
+> The same will be with parallel locking if we will not check type of
+> operation to determine the dependency.
+> 
+>> * 3.6 provide a detailed explanation please
+> "When enabled, COS makes REP-ACK not needed."
+> Basically the COS is about two things:
+> 1) dependency tracking. This functionality which try to determine is
+> current operation depending on some other uncommitted one.
+
+"try to?" - so it sometimes fails?
+
+> It may be  
+> simple 
+
+What kind of language is this?
+
+>and check only nids of clients, maybe more sophisticated and
+> include type of operation checking or any other additional data.
+
+Without a definition of dependency, you can see why I have completely
+rejected the HLD, and I will continue to do so.
+
+> 2) COS itself, the doing sync commit of current operation if there is
+> dependency.
+> 
+> So if we have 1) and 2) we have only the following cases:
+> - there is dependency determined and commit is needed to remove it. No ACK
+> is needed.
+> - there is no dependency and we don't need no ACK and lock nor commit
+> because client's replays are not dependent
+> Therefore the ACK is not needed in both cases. The COS don't need to wait
+> on repack lock, it determine the share case and do commit.
+
+In the HLD state and define in 100% accurate manner why REP ACKS are needed,
+and prove that with COS they are not.  This clearly depends on precise
+definitions.
+
+> 
+> how ACK is related to 'simple' COS (the only client NIDs are matter):
+> 1) client1 did operation and lock object until ACK from it will come to
+> server
+> 2) client2 is waiting for ACK or commit to access the object
+> 3) if there was no commit yet, then client2 determine the sharing exists
+> and force commit
+> 
+> The only positive effect of ACK is delay before doing sync, that give us
+> the chance to wait for commit without doing force sync. But that can be
+> done with timer to get the same results.
+
+No timers - end of discussion.
+
+> 
+> In HLD we propose the following:
+> 1) client1 got lock, did operation, unlock object after operation is done
+> 2) client2 got lock on object and check was there the dependency
+> 3) if dependency then force commit (or wait for it as alternative way)
+> 4) otherwise update dependency info for next check, unlock object when
+> operation is done
+> 
+> This is generic way and will work with any dependency tracking (on NIDs,
+> on types of operations, etc.)
+
+Two clients is not a sufficient argument possibly.
+
+
+Please put explanations in the HLD and supply a new one.
+
+
+> 
+>> * GC thread is wrong mechanism this is what we have commit callbacks for
+
+No GC - end of discussion.
+
+> 
+> Well, with callbacks we have to scan through all hash to find data to
+> delete on each callback. As alex said there can be about 10K uncommitted
+> transactions in high load easily, therefore using callback may become the
+> bottlneck. There was discussion recently in devel@ about that originated
+> by zam. Although I agree the HLD should be clear about why we choose that
+> way and what is wrong with another.
+> 
+>> * Why not use the DLM, then we can simply keep the client waiting ? the
+>> mechanism already exists for repack; I am not convinced at all by the
+>> reasoning that rep-ack is so different ? no real facts are quoted
+> 
+> Let's estimate how RepACK lock is suitable as dependency tracking
+> functionality.
+
+Without better definitions, the arguments below cannot be judged.
+
+> In fact it is more like 'possible dependency prevention'
+> mechanism, and block object always because we can't predict the next
+> operation, so should keep lock taken for ALL modifying operations. It is
+> not 'tracking' but 'prediction' mechanism, it blocks access to the object
+> until client will got reply just because the conflicting operation is
+> possible but not because it really happen.
+> Moreover it conflicts in general with dependency tracking we needed,
+> because it will serialize operations even when they may not depend.
+> 
+> With RepACK lock we are entering in operation AFTER the checks and we
+> don't know the result of this check - was there operation from different
+> client? are changes committed? Should we do sync or not? RepACK lock
+> doesn't answer this question and we can't decide about sync is needed or
+> not.
+> 
+> For example, the client2 will wait for commit or ACK before entering in
+> locked area.
+> 1) ACK is got but no commit yet. So client2 enter in locked area and now
+> should determine was commit done or not. How to do that? This is vital
+> because if there was no commit yet then we should do it. We may use
+> version of object possible and check it against last_committed, but this
+> will work only with VBR.
+> So we need extra data per-object like transno.
+> 2) Commit was done. We should still do the same as for 1) to be sure about
+> was commit done or not because it is not known why lock was unlocked - due
+> to ACK or commit.
+> 3) But we don't know still is there conflict or not because we should
+> check client uuids, but we don't store such info anywhere and waiting on
+> lock is not reflected somehow. So we need extra data (or extra information
+>  from ldlm?) again to store uuid of client who did latest operation on that
+> object.
+> 
+> The only way how dlm can work without any additional data is to unlock
+> only when commit. But in that case we don't need COS at all. Each
+> conflicting client will wait on lock until previous changes will be
+> committed. But this may lead to huge latency for requests, comparing with
+> commit interval and it is not what we need.
+> 
+>> * It is left completely without explanation how the hash table (which I
+>> think we don?t need/want) is used
+> 
+> hash table store the following data per object:
+> struct lu_dep_info {
+>          struct ll_fid     di_object;
+>          struct obd_uuid   di_client;
+>          __u64             di_transno;
+> };
+> 
+> it contains uuid of client and transno of last change from this client.
+> The uuid is compared to determine is there is conflict of not, the transno
+> shows was that data committed already or not. I described above why it is
+> needed. It is 1.6-related issue because we have only inode of object and
+> no any extra structure. The HEAD has lu_object enveloping inodes, and hash
+> will not needed, the dependency info may be stored per lu_object.
+> 
+>> 
+>> Regards,
+>> 
+>> Peter
+> 
+> 
+
+
+
+
+From Jeff.Bonwick at sun.com  Sat May 31 21:53:02 2008
+From: Jeff.Bonwick at sun.com (Jeff Bonwick)
+Date: Sat, 31 May 2008 21:53:02 -0700
+Subject: [Lustre-devel] Moving forward on Quotas
+In-Reply-To: <C46829E1.5610%peter.braam@sun.com>
+References: <18493.29199.765234.755534@gargle.gargle.HOWL>
+	<C46829E1.5610%peter.braam@sun.com>
+Message-ID: <20080601045302.GA29979@eng.sun.com>
+
+I'd suggest working with Matt Ahrens on this.
+
+Jeff
+
+On Sun, Jun 01, 2008 at 10:26:41AM +0800, Peter Braam wrote:
+> Jeff - 
+> 
+> could you get in touch with Nikita and Ricardo and assist them with a draft
+> of quota design for the DMU.  Nikita has some interesting API proposals, but
+> there are some pretty deep ZFS issues involved where help would be welcome,
+> as far as I can see.
+> 
+> Just as a heads up, quota in systems like Lustre is quite a difficult issue,
+> as many servers contribute to quota usage and this needs "acquire", and
+> "release" of quota in reasonable chunks to avoid the server server protocol
+> getting too chatty.
+> 
+> Thank you for your help!
+> 
+> Peter
+> 
+> 
+> On 5/28/08 10:54 PM, "Nikita Danilov" <Nikita.Danilov at Sun.COM> wrote:
+> 
+> > Ricardo M. Correia writes:
+> >> On Ter, 2008-05-27 at 07:28 +0800, Peter Braam wrote:
+> >> 
+> >>>> Going aside, if I were designing quota from the scratch right now, I
+> >>>> would implement it completely inside of Lustre. All that is needed for
+> >>>> such an implementation is a set of call-backs that local file-system
+> >>>> invokes when it allocates/frees blocks (or inodes) for a given
+> >>>> object. Lustre would use these call-backs to transactionally update
+> >>>> local quota in its own format. That would save us a lot of hassle we
+> >>>> have dealing with the changing kernel quota interfaces, uid re-mappings,
+> >>>> and subtle differences between quota implementations on a different file
+> >>>> systems.
+> >>> 
+> >>> ======> IMPORTANT: get in touch with Jeff Bonwick now, let's get quota
+> >>> implemented in this way in DMU then.
+> >> 
+> >> 
+> >> I think this was proposed by Alex before, but AFAIU the conclusion is
+> >> that this was not possible to do with ZFS (or at least, not easy to do).
+> >> 
+> >> The problem is that ZFS uses delayed allocations, i.e., allocations
+> >> occur long after a transaction group has been closed, and therefore we
+> >> can't transactionally keep track of allocated space because by the time
+> >> the callbacks were called we are not allowed to write to the transaction
+> >> group anymore, since another 2 txgs could have been opened already.
+> > 
+> > But that problem has to be solved anyway to implement per-user quotas
+> > for ZFS, correct?
+> > 
+> > One possible solution I see is to use something like ZIL to log
+> > operations in the context of current transaction group. This log can be
+> > replayed during mount to update quota file.
+> > 
+> >> 
+> >> Since this couldn't be done transactionally, if the node crashes, there
+> >> would be no way of knowing how many blocks had been allocated on the
+> >> latest (actually, the latest 2) committed transaction groups..
+> >> 
+> >> Regards,
+> >> Ricardo
+> > 
+> > Nikita.
+> 
+> 
+
+

@@ -1,0 +1,2878 @@
+From Peter.Bojanic at Sun.COM  Wed Jan  2 16:50:18 2008
+From: Peter.Bojanic at Sun.COM (Peter Bojanic)
+Date: Wed, 02 Jan 2008 20:50:18 -0400
+Subject: [Lustre-devel] Lustre architectural discussions to Lustre-devel
+Message-ID: <78607F39-0AAF-4F6F-A5A3-C798D191B772@sun.com>
+
+Dear Lustre architects and community members,
+
+January 2008 marks another important milestone for the Lustre project  
+and its community of users. In the spirit of moving Lustre development  
+further out in the open, the Lustre team at Sun will shift  
+architectural discussions from our internal mailing list to lustre-devel at clusterfs.com 
+, effective immediately.
+
+This open community list hasn't typically seen much traffic in the  
+past, so it's a perfect forum for this type of discussion. Everyone is  
+welcome to observe and learn from these discussions, and thoughtful  
+input is welcome. But this is not a technical Q&A list, so we  
+respectfully request that community members be thoughtful with their  
+posts and treat the list with the utmost care.
+
+Technical questions about Lustre are always welcome on lustre-discuss at clusterfs.com 
+, where Lustre engineers and community members alike will be able to  
+help you out.
+
+Cheers,
+Bojanic
+
+
+
+From eeb at sun.com  Fri Jan  4 05:37:04 2008
+From: eeb at sun.com (Eric Barton)
+Date: Fri, 04 Jan 2008 13:37:04 +0000
+Subject: [Lustre-devel] 2 primitives for the NRS
+Message-ID: <00d501c84ed6$e4fb2010$0281a8c0@ebpc>
+
+What the NRS (network request scheduler) really needs is something
+that can order 10**[4-6] RPC requests incredibly efficiently - any
+overhead just eats into server efficiency and we already swamp a
+server with simple pings at ~30-40,000 RPCs per second.  I've
+implemented a heap which is already looking good at managing
+collections of 1,000,000+ objects with nearly sub-microsecond
+insert+ordered_remove overhead.
+
+Here is the API, which also introduces a sparse 1D array suitable for
+use in the kernel.  The binary heap uses it as space and cache
+efficient means of tree walking.
+
+Any suggestions for improving the API appreciated...
+
+#ifndef __LIBCFS_BHEAP_H__
+#define __LIBCFS_BHEAP_H__
+
+/* Auto-array 
+ * A sparse 1D contiguous array of pointers which uses single, double and
+ * triple indirection maps and avoids allocating large contiguous memory.
+ *
+ * FIXME: CAA_SHIFT should be defined automatically so that 
+ * (CAA_SIZE == CFS_PAGE_SIZE/sizeof(void *))
+ */
+
+#define CAA_SHIFT  10
+#define CAA_SIZE   (1 << CAA_SHIFT)             /* # ptrs per level */
+#define CAA_MASK   (CAA_SIZE - 1)
+#define CAA_NOB    (CAA_SIZE * sizeof(void *))
+
+typedef struct
+{
+        void         ****aa_3d;                 /* Triple indirect */
+        void          ***aa_2d;                 /* double indirect */
+        void           **aa_1d;                 /* single indirect */
+} cfs_autoarray_t;
+
+void   cfs_aa_init(cfs_autoarray_t *aa);         /* setup */
+void   cfs_aa_fini(cfs_autoarray_t *aa);         /* free all allocated mem */
+
+/* effectively &aa[idx] but you MUST know &aa[idx] exists */
+void **cfs_aa_index(cfs_autoarray_t *aa, unsigned int idx);
+
+/* effectively &aa[idx] - return NULL if &aa[idx] doesn't exist and 'grow' is
+ * FALSE */
+void **cfs_aa_lookup(cfs_autoarray_t *aa, unsigned int idx, int grow);
+
+
+/* Binary heap
+ * 
+ * Supports insertion and ordered removal of members sorted by the given total
+ * order ('compare')
+ */
+
+typedef struct
+{
+        cfs_autoarray_t  cbh_members;
+        unsigned int     cbh_size;
+        unsigned int     cbh_maxsize;
+        int            (*cbh_compare)(void *a, void *b);
+} cfs_binheap_t;
+
+void  cfs_binheap_init(cfs_binheap_t *h, int (*compare)(void *a, void *b));
+void  cfs_binheap_fini(cfs_binheap_t *h);
+int   cfs_binheap_size(cfs_binheap_t *h);
+int   cfs_binheap_insert(cfs_binheap_t *h, void *e);
+void *cfs_binheap_remove_root(cfs_binheap_t *h);
+
+#endif /* __LIBCFS_BHEAP_H__ */
+
+
+
+From weikuan.yu at gmail.com  Fri Jan  4 09:00:30 2008
+From: weikuan.yu at gmail.com (Weikuan Yu)
+Date: Fri, 04 Jan 2008 12:00:30 -0500
+Subject: [Lustre-devel] 2 primitives for the NRS
+In-Reply-To: <00d501c84ed6$e4fb2010$0281a8c0@ebpc>
+References: <00d501c84ed6$e4fb2010$0281a8c0@ebpc>
+Message-ID: <477E662E.30803@gmail.com>
+
+Hi,
+
+I am trying to plug in an I/O request scheduler into OSS before read/write 
+requests get dispatched to the obdfilter. What I am using is hashed bins 
+with a basic rb tree, assuming it would be fairly reasonable to handle the 
+number of I/O requests that can reach an OSS. My interface calls are very 
+similar to yours, except the lack of plug-in comparison. I would not have 
+more to suggest on this. But I do have a couple of questions to check for 
+possible thoughts if you have.
+
+(1) How are you going to order the requests, say the read/write ones? I 
+assume you made it flexible with a plug-in compare(). Would the order of the 
+I/O requests based on object ID have some relevance to their locality on the 
+disks? I was assuming at least the requests can get smoothed out with the 
+objID ordering.
+
+(2) Have you checked the overhead when there are many concurrent threads 
+competing for the locks associated with your heap? The performance impact 
+thereof?
+
+(3) Do you anticipate to merge the requests in any way, or possibly batch 
+execute them?
+
+--Weikuan
+
+
+Eric Barton wrote:
+> What the NRS (network request scheduler) really needs is something
+> that can order 10**[4-6] RPC requests incredibly efficiently - any
+> overhead just eats into server efficiency and we already swamp a
+> server with simple pings at ~30-40,000 RPCs per second.  I've
+> implemented a heap which is already looking good at managing
+> collections of 1,000,000+ objects with nearly sub-microsecond
+> insert+ordered_remove overhead.
+> 
+> Here is the API, which also introduces a sparse 1D array suitable for
+> use in the kernel.  The binary heap uses it as space and cache
+> efficient means of tree walking.
+> 
+> Any suggestions for improving the API appreciated...
+> 
+> #ifndef __LIBCFS_BHEAP_H__
+> #define __LIBCFS_BHEAP_H__
+> 
+> /* Auto-array 
+>  * A sparse 1D contiguous array of pointers which uses single, double and
+>  * triple indirection maps and avoids allocating large contiguous memory.
+>  *
+>  * FIXME: CAA_SHIFT should be defined automatically so that 
+>  * (CAA_SIZE == CFS_PAGE_SIZE/sizeof(void *))
+>  */
+> 
+> #define CAA_SHIFT  10
+> #define CAA_SIZE   (1 << CAA_SHIFT)             /* # ptrs per level */
+> #define CAA_MASK   (CAA_SIZE - 1)
+> #define CAA_NOB    (CAA_SIZE * sizeof(void *))
+> 
+> typedef struct
+> {
+>         void         ****aa_3d;                 /* Triple indirect */
+>         void          ***aa_2d;                 /* double indirect */
+>         void           **aa_1d;                 /* single indirect */
+> } cfs_autoarray_t;
+> 
+> void   cfs_aa_init(cfs_autoarray_t *aa);         /* setup */
+> void   cfs_aa_fini(cfs_autoarray_t *aa);         /* free all allocated mem */
+> 
+> /* effectively &aa[idx] but you MUST know &aa[idx] exists */
+> void **cfs_aa_index(cfs_autoarray_t *aa, unsigned int idx);
+> 
+> /* effectively &aa[idx] - return NULL if &aa[idx] doesn't exist and 'grow' is
+>  * FALSE */
+> void **cfs_aa_lookup(cfs_autoarray_t *aa, unsigned int idx, int grow);
+> 
+> 
+> /* Binary heap
+>  * 
+>  * Supports insertion and ordered removal of members sorted by the given total
+>  * order ('compare')
+>  */
+> 
+> typedef struct
+> {
+>         cfs_autoarray_t  cbh_members;
+>         unsigned int     cbh_size;
+>         unsigned int     cbh_maxsize;
+>         int            (*cbh_compare)(void *a, void *b);
+> } cfs_binheap_t;
+> 
+> void  cfs_binheap_init(cfs_binheap_t *h, int (*compare)(void *a, void *b));
+> void  cfs_binheap_fini(cfs_binheap_t *h);
+> int   cfs_binheap_size(cfs_binheap_t *h);
+> int   cfs_binheap_insert(cfs_binheap_t *h, void *e);
+> void *cfs_binheap_remove_root(cfs_binheap_t *h);
+> 
+> #endif /* __LIBCFS_BHEAP_H__ */
+> 
+> _______________________________________________
+> Lustre-devel mailing list
+> Lustre-devel at clusterfs.com
+> https://mail.clusterfs.com/mailman/listinfo/lustre-devel
+> 
+
+
+
+From lee at sandia.gov  Fri Jan  4 09:40:17 2008
+From: lee at sandia.gov (Lee Ward)
+Date: Fri, 04 Jan 2008 10:40:17 -0700
+Subject: [Lustre-devel] 2 primitives for the NRS
+In-Reply-To: <00d501c84ed6$e4fb2010$0281a8c0@ebpc>
+References: <00d501c84ed6$e4fb2010$0281a8c0@ebpc>
+Message-ID: <1199468417.3722.522.camel@wheel>
+
+Hi Eric,
+
+Wow! That is good. I had a similar need for another project and solved
+it using a splay tree. Overhead is ~2.5 usec/op for random inserts with
+unique keys and ~.04 usec/op for the ordered remove, at 1M records.
+Where might I get your implementation? Would like to see if I can adapt
+it for my project.
+
+	--Lee
+
+On Fri, 2008-01-04 at 06:37 -0700, Eric Barton wrote:
+> What the NRS (network request scheduler) really needs is something
+> that can order 10**[4-6] RPC requests incredibly efficiently - any
+> overhead just eats into server efficiency and we already swamp a
+> server with simple pings at ~30-40,000 RPCs per second.  I've
+> implemented a heap which is already looking good at managing
+> collections of 1,000,000+ objects with nearly sub-microsecond
+> insert+ordered_remove overhead.
+> 
+> Here is the API, which also introduces a sparse 1D array suitable for
+> use in the kernel.  The binary heap uses it as space and cache
+> efficient means of tree walking.
+> 
+> Any suggestions for improving the API appreciated...
+> 
+> #ifndef __LIBCFS_BHEAP_H__
+> #define __LIBCFS_BHEAP_H__
+> 
+> /* Auto-array
+>  * A sparse 1D contiguous array of pointers which uses single, double and
+>  * triple indirection maps and avoids allocating large contiguous memory.
+>  *
+>  * FIXME: CAA_SHIFT should be defined automatically so that
+>  * (CAA_SIZE == CFS_PAGE_SIZE/sizeof(void *))
+>  */
+> 
+> #define CAA_SHIFT  10
+> #define CAA_SIZE   (1 << CAA_SHIFT)             /* # ptrs per level */
+> #define CAA_MASK   (CAA_SIZE - 1)
+> #define CAA_NOB    (CAA_SIZE * sizeof(void *))
+> 
+> typedef struct
+> {
+>         void         ****aa_3d;                 /* Triple indirect */
+>         void          ***aa_2d;                 /* double indirect */
+>         void           **aa_1d;                 /* single indirect */
+> } cfs_autoarray_t;
+> 
+> void   cfs_aa_init(cfs_autoarray_t *aa);         /* setup */
+> void   cfs_aa_fini(cfs_autoarray_t *aa);         /* free all allocated mem */
+> 
+> /* effectively &aa[idx] but you MUST know &aa[idx] exists */
+> void **cfs_aa_index(cfs_autoarray_t *aa, unsigned int idx);
+> 
+> /* effectively &aa[idx] - return NULL if &aa[idx] doesn't exist and 'grow' is
+>  * FALSE */
+> void **cfs_aa_lookup(cfs_autoarray_t *aa, unsigned int idx, int grow);
+> 
+> 
+> /* Binary heap
+>  *
+>  * Supports insertion and ordered removal of members sorted by the given total
+>  * order ('compare')
+>  */
+> 
+> typedef struct
+> {
+>         cfs_autoarray_t  cbh_members;
+>         unsigned int     cbh_size;
+>         unsigned int     cbh_maxsize;
+>         int            (*cbh_compare)(void *a, void *b);
+> } cfs_binheap_t;
+> 
+> void  cfs_binheap_init(cfs_binheap_t *h, int (*compare)(void *a, void *b));
+> void  cfs_binheap_fini(cfs_binheap_t *h);
+> int   cfs_binheap_size(cfs_binheap_t *h);
+> int   cfs_binheap_insert(cfs_binheap_t *h, void *e);
+> void *cfs_binheap_remove_root(cfs_binheap_t *h);
+> 
+> #endif /* __LIBCFS_BHEAP_H__ */
+> 
+> _______________________________________________
+> Lustre-devel mailing list
+> Lustre-devel at clusterfs.com
+> https://mail.clusterfs.com/mailman/listinfo/lustre-devel
+> 
+
+
+
+
+From eeb at sun.com  Fri Jan  4 09:51:59 2008
+From: eeb at sun.com (Eric Barton)
+Date: Fri, 04 Jan 2008 17:51:59 +0000
+Subject: [Lustre-devel] 2 primitives for the NRS
+In-Reply-To: <1199468417.3722.522.camel@wheel>
+References: <00d501c84ed6$e4fb2010$0281a8c0@ebpc>
+	<1199468417.3722.522.camel@wheel>
+Message-ID: <000f01c84efa$8150dd10$0281a8c0@ebpc>
+
+Lee,
+
+Here's the prototype + trivial exercising code.  I'm trying to run it with
+something that should roughly approximate RPC arrival order - if that's 
+full of "itself" then I really need to know :)
+
+> -----Original Message-----
+> From: Lee Ward [mailto:lee at sandia.gov] 
+> Sent: 04 January 2008 5:40 PM
+> To: Eric Barton
+> Cc: lustre-devel at clusterfs.com
+> Subject: Re: [Lustre-devel] 2 primitives for the NRS
+> 
+> Hi Eric,
+> 
+> Wow! That is good. I had a similar need for another project and solved
+> it using a splay tree. Overhead is ~2.5 usec/op for random 
+> inserts with
+> unique keys and ~.04 usec/op for the ordered remove, at 1M records.
+> Where might I get your implementation? Would like to see if I 
+> can adapt
+> it for my project.
+> 
+> 	--Lee
+> 
+> On Fri, 2008-01-04 at 06:37 -0700, Eric Barton wrote:
+> > What the NRS (network request scheduler) really needs is something
+> > that can order 10**[4-6] RPC requests incredibly efficiently - any
+> > overhead just eats into server efficiency and we already swamp a
+> > server with simple pings at ~30-40,000 RPCs per second.  I've
+> > implemented a heap which is already looking good at managing
+> > collections of 1,000,000+ objects with nearly sub-microsecond
+> > insert+ordered_remove overhead.
+> > 
+> > Here is the API, which also introduces a sparse 1D array 
+> suitable for
+> > use in the kernel.  The binary heap uses it as space and cache
+> > efficient means of tree walking.
+> > 
+> > Any suggestions for improving the API appreciated...
+> > 
+> > #ifndef __LIBCFS_BHEAP_H__
+> > #define __LIBCFS_BHEAP_H__
+> > 
+> > /* Auto-array
+> >  * A sparse 1D contiguous array of pointers which uses 
+> single, double and
+> >  * triple indirection maps and avoids allocating large 
+> contiguous memory.
+> >  *
+> >  * FIXME: CAA_SHIFT should be defined automatically so that
+> >  * (CAA_SIZE == CFS_PAGE_SIZE/sizeof(void *))
+> >  */
+> > 
+> > #define CAA_SHIFT  10
+> > #define CAA_SIZE   (1 << CAA_SHIFT)             /* # ptrs 
+> per level */
+> > #define CAA_MASK   (CAA_SIZE - 1)
+> > #define CAA_NOB    (CAA_SIZE * sizeof(void *))
+> > 
+> > typedef struct
+> > {
+> >         void         ****aa_3d;                 /* Triple 
+> indirect */
+> >         void          ***aa_2d;                 /* double 
+> indirect */
+> >         void           **aa_1d;                 /* single 
+> indirect */
+> > } cfs_autoarray_t;
+> > 
+> > void   cfs_aa_init(cfs_autoarray_t *aa);         /* setup */
+> > void   cfs_aa_fini(cfs_autoarray_t *aa);         /* free 
+> all allocated mem */
+> > 
+> > /* effectively &aa[idx] but you MUST know &aa[idx] exists */
+> > void **cfs_aa_index(cfs_autoarray_t *aa, unsigned int idx);
+> > 
+> > /* effectively &aa[idx] - return NULL if &aa[idx] doesn't 
+> exist and 'grow' is
+> >  * FALSE */
+> > void **cfs_aa_lookup(cfs_autoarray_t *aa, unsigned int idx, 
+> int grow);
+> > 
+> > 
+> > /* Binary heap
+> >  *
+> >  * Supports insertion and ordered removal of members sorted 
+> by the given total
+> >  * order ('compare')
+> >  */
+> > 
+> > typedef struct
+> > {
+> >         cfs_autoarray_t  cbh_members;
+> >         unsigned int     cbh_size;
+> >         unsigned int     cbh_maxsize;
+> >         int            (*cbh_compare)(void *a, void *b);
+> > } cfs_binheap_t;
+> > 
+> > void  cfs_binheap_init(cfs_binheap_t *h, int 
+> (*compare)(void *a, void *b));
+> > void  cfs_binheap_fini(cfs_binheap_t *h);
+> > int   cfs_binheap_size(cfs_binheap_t *h);
+> > int   cfs_binheap_insert(cfs_binheap_t *h, void *e);
+> > void *cfs_binheap_remove_root(cfs_binheap_t *h);
+> > 
+> > #endif /* __LIBCFS_BHEAP_H__ */
+> > 
+> > _______________________________________________
+> > Lustre-devel mailing list
+> > Lustre-devel at clusterfs.com
+> > https://mail.clusterfs.com/mailman/listinfo/lustre-devel
+> > 
+> 
+> 
+> 
+-------------- next part --------------
+A non-text attachment was scrubbed...
+Name: heapnd.c
+Type: application/octet-stream
+Size: 11486 bytes
+Desc: not available
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20080104/b02040ab/attachment.obj>
+
+From eeb at sun.com  Fri Jan  4 10:19:44 2008
+From: eeb at sun.com (Eric Barton)
+Date: Fri, 04 Jan 2008 18:19:44 +0000
+Subject: [Lustre-devel] 2 primitives for the NRS
+In-Reply-To: <477E662E.30803@gmail.com>
+References: <00d501c84ed6$e4fb2010$0281a8c0@ebpc> <477E662E.30803@gmail.com>
+Message-ID: <002001c84efe$61cec660$0281a8c0@ebpc>
+
+Wonderful questions! 
+
+> I am trying to plug in an I/O request scheduler into OSS before
+> read/write requests get dispatched to the obdfilter. 
+
+If you base your code off b1_6, you can take a free ride on the initial
+request processing done by Nathan's adaptive timeout code.
+
+> What I am using
+> is hashed bins with a basic rb tree, assuming it would be fairly
+> reasonable to handle the number of I/O requests that can reach an
+> OSS. My interface calls are very similar to yours, except the lack
+> of plug-in comparison. I would not have more to suggest on this. 
+> But I do have a couple of questions to check for possible thoughts if
+> you have.
+> 
+> (1) How are you going to order the requests, say the read/write
+> ones? I assume you made it flexible with a plug-in compare(). 
+
+Yes - because I don't know yet what's going to work best.  And maybe
+different services might want different orders.  And generalisation
+when it doesn't hurt performance is a hard habit to break :)
+
+My first thoughts are about fairness to all clients in the face of
+unfairness elsewhere - e.g. a gridlocked network - so I'm thinking of
+something that picks buffered RPC requests round-robin on client ID.
+
+This is probably good for workloads of large numbers of single-client
+jobs to ensure that no individual client can be starved.  However I
+also suggest that it's good for I/O performed by a single job spread
+over many clients.  
+
+I base this on the idea that a good backend filesystem should and can
+optimize disk utilisation.  When a file is written, the file<->disk
+offset mapping is fixed for subsequent reads, so I want the NRS to
+make I/O request execution order repeatable in the face of network
+"noise" and races between clients.  Without this repeatability, we
+have to fall back on the disk elevator to re-create the "good" disk
+I/O stream on subsequent reads.  Surely it cannot do such a good job
+as the NRS since it must have orders of magnitude fewer requests to
+play with - bulk buffers must be allocated by the time it sees them.
+
+See http://arch.lustre.org/index.php?title=Network_Request_Scheduler
+
+I'm afraid I don't yet have anything even half backed to say on
+write v. read order etc.  I'd still want some empirical evidence first.
+
+> Would the order of the I/O requests based on object ID have some
+> relevance to their locality on the disks?
+
+I thinks it might make more sense for the backend F/S to use a job ID
+to help it create sequential disk offsets for the whole I/O pattern
+rather than anything coming from one individual client.
+
+> I was assuming at least the requests
+> can get smoothed out with the objID ordering.
+> 
+> (2) Have you checked the overhead when there are many concurrent
+> threads competing for the locks associated with your heap?  The
+> performance impact thereof?
+
+I've only done sequential timings so far.  NRS ops could be "Amdhal
+moments" for the whole server so fat SMPs might require some better
+care.
+
+> (3) Do you anticipate to merge the requests in any way, or possibly
+> batch execute them?
+
+Yes, but I'm such a lazy sod that I hope the disk elevator will smile
+on me.  If not and I have to roll up my sleeves - so be it.
+
+    Cheers,
+              Eric
+
+
+
+From eeb at sun.com  Fri Jan  4 10:36:59 2008
+From: eeb at sun.com (Eric Barton)
+Date: Fri, 04 Jan 2008 18:36:59 +0000
+Subject: [Lustre-devel] 2 primitives for the NRS
+In-Reply-To: <1199468417.3722.522.camel@wheel>
+References: <00d501c84ed6$e4fb2010$0281a8c0@ebpc>
+	<1199468417.3722.522.camel@wheel>
+Message-ID: <000e01c84f00$cadfd480$0281a8c0@ebpc>
+
+Oops, I forgot the copyright boilerplate...
+
+    Cheers,
+              Eric
+ 
+
+> -----Original Message-----
+> From: Lee Ward [mailto:lee at sandia.gov] 
+> Sent: 04 January 2008 5:40 PM
+> To: Eric Barton
+> Cc: lustre-devel at clusterfs.com
+> Subject: Re: [Lustre-devel] 2 primitives for the NRS
+> 
+> Hi Eric,
+> 
+> Wow! That is good. I had a similar need for another project and solved
+> it using a splay tree. Overhead is ~2.5 usec/op for random 
+> inserts with
+> unique keys and ~.04 usec/op for the ordered remove, at 1M records.
+> Where might I get your implementation? Would like to see if I 
+> can adapt
+> it for my project.
+> 
+> 	--Lee
+> 
+> On Fri, 2008-01-04 at 06:37 -0700, Eric Barton wrote:
+> > What the NRS (network request scheduler) really needs is something
+> > that can order 10**[4-6] RPC requests incredibly efficiently - any
+> > overhead just eats into server efficiency and we already swamp a
+> > server with simple pings at ~30-40,000 RPCs per second.  I've
+> > implemented a heap which is already looking good at managing
+> > collections of 1,000,000+ objects with nearly sub-microsecond
+> > insert+ordered_remove overhead.
+> > 
+> > Here is the API, which also introduces a sparse 1D array 
+> suitable for
+> > use in the kernel.  The binary heap uses it as space and cache
+> > efficient means of tree walking.
+> > 
+> > Any suggestions for improving the API appreciated...
+> > 
+> > #ifndef __LIBCFS_BHEAP_H__
+> > #define __LIBCFS_BHEAP_H__
+> > 
+> > /* Auto-array
+> >  * A sparse 1D contiguous array of pointers which uses 
+> single, double and
+> >  * triple indirection maps and avoids allocating large 
+> contiguous memory.
+> >  *
+> >  * FIXME: CAA_SHIFT should be defined automatically so that
+> >  * (CAA_SIZE == CFS_PAGE_SIZE/sizeof(void *))
+> >  */
+> > 
+> > #define CAA_SHIFT  10
+> > #define CAA_SIZE   (1 << CAA_SHIFT)             /* # ptrs 
+> per level */
+> > #define CAA_MASK   (CAA_SIZE - 1)
+> > #define CAA_NOB    (CAA_SIZE * sizeof(void *))
+> > 
+> > typedef struct
+> > {
+> >         void         ****aa_3d;                 /* Triple 
+> indirect */
+> >         void          ***aa_2d;                 /* double 
+> indirect */
+> >         void           **aa_1d;                 /* single 
+> indirect */
+> > } cfs_autoarray_t;
+> > 
+> > void   cfs_aa_init(cfs_autoarray_t *aa);         /* setup */
+> > void   cfs_aa_fini(cfs_autoarray_t *aa);         /* free 
+> all allocated mem */
+> > 
+> > /* effectively &aa[idx] but you MUST know &aa[idx] exists */
+> > void **cfs_aa_index(cfs_autoarray_t *aa, unsigned int idx);
+> > 
+> > /* effectively &aa[idx] - return NULL if &aa[idx] doesn't 
+> exist and 'grow' is
+> >  * FALSE */
+> > void **cfs_aa_lookup(cfs_autoarray_t *aa, unsigned int idx, 
+> int grow);
+> > 
+> > 
+> > /* Binary heap
+> >  *
+> >  * Supports insertion and ordered removal of members sorted 
+> by the given total
+> >  * order ('compare')
+> >  */
+> > 
+> > typedef struct
+> > {
+> >         cfs_autoarray_t  cbh_members;
+> >         unsigned int     cbh_size;
+> >         unsigned int     cbh_maxsize;
+> >         int            (*cbh_compare)(void *a, void *b);
+> > } cfs_binheap_t;
+> > 
+> > void  cfs_binheap_init(cfs_binheap_t *h, int 
+> (*compare)(void *a, void *b));
+> > void  cfs_binheap_fini(cfs_binheap_t *h);
+> > int   cfs_binheap_size(cfs_binheap_t *h);
+> > int   cfs_binheap_insert(cfs_binheap_t *h, void *e);
+> > void *cfs_binheap_remove_root(cfs_binheap_t *h);
+> > 
+> > #endif /* __LIBCFS_BHEAP_H__ */
+> > 
+> > _______________________________________________
+> > Lustre-devel mailing list
+> > Lustre-devel at clusterfs.com
+> > https://mail.clusterfs.com/mailman/listinfo/lustre-devel
+> > 
+> 
+> 
+> 
+-------------- next part --------------
+A non-text attachment was scrubbed...
+Name: heapnd.c
+Type: application/octet-stream
+Size: 12237 bytes
+Desc: not available
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20080104/0a654b9a/attachment.obj>
+
+From lee at sandia.gov  Fri Jan  4 16:36:01 2008
+From: lee at sandia.gov (Lee Ward)
+Date: Fri, 04 Jan 2008 17:36:01 -0700
+Subject: [Lustre-devel] 2 primitives for the NRS
+In-Reply-To: <000e01c84f00$cadfd480$0281a8c0@ebpc>
+References: <00d501c84ed6$e4fb2010$0281a8c0@ebpc>
+	<1199468417.3722.522.camel@wheel> <000e01c84f00$cadfd480$0281a8c0@ebpc>
+Message-ID: <1199493361.3722.559.camel@wheel>
+
+Hi Eric,
+
+Your machine must be faster than mine :) I could never get your heapnd.c
+program to demonstrate rates below 2 usec.
+
+I used your test harness as it was easier to mod than mine. Also, I got
+better times with your harness exercising the splay tree. Think this is
+because my test harness destroys the TLB cache; I build the tree from
+scratch, empty it, rebuild it... Just a lousy harness. Yours is much
+closer to my use-case, anyway. Don't know why I did that.
+
+The splay tree implementation turned out to be faster when I finally got
+an apples-to-apples comparison using your harness. It used about 20%
+more memory though. Classic time/space trade-off I guess. My app is not
+particularly sensitive to memory usage. Thanks for letting me try out
+your code.
+
+Anyway, I owe you the results since you were so kind as to send your
+code:
+
+Script started on Fri 04 Jan 2008 05:14:40 PM MST
+lee at wheel:/tmp$ cc heapnd.c
+lee at wheel:/tmp$ ./a.out 1000000 1000000
+Size 1000000: 4.266uS
+>>cat /proc/21262/statm: 10420 9894 101 2 0 9823 0
+lee at wheel:/tmp$ cc treend.c
+lee at wheel:/tmp$ !./a
+./a.out 1000000 1000000
+Size 1000000: 1.620uS
+>>cat /proc/21277/statm: 12375 11839 100 2 0 11778 0
+lee at wheel:/tmp$ cc -O3 heapnd.c
+lee at wheel:/tmp$ !./
+./a.out 1000000 1000000
+Size 1000000: 2.455uS
+>>cat /proc/21289/statm: 10420 9893 100 2 0 9823 0
+lee at wheel:/tmp$ cc -O3 treend.c
+lee at wheel:/tmp$ !./
+./a.out 1000000 1000000
+Size 1000000: 0.969uS
+>>cat /proc/21304/statm: 12376 11838 99 3 0 11778 0
+lee at wheel:/tmp$ exit
+
+Script done on Fri 04 Jan 2008 05:15:54 PM MST
+
+		--Lee
+
+
+On Fri, 2008-01-04 at 11:36 -0700, Eric Barton wrote:
+> Oops, I forgot the copyright boilerplate...
+> 
+>     Cheers,
+>               Eric
+> 
+> 
+> > -----Original Message-----
+> > From: Lee Ward [mailto:lee at sandia.gov]
+> > Sent: 04 January 2008 5:40 PM
+> > To: Eric Barton
+> > Cc: lustre-devel at clusterfs.com
+> > Subject: Re: [Lustre-devel] 2 primitives for the NRS
+> >
+> > Hi Eric,
+> >
+> > Wow! That is good. I had a similar need for another project and solved
+> > it using a splay tree. Overhead is ~2.5 usec/op for random
+> > inserts with
+> > unique keys and ~.04 usec/op for the ordered remove, at 1M records.
+> > Where might I get your implementation? Would like to see if I
+> > can adapt
+> > it for my project.
+> >
+> >       --Lee
+> >
+> > On Fri, 2008-01-04 at 06:37 -0700, Eric Barton wrote:
+> > > What the NRS (network request scheduler) really needs is something
+> > > that can order 10**[4-6] RPC requests incredibly efficiently - any
+> > > overhead just eats into server efficiency and we already swamp a
+> > > server with simple pings at ~30-40,000 RPCs per second.  I've
+> > > implemented a heap which is already looking good at managing
+> > > collections of 1,000,000+ objects with nearly sub-microsecond
+> > > insert+ordered_remove overhead.
+> > >
+> > > Here is the API, which also introduces a sparse 1D array
+> > suitable for
+> > > use in the kernel.  The binary heap uses it as space and cache
+> > > efficient means of tree walking.
+> > >
+> > > Any suggestions for improving the API appreciated...
+> > >
+> > > #ifndef __LIBCFS_BHEAP_H__
+> > > #define __LIBCFS_BHEAP_H__
+> > >
+> > > /* Auto-array
+> > >  * A sparse 1D contiguous array of pointers which uses
+> > single, double and
+> > >  * triple indirection maps and avoids allocating large
+> > contiguous memory.
+> > >  *
+> > >  * FIXME: CAA_SHIFT should be defined automatically so that
+> > >  * (CAA_SIZE == CFS_PAGE_SIZE/sizeof(void *))
+> > >  */
+> > >
+> > > #define CAA_SHIFT  10
+> > > #define CAA_SIZE   (1 << CAA_SHIFT)             /* # ptrs
+> > per level */
+> > > #define CAA_MASK   (CAA_SIZE - 1)
+> > > #define CAA_NOB    (CAA_SIZE * sizeof(void *))
+> > >
+> > > typedef struct
+> > > {
+> > >         void         ****aa_3d;                 /* Triple
+> > indirect */
+> > >         void          ***aa_2d;                 /* double
+> > indirect */
+> > >         void           **aa_1d;                 /* single
+> > indirect */
+> > > } cfs_autoarray_t;
+> > >
+> > > void   cfs_aa_init(cfs_autoarray_t *aa);         /* setup */
+> > > void   cfs_aa_fini(cfs_autoarray_t *aa);         /* free
+> > all allocated mem */
+> > >
+> > > /* effectively &aa[idx] but you MUST know &aa[idx] exists */
+> > > void **cfs_aa_index(cfs_autoarray_t *aa, unsigned int idx);
+> > >
+> > > /* effectively &aa[idx] - return NULL if &aa[idx] doesn't
+> > exist and 'grow' is
+> > >  * FALSE */
+> > > void **cfs_aa_lookup(cfs_autoarray_t *aa, unsigned int idx,
+> > int grow);
+> > >
+> > >
+> > > /* Binary heap
+> > >  *
+> > >  * Supports insertion and ordered removal of members sorted
+> > by the given total
+> > >  * order ('compare')
+> > >  */
+> > >
+> > > typedef struct
+> > > {
+> > >         cfs_autoarray_t  cbh_members;
+> > >         unsigned int     cbh_size;
+> > >         unsigned int     cbh_maxsize;
+> > >         int            (*cbh_compare)(void *a, void *b);
+> > > } cfs_binheap_t;
+> > >
+> > > void  cfs_binheap_init(cfs_binheap_t *h, int
+> > (*compare)(void *a, void *b));
+> > > void  cfs_binheap_fini(cfs_binheap_t *h);
+> > > int   cfs_binheap_size(cfs_binheap_t *h);
+> > > int   cfs_binheap_insert(cfs_binheap_t *h, void *e);
+> > > void *cfs_binheap_remove_root(cfs_binheap_t *h);
+> > >
+> > > #endif /* __LIBCFS_BHEAP_H__ */
+> > >
+> > > _______________________________________________
+> > > Lustre-devel mailing list
+> > > Lustre-devel at clusterfs.com
+> > > https://mail.clusterfs.com/mailman/listinfo/lustre-devel
+> > >
+> >
+> >
+> >
+
+
+
+
+From Alexey.Lyashkov at Sun.COM  Sat Jan  5 04:19:42 2008
+From: Alexey.Lyashkov at Sun.COM (Alex Lyashkov)
+Date: Sat, 05 Jan 2008 14:19:42 +0200
+Subject: [Lustre-devel] 2 primitives for the NRS
+In-Reply-To: <00d501c84ed6$e4fb2010$0281a8c0@ebpc>
+References: <00d501c84ed6$e4fb2010$0281a8c0@ebpc>
+Message-ID: <1199535582.16449.6.camel@bear.shadowland>
+
+On Fri, 2008-01-04 at 13:37 +0000, Eric Barton wrote:
+
+> Any suggestions for improving the API appreciated...
+> 
+> #ifndef __LIBCFS_BHEAP_H__
+> #define __LIBCFS_BHEAP_H__
+> 
+> /* Auto-array 
+>  * A sparse 1D contiguous array of pointers which uses single, double and
+>  * triple indirection maps and avoids allocating large contiguous memory.
+>  *
+>  * FIXME: CAA_SHIFT should be defined automatically so that 
+>  */
+> 
+> #define CAA_SHIFT  10
+> #define CAA_SIZE   (1 << CAA_SHIFT)             /* # ptrs per level */
+> #define CAA_MASK   (CAA_SIZE - 1)
+> #define CAA_NOB    (CAA_SIZE * sizeof(void *))
+> 
+> typedef struct
+> {
+>         void         ****aa_3d;                 /* Triple indirect */
+>         void          ***aa_2d;                 /* double indirect */
+>         void           **aa_1d;                 /* single indirect */
+> } cfs_autoarray_t;
+> 
+> void   cfs_aa_init(cfs_autoarray_t *aa);         /* setup */
+> void   cfs_aa_fini(cfs_autoarray_t *aa);         /* free all allocated mem */
+> 
+> /* effectively &aa[idx] but you MUST know &aa[idx] exists */
+> void **cfs_aa_index(cfs_autoarray_t *aa, unsigned int idx);
+> 
+> /* effectively &aa[idx] - return NULL if &aa[idx] doesn't exist and 'grow' is
+>  * FALSE */
+> void **cfs_aa_lookup(cfs_autoarray_t *aa, unsigned int idx, int grow);
+> 
+why not move obdclass/class_hash into libcfs and use for lnet also ?
+now it really generic code and can be easy moved info libcfs.
+also if lookup algorithm in class_hash not good for work with 10^6
+elements, this need to be adjusted for all usages.
+
+
+-- 
+Alex Lyashkov <Alexey.lyashkov at sun.com>
+Lustre Group, Sun Microsystems
+
+
+
+From Peter.Bojanic at Sun.COM  Sun Jan  6 20:04:21 2008
+From: Peter.Bojanic at Sun.COM (Peter Bojanic)
+Date: Mon, 07 Jan 2008 00:04:21 -0400
+Subject: [Lustre-devel] moving /proc to $MNT/.lustre
+In-Reply-To: <47618E96.3080709@sun.com>
+References: <47618E96.3080709@sun.com>
+Message-ID: <F8F87424-C3EE-45E7-838E-95E1047F521D@Sun.COM>
+
+Hi Nathan,
+
+(Copying Lustre-devel)
+
+On 2007-12-13, at 15:57 , Nathan Rutman wrote:
+
+> Peter - I filed bug 14471 and Tom is running with it, but it's kind  
+> of a big UI change and so I think someone In Authority should give  
+> the go-ahead.  I think andreas and I are in agreement that it makes  
+> sense.  The first step should be to do a nice DLD detailing  
+> potential impact on all our tools, testing, debug etc.
+
+Are you absolutely certain about this? This is going to break a ton of  
+people's scripts.
+
+This needs a few more nods from the architecture group -- I'd like to  
+see at least eeb chime in.
+
+By means of discussing it here, we're pretty much announcing the  
+change to the Lustre community. But, if we proceed, you should also  
+post a note to lustre-discuss for wider dissemination.
+
+Thanks,
+Bojanic
+
+
+
+
+From Peter.Braam at Sun.COM  Mon Jan  7 01:23:52 2008
+From: Peter.Braam at Sun.COM (Peter J Braam)
+Date: Mon, 07 Jan 2008 10:23:52 +0100
+Subject: [Lustre-devel] WBC architecture page.
+In-Reply-To: <18271.32703.427325.914760@gargle.gargle.HOWL>
+References: <18271.32703.427325.914760@gargle.gargle.HOWL>
+Message-ID: <4781EFA8.2070104@sun.com>
+
+Is it possible to see a proxy cluster of servers as a more general case
+(CMD introduces distributed logs)?  That might be beneficial to end up
+with one reintegration mechanism.
+
+The page is very good, as I have said before I think.
+
+-peter-
+
+Nikita Danilov wrote:
+> Hello Peter,
+>
+> can you take a look at the updated WBC architecture page
+> (http://arch.lustre.org/index.php?title=Write_Back_Cache) and tell me
+> what is wrong/missing?
+>
+> Nikita.
+>   
+
+
+
+From Peter.Braam at Sun.COM  Mon Jan  7 01:24:52 2008
+From: Peter.Braam at Sun.COM (Peter J Braam)
+Date: Mon, 07 Jan 2008 10:24:52 +0100
+Subject: [Lustre-devel] I/O trace tool
+In-Reply-To: <475C191B.7030204@sun.com>
+References: <475C191B.7030204@sun.com>
+Message-ID: <4781EFE4.6090104@sun.com>
+
+Hi Tom -
+
+Tom.Wang wrote:
+> Hello,
+>
+> Here is an idea for lustre I/O trace tool.
+>
+> We can provide 1 new lfs utility, for example lfs trace.
+>
+> So in the I/O trace job, we could
+>
+> 1) lfs trace job_id start   (Enable all the trace dump on OSS and MDS 
+> for this job, here the trace means the information under /proc or some
+>                                           debug log, but also may add 
+> some other information. maybe in llog format)
+> 2) Run the application.
+> 3) lfs trace job_id stop trace_log. (Disable the trace dump on the 
+> servers, and get the trace log from these servers).
+>
+> But here is a problem,  since  this  tool  will  be  used  by  normal  
+> end-user,  so  the lfs should only enable the trace
+> for the request of this job.  But current, server can not identify the 
+> job id at all.  And also maintaining the job_id for the job
+> may also bring some troubles. 
+
+The logging system allows to follow the xid of requests executed on
+clients to server threads.  I am not sure if this is fully implemented.
+
+It is important that this problem is resolved, and I think you can do 
+it.  Of course requests sometimes initiate from cache flushes etc and in 
+this case finding the source is maybe not so easy.
+
+- Peter -
+
+> An alternative way  is to identify the request by uid and gid on the 
+> server, then only requests from
+> this user will be traced,   but then the end user can only run that 
+> trace job at that time.
+> Any ideas?
+>
+> Thanks
+> WangDi
+>
+>
+>
+>
+>
+>
+>
+>
+>
+>
+>
+>
+
+
+
+From Peter.Braam at Sun.COM  Mon Jan  7 01:25:37 2008
+From: Peter.Braam at Sun.COM (Peter J Braam)
+Date: Mon, 07 Jan 2008 10:25:37 +0100
+Subject: [Lustre-devel] server changelogs
+In-Reply-To: <4755D76F.9080604@sun.com>
+References: <4755D76F.9080604@sun.com>
+Message-ID: <4781F011.6020807@sun.com>
+
+Hi Nathan -
+
+Good page, here are some comments.
+
+Peter
+
+Mention other internal consumers such as replication, rollback and
+orphan recovery mechanisms.
+
+1. In the Qualities - describe what a records should be capable of
+(redo, undo, pathname reconstruction).  Physiology is not a common term,
+"Operation based" logging is common (better than intents).
+
+2. change the subheadings on the use cases please.
+
+3. For audit many things are logged.  Failed authorization attempts are
+the most important as are file removals and opens.  Write more detail in
+the response part.
+
+4. Database sync - transactional qualities are critical.  Again, the
+response is too short.  Also pathname reconstruction shows that records
+have to contain unexpected fields, such as parent fids.
+
+5. HSM_Aging - I thought HSM aging would be done with a separate log to
+record read-only accesses. This log works in conjunction with an inode
+in the EA which points to the log record.
+
+6. Replication.  One needs to do unexpected things, such as setting the
+mtime of parent directories to what was used on the client and checking
+that versions of objects were the same on client and server.  This leads
+to a more detailed description of fields in the changelog records.
+
+7. Undo leads to more interesting field descriptions for the records.
+What is the difference between rollback and undo?
+
+8. Requierements are best formulated with the QAW tables.
+
+9. Scope - dependent transactions probably have to be recorded as such.
+Physiology - almost all changelogs must be created transactionally in
+conjunction with file system updates. Consistency (strange word) - I
+think we are shooting for parallel replication algorithms for
+scalability as well as combining records for FS wide streams?  How -
+this should be a QAW outlining the algorithm.  Discuss retention
+behavior in detail for multiple consumers of one record in the presence
+of rollback epoch markers.  Log content - filename is naive - what about
+fids, parent fids etc?  API - no harm in being more explicit here.
+
+10. Feeds per consumer may lead to too many logs I think.  I was
+thinking about multiple cancellation bits or a ref count on records.
+Remember that these logs must be in catalogs for scalability.  In some
+cases logs may need to be recompacted.
+
+
+
+
+
+Nathan Rutman wrote:
+> Use cases updated.  I think this is solid now.   What are the next steps?
+> http://arch.lustre.org/index.php?title=Server_Changelogs
+
+
+
+From Nathan.Rutman at Sun.COM  Mon Jan  7 09:50:22 2008
+From: Nathan.Rutman at Sun.COM (Nathan Rutman)
+Date: Mon, 07 Jan 2008 09:50:22 -0800
+Subject: [Lustre-devel] moving /proc to $MNT/.lustre
+In-Reply-To: <F8F87424-C3EE-45E7-838E-95E1047F521D@Sun.COM>
+References: <47618E96.3080709@sun.com>
+	<F8F87424-C3EE-45E7-838E-95E1047F521D@Sun.COM>
+Message-ID: <4782665E.1070406@sun.com>
+
+Peter Bojanic wrote:
+> Hi Nathan,
+>
+> (Copying Lustre-devel)
+>
+> On 2007-12-13, at 15:57 , Nathan Rutman wrote:
+>
+>   
+>> Peter - I filed bug 14471 and Tom is running with it, but it's kind  
+>> of a big UI change and so I think someone In Authority should give  
+>> the go-ahead.  I think andreas and I are in agreement that it makes  
+>> sense.  The first step should be to do a nice DLD detailing  
+>> potential impact on all our tools, testing, debug etc.
+>>     
+>
+> Are you absolutely certain about this? This is going to break a ton of  
+> people's scripts.
+>
+>   
+well, that's why I asked.  As I said, Andreas and I are in agreement, 
+and it certainly makes sense from a portability point of view, as well 
+as consistency with future features (snapshots, audit logs, etc.), and 
+the final elimination of our various /proc locking headaches.  But yes, 
+it would break user's scripts  - that's a 1-time thing, and I think not 
+too terrible.
+
+> This needs a few more nods from the architecture group -- I'd like to  
+> see at least eeb chime in.
+>
+> By means of discussing it here, we're pretty much announcing the  
+> change to the Lustre community. But, if we proceed, you should also  
+> post a note to lustre-discuss for wider dissemination.
+>
+> Thanks,
+> Bojanic
+>
+>
+> _______________________________________________
+> Lustre-devel mailing list
+> Lustre-devel at clusterfs.com
+> https://mail.clusterfs.com/mailman/listinfo/lustre-devel
+>   
+
+
+
+From Brian.Murrell at Sun.COM  Mon Jan  7 10:10:36 2008
+From: Brian.Murrell at Sun.COM (Brian J. Murrell)
+Date: Mon, 07 Jan 2008 13:10:36 -0500
+Subject: [Lustre-devel] moving /proc to $MNT/.lustre
+In-Reply-To: <4782665E.1070406@sun.com>
+References: <47618E96.3080709@sun.com>
+	<F8F87424-C3EE-45E7-838E-95E1047F521D@Sun.COM>
+	<4782665E.1070406@sun.com>
+Message-ID: <1199729436.23325.65.camel@pc.ilinx>
+
+On Mon, 2008-01-07 at 09:50 -0800, Nathan Rutman wrote:
+> well, that's why I asked.  As I said, Andreas and I are in agreement, 
+> and it certainly makes sense from a portability point of view, as well 
+> as consistency with future features (snapshots, audit logs, etc.), and 
+> the final elimination of our various /proc locking headaches.  But yes, 
+> it would break user's scripts  - that's a 1-time thing, and I think not 
+> too terrible.
+
+Is it possible to support both for a release or two to give people time
+to migrate and have an actual implementation to test against as they
+work to port their scripts?  The alternative is that given that we don't
+provide public beta binaries or nightly snapshot binaries, we'd be
+requiring people who want to port, test and release their ports on "flag
+day" to build from CVS to test.
+
+b.
+-------------- next part --------------
+A non-text attachment was scrubbed...
+Name: not available
+Type: application/pgp-signature
+Size: 189 bytes
+Desc: This is a digitally signed message part
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20080107/c1d2062b/attachment.pgp>
+
+From Alex.Zhuravlev at Sun.COM  Mon Jan  7 10:10:28 2008
+From: Alex.Zhuravlev at Sun.COM (Alex Zhuravlev)
+Date: Mon, 07 Jan 2008 21:10:28 +0300
+Subject: [Lustre-devel] moving /proc to $MNT/.lustre
+In-Reply-To: <4782665E.1070406@sun.com>
+References: <47618E96.3080709@sun.com>
+	<F8F87424-C3EE-45E7-838E-95E1047F521D@Sun.COM>
+	<4782665E.1070406@sun.com>
+Message-ID: <47826B14.2050307@sun.com>
+
+Nathan Rutman wrote:
+> well, that's why I asked.  As I said, Andreas and I are in agreement, 
+> and it certainly makes sense from a portability point of view, as well 
+> as consistency with future features (snapshots, audit logs, etc.), and 
+> the final elimination of our various /proc locking headaches.  But yes, 
+> it would break user's scripts  - that's a 1-time thing, and I think not 
+> too terrible.
+
+it's not quite clear how do we do with userspace servers. there was an idea
+to use named pipes, but I'm not sure it's very portable.
+
+thanks, Alex
+
+
+
+From adilger at sun.com  Mon Jan  7 12:07:18 2008
+From: adilger at sun.com (Andreas Dilger)
+Date: Mon, 7 Jan 2008 13:07:18 -0700
+Subject: [Lustre-devel] moving /proc to $MNT/.lustre
+In-Reply-To: <1199729436.23325.65.camel@pc.ilinx>
+References: <47618E96.3080709@sun.com>
+	<F8F87424-C3EE-45E7-838E-95E1047F521D@Sun.COM>
+	<4782665E.1070406@sun.com> <1199729436.23325.65.camel@pc.ilinx>
+Message-ID: <20080107200718.GT3351@webber.adilger.int>
+
+On Jan 07, 2008  13:10 -0500, Brian J. Murrell wrote:
+> On Mon, 2008-01-07 at 09:50 -0800, Nathan Rutman wrote:
+> > well, that's why I asked.  As I said, Andreas and I are in agreement, 
+> > and it certainly makes sense from a portability point of view, as well 
+> > as consistency with future features (snapshots, audit logs, etc.), and 
+> > the final elimination of our various /proc locking headaches.  But yes, 
+> > it would break user's scripts  - that's a 1-time thing, and I think not 
+> > too terrible.
+> 
+> Is it possible to support both for a release or two to give people time
+> to migrate and have an actual implementation to test against as they
+> work to port their scripts?  The alternative is that given that we don't
+> provide public beta binaries or nightly snapshot binaries, we'd be
+> requiring people who want to port, test and release their ports on "flag
+> day" to build from CVS to test.
+
+It wasn't mentioned here, but this is already planned.  There will be
+new commands "lctl get_param" and "lctl set_param" (or similar) that
+will be usable by scripts to get/set Lustre tunables.  This will work
+with both /proc and .../.lustre files so will allow scripts to move
+over to the new mechanism.
+
+For user-space servers there will be no alternative but to use the lctl
+mechanism since /proc entries will not exist at all.  Then again, there
+will not be any existing systems using the old mechanism since uOSS will
+only work with ZFS.
+
+Cheers, Andreas
+--
+Andreas Dilger
+Sr. Staff Engineer, Lustre Group
+Sun Microsystems of Canada, Inc.
+
+
+
+From Oleg.Drokin at Sun.COM  Mon Jan  7 19:39:31 2008
+From: Oleg.Drokin at Sun.COM (Oleg Drokin)
+Date: Mon, 07 Jan 2008 22:39:31 -0500
+Subject: [Lustre-devel] moving /proc to $MNT/.lustre
+In-Reply-To: <20080107200718.GT3351@webber.adilger.int>
+References: <47618E96.3080709@sun.com>
+	<F8F87424-C3EE-45E7-838E-95E1047F521D@Sun.COM>
+	<4782665E.1070406@sun.com> <1199729436.23325.65.camel@pc.ilinx>
+	<20080107200718.GT3351@webber.adilger.int>
+Message-ID: <69573950-6797-4203-8516-CB7B0FC3271E@sun.com>
+
+Hello!
+
+On Jan 7, 2008, at 3:07 PM, Andreas Dilger wrote:
+>> Is it possible to support both for a release or two to give people  
+>> time
+>> to migrate and have an actual implementation to test against as they
+>> work to port their scripts?  The alternative is that given that we  
+>> don't
+>> provide public beta binaries or nightly snapshot binaries, we'd be
+>> requiring people who want to port, test and release their ports on  
+>> "flag
+>> day" to build from CVS to test.
+> It wasn't mentioned here, but this is already planned.  There will be
+> new commands "lctl get_param" and "lctl set_param" (or similar) that
+> will be usable by scripts to get/set Lustre tunables.  This will work
+> with both /proc and .../.lustre files so will allow scripts to move
+> over to the new mechanism.
+
+What's the plan to prevent various backups software (and also tar &  
+friends)
+from backing up and restoring (esp. restoring of course) values in these
+files?
+
+Bye,
+     Oleg
+
+
+
+From adilger at sun.com  Mon Jan  7 22:48:15 2008
+From: adilger at sun.com (Andreas Dilger)
+Date: Mon, 7 Jan 2008 23:48:15 -0700
+Subject: [Lustre-devel] moving /proc to $MNT/.lustre
+In-Reply-To: <69573950-6797-4203-8516-CB7B0FC3271E@sun.com>
+References: <47618E96.3080709@sun.com>
+	<F8F87424-C3EE-45E7-838E-95E1047F521D@Sun.COM>
+	<4782665E.1070406@sun.com> <1199729436.23325.65.camel@pc.ilinx>
+	<20080107200718.GT3351@webber.adilger.int>
+	<69573950-6797-4203-8516-CB7B0FC3271E@sun.com>
+Message-ID: <20080108064815.GC3351@webber.adilger.int>
+
+On Jan 07, 2008  22:39 -0500, Oleg Drokin wrote:
+> On Jan 7, 2008, at 3:07 PM, Andreas Dilger wrote:
+>>> Is it possible to support both for a release or two to give people time
+>>> to migrate and have an actual implementation to test against as they
+>>> work to port their scripts?  The alternative is that given that we don't
+>>> provide public beta binaries or nightly snapshot binaries, we'd be
+>>> requiring people who want to port, test and release their ports on "flag
+>>> day" to build from CVS to test.
+>> It wasn't mentioned here, but this is already planned.  There will be
+>> new commands "lctl get_param" and "lctl set_param" (or similar) that
+>> will be usable by scripts to get/set Lustre tunables.  This will work
+>> with both /proc and .../.lustre files so will allow scripts to move
+>> over to the new mechanism.
+>
+> What's the plan to prevent various backups software (and also tar & 
+> friends)
+> from backing up and restoring (esp. restoring of course) values in these
+> files?
+
+The typical way is that .lustre would not appear in readdir/getdirents
+but could be accessed if explicitly named.
+
+Cheers, Andreas
+--
+Andreas Dilger
+Sr. Staff Engineer, Lustre Group
+Sun Microsystems of Canada, Inc.
+
+
+
+From Alex.Zhuravlev at Sun.COM  Mon Jan  7 22:53:39 2008
+From: Alex.Zhuravlev at Sun.COM (Alex Zhuravlev)
+Date: Tue, 08 Jan 2008 09:53:39 +0300
+Subject: [Lustre-devel] moving /proc to $MNT/.lustre
+In-Reply-To: <20080108064815.GC3351@webber.adilger.int>
+References: <47618E96.3080709@sun.com>
+	<F8F87424-C3EE-45E7-838E-95E1047F521D@Sun.COM>
+	<4782665E.1070406@sun.com> <1199729436.23325.65.camel@pc.ilinx>
+	<20080107200718.GT3351@webber.adilger.int>
+	<69573950-6797-4203-8516-CB7B0FC3271E@sun.com>
+	<20080108064815.GC3351@webber.adilger.int>
+Message-ID: <47831DF3.2070107@sun.com>
+
+Andreas Dilger wrote:
+>> What's the plan to prevent various backups software (and also tar & 
+>> friends)
+>> from backing up and restoring (esp. restoring of course) values in these
+>> files?
+> 
+> The typical way is that .lustre would not appear in readdir/getdirents
+> but could be accessed if explicitly named.
+
+wouldn't it make sense to get rid of .lustre and use lctl then?
+I guess we'll have to do this anyway if we want to use all our
+testing infrastructure with userspace servers.
+
+thanks, Alex
+
+
+
+From nic at cray.com  Tue Jan  8 04:31:25 2008
+From: nic at cray.com (Nicholas Henke)
+Date: Tue, 08 Jan 2008 06:31:25 -0600
+Subject: [Lustre-devel] moving /proc to $MNT/.lustre
+In-Reply-To: <20080107200718.GT3351@webber.adilger.int>
+References: <47618E96.3080709@sun.com>	<F8F87424-C3EE-45E7-838E-95E1047F521D@Sun.COM>	<4782665E.1070406@sun.com>
+	<1199729436.23325.65.camel@pc.ilinx>
+	<20080107200718.GT3351@webber.adilger.int>
+Message-ID: <47836D1D.1090200@cray.com>
+
+Andreas Dilger wrote:
+> 
+> It wasn't mentioned here, but this is already planned.  There will be
+> new commands "lctl get_param" and "lctl set_param" (or similar) that
+> will be usable by scripts to get/set Lustre tunables.  This will work
+> with both /proc and .../.lustre files so will allow scripts to move
+> over to the new mechanism.
+> 
+> For user-space servers there will be no alternative but to use the lctl
+> mechanism since /proc entries will not exist at all.  Then again, there
+> will not be any existing systems using the old mechanism since uOSS will
+> only work with ZFS.
+> 
+
+How is get_param/set_param going to work for the cases like clearing the LRU - where one might not 
+know the names of all of the parameters:
+
+for LRU in /proc/fs/lustre/ldlm/namespaces/*/lru_size; do echo clear > $LRU; done
+
+Nic
+
+
+
+From Peter.Bojanic at Sun.COM  Tue Jan  8 15:44:02 2008
+From: Peter.Bojanic at Sun.COM (Peter Bojanic)
+Date: Tue, 08 Jan 2008 19:44:02 -0400
+Subject: [Lustre-devel] Question about liblustre and Lustre 2.0
+Message-ID: <AD0589D8-8D0E-4A4D-9DA1-40868436BE6F@sun.com>
+
+Hi,
+
+A customer recently asked me a couple of questions about liblustre:
+
+1. Does the Lustre Group anticipate any problems with supporting  
+liblustre in Lustre 2.0 and beyond?
+
+2. Are there any opportunities for the Lustre Group, or Lustre users  
+in general, to leverage liblustre for any purposes in the future?
+
+Feedback from the Lustre Group senior architects on this matter would  
+be appreciated.
+
+Cheers,
+Bojanic
+
+
+
+From Nathan.Rutman at Sun.COM  Tue Jan  8 19:57:03 2008
+From: Nathan.Rutman at Sun.COM (Nathan Rutman)
+Date: Tue, 08 Jan 2008 19:57:03 -0800
+Subject: [Lustre-devel] moving /proc to $MNT/.lustre
+In-Reply-To: <47831DF3.2070107@sun.com>
+References: <47618E96.3080709@sun.com>
+	<F8F87424-C3EE-45E7-838E-95E1047F521D@Sun.COM>
+	<4782665E.1070406@sun.com> <1199729436.23325.65.camel@pc.ilinx>
+	<20080107200718.GT3351@webber.adilger.int>
+	<69573950-6797-4203-8516-CB7B0FC3271E@sun.com>
+	<20080108064815.GC3351@webber.adilger.int> <47831DF3.2070107@sun.com>
+Message-ID: <4784460F.7000102@sun.com>
+
+Alex Zhuravlev wrote:
+> Andreas Dilger wrote:
+>>> What's the plan to prevent various backups software (and also tar & 
+>>> friends)
+>>> from backing up and restoring (esp. restoring of course) values in 
+>>> these
+>>> files?
+>>
+>> The typical way is that .lustre would not appear in readdir/getdirents
+>> but could be accessed if explicitly named.
+>
+> wouldn't it make sense to get rid of .lustre and use lctl then?
+> I guess we'll have to do this anyway if we want to use all our
+> testing infrastructure with userspace servers.
+No - there will be plenty of other things in .lustre as well:
+snapshots
+log files
+status indications
+
+
+
+From Nathan.Rutman at Sun.COM  Tue Jan  8 20:01:58 2008
+From: Nathan.Rutman at Sun.COM (Nathan Rutman)
+Date: Tue, 08 Jan 2008 20:01:58 -0800
+Subject: [Lustre-devel] moving /proc to $MNT/.lustre
+In-Reply-To: <47836D1D.1090200@cray.com>
+References: <47618E96.3080709@sun.com>
+	<F8F87424-C3EE-45E7-838E-95E1047F521D@Sun.COM>
+	<4782665E.1070406@sun.com> <1199729436.23325.65.camel@pc.ilinx>
+	<20080107200718.GT3351@webber.adilger.int> <47836D1D.1090200@cray.com>
+Message-ID: <47844736.8020304@sun.com>
+
+Nicholas Henke wrote:
+> Andreas Dilger wrote:
+>>
+>> It wasn't mentioned here, but this is already planned.  There will be
+>> new commands "lctl get_param" and "lctl set_param" (or similar) that
+>> will be usable by scripts to get/set Lustre tunables.  This will work
+>> with both /proc and .../.lustre files so will allow scripts to move
+>> over to the new mechanism.
+>>
+>> For user-space servers there will be no alternative but to use the lctl
+>> mechanism since /proc entries will not exist at all.  Then again, there
+>> will not be any existing systems using the old mechanism since uOSS will
+>> only work with ZFS.
+>>
+>
+> How is get_param/set_param going to work for the cases like clearing 
+> the LRU - where one might not know the names of all of the parameters:
+>
+> for LRU in /proc/fs/lustre/ldlm/namespaces/*/lru_size; do echo clear > 
+> $LRU; done
+>
+> Nic
+In this particular case, there will not be a "namespaces" subdirectory 
+-- there will be different files in the .lustre directories of different 
+mount points:
+/mnt/test/.lustre/ldlm/lru_size
+/mnt/fast2/.lustre/ldlm/lru_size
+etc
+
+But in general, if there are any non-predefined path names for userspace 
+server parameters, we'll have to add a lctl method of listing them.
+
+
+
+From bs at q-leap.de  Fri Jan 11 14:39:57 2008
+From: bs at q-leap.de (Bernd Schubert)
+Date: Fri, 11 Jan 2008 23:39:57 +0100
+Subject: [Lustre-devel] Question about liblustre and Lustre 2.0
+In-Reply-To: <AD0589D8-8D0E-4A4D-9DA1-40868436BE6F@sun.com>
+References: <AD0589D8-8D0E-4A4D-9DA1-40868436BE6F@sun.com>
+Message-ID: <200801112339.57756.bs@q-leap.de>
+
+On Wednesday 09 January 2008 00:44:02 Peter Bojanic wrote:
+> Hi,
+>
+> A customer recently asked me a couple of questions about liblustre:
+>
+> 1. Does the Lustre Group anticipate any problems with supporting
+> liblustre in Lustre 2.0 and beyond?
+>
+> 2. Are there any opportunities for the Lustre Group, or Lustre users
+> in general, to leverage liblustre for any purposes in the future?
+
+I still plan to write a fuse client based in liblustre, just didn't have the 
+time yet.
+
+Cheers,
+Bernd
+
+-- 
+Bernd Schubert
+Q-Leap Networks GmbH
+
+
+
+From Alexey.Lyashkov at Sun.COM  Sat Jan 12 00:14:04 2008
+From: Alexey.Lyashkov at Sun.COM (Alex Lyashkov)
+Date: Sat, 12 Jan 2008 10:14:04 +0200
+Subject: [Lustre-devel] Question about liblustre and Lustre 2.0
+In-Reply-To: <200801112339.57756.bs@q-leap.de>
+References: <AD0589D8-8D0E-4A4D-9DA1-40868436BE6F@sun.com>
+	<200801112339.57756.bs@q-leap.de>
+Message-ID: <1200125644.29834.31.camel@bear.shadowland>
+
+On Fri, 2008-01-11 at 23:39 +0100, Bernd Schubert wrote:
+> On Wednesday 09 January 2008 00:44:02 Peter Bojanic wrote:
+> > Hi,
+> >
+> > A customer recently asked me a couple of questions about liblustre:
+> >
+> > 1. Does the Lustre Group anticipate any problems with supporting
+> > liblustre in Lustre 2.0 and beyond?
+> >
+> > 2. Are there any opportunities for the Lustre Group, or Lustre users
+> > in general, to leverage liblustre for any purposes in the future?
+> 
+> I still plan to write a fuse client based in liblustre, just didn't have the 
+> time yet.
+>
+This already exist.
+http://wiki.lustre.org/index.php?title=Fuse
+
+-- 
+Alex Lyashkov <Alexey.lyashkov at sun.com>
+Lustre Group, Sun Microsystems
+
+
+
+From peter.braam at sun.com  Sun Jan 13 00:53:41 2008
+From: peter.braam at sun.com (Peter J. Braam)
+Date: Sun, 13 Jan 2008 11:53:41 +0300
+Subject: [Lustre-devel] MDS Striping WP - Final PDF
+In-Reply-To: <4CA3166E-57B5-44E6-ADCD-E20304BA8413@Sun.COM>
+References: <47865F41.4050309@sun.com>
+	<4CA3166E-57B5-44E6-ADCD-E20304BA8413@Sun.COM>
+Message-ID: <b9aa6a570801130053s374c15e0ve6614e2998b1e10@mail.gmail.com>
+
+CFS has prepared a description of the striping attributes that are in use in
+Lustre:
+
+http://arch.lustre.org/index.php?title=MDS_striping_format
+
+Instrumental discussed this with us and suggested it would be nice to have
+standards for this kind of thing.   We wanted to inspire the pNFS teams in
+particular.
+
+
+- Peter -
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20080113/5e580c49/attachment.htm>
+
+From Alex.Zhuravlev at Sun.COM  Mon Jan 14 12:54:05 2008
+From: Alex.Zhuravlev at Sun.COM (Alex Zhuravlev)
+Date: Mon, 14 Jan 2008 23:54:05 +0300
+Subject: [Lustre-devel] moving /proc to $MNT/.lustre
+In-Reply-To: <4784460F.7000102@sun.com>
+References: <47618E96.3080709@sun.com>
+	<F8F87424-C3EE-45E7-838E-95E1047F521D@Sun.COM>
+	<4782665E.1070406@sun.com> <1199729436.23325.65.camel@pc.ilinx>
+	<20080107200718.GT3351@webber.adilger.int>
+	<69573950-6797-4203-8516-CB7B0FC3271E@sun.com>
+	<20080108064815.GC3351@webber.adilger.int> <47831DF3.2070107@sun.com>
+	<4784460F.7000102@sun.com>
+Message-ID: <478BCBED.8090600@sun.com>
+
+Nathan Rutman wrote:
+> No - there will be plenty of other things in .lustre as well:
+> snapshots
+> log files
+> status indications
+
+hmm. and how are we going to access that in case of userspace server?
+via client?
+
+thanks, Alex
+
+
+
+From thomas.leibovici at cea.fr  Tue Jan 15 01:21:10 2008
+From: thomas.leibovici at cea.fr (LEIBOVICI Thomas)
+Date: Tue, 15 Jan 2008 10:21:10 +0100
+Subject: [Lustre-devel] ZFS-DMU benchmark on Linux
+Message-ID: <478C7B06.5020805@cea.fr>
+
+Hi all,
+
+You will find in attachment to this mail some benchmarks we made on 
+Linux with pios over ZFS-DMU.
+There are some interesting things about ZFS tuning and some ideas for 
+breaking a bottleneck we identified in DMU.
+
+Thomas LEIBOVICI
+CEA/DAM - Ile de France
+-------------- next part --------------
+A non-text attachment was scrubbed...
+Name: ZFS_benchs_Linux.pdf
+Type: application/pdf
+Size: 99215 bytes
+Desc: not available
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20080115/2e443814/attachment.pdf>
+
+From Ricardo.M.Correia at Sun.COM  Tue Jan 15 07:18:08 2008
+From: Ricardo.M.Correia at Sun.COM (Ricardo M. Correia)
+Date: Tue, 15 Jan 2008 15:18:08 +0000
+Subject: [Lustre-devel] ZFS-DMU benchmark on Linux
+In-Reply-To: <478C7B06.5020805@cea.fr>
+References: <478C7B06.5020805@cea.fr>
+Message-ID: <478CCEB0.2050301@Sun.COM>
+
+Hi Thomas,
+
+LEIBOVICI Thomas wrote:
+> You will find in attachment to this mail some benchmarks we made on 
+> Linux with pios over ZFS-DMU.
+> There are some interesting things about ZFS tuning and some ideas for 
+> breaking a bottleneck we identified in DMU.
+
+Those are some very, very interesting benchmarks.
+
+Regarding the "ZFS striping performance", you noticed that increasing 
+the number of threads beyond a certain point didn't improve performance, 
+in fact it actually decreased.
+I think that was something expected due to the fact that the DMU already 
+has a good streamlined I/O pipeline which already parallelizes I/O, and 
+increasing the number of threads greatly beyond the number of cpus 
+causes contention to increase which causes I/O throughput to decrease.
+
+However, it is in fact unfortunate that more luns didn't improve 
+performance. I wonder if you were hitting a CPU wall?
+In a previous benchmark I ran, I noticed that PIOS was not getting 
+improved throughput with more disks, even though there was still a 
+significant percentage of available CPU time.
+So I guess we still have opportunities to do good optimizations.
+
+The "ZIO threads" is also something that I highly suspected had an 
+impact in throughput, which is why when I benchmarked the DMU on the 
+Thumper I increased them from 8 to 24. It is good to have hard data that 
+confirms this.
+
+The section about parallelizing checksums is something that the ZFS team 
+appears to have solved already.
+You can see this code section: 
+http://www.wizy.org/mercurial/zfs-lustre/file/49c2aaa6a859/src/lib/libzfscommon/include/sys/zio_impl.h#101
+
+If you take a look at the "ZIO_WRITE_COMMON_STAGES", you will notice 
+that just before the "checksum generate" stage there is an "issue async" 
+stage. This "issue async" stage basically consists in dispatching the 
+I/O (ZIO) to the ZIO thread pool, which effectively causes them to be 
+parallelized. The I/O dependencies are automatically tracked by the ZIO 
+pipeline.
+
+All in all, this was a very good report.
+
+So far we have only done very limited benchmarking and optimization, but 
+we are already starting to work on performance improvements. One of the 
+tasks of our next development cycle will be doing this kind of analysis 
+but, of course, the sooner we see this, the better :)
+
+Great work and thanks for sharing this with us!
+
+Best regards,
+Ricardo
+
+-- 
+<http://www.sun.com> 	
+
+*Ricardo Manuel Correia*
+
+Lustre Engineering
+*Sun Microsystems, Inc.*
+Portugal
+
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20080115/d043c2df/attachment.htm>
+-------------- next part --------------
+A non-text attachment was scrubbed...
+Name: 6g_top.gif
+Type: image/gif
+Size: 1257 bytes
+Desc: not available
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20080115/d043c2df/attachment.gif>
+
+From Nikita.Danilov at Sun.COM  Thu Jan 17 08:38:38 2008
+From: Nikita.Danilov at Sun.COM (Nikita Danilov)
+Date: Thu, 17 Jan 2008 19:38:38 +0300
+Subject: [Lustre-devel] architecture: "windows" reintegration/recovery
+Message-ID: <18319.39197.737814.901049@gargle.gargle.HOWL>
+
+Hello,
+
+first a bit of clarification: this message is probably missing important
+context for a regular lustre-discuss@ reader, and moreover, discusses
+some ideas that were introduced only very recently and are documented
+nowhere. "Windows" in the following bear no relation to the certain
+software platform. :-)
+
+Windows architecture is at http://arch.lustre.org/index.php?title=Windows
+
+It seems that there is a subtle point in windows recovery/reintegration
+algorithms, that wasn't spelled out during last meeting. Specifically,
+it is not clear when it is safe to discard already sent window from the
+sender memory. Formally, window can be discarded once it is guaranteed
+that it won't be required in the future by the roll-forward phase of the
+recovery. Which, in turn, means that window can be discarded once it is
+committed on all destination servers, but here lies a problem. Let's
+look at the particular example:
+
+Suppose that we have a client C0, talking to the proxy cluster,
+consisting of two servers S0 and S1 (source nodes), that in turn talk to
+the master servers D0 and D1 (destination nodes).
+
+    - C0 creates a file "foo", and it so happens that the parent
+    directory, where name "foo" is inserted, is on S0, while new foo
+    inode is created on S1.
+
+    - Some time later S0 and S1 start merging their cached modifications
+    to the D0 and D1 respectively. S0 composes a window W0, containing
+    addition of "foo", and sends it to D0; S1 composes a window W1,
+    containing creation of new foo inode, and sends it to D1. W0 and W1
+    together are form what was previously known as an "epoch": they move
+    file system from one consistent state to another. 
+
+    - Yet, destination servers commit windows independently. This means
+    that S0 cannot discard W0 from its memory once D0 committed W0,
+    because it may happen that W1 is still uncommitted on D1, and whole
+    "epoch" can be rolled-back by the recovery process.
+
+It seems that some form of communication is needed to find out when
+given "source epoch" (that is, an epoch on the source cluster S0, S1,
+represented as a set of windows W0, W1) can be discarded. Obvious
+solutions are:
+
+    - let's source nodes communicate with each other to find out when
+    all windows in the epoch are committed on their respective
+    destination servers, or
+
+    - let's destination nodes to communicate with each other to find out
+    when given epoch for a given source (there might be a large number
+    of proxy clusters and WBC clients connected to the same destination
+    cluster) is fully committed.
+
+    It seems very tempting to re-use CUT algorithm already ticking on
+    the destination server for this, but that seems to require for
+    source epochs to nest within destination epochs, which probably
+    isn't wanted, because it introduces additional synchronization
+    between source and destination clusters.
+
+Similar problems arise w.r.t. question of when it is safe to discard
+undo entries on the destination servers.
+
+Any ideas?
+
+Nikita.
+
+
+
+From adilger at sun.com  Thu Jan 17 10:35:41 2008
+From: adilger at sun.com (Andreas Dilger)
+Date: Thu, 17 Jan 2008 11:35:41 -0700
+Subject: [Lustre-devel] [URGENT] Lustre 1.6.4.1 data loss bug
+Message-ID: <20080117183541.GY3351@webber.adilger.int>
+
+Attention to all Lustre users.
+
+There was a serious problem discovered with only the 1.6.4.1 release
+which could lead to major data loss on relatively new Lustre filesystems
+in certain situations.  The 1.6.4.2 release is being prepared that will
+fix the problem, and workarounds are available for existing 1.6.4.1 users,
+but in the meantime customers should be aware of the problem and take
+measures to avoid the problem (described at the end of the email).
+
+The problem is described in bug 14631, and while there are no known cases
+that this has impacted a production environment, the consequences can be
+severe and all users should take note.  The bug can cause objects on newly
+formatted OSTs to be deleted if the following conditions are true:
+
+OST has had fewer than 20000 objects created on it ever
+-------------------------------------------------------
+This can be seen on each OST via "cat /proc/fs/lustre/obdfilter/*/last_id"
+which reports the highest object ID ever created on that OST.  If this
+number is greater than 20000 that OST is not at risk of data loss.
+
+The OST must be in recovery at the time the MDT is first mounted
+----------------------------------------------------------------
+This would happen if the OSS node crashed, or if the OST filesystem is
+unmounted while the MDT or a client is still connected.  Unmounting all
+clients and MDT before the OST is always the correct process and will
+avoid this problem, but it is also possible to force unmount the OST
+with "umount -f /mnt/ost*" (or path as appropriate) to evict all
+connections and avoid the problem.
+
+If the OST is in recovery at mount time then it can be mounted before the
+MDT and "lct --device {OST device number} abort_recovery" used to abort
+recovery before the MDT is mounted.  Alternately, the OST will only wait
+a specific time for recovery (4:10 by default, actual value printed in
+dmesg) and this can be allowed to expire before mounting the MDT to avoid
+the problem.
+
+The MDT is not in recovery when it connects to the OST(s)
+---------------------------------------------------------
+If the MDT is not in recovery at mount time (i.e. it was shut down
+cleanly), but the OST is in recovery then the MDT will try and get
+information from the OST on existing objects, but fail.  Later in
+the startup process the MDT would incorrectly signal the OST to delete
+all unused objects.  If the MDT is in recovery at startup, then the
+MDT recovery period will expire after the OST recovery and the problem
+will not be triggered.  If the OSTs are mounted and are not in recovery
+when the MDT mounts then the problem will also not be triggered.
+
+
+To avoid triggering the problem:
+--------------------------------
+- unmount the clients and MDT before the OST.  When unmounting
+the OST use "umount -f /mnt/ost*" to force disconnect all clients.
+- mount the OSTs before the MDT, and wait for the recovery to timeout
+(or cancel it, as above) before mounting the MDT
+- create at least 20000 objects on each OST.  Specific OSTs can be
+targetted via "lfs setstripe -i {OST index} /path/to/lustre/file".
+These objects do not need to remain on the OST, there just have to have
+been that many objects created on the OST ever, to activate a sanity
+check when the 1.6.4.1 MDT connects to the OST.
+- upgrade to lustre 1.6.4.2 when available
+
+Cheers, Andreas
+--
+Andreas Dilger
+Sr. Staff Engineer, Lustre Group
+Sun Microsystems of Canada, Inc.
+
+
+From Peter.Braam at Sun.COM  Thu Jan 17 11:19:10 2008
+From: Peter.Braam at Sun.COM (Peter J Braam)
+Date: Thu, 17 Jan 2008 11:19:10 -0800
+Subject: [Lustre-devel] batched integration
+Message-ID: <478FAA2E.90401@sun.com>
+
+http://arch.lustre.org/index.php?title=Windows
+
+First of all the word "Windows" should be changed to "epochs" or 
+"batches" - we are doing too many other things, like porting Lustre to 
+Windows.
+
+The architecture of this should be more closely related to the migration 
+architecture documented elsewhere on the wiki.  A coordinator is 
+required to start and close epochs that will be reintegrated and agents 
+on the source/target nodes.
+
+I hope this helps.
+
+Peter
+
+
+
+From cfaber at sun.com  Fri Jan 18 11:48:52 2008
+From: cfaber at sun.com (cfaber at sun.com)
+Date: Fri, 18 Jan 2008 14:48:52 -0500 (EST)
+Subject: [Lustre-devel] test
+Message-ID: <20080118194858.68A672D61C7A@mail.clusterfs.com>
+
+test
+
+
+From Peter.Braam at Sun.COM  Tue Jan 22 17:00:36 2008
+From: Peter.Braam at Sun.COM (Peter J Braam)
+Date: Wed, 23 Jan 2008 09:00:36 +0800
+Subject: [Lustre-devel] [Fwd: Re: WBC subcomponents.]
+Message-ID: <479691B4.6020004@sun.com>
+
+
+Hi Nikita -
+
+This looks excellent, except that I don't feel we have a good basis for 
+the estimates yet. 
+
+This has major architectural value as it gives a component breakdown and 
+should be recorded as such on the architecture wiki.  When you do these 
+component breakdowns it is important to identify what interfaces are 
+offered and used by the components (this is the static aspect of the 
+interface).  It is also useful to make interaction diagrams showing how 
+the components use each other to execute use cases (this is the dynamic 
+aspect).
+
+- Peter -
+
+Nikita Danilov wrote:
+> Hello,
+>
+> below is a tentative list of tasks into which WBC effort can be
+> sub-divided. I also provided a less exact list for the EPOCH component,
+> and an incomplete list for the STL component.
+>
+> WBC tasks are estimated in lines-of-code with the total of (9100 + 3000)
+> LOC, where LOC is a non-comment, non-whitespace line of the source
+> file. I believe it is too early to estimate all EPOCH tasks, hopefully
+> there will be more clear understanding of the situation during next
+> week. I tried to estimate the EPOCH tasks that are absolutely necessary
+> during the early stages of WBC development.
+>
+> Vladimir is the best person to complete the list of STL tasks,
+> together with the estimations.
+>
+> C-* tasks are for the client, S-* tasks are for the server.
+>
+> ESTIMATION
+>
+>                      scope                                                effort
+>                                                                              loc
+> WBC
+>
+>     C-VFS-MM         integration with vfs: inodes, dentries, memory         2500
+>                      pressure. Executing operation effects locally.
+>
+>     C-ops-caching    tracking operations: list vs. fragments. Tracking      2500
+>                      dependencies.
+>
+>     C-write-out      policy deciding when to write-out cached state         1000
+>                      updates, and with what granularity: age, amount,
+>                      max-in-flight
+>
+>     C-dir-pages      caching of directory pages and using them for local    1000
+>                      lookups
+>
+>     C-new-files      creation of new files locally                           200
+>
+>     C-new-objects    creation of new objects locally                         200
+>
+>     C-DLM            invoking reintegration on a lock cancel, lock           200
+>                      weighting
+>
+>     C-data           dependencies between cached data and meta-data          200
+>
+>     C-IO             switching between whole-file mds-based locking and      250
+>                      extent locking
+>
+>     C-grants         unified resource range leasing mechanism                250
+>
+>     S-grants         unified resource range leasing mechanism                250
+>
+>     C-misc           sync, fsync, compatibility flag, mount option           200
+>
+>     S-misc           compatibility flags                                     100
+>
+> STL
+>
+>     C-policy         track usage statistics and use them to decide when to
+>                      ask for an STL
+>
+>     S-policy         track usage statistics and use them to decide when to
+>                      grant an STL
+>
+> EPOCHS
+>
+>     formalization    formal reintegration model with "proofs" of recovery
+>                      correctness and concurrency control description
+>
+>     C-reintegration  reintegration, including concurrency control,          1000
+>                      integration with ptlrpc
+>
+>     S-compound       implementation of the compound operations on           1000
+>                      the server
+>
+>     S-reintegration  reintegration of batches on the server, thread         1000
+>                      scheduling
+>
+>     S-undo           keeping undo logs
+>
+>     S-cuts           implementation of the CUTs algorithm
+>
+>     C-gc             garbage collection: when to discard cached batches
+>
+>     S-gc             garbage collection: when to discard undo logs
+>
+>     C-recovery       replay, including optional optimistic "pre-replay"
+>
+>     S-recovery-0     roll-back of the uncommitted epochs
+>
+>     S-recovery-1     roll-forward from the clients
+>
+> EXTERNAL DEPENDENCIES
+>
+>     ost-fid          ost understanding fids, and granting fid sequences
+>                      to the clients
+> Nikita.
+>   
+</div>
+
+
+
+From Peter.Braam at Sun.COM  Tue Jan 22 17:01:09 2008
+From: Peter.Braam at Sun.COM (Peter J Braam)
+Date: Wed, 23 Jan 2008 09:01:09 +0800
+Subject: [Lustre-devel] [Fwd: flash cache page]
+Message-ID: <479691D5.6040009@sun.com>
+
+
+
+-------- Original Message --------
+Subject: 	flash cache page
+Date: 	Wed, 23 Jan 2008 08:46:43 +0800
+From: 	Peter J Braam <Peter.Braam at Sun.COM>
+To: 	Vladimir V. Saveliev <Vladimir.Saveliev at Sun.COM>, 
+lustre-devel at lustre.org
+References: 	<478E29FF.2050306 at sun.com> <478E52AE.4060801 at sun.com> 
+<1200609618.30173.3.camel at linux.site>
+
+
+
+<div class="moz-text-flowed" style="font-family: -moz-fixed">Vladimir -
+
+Here are some suggestions to improve the requirements & architecture for 
+the flash cache.
+
+
+1 Use case table.
+
+i. we decided on an implementation constraint to store both file layouts 
+as attributes of objects in a redirection layer in the client.  These 
+layouts would be obtained from the MDS cluster, see (iv)
+
+ii. We decided that locks would be taken in a hierarchical  manner -  
+the flash cache would run a LDLM and locks would be taken there.
+
+iii. Correctness would be handled automatically through the 
+hierarchy.    However, to avoid a lot of reading "write only locks" used 
+when entire pages are written are probably desirable (i.e. the caching 
+infrastructure on the flash OST's is different from a Lustre client).
+
+iv How EA2 is acquired needs more detail.
+
+
+v Power loss needs a discussion - after restarting the cache an iterator 
+is needed to push the data out.
+
+2. QAS scenarios - these do need to be written.  These sketchy notes are 
+not getting us much further.
+
+3. Implementation details (many are not)
+
+i.  What was the specific use of the "whole file" bit for MDT locks? We 
+had several uses that showed its value - we should write them down 
+before we forget.
+
+ii. Please change all of these into detailed well written sentences - 
+most are quality attribute scenarios and should be documented with a 
+small table for each.
+
+Peter
+</div>
+
+
+
+From peter.braam at sun.com  Tue Jan 22 17:19:28 2008
+From: peter.braam at sun.com (Peter J. Braam)
+Date: Wed, 23 Jan 2008 09:19:28 +0800
+Subject: [Lustre-devel] subtree locks
+Message-ID: <b9aa6a570801221719m21328e4aq6610fa9c8a4ef585@mail.gmail.com>
+
+i am looking at the subtree locks page
+http://arch.lustre.org/index.php?title=Sub_Tree_Locks
+
+1. Is there really an opportunity to have "strong STL" locks?  Why would we
+want them?  How would the revocation mechanism work?
+
+2. In the acquire STL table - the Environment is "normal use".    The issue
+"we anticipate the client will have exclusive access to the ..." needs to be
+clarified as a server policy.
+
+3. More details is needed on using normal locks under and STL when hard
+links, open files or current working directories are encountered.
+
+- Peter -
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20080123/738d2473/attachment.htm>
+
+From Peter.Braam at Sun.COM  Thu Jan 24 01:08:17 2008
+From: Peter.Braam at Sun.COM (Peter J Braam)
+Date: Thu, 24 Jan 2008 17:08:17 +0800
+Subject: [Lustre-devel] flash cache page
+In-Reply-To: <1201135464.14768.13.camel@linux.site>
+References: <478E29FF.2050306@sun.com> <478E52AE.4060801@sun.com>
+	<1200609618.30173.3.camel@linux.site> <47968E73.9020401@sun.com>
+	<1201135464.14768.13.camel@linux.site>
+Message-ID: <47985581.1070702@sun.com>
+
+
+>> 1 Use case table.
+>>
+>> i. we decided on an implementation constraint to store both file layouts 
+>> as attributes of objects in a redirection layer in the client.  These 
+>> layouts would be obtained from the MDS cluster, see (iv)
+>>
+>> ii. We decided that locks would be taken in a hierarchical  manner -  
+>> the flash cache would run a LDLM and locks would be taken there.
+>>
+>> iii. Correctness would be handled automatically through the 
+>> hierarchy.    
+>>     
+>
+>
+>   
+>> However, to avoid a lot of reading "write only locks" used 
+>> when entire pages are written are probably desirable (i.e. the caching 
+>> infrastructure on the flash OST's is different from a Lustre client).
+>>
+>>     
+>
+>   
+If a client writes a full page, the page should not first be read by the 
+flash cache.  Almost too obvious perhaps.
+
+- Peter -
+
+
+From patrice.lucas at cea.fr  Fri Jan 25 01:45:38 2008
+From: patrice.lucas at cea.fr (LUCAS Patrice)
+Date: Fri, 25 Jan 2008 10:45:38 +0100
+Subject: [Lustre-devel] SNMP support enhancement (a quick improvement : the
+ number of request per MDS)
+Message-ID: <4799AFC2.7070209@cea.fr>
+
+Hi,
+
+Is Lustre team thinking about changing or improving the snmp part of the code ?
+
+We think it could be profitable to be able to monitor Lustre client, OSS and
+MDS, as any common network device by using simple snmp requests.
+
+As an example of a quick improvement, I attached a patch that adds to
+snmp-agent the feature to give the number of requests processed by an MDS node.
+(This patch applies to the 1.6.2 lustre version.)
+
+(At the same time, I submit this subject on bugzilla.lustre.org : "bug enhancement" n?14729 )
+
+Thanks
+
+Patrice LUCAS
+CEA/DAM
+
+-------------- next part --------------
+An embedded and charset-unspecified text was scrubbed...
+Name: patch_snmp_MDSNBSAMPLEDREQ_lustre_1.6.2
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20080125/428bf3a2/attachment.txt>
+
+From Nathan.Rutman at Sun.COM  Fri Jan 25 12:37:17 2008
+From: Nathan.Rutman at Sun.COM (Nathaniel Rutman)
+Date: Fri, 25 Jan 2008 12:37:17 -0800
+Subject: [Lustre-devel] Feed API draft for comment
+Message-ID: <479A487D.8020602@sun.com>
+
+RFC:
+This is draft proposal API for the user-level interface for feeds.  
+(This does not describe changelogs in general).
+
+Feeds would generally be used for two things: creating audit logs, and 
+driving a database watching for filesystem changes.
+-------------- next part --------------
+A non-text attachment was scrubbed...
+Name: feed_api.pdf
+Type: application/pdf
+Size: 85313 bytes
+Desc: not available
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20080125/a5b52ad2/attachment.pdf>
+
+From adilger at sun.com  Fri Jan 25 16:20:51 2008
+From: adilger at sun.com (Andreas Dilger)
+Date: Fri, 25 Jan 2008 17:20:51 -0700
+Subject: [Lustre-devel] Feed API draft for comment
+In-Reply-To: <479A487D.8020602@sun.com>
+References: <479A487D.8020602@sun.com>
+Message-ID: <20080126002051.GQ18433@webber.adilger.int>
+
+On Jan 25, 2008  12:37 -0800, Nathaniel Rutman wrote:
+> This is draft proposal API for the user-level interface for feeds.  (This 
+> does not describe changelogs in general).
+>
+> Feeds would generally be used for two things: creating audit logs, and 
+> driving a database watching for filesystem changes.
+
+2.1.1
+The type-specific data struct looks awfully like an MDS_REINT record...
+It would be highly convenient if it were exactly the same.  That would
+make it possible, for example, to implement a mechanism like the ZFS
+"send" and "receive" functionality (at the Lustre level) to clone one
+filesystem onto another by "simply" taking the feed from the parent
+filesystem and driving it directly into the batch reintegration mechanism
+being planned for client-side metadata cache.
+
+I'm not familiar with all of the details of the ZFS "send" structures,
+but my understanding is that these are generated as changelogs from a
+particular snapshot, and the record contains enough information to make
+the target filesystem an exact clone of the current one, including file
+offset+length for "write" commands so that a subset of a large file could
+be sent instead of the whole thing.  By doing this against a snapshot,
+this allows the feed to "reduce" operations that may have been done
+as multiple discrete steps originally (e.g. small writes that change a
+large part of a file, or creation and subsequent removal of files after
+the reference snapshot).
+
+Is there a benefit to having the clientname as an ASCII string, instead
+of the more compact NID value?  This could be expanded in userspace via
+a library call if needed, but avoids server overhead if it isn't needed.
+
+2.1.2
+One aspect of the design that is troubling is the guarantee that a
+feed will be persistent once created.  It seems entirely probable that
+some feed would be set up for a particular task, the task completed, and
+then the userspace consumer being stopped without being destroyed, and
+never restarted again.  This would result in a boundless growth of the
+feed "backlog" as there is no longer a consumer.
+
+2.1.3
+I'm assuming that the actual kernel implementation of the feed stream
+will allow a "poll" mechanisms (sys_poll, sys_epoll, etc.) to notify
+the consumer, instead of having it e.g. busy wait on the feed size?
+There are a wide variety of services that already function in a similar
+way (e.g. ftp and http servers), and having them efficiently process
+their requests is important.
+
+Also, the requirement that a process be privileged to start a feed
+is a bit unfortunate.  I can imagine that it isn't possible to start a
+_persistent_ feed (i.e. one that lives after the death of the application)
+but it should be possible to have a transient one.  A simple use case
+would be integration into the Linux inotify/dnotify mechanism (and
+equivalent for OS/X, Solaris) for desktop updates, Spotlight on OS/X,
+Google Desktop search, etc.  It would of course only be possible to
+receive a feed for files that a particular user already had access to.
+
+For applications like backup/sync it is also undesirable that the operator
+not need full system privileges in order to start the backup.  I suppose
+unprivileged access might be possible by having the privileged feed be
+sent to a secondary userspace process like the dbus-daemon on Linux...
+This also implies that the feed needs to be filterable for a given user.
+
+
+For consumer feed restart, how does the consumer know where the first
+uncancelled entry begins?  Assuming this is a linear stream of records
+the file offsets can become very large quite quickly.  A mechanism like
+SEEK_DATA would be useful, as would adding some parameters to the
+llapi_audit_getinfo() data structure to return the first and available
+record offset.  Also, there is the risk of 2^64-byte offset overflow
+if this is presented as a regular file to userspace.  It would make more
+sense to present this as a FIFO or socket.
+
+Cheers, Andreas
+--
+Andreas Dilger
+Sr. Staff Engineer, Lustre Group
+Sun Microsystems of Canada, Inc.
+
+
+
+From Nathan.Rutman at Sun.COM  Mon Jan 28 10:02:06 2008
+From: Nathan.Rutman at Sun.COM (Nathaniel Rutman)
+Date: Mon, 28 Jan 2008 10:02:06 -0800
+Subject: [Lustre-devel] Feed API draft for comment
+In-Reply-To: <20080126002051.GQ18433@webber.adilger.int>
+References: <479A487D.8020602@sun.com>
+	<20080126002051.GQ18433@webber.adilger.int>
+Message-ID: <479E189E.8090106@sun.com>
+
+Andreas Dilger wrote:
+> On Jan 25, 2008  12:37 -0800, Nathaniel Rutman wrote:
+>   
+>> This is draft proposal API for the user-level interface for feeds.  (This 
+>> does not describe changelogs in general).
+>>
+>> Feeds would generally be used for two things: creating audit logs, and 
+>> driving a database watching for filesystem changes.
+>>     
+>
+> 2.1.1
+> The type-specific data struct looks awfully like an MDS_REINT record...
+> It would be highly convenient if it were exactly the same.  That would
+> make it possible, for example, to implement a mechanism like the ZFS
+> "send" and "receive" functionality (at the Lustre level) to clone one
+> filesystem onto another by "simply" taking the feed from the parent
+> filesystem and driving it directly into the batch reintegration mechanism
+> being planned for client-side metadata cache.
+>   
+That's where I took it from.  You're right, I should include all the 
+MDS_REINT fields.
+> Is there a benefit to having the clientname as an ASCII string, instead
+> of the more compact NID value?  This could be expanded in userspace via
+> a library call if needed, but avoids server overhead if it isn't needed.
+>   
+Good point.  We need a translator to human-readable form anyhow; may as 
+well have it
+decode the nid as well.
+> 2.1.2
+> One aspect of the design that is troubling is the guarantee that a
+> feed will be persistent once created.  It seems entirely probable that
+> some feed would be set up for a particular task, the task completed, and
+> then the userspace consumer being stopped without being destroyed, and
+> never restarted again.  This would result in a boundless growth of the
+> feed "backlog" as there is no longer a consumer.
+>   
+Here is where the abort_timeout would come in handy.  Maybe I should 
+default that to
+some large size, or instead have a default abort_size that assumes the 
+consumer is
+dead when the log grows beyond some number of unconsumed entries.
+> 2.1.3
+> I'm assuming that the actual kernel implementation of the feed stream
+> will allow a "poll" mechanisms (sys_poll, sys_epoll, etc.) to notify
+> the consumer, instead of having it e.g. busy wait on the feed size?
+> There are a wide variety of services that already function in a similar
+> way (e.g. ftp and http servers), and having them efficiently process
+> their requests is important.
+>   
+Consumers would generally blocking wait (not busy wait) on the 
+filedescriptor.  
+Or use select(2) or poll(2).
+> Also, the requirement that a process be privileged to start a feed
+> is a bit unfortunate.  I can imagine that it isn't possible to start a
+> _persistent_ feed (i.e. one that lives after the death of the application)
+> but it should be possible to have a transient one.  A simple use case
+> would be integration into the Linux inotify/dnotify mechanism (and
+> equivalent for OS/X, Solaris) for desktop updates, Spotlight on OS/X,
+> Google Desktop search, etc.  It would of course only be possible to
+> receive a feed for files that a particular user already had access to.
+>   
+the point is security - you don't want joe user to be able to be able to 
+log what
+every other user is doing to the filesystem.  One might argue, however, 
+that
+since you're doing this on the server anyhow (not a client), that the server
+itself should be secured and we don't bother here...
+> For applications like backup/sync it is also undesirable that the operator
+> not need full system privileges in order to start the backup.  I suppose
+> unprivileged access might be possible by having the privileged feed be
+> sent to a secondary userspace process like the dbus-daemon on Linux...
+> This also implies that the feed needs to be filterable for a given user.
+>
+>
+> For consumer feed restart, how does the consumer know where the first
+> uncancelled entry begins?  Assuming this is a linear stream of records
+> the file offsets can become very large quite quickly.  A mechanism like
+> SEEK_DATA would be useful, as would adding some parameters to the
+> llapi_audit_getinfo() data structure to return the first and available
+> record offset.  Also, there is the risk of 2^64-byte offset overflow
+> if this is presented as a regular file to userspace.  It would make more
+> sense to present this as a FIFO or socket.
+>   
+The consumer doesn't know, the feed does.  It has retained all 
+uncanceled entries
+persistently, so it just starts playing back from the first uncanceled 
+one.  The consumers
+were given sequence numbers in each log entry; it is up to them to 
+ignore repeated
+records that they already processed (but did not cancel from the feed). 
+Ah yes, I get what you are saying now; it's not really a file that you 
+can see the beginning of
+at any point - the beginning disappears as entries are consumed.  So 
+yes, a FIFO. 
+That implies a single consumer per FIFO, but I think that's fine.  We'll 
+restrict ourselves
+to the AC_ONESHOT case, and drop AC_BATCH, which I was unsure was useful 
+anyhow.
+And yes, getinfo returning max number of available records would be 
+useful too.  I'll
+still use the next read() as an indicator that the previous batch of 
+records read can now
+be canceled.
+
+
+
+From eeb at sun.com  Mon Jan 28 13:32:43 2008
+From: eeb at sun.com (Eric Barton)
+Date: Mon, 28 Jan 2008 21:32:43 +0000
+Subject: [Lustre-devel] Feed API draft for comment
+In-Reply-To: <479E189E.8090106@sun.com>
+References: <479A487D.8020602@sun.com>
+	<20080126002051.GQ18433@webber.adilger.int> <479E189E.8090106@sun.com>
+Message-ID: <0c8901c861f5$51128870$0281a8c0@ebpc>
+
+Nathan,
+
+> 2.1.1
+> The type-specific data struct looks awfully like an MDS_REINT record...
+> It would be highly convenient if it were exactly the same.  That would
+> make it possible, for example, to implement a mechanism like the ZFS
+> "send" and "receive" functionality (at the Lustre level) to clone one
+> filesystem onto another by "simply" taking the feed from the parent
+> filesystem and driving it directly into the batch reintegration mechanism
+> being planned for client-side metadata cache.
+
+Didn't we rule this out in Moscow?
+
+> Is there a benefit to having the clientname as an ASCII string, instead
+> of the more compact NID value?  This could be expanded in userspace via
+> a library call if needed, but avoids server overhead if it isn't needed.
+
+Yes (compact wire representation - lower layers already have it)
+No (interop MUCH easier with strings)
+
+> One aspect of the design that is troubling is the guarantee that a
+> feed will be persistent once created.  It seems entirely probable that
+> some feed would be set up for a particular task, the task completed, and
+> then the userspace consumer being stopped without being destroyed, and
+> never restarted again.  This would result in a boundless growth of the
+> feed "backlog" as there is no longer a consumer.
+
+Needs a good answer
+
+> I'm assuming that the actual kernel implementation of the feed stream
+> will allow a "poll" mechanisms (sys_poll, sys_epoll, etc.) to notify
+> the consumer, instead of having it e.g. busy wait on the feed size?
+> There are a wide variety of services that already function in a similar
+> way (e.g. ftp and http servers), and having them efficiently process
+> their requests is important.
+
+Good point
+
+> Also, the requirement that a process be privileged to start a feed
+> is a bit unfortunate.  I can imagine that it isn't possible to start a
+> _persistent_ feed (i.e. one that lives after the death of the application)
+> but it should be possible to have a transient one.  
+
+I wouldn't be tempted to relax the privilege required to do _anything_at_all_
+with a feed until the security issues are _completely_ understood.
+
+> A simple use case
+> would be integration into the Linux inotify/dnotify mechanism (and
+> equivalent for OS/X, Solaris) for desktop updates, Spotlight on OS/X,
+> Google Desktop search, etc.  It would of course only be possible to
+> receive a feed for files that a particular user already had access to.
+
+Until you've really thought through the security implications, a statement
+as seemingly obvious as this can't be trusted.  Security issues are
+profoundly devious.
+
+> For applications like backup/sync it is also undesirable that the operator
+> not need full system privileges in order to start the backup. I suppose
+> unprivileged access might be possible by having the privileged feed be
+> sent to a secondary userspace process like the dbus-daemon on Linux...
+> This also implies that the feed needs to be filterable for a 
+> given user.
+
+Again - must be thought through _completely_ before relaxing constraints.
+
+> For consumer feed restart, how does the consumer know where the first
+> uncancelled entry begins?  Assuming this is a linear stream of records
+> the file offsets can become very large quite quickly.  A mechanism like
+> SEEK_DATA would be useful, as would adding some parameters to the
+> llapi_audit_getinfo() data structure to return the first and available
+> record offset.  Also, there is the risk of 2^64-byte offset overflow
+> if this is presented as a regular file to userspace.  It would make more
+> sense to present this as a FIFO or socket.
+
+(BTW, please check my figures in the following - it's too easy to be out
+ by an order of magnitude...)
+
+2^64 is about 16384 petabytes, so not than many orders of magnitude bigger
+than the whole filesystems envisaged for the near future.  Can a feed
+include the actual data?  If so, then this could be a real limitation
+(say in the next decade).
+
+However it will take 54 years to push 2^64 bytes as a single stream through
+a 10GByte/sec network and even with a future 1TByte/sec network (wow - 
+imagine that) it would still be 6 months.  So it's not a limitation for a
+single stream FTTB.
+
+But must a feed necessarily be a single stream?  Will the bandwidth at
+which a feed can be created never exceed the capacity of a single pipe?
+Can we envisage the use cases of a clustered feed receiver?  Could that
+ever include another lustre filesystem?
+
+    Cheers,
+              Eric
+
+
+
+From Peter.Braam at Sun.COM  Mon Jan 28 14:30:08 2008
+From: Peter.Braam at Sun.COM (Peter J Braam)
+Date: Tue, 29 Jan 2008 07:30:08 +0900
+Subject: [Lustre-devel] Feed API draft for comment
+In-Reply-To: <479E189E.8090106@sun.com>
+References: <479A487D.8020602@sun.com>
+	<20080126002051.GQ18433@webber.adilger.int> <479E189E.8090106@sun.com>
+Message-ID: <479E5770.5040303@sun.com>
+
+
+>> 2.1.2
+>> One aspect of the design that is troubling is the guarantee that a
+>> feed will be persistent once created.  It seems entirely probable that
+>> some feed would be set up for a particular task, the task completed, and
+>> then the userspace consumer being stopped without being destroyed, and
+>> never restarted again.  This would result in a boundless growth of the
+>> feed "backlog" as there is no longer a consumer.
+>>   
+> Here is where the abort_timeout would come in handy.  Maybe I should 
+> default that to
+> some large size, or instead have a default abort_size that assumes the 
+> consumer is
+> dead when the log grows beyond some number of unconsumed entries.
+
+There are many feeds for which incurring ENOSPACE is the right answer.  
+For example, searches have to be exact, and perhaps re-scanning the file 
+system is not an option.  The only reason I know that you may want to 
+truncate changelogs forcefully is for non-returning disconnected clients 
+or proxies.
+
+So there might be two refcounts (one for essential and one for less 
+essential users) on a feed to accomplish this, but having refcounts may 
+make it hard to track which consumers have consumed.
+
+
+>> 2.1.3
+>> I'm assuming that the actual kernel implementation of the feed stream
+>> will allow a "poll" mechanisms (sys_poll, sys_epoll, etc.) to notify
+>> the consumer, instead of having it e.g. busy wait on the feed size?
+>> There are a wide variety of services that already function in a similar
+>> way (e.g. ftp and http servers), and having them efficiently process
+>> their requests is important.
+>>   
+> Consumers would generally blocking wait (not busy wait) on the 
+> filedescriptor.  Or use select(2) or poll(2).
+>> Also, the requirement that a process be privileged to start a feed
+>> is a bit unfortunate.  I can imagine that it isn't possible to start a
+>> _persistent_ feed (i.e. one that lives after the death of the 
+>> application)
+>> but it should be possible to have a transient one.  A simple use case
+>> would be integration into the Linux inotify/dnotify mechanism (and
+>> equivalent for OS/X, Solaris) for desktop updates, Spotlight on OS/X,
+>> Google Desktop search, etc.  It would of course only be possible to
+>> receive a feed for files that a particular user already had access to.
+>>   
+> the point is security - you don't want joe user to be able to be able 
+> to log what
+> every other user is doing to the filesystem.  One might argue, 
+> however, that
+> since you're doing this on the server anyhow (not a client), that the 
+> server
+> itself should be secured and we don't bother here...
+
+
+>> For applications like backup/sync it is also undesirable that the 
+>> operator
+>> not need full system privileges in order to start the backup.  I suppose
+>> unprivileged access might be possible by having the privileged feed be
+>> sent to a secondary userspace process like the dbus-daemon on Linux...
+>> This also implies that the feed needs to be filterable for a given user.
+>>
+
+
+The kerberos user should have FID access priviliges to use a feed. This 
+is unrelated to the uid.
+
+>>
+>> For consumer feed restart, how does the consumer know where the first
+>> uncancelled entry begins?
+
+Usually the replicator reports this (e.g. the search engine says "last 
+digested feed entry was....", similar for replicators)
+
+- Peter -
+
+
+From Jinshan.Xiong at Sun.COM  Tue Jan 29 07:22:12 2008
+From: Jinshan.Xiong at Sun.COM (jay)
+Date: Tue, 29 Jan 2008 23:22:12 +0800
+Subject: [Lustre-devel] Performance comparison for raid6 driver
+Message-ID: <479F44A4.4020203@sun.com>
+
+Hello,
+
+Please check the attachment for the enhancement of performance after 
+applying our patches for raid6, these data are collected with rhel4 
+kernels.
+
+Jay
+-------------- next part --------------
+A non-text attachment was scrubbed...
+Name: Thumper-sgp_dd_raid6.ods
+Type: application/vnd.oasis.opendocument.spreadsheet
+Size: 157049 bytes
+Desc: not available
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20080129/d517f198/attachment.ods>
+
+From Nikita.Danilov at Sun.COM  Tue Jan 29 12:18:50 2008
+From: Nikita.Danilov at Sun.COM (Nikita Danilov)
+Date: Tue, 29 Jan 2008 23:18:50 +0300
+Subject: [Lustre-devel] client io rewrite design specifications
+Message-ID: <18335.35370.785491.798956@gargle.gargle.HOWL>
+
+[sorry for possible duplicates.]
+
+Hello,
+
+attached are Clio's HLD and DLD. They are also available in the CVS:
+
+        HLD/client-io-layering.lyx
+        DLD/client-io-layering-dld.lyx
+
+DLD is still incomplete. It has state machine descriptions, but lacks
+use cases and logical specification.
+
+Please take a look.
+
+Nikita.
+
+
+From Nathan.Rutman at Sun.COM  Wed Jan 30 22:15:35 2008
+From: Nathan.Rutman at Sun.COM (Nathaniel Rutman)
+Date: Wed, 30 Jan 2008 22:15:35 -0800
+Subject: [Lustre-devel] [Fwd: feed api, rev2]
+Message-ID: <47A16787.4030402@sun.com>
+
+
+-------------- next part --------------
+An embedded message was scrubbed...
+From: Nathaniel Rutman <Nathan.Rutman at Sun.COM>
+Subject: feed api, rev2
+Date: Wed, 30 Jan 2008 16:47:20 -0800
+Size: 128189
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20080130/54bdd575/attachment.eml>
+
+From adilger at sun.com  Thu Jan 31 13:32:34 2008
+From: adilger at sun.com (Andreas Dilger)
+Date: Thu, 31 Jan 2008 14:32:34 -0700
+Subject: [Lustre-devel] tunables
+In-Reply-To: <47A225EB.5010301@sun.com>
+References: <0d7401c86229$d2ef52e0$0281a8c0@ebpc>
+	<20080129095301.GI18433@webber.adilger.int> <47A225EB.5010301@sun.com>
+Message-ID: <20080131213234.GA3419@webber.adilger.int>
+
+On Jan 31, 2008  11:47 -0800, Nathaniel Rutman wrote:
+> 'Andreas Dilger' wrote:
+>> The patch as it stands now will set any tunables in
+>> /proc/{fs,sys}/{lustre,lnet}/ that match the path regexp supplied.
+>>
+>> This works on both clients and servers.  On 1.6 it just creates a
+>> path regexp to find the various files.  On 1.8 it will eventually
+>> communicate with the uOSS/uMDS process via a socket or something,
+>> but the goal right now is putting an interface in place with the
+>> existing release so that scripts/documentation can be compatible.
+>>
+>> It doesn't necessarily have anything to do with a mountpoint, but it
+>> does require the Lustre devices (that need to be tuned) to be set up.
+>   
+> When I originally filed 14471, it was a grand plan of getting rid of /proc/ 
+> and other Linuxisms by putting everything under Lustre control in a special
+> <lustremountpt>/.lustre/param directory.  14471 has now morphed into 
+> "implement lctl {get,set}_param", which, along with 14691, allows a
+> consistent way of accessing the items formerly under proc.  This is fine
+> for a first step, but I still think it doesn't go far enough. We'll
+> eventually need  snapshots: <mntpt>/.lustre/snapshot/ and sooner feeds:
+> <mntpt>/.lustre/feed/
+
+The "move everything to .../.lustre/param" functionality was moved to
+bug 14687 "Move /proc/{fs,sys}/{lustre,lnet} to /mntpt/.lustre" in
+order to make the separate tasks more manageable.  The work in bug
+14471 and 14691 are required for userspace servers, and as such for
+the 1.8 release, while 14687 is a "nice to have" and doesn't really
+bear any relationship to snapshots and feeds except that they share
+the ".lustre" virtual directory.
+
+The "lctl {get,set}_param" interfaces are intended to provide a common
+userland interface to tunables and stats regardless of whether the
+servers are running in userspace or the kernel.  I think similar changes
+can easily be made to llstat and collectl to extract stats directly
+from the userspace server processes as well.
+
+> This idea works fine for current clients and servers (which all use 
+> mountpoints), but not for userspace servers.  I don't think we have come
+> up with a good answer for that.
+
+In fact, the move of the parameters to the lustre mountpoint is
+irrelevant for userspace servers, because they won't have any mountpoint.
+The work in bug 14691 will address the getting and setting of Lustre
+tunables for userspace servers, and access to stats.
+
+> For params that are shared between all mounts, I think its fine to have 
+> access to them from each one; a change anywhere is reflected server-wide.
+
+This might be considered a security risk, as any malicious client could
+change parameters for the whole system.
+
+> For tunables "relevant without anything at all mounted" say e.g. LNET,
+> or uOSS: I don't know.  Also for tunables that must be set before
+> services are started: I don't know.  FWIW, right now, servers get
+> permanent params out of their config files, but those are read while
+> the services are starting (not before).  Module parameters are used to
+> set pre-startup params. I really don't like the idea of using modules
+> params either (does Solaris use the same API?).  Maybe we need a plain
+> old text config file for portability.
+
+> Really, I want something contained entirely within Lustre, but I don't see 
+> how to do that unless Lustre is running.
+>
+> I do think the uOSS somehow needs to have a mountpoint.  How is a uOSS 
+> started?
+> Maybe by mounting a stub Lustre client that just provides access to 
+> /.lustre?
+
+That's just the point - I think you are putting extra requirements in
+place to handle the change to move tunables into .../.lustre.  With
+the work in bug 14691 to communicate directly with the userspace server
+over a socket (a natural process-to-process communication method) there
+is no need to have a mountpoint.  Otherwise, we get into some overly
+complex framework like FUSE to have a userspace process providing services
+to the kernel to provide a mechanism for another userspace process to
+talk to it.  Ugh.
+
+Cheers, Andreas
+--
+Andreas Dilger
+Sr. Staff Engineer, Lustre Group
+Sun Microsystems of Canada, Inc.
+
+
+
+From Nathan.Rutman at Sun.COM  Thu Jan 31 14:22:45 2008
+From: Nathan.Rutman at Sun.COM (Nathaniel Rutman)
+Date: Thu, 31 Jan 2008 14:22:45 -0800
+Subject: [Lustre-devel] tunables
+In-Reply-To: <20080131213234.GA3419@webber.adilger.int>
+References: <0d7401c86229$d2ef52e0$0281a8c0@ebpc>
+	<20080129095301.GI18433@webber.adilger.int> <47A225EB.5010301@sun.com>
+	<20080131213234.GA3419@webber.adilger.int>
+Message-ID: <47A24A35.1000300@sun.com>
+
+Andreas Dilger wrote:
+> On Jan 31, 2008  11:47 -0800, Nathaniel Rutman wrote:
+>   
+>> 'Andreas Dilger' wrote:
+>>     
+>>> The patch as it stands now will set any tunables in
+>>> /proc/{fs,sys}/{lustre,lnet}/ that match the path regexp supplied.
+>>>
+>>> This works on both clients and servers.  On 1.6 it just creates a
+>>> path regexp to find the various files.  On 1.8 it will eventually
+>>> communicate with the uOSS/uMDS process via a socket or something,
+>>> but the goal right now is putting an interface in place with the
+>>> existing release so that scripts/documentation can be compatible.
+>>>
+>>> It doesn't necessarily have anything to do with a mountpoint, but it
+>>> does require the Lustre devices (that need to be tuned) to be set up.
+>>>       
+>>   
+>> When I originally filed 14471, it was a grand plan of getting rid of /proc/ 
+>> and other Linuxisms by putting everything under Lustre control in a special
+>> <lustremountpt>/.lustre/param directory.  14471 has now morphed into 
+>> "implement lctl {get,set}_param", which, along with 14691, allows a
+>> consistent way of accessing the items formerly under proc.  This is fine
+>> for a first step, but I still think it doesn't go far enough. We'll
+>> eventually need  snapshots: <mntpt>/.lustre/snapshot/ and sooner feeds:
+>> <mntpt>/.lustre/feed/
+>>     
+>
+> The "move everything to .../.lustre/param" functionality was moved to
+> bug 14687 "Move /proc/{fs,sys}/{lustre,lnet} to /mntpt/.lustre" in
+> order to make the separate tasks more manageable.  The work in bug
+> 14471 and 14691 are required for userspace servers, and as such for
+> the 1.8 release, while 14687 is a "nice to have" and doesn't really
+> bear any relationship to snapshots and feeds except that they share
+> the ".lustre" virtual directory.
+>
+> The "lctl {get,set}_param" interfaces are intended to provide a common
+> userland interface to tunables and stats regardless of whether the
+> servers are running in userspace or the kernel.  I think similar changes
+> can easily be made to llstat and collectl to extract stats directly
+> from the userspace server processes as well.
+>
+>   
+>> This idea works fine for current clients and servers (which all use 
+>> mountpoints), but not for userspace servers.  I don't think we have come
+>> up with a good answer for that.
+>>     
+>
+> In fact, the move of the parameters to the lustre mountpoint is
+> irrelevant for userspace servers, because they won't have any mountpoint.
+> The work in bug 14691 will address the getting and setting of Lustre
+> tunables for userspace servers, and access to stats.
+>
+>   
+>> For params that are shared between all mounts, I think its fine to have 
+>> access to them from each one; a change anywhere is reflected server-wide.
+>>     
+>
+> This might be considered a security risk, as any malicious client could
+> change parameters for the whole system.
+>
+>   
+>> For tunables "relevant without anything at all mounted" say e.g. LNET,
+>> or uOSS: I don't know.  Also for tunables that must be set before
+>> services are started: I don't know.  FWIW, right now, servers get
+>> permanent params out of their config files, but those are read while
+>> the services are starting (not before).  Module parameters are used to
+>> set pre-startup params. I really don't like the idea of using modules
+>> params either (does Solaris use the same API?).  Maybe we need a plain
+>> old text config file for portability.
+>>     
+>
+>   
+>> Really, I want something contained entirely within Lustre, but I don't see 
+>> how to do that unless Lustre is running.
+>>
+>> I do think the uOSS somehow needs to have a mountpoint.  How is a uOSS 
+>> started?
+>> Maybe by mounting a stub Lustre client that just provides access to 
+>> /.lustre?
+>>     
+>
+> That's just the point - I think you are putting extra requirements in
+> place to handle the change to move tunables into .../.lustre.  With
+> the work in bug 14691 to communicate directly with the userspace server
+> over a socket (a natural process-to-process communication method) there
+> is no need to have a mountpoint.  Otherwise, we get into some overly
+> complex framework like FUSE to have a userspace process providing services
+> to the kernel to provide a mechanism for another userspace process to
+> talk to it.  Ugh.
+>   
+I agree with everything above.
+But I was trying to get across a grand unified vision.  If we're going 
+to need
+snapshots: <mntpt>/.lustre/snapshot/
+feeds: <mntpt>/.lustre/feed/
+then we may as well have
+params: <mntpt>/.lustre/param/
+
+Using lctl {get,set}_param is fine if all we have is params, but what
+do we do about snapshots, feeds, etc?  Snapshots in particular
+need a real file tree, but I suppose you could argue they only need to
+exist on clients.  And I'll have to come up with yet a third interface for
+feeds.  I just really like the idea of presenting all of our filesystem
+"periphery" stuff in a single, consistent manner.
+
+
+
+
+
+

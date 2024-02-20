@@ -1,0 +1,787 @@
+From jsimmons at infradead.org  Fri Jan 14 10:48:24 2011
+From: jsimmons at infradead.org (James Simmons)
+Date: Fri, 14 Jan 2011 18:48:24 +0000 (GMT)
+Subject: [Lustre-devel] Setting attributes at open.
+Message-ID: <alpine.LFD.2.00.1101141827450.5594@casper.infradead.org>
+
+
+Hello!
+
+	Lustre 1.8 had issues with mode setting which is in bug 24226 fix 
+was fixed. Testing Lustre 2.X revealed the same problem. The correct 
+behavior is when a file size is altered the SUID/SGID go away. This occurs 
+at the beginning of the file size change. Currently lustre does a 
+attribute change after a file is closed which is incorrect. Another 
+problem also surfaced. It seems there is a race possible where a client 
+writes to a file, then client and mdt both die and the open transaction is 
+not committed, so the datain the file is updated, but suid is not removed.
+	So I made a attempt to alter the file attributes at the open time 
+when the intent is to alter the file size. Just like the other 
+md_object_operations I started to pass in the struct md_attr *ma for 
+the opens to operate on it. mdd_open_sanity_check does detect the the 
+condition I'm interested in but when I call mdd_attr_set the results hang 
+the MDS. What is missing?
+
+diff --git a/lustre/cmm/cmm_object.c b/lustre/cmm/cmm_object.c
+index 5fdcf9a..c892661 100644
+--- a/lustre/cmm/cmm_object.c
++++ b/lustre/cmm/cmm_object.c
+@@ -340,11 +340,11 @@ static int cml_ref_del(const struct lu_env *env, struct md_object *mo,
+ }
+ 
+ static int cml_open(const struct lu_env *env, struct md_object *mo,
+-                    int flags)
++                    struct md_attr *ma, int flags)
+ {
+         int rc;
+         ENTRY;
+-        rc = mo_open(env, md_object_next(mo), flags);
++        rc = mo_open(env, md_object_next(mo), ma, flags);
+         RETURN(rc);
+ }
+ 
+@@ -1093,7 +1093,7 @@ static int cmr_ref_del(const struct lu_env *env, struct md_object *mo,
+ }
+ 
+ static int cmr_open(const struct lu_env *env, struct md_object *mo,
+-                    int flags)
++                    struct md_attr *ma, int flags)
+ {
+         return -EREMOTE;
+ }
+diff --git a/lustre/include/md_object.h b/lustre/include/md_object.h
+index 9a7e3ee..59012f3 100644
+--- a/lustre/include/md_object.h
++++ b/lustre/include/md_object.h
+@@ -262,8 +262,8 @@ struct md_object_operations {
+                            struct md_object *obj,
+                            struct md_attr *ma);
+ 
+-        int (*moo_open)(const struct lu_env *env,
+-                        struct md_object *obj, int flag);
++        int (*moo_open)(const struct lu_env *env, struct md_object *obj,
++                        struct md_attr *ma, int flag);
+ 
+         int (*moo_close)(const struct lu_env *env, struct md_object *obj,
+                          struct md_attr *ma);
+@@ -679,10 +679,11 @@ static inline int mo_xattr_list(const struct lu_env *env,
+ 
+ static inline int mo_open(const struct lu_env *env,
+                           struct md_object *m,
++                          struct md_attr *ma,
+                           int flags)
+ {
+         LASSERT(m->mo_ops->moo_open);
+-        return m->mo_ops->moo_open(env, m, flags);
++        return m->mo_ops->moo_open(env, m, ma, flags);
+ }
+ 
+ static inline int mo_close(const struct lu_env *env,
+diff --git a/lustre/mdd/mdd_device.c b/lustre/mdd/mdd_device.c
+index 0dbfbd4..16c457c 100644
+--- a/lustre/mdd/mdd_device.c
++++ b/lustre/mdd/mdd_device.c
+@@ -527,7 +527,7 @@ static int dot_lustre_mdd_ref_del(const struct lu_env *env,
+ }
+ 
+ static int dot_lustre_mdd_open(const struct lu_env *env, struct md_object *obj,
+-                               int flags)
++                               struct md_attr *ma, int flags)
+ {
+         struct mdd_object *mdd_obj = md2mdd_obj(obj);
+ 
+@@ -779,7 +779,7 @@ static int obf_xattr_get(const struct lu_env *env,
+ }
+ 
+ static int obf_mdd_open(const struct lu_env *env, struct md_object *obj,
+-                        int flags)
++                        struct md_attr *ma, int flags)
+ {
+         struct mdd_object *mdd_obj = md2mdd_obj(obj);
+ 
+diff --git a/lustre/mdd/mdd_object.c b/lustre/mdd/mdd_object.c
+index 6209af9..f05cb4b 100644
+--- a/lustre/mdd/mdd_object.c
++++ b/lustre/mdd/mdd_object.c
+@@ -1965,10 +1950,11 @@ int accmode(const struct lu_env *env, struct lu_attr *la, int flags)
+         return res;
+ }
+ 
+-static int mdd_open_sanity_check(const struct lu_env *env,
+-                                 struct mdd_object *obj, int flag)
++static int mdd_open_sanity_check(const struct lu_env *env, struct md_object *o, 
++                                 struct md_attr *ma, int flag)
+ {
+         struct lu_attr *tmp_la = &mdd_env_info(env)->mti_la;
++        struct mdd_object *obj = md2mdd_obj(o);
+         int mode, rc;
+         ENTRY;
+ 
+@@ -2006,6 +1992,22 @@ static int mdd_open_sanity_check(const struct lu_env *env,
+                         RETURN(-EPERM);
+         }
+ 
++        if (S_ISREG(tmp_la->la_mode) && (tmp_la->la_mode & (S_ISGID|S_ISUID))) {
++            LCONSOLE_INFO("mdd_open_sanity_check encountered S_IS[G|U]ID\n");
++            if (flag & (MDS_OPEN_TRUNC|MDS_OPEN_APPEND)) {
++                ma->ma_attr_flags |= MDS_PERM_BYPASS;
++                ma->ma_attr.la_mode &= ~(S_ISGID|S_ISUID);
++                ma->ma_attr.la_valid = LA_MODE;
++                LCONSOLE_INFO("ma->ma_attr.la_valid %llx\n",
++                                ma->ma_attr.la_valid);
++                rc = mdd_attr_set(env, o, ma); 
++                if (rc)
++                        RETURN(rc);
++            } else {
++                RETURN(-EPERM);
++            }
++        }
++ 
+ #if 0
+         /*
+          * Now, flag -- O_NOATIME does not be packed by client.
+@@ -2025,14 +2027,14 @@ static int mdd_open_sanity_check(const struct lu_env *env,
+ }
+ 
+ static int mdd_open(const struct lu_env *env, struct md_object *obj,
+-                    int flags)
++                    struct md_attr *ma, int flags)
+ {
+         struct mdd_object *mdd_obj = md2mdd_obj(obj);
+         int rc = 0;
+ 
+         mdd_write_lock(env, mdd_obj, MOR_TGT_CHILD);
+ 
+-        rc = mdd_open_sanity_check(env, mdd_obj, flags);
++        rc = mdd_open_sanity_check(env, obj, ma, flags);
+         if (rc == 0)
+                 mdd_obj->mod_count++;
+ 
+diff --git a/lustre/mdt/mdt_lib.c b/lustre/mdt/mdt_lib.c
+index 2a3b4a0..31fb9d0 100644
+--- a/lustre/mdt/mdt_lib.c
++++ b/lustre/mdt/mdt_lib.c
+@@ -745,9 +745,6 @@ static __u64 mdt_attr_valid_xlate(__u64 in, struct mdt_reint_record *rr,
+         if (in & MDS_OPEN_OWNEROVERRIDE)
+                 ma->ma_attr_flags |= MDS_OPEN_OWNEROVERRIDE;
+ 
+-        if (in & (ATTR_KILL_SUID|ATTR_KILL_SGID))
+-                ma->ma_attr_flags |= MDS_PERM_BYPASS;
+-
+         /*XXX need ATTR_RAW?*/
+         in &= ~(ATTR_MODE|ATTR_UID|ATTR_GID|ATTR_SIZE|ATTR_BLOCKS|
+                 ATTR_ATIME|ATTR_MTIME|ATTR_CTIME|ATTR_FROM_OPEN|
+diff --git a/lustre/mdt/mdt_open.c b/lustre/mdt/mdt_open.c
+index d581b82..2b221f9 100644
+--- a/lustre/mdt/mdt_open.c
++++ b/lustre/mdt/mdt_open.c
+@@ -640,7 +640,7 @@ static int mdt_mfd_open(struct mdt_thread_info *info, struct mdt_object *p,
+         if (rc)
+                 RETURN(rc);
+ 
+-        rc = mo_open(info->mti_env, mdt_object_child(o),
++        rc = mo_open(info->mti_env, mdt_object_child(o), ma,
+                      created ? flags | MDS_OPEN_CREATED : flags);
+         if (rc)
+                 RETURN(rc);
+
+
+From tappro at whamcloud.com  Fri Jan 14 11:04:40 2011
+From: tappro at whamcloud.com (Mikhail Pershin)
+Date: Fri, 14 Jan 2011 22:04:40 +0300
+Subject: [Lustre-devel] Setting attributes at open.
+In-Reply-To: <alpine.LFD.2.00.1101141827450.5594@casper.infradead.org>
+References: <alpine.LFD.2.00.1101141827450.5594@casper.infradead.org>
+Message-ID: <op.vpba9oe9f7bdb6@garden>
+
+Hello,
+
+just quick idea. The mdd_open_sanity_check() is called under  
+mdd_write_lock():
+>         mdd_write_lock(env, mdd_obj, MOR_TGT_CHILD);
+> -        rc = mdd_open_sanity_check(env, mdd_obj, flags);
+> +        rc = mdd_open_sanity_check(env, obj, ma, flags);
+
+You've added mdd_attr_set(env, o, ma); in it causing deadlock it seems,
+because it calls mdd_attr_set_internal_locked() which is taking the same  
+lock.
+
+
+On Fri, 14 Jan 2011 21:48:24 +0300, James Simmons <jsimmons at infradead.org>  
+wrote:
+
+>
+> Hello!
+>
+> 	Lustre 1.8 had issues with mode setting which is in bug 24226 fix
+> was fixed. Testing Lustre 2.X revealed the same problem. The correct
+> behavior is when a file size is altered the SUID/SGID go away. This  
+> occurs
+> at the beginning of the file size change. Currently lustre does a
+> attribute change after a file is closed which is incorrect. Another
+> problem also surfaced. It seems there is a race possible where a client
+> writes to a file, then client and mdt both die and the open transaction  
+> is
+> not committed, so the datain the file is updated, but suid is not  
+> removed.
+> 	So I made a attempt to alter the file attributes at the open time
+> when the intent is to alter the file size. Just like the other
+> md_object_operations I started to pass in the struct md_attr *ma for
+> the opens to operate on it. mdd_open_sanity_check does detect the the
+> condition I'm interested in but when I call mdd_attr_set the results hang
+> the MDS. What is missing?
+>
+> diff --git a/lustre/cmm/cmm_object.c b/lustre/cmm/cmm_object.c
+> index 5fdcf9a..c892661 100644
+> --- a/lustre/cmm/cmm_object.c
+> +++ b/lustre/cmm/cmm_object.c
+> @@ -340,11 +340,11 @@ static int cml_ref_del(const struct lu_env *env,  
+> struct md_object *mo,
+>  }
+> static int cml_open(const struct lu_env *env, struct md_object *mo,
+> -                    int flags)
+> +                    struct md_attr *ma, int flags)
+>  {
+>          int rc;
+>          ENTRY;
+> -        rc = mo_open(env, md_object_next(mo), flags);
+> +        rc = mo_open(env, md_object_next(mo), ma, flags);
+>          RETURN(rc);
+>  }
+> @@ -1093,7 +1093,7 @@ static int cmr_ref_del(const struct lu_env *env,  
+> struct md_object *mo,
+>  }
+> static int cmr_open(const struct lu_env *env, struct md_object *mo,
+> -                    int flags)
+> +                    struct md_attr *ma, int flags)
+>  {
+>          return -EREMOTE;
+>  }
+> diff --git a/lustre/include/md_object.h b/lustre/include/md_object.h
+> index 9a7e3ee..59012f3 100644
+> --- a/lustre/include/md_object.h
+> +++ b/lustre/include/md_object.h
+> @@ -262,8 +262,8 @@ struct md_object_operations {
+>                             struct md_object *obj,
+>                             struct md_attr *ma);
+> -        int (*moo_open)(const struct lu_env *env,
+> -                        struct md_object *obj, int flag);
+> +        int (*moo_open)(const struct lu_env *env, struct md_object *obj,
+> +                        struct md_attr *ma, int flag);
+>         int (*moo_close)(const struct lu_env *env, struct md_object *obj,
+>                           struct md_attr *ma);
+> @@ -679,10 +679,11 @@ static inline int mo_xattr_list(const struct  
+> lu_env *env,
+> static inline int mo_open(const struct lu_env *env,
+>                            struct md_object *m,
+> +                          struct md_attr *ma,
+>                            int flags)
+>  {
+>          LASSERT(m->mo_ops->moo_open);
+> -        return m->mo_ops->moo_open(env, m, flags);
+> +        return m->mo_ops->moo_open(env, m, ma, flags);
+>  }
+> static inline int mo_close(const struct lu_env *env,
+> diff --git a/lustre/mdd/mdd_device.c b/lustre/mdd/mdd_device.c
+> index 0dbfbd4..16c457c 100644
+> --- a/lustre/mdd/mdd_device.c
+> +++ b/lustre/mdd/mdd_device.c
+> @@ -527,7 +527,7 @@ static int dot_lustre_mdd_ref_del(const struct  
+> lu_env *env,
+>  }
+> static int dot_lustre_mdd_open(const struct lu_env *env, struct  
+> md_object *obj,
+> -                               int flags)
+> +                               struct md_attr *ma, int flags)
+>  {
+>          struct mdd_object *mdd_obj = md2mdd_obj(obj);
+> @@ -779,7 +779,7 @@ static int obf_xattr_get(const struct lu_env *env,
+>  }
+> static int obf_mdd_open(const struct lu_env *env, struct md_object *obj,
+> -                        int flags)
+> +                        struct md_attr *ma, int flags)
+>  {
+>          struct mdd_object *mdd_obj = md2mdd_obj(obj);
+> diff --git a/lustre/mdd/mdd_object.c b/lustre/mdd/mdd_object.c
+> index 6209af9..f05cb4b 100644
+> --- a/lustre/mdd/mdd_object.c
+> +++ b/lustre/mdd/mdd_object.c
+> @@ -1965,10 +1950,11 @@ int accmode(const struct lu_env *env, struct  
+> lu_attr *la, int flags)
+>          return res;
+>  }
+> -static int mdd_open_sanity_check(const struct lu_env *env,
+> -                                 struct mdd_object *obj, int flag)
+> +static int mdd_open_sanity_check(const struct lu_env *env, struct  
+> md_object *o,
+> +                                 struct md_attr *ma, int flag)
+>  {
+>          struct lu_attr *tmp_la = &mdd_env_info(env)->mti_la;
+> +        struct mdd_object *obj = md2mdd_obj(o);
+>          int mode, rc;
+>          ENTRY;
+> @@ -2006,6 +1992,22 @@ static int mdd_open_sanity_check(const struct  
+> lu_env *env,
+>                          RETURN(-EPERM);
+>          }
+> +        if (S_ISREG(tmp_la->la_mode) && (tmp_la->la_mode &  
+> (S_ISGID|S_ISUID))) {
+> +            LCONSOLE_INFO("mdd_open_sanity_check encountered  
+> S_IS[G|U]ID\n");
+> +            if (flag & (MDS_OPEN_TRUNC|MDS_OPEN_APPEND)) {
+> +                ma->ma_attr_flags |= MDS_PERM_BYPASS;
+> +                ma->ma_attr.la_mode &= ~(S_ISGID|S_ISUID);
+> +                ma->ma_attr.la_valid = LA_MODE;
+> +                LCONSOLE_INFO("ma->ma_attr.la_valid %llx\n",
+> +                                ma->ma_attr.la_valid);
+> +                rc = mdd_attr_set(env, o, ma);
+> +                if (rc)
+> +                        RETURN(rc);
+> +            } else {
+> +                RETURN(-EPERM);
+> +            }
+> +        }
+> +
+>  #if 0
+>          /*
+>           * Now, flag -- O_NOATIME does not be packed by client.
+> @@ -2025,14 +2027,14 @@ static int mdd_open_sanity_check(const struct  
+> lu_env *env,
+>  }
+> static int mdd_open(const struct lu_env *env, struct md_object *obj,
+> -                    int flags)
+> +                    struct md_attr *ma, int flags)
+>  {
+>          struct mdd_object *mdd_obj = md2mdd_obj(obj);
+>          int rc = 0;
+>         mdd_write_lock(env, mdd_obj, MOR_TGT_CHILD);
+> -        rc = mdd_open_sanity_check(env, mdd_obj, flags);
+> +        rc = mdd_open_sanity_check(env, obj, ma, flags);
+>          if (rc == 0)
+>                  mdd_obj->mod_count++;
+> diff --git a/lustre/mdt/mdt_lib.c b/lustre/mdt/mdt_lib.c
+> index 2a3b4a0..31fb9d0 100644
+> --- a/lustre/mdt/mdt_lib.c
+> +++ b/lustre/mdt/mdt_lib.c
+> @@ -745,9 +745,6 @@ static __u64 mdt_attr_valid_xlate(__u64 in, struct  
+> mdt_reint_record *rr,
+>          if (in & MDS_OPEN_OWNEROVERRIDE)
+>                  ma->ma_attr_flags |= MDS_OPEN_OWNEROVERRIDE;
+> -        if (in & (ATTR_KILL_SUID|ATTR_KILL_SGID))
+> -                ma->ma_attr_flags |= MDS_PERM_BYPASS;
+> -
+>          /*XXX need ATTR_RAW?*/
+>          in &= ~(ATTR_MODE|ATTR_UID|ATTR_GID|ATTR_SIZE|ATTR_BLOCKS|
+>                  ATTR_ATIME|ATTR_MTIME|ATTR_CTIME|ATTR_FROM_OPEN|
+> diff --git a/lustre/mdt/mdt_open.c b/lustre/mdt/mdt_open.c
+> index d581b82..2b221f9 100644
+> --- a/lustre/mdt/mdt_open.c
+> +++ b/lustre/mdt/mdt_open.c
+> @@ -640,7 +640,7 @@ static int mdt_mfd_open(struct mdt_thread_info  
+> *info, struct mdt_object *p,
+>          if (rc)
+>                  RETURN(rc);
+> -        rc = mo_open(info->mti_env, mdt_object_child(o),
+> +        rc = mo_open(info->mti_env, mdt_object_child(o), ma,
+>                       created ? flags | MDS_OPEN_CREATED : flags);
+>          if (rc)
+>                  RETURN(rc);
+> _______________________________________________
+> Lustre-devel mailing list
+> Lustre-devel at lists.lustre.org
+> http://lists.lustre.org/mailman/listinfo/lustre-devel
+
+
+-- 
+Mikhail Pershin,
+Whamcloud Inc.
+
+
+From mike.tappro at gmail.com  Fri Jan 14 11:14:37 2011
+From: mike.tappro at gmail.com (Mikhail Pershin)
+Date: Fri, 14 Jan 2011 22:14:37 +0300
+Subject: [Lustre-devel] Setting attributes at open.
+In-Reply-To: <alpine.LFD.2.00.1101141827450.5594@casper.infradead.org>
+References: <alpine.LFD.2.00.1101141827450.5594@casper.infradead.org>
+Message-ID: <op.vpbbqmjpcckvm4@garden>
+
+Hello,
+
+just quick idea. The mdd_open_sanity_check() is called under
+mdd_write_lock():
+>         mdd_write_lock(env, mdd_obj, MOR_TGT_CHILD);
+> -        rc = mdd_open_sanity_check(env, mdd_obj, flags);
+> +        rc = mdd_open_sanity_check(env, obj, ma, flags);
+
+You've added mdd_attr_set(env, o, ma); in it causing deadlock it seems,
+because it calls mdd_attr_set_internal_locked() which is taking the same
+lock.
+
+
+On Fri, 14 Jan 2011 21:48:24 +0300, James Simmons <jsimmons at infradead.org>
+wrote:
+
+>
+> Hello!
+>
+> 	Lustre 1.8 had issues with mode setting which is in bug 24226 fix
+> was fixed. Testing Lustre 2.X revealed the same problem. The correct
+> behavior is when a file size is altered the SUID/SGID go away. This  
+> occurs
+> at the beginning of the file size change. Currently lustre does a
+> attribute change after a file is closed which is incorrect. Another
+> problem also surfaced. It seems there is a race possible where a client
+> writes to a file, then client and mdt both die and the open transaction  
+> is
+> not committed, so the datain the file is updated, but suid is not  
+> removed.
+> 	So I made a attempt to alter the file attributes at the open time
+> when the intent is to alter the file size. Just like the other
+> md_object_operations I started to pass in the struct md_attr *ma for
+> the opens to operate on it. mdd_open_sanity_check does detect the the
+> condition I'm interested in but when I call mdd_attr_set the results hang
+> the MDS. What is missing?
+>
+> diff --git a/lustre/cmm/cmm_object.c b/lustre/cmm/cmm_object.c
+> index 5fdcf9a..c892661 100644
+> --- a/lustre/cmm/cmm_object.c
+> +++ b/lustre/cmm/cmm_object.c
+> @@ -340,11 +340,11 @@ static int cml_ref_del(const struct lu_env *env,  
+> struct md_object *mo,
+>  }
+> static int cml_open(const struct lu_env *env, struct md_object *mo,
+> -                    int flags)
+> +                    struct md_attr *ma, int flags)
+>  {
+>          int rc;
+>          ENTRY;
+> -        rc = mo_open(env, md_object_next(mo), flags);
+> +        rc = mo_open(env, md_object_next(mo), ma, flags);
+>          RETURN(rc);
+>  }
+> @@ -1093,7 +1093,7 @@ static int cmr_ref_del(const struct lu_env *env,  
+> struct md_object *mo,
+>  }
+> static int cmr_open(const struct lu_env *env, struct md_object *mo,
+> -                    int flags)
+> +                    struct md_attr *ma, int flags)
+>  {
+>          return -EREMOTE;
+>  }
+> diff --git a/lustre/include/md_object.h b/lustre/include/md_object.h
+> index 9a7e3ee..59012f3 100644
+> --- a/lustre/include/md_object.h
+> +++ b/lustre/include/md_object.h
+> @@ -262,8 +262,8 @@ struct md_object_operations {
+>                             struct md_object *obj,
+>                             struct md_attr *ma);
+> -        int (*moo_open)(const struct lu_env *env,
+> -                        struct md_object *obj, int flag);
+> +        int (*moo_open)(const struct lu_env *env, struct md_object *obj,
+> +                        struct md_attr *ma, int flag);
+>         int (*moo_close)(const struct lu_env *env, struct md_object *obj,
+>                           struct md_attr *ma);
+> @@ -679,10 +679,11 @@ static inline int mo_xattr_list(const struct  
+> lu_env *env,
+> static inline int mo_open(const struct lu_env *env,
+>                            struct md_object *m,
+> +                          struct md_attr *ma,
+>                            int flags)
+>  {
+>          LASSERT(m->mo_ops->moo_open);
+> -        return m->mo_ops->moo_open(env, m, flags);
+> +        return m->mo_ops->moo_open(env, m, ma, flags);
+>  }
+> static inline int mo_close(const struct lu_env *env,
+> diff --git a/lustre/mdd/mdd_device.c b/lustre/mdd/mdd_device.c
+> index 0dbfbd4..16c457c 100644
+> --- a/lustre/mdd/mdd_device.c
+> +++ b/lustre/mdd/mdd_device.c
+> @@ -527,7 +527,7 @@ static int dot_lustre_mdd_ref_del(const struct  
+> lu_env *env,
+>  }
+> static int dot_lustre_mdd_open(const struct lu_env *env, struct  
+> md_object *obj,
+> -                               int flags)
+> +                               struct md_attr *ma, int flags)
+>  {
+>          struct mdd_object *mdd_obj = md2mdd_obj(obj);
+> @@ -779,7 +779,7 @@ static int obf_xattr_get(const struct lu_env *env,
+>  }
+> static int obf_mdd_open(const struct lu_env *env, struct md_object *obj,
+> -                        int flags)
+> +                        struct md_attr *ma, int flags)
+>  {
+>          struct mdd_object *mdd_obj = md2mdd_obj(obj);
+> diff --git a/lustre/mdd/mdd_object.c b/lustre/mdd/mdd_object.c
+> index 6209af9..f05cb4b 100644
+> --- a/lustre/mdd/mdd_object.c
+> +++ b/lustre/mdd/mdd_object.c
+> @@ -1965,10 +1950,11 @@ int accmode(const struct lu_env *env, struct  
+> lu_attr *la, int flags)
+>          return res;
+>  }
+> -static int mdd_open_sanity_check(const struct lu_env *env,
+> -                                 struct mdd_object *obj, int flag)
+> +static int mdd_open_sanity_check(const struct lu_env *env, struct  
+> md_object *o,
+> +                                 struct md_attr *ma, int flag)
+>  {
+>          struct lu_attr *tmp_la = &mdd_env_info(env)->mti_la;
+> +        struct mdd_object *obj = md2mdd_obj(o);
+>          int mode, rc;
+>          ENTRY;
+> @@ -2006,6 +1992,22 @@ static int mdd_open_sanity_check(const struct  
+> lu_env *env,
+>                          RETURN(-EPERM);
+>          }
+> +        if (S_ISREG(tmp_la->la_mode) && (tmp_la->la_mode &  
+> (S_ISGID|S_ISUID))) {
+> +            LCONSOLE_INFO("mdd_open_sanity_check encountered  
+> S_IS[G|U]ID\n");
+> +            if (flag & (MDS_OPEN_TRUNC|MDS_OPEN_APPEND)) {
+> +                ma->ma_attr_flags |= MDS_PERM_BYPASS;
+> +                ma->ma_attr.la_mode &= ~(S_ISGID|S_ISUID);
+> +                ma->ma_attr.la_valid = LA_MODE;
+> +                LCONSOLE_INFO("ma->ma_attr.la_valid %llx\n",
+> +                                ma->ma_attr.la_valid);
+> +                rc = mdd_attr_set(env, o, ma);
+> +                if (rc)
+> +                        RETURN(rc);
+> +            } else {
+> +                RETURN(-EPERM);
+> +            }
+> +        }
+> +
+>  #if 0
+>          /*
+>           * Now, flag -- O_NOATIME does not be packed by client.
+> @@ -2025,14 +2027,14 @@ static int mdd_open_sanity_check(const struct  
+> lu_env *env,
+>  }
+> static int mdd_open(const struct lu_env *env, struct md_object *obj,
+> -                    int flags)
+> +                    struct md_attr *ma, int flags)
+>  {
+>          struct mdd_object *mdd_obj = md2mdd_obj(obj);
+>          int rc = 0;
+>         mdd_write_lock(env, mdd_obj, MOR_TGT_CHILD);
+> -        rc = mdd_open_sanity_check(env, mdd_obj, flags);
+> +        rc = mdd_open_sanity_check(env, obj, ma, flags);
+>          if (rc == 0)
+>                  mdd_obj->mod_count++;
+> diff --git a/lustre/mdt/mdt_lib.c b/lustre/mdt/mdt_lib.c
+> index 2a3b4a0..31fb9d0 100644
+> --- a/lustre/mdt/mdt_lib.c
+> +++ b/lustre/mdt/mdt_lib.c
+> @@ -745,9 +745,6 @@ static __u64 mdt_attr_valid_xlate(__u64 in, struct  
+> mdt_reint_record *rr,
+>          if (in & MDS_OPEN_OWNEROVERRIDE)
+>                  ma->ma_attr_flags |= MDS_OPEN_OWNEROVERRIDE;
+> -        if (in & (ATTR_KILL_SUID|ATTR_KILL_SGID))
+> -                ma->ma_attr_flags |= MDS_PERM_BYPASS;
+> -
+>          /*XXX need ATTR_RAW?*/
+>          in &= ~(ATTR_MODE|ATTR_UID|ATTR_GID|ATTR_SIZE|ATTR_BLOCKS|
+>                  ATTR_ATIME|ATTR_MTIME|ATTR_CTIME|ATTR_FROM_OPEN|
+> diff --git a/lustre/mdt/mdt_open.c b/lustre/mdt/mdt_open.c
+> index d581b82..2b221f9 100644
+> --- a/lustre/mdt/mdt_open.c
+> +++ b/lustre/mdt/mdt_open.c
+> @@ -640,7 +640,7 @@ static int mdt_mfd_open(struct mdt_thread_info  
+> *info, struct mdt_object *p,
+>          if (rc)
+>                  RETURN(rc);
+> -        rc = mo_open(info->mti_env, mdt_object_child(o),
+> +        rc = mo_open(info->mti_env, mdt_object_child(o), ma,
+>                       created ? flags | MDS_OPEN_CREATED : flags);
+>          if (rc)
+>                  RETURN(rc);
+> _______________________________________________
+> Lustre-devel mailing list
+> Lustre-devel at lists.lustre.org
+> http://lists.lustre.org/mailman/listinfo/lustre-devel
+
+
+-- 
+Mikhail Pershin,
+Whamcloud Inc.
+
+
+From jsimmons at infradead.org  Fri Jan 14 12:04:11 2011
+From: jsimmons at infradead.org (James Simmons)
+Date: Fri, 14 Jan 2011 20:04:11 +0000 (GMT)
+Subject: [Lustre-devel] Setting attributes at open.
+In-Reply-To: <op.vpba9oe9f7bdb6@garden>
+References: <alpine.LFD.2.00.1101141827450.5594@casper.infradead.org>
+	<op.vpba9oe9f7bdb6@garden>
+Message-ID: <alpine.LFD.2.00.1101142000590.5594@casper.infradead.org>
+
+
+> Hello,
+> 
+> just quick idea. The mdd_open_sanity_check() is called under  
+> mdd_write_lock():
+> >         mdd_write_lock(env, mdd_obj, MOR_TGT_CHILD);
+> > -        rc = mdd_open_sanity_check(env, mdd_obj, flags);
+> > +        rc = mdd_open_sanity_check(env, obj, ma, flags);
+> 
+> You've added mdd_attr_set(env, o, ma); in it causing deadlock it seems,
+> because it calls mdd_attr_set_internal_locked() which is taking the same  
+> lock.
+
+Perhaps mdd_attr_set is to heavy of a function. I wonder would calling
+mdd_setattr_txn_param_build be light enough to do what we want or do we 
+really need to write to the change logs that happs in mdd_attr_set.
+
+
+From vilobh.meshram at gmail.com  Sat Jan 29 11:16:53 2011
+From: vilobh.meshram at gmail.com (Vilobh Meshram)
+Date: Sat, 29 Jan 2011 14:16:53 -0500
+Subject: [Lustre-devel] How can the name_to_handle() syscall benefit Lustre
+Message-ID: <AANLkTikENzMTe_M=OPEUTKbHy+7FR=LP3sPUUDGKvWx+@mail.gmail.com>
+
+Hi All,
+
+How can the name_to_handle() syscall benefit Lustre ?
+
+Any insights will be helpful.
+
+Thanks,
+Vilobh
+*Graduate Research Associate
+Department of Computer Science
+The Ohio State University Columbus Ohio*
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20110129/8ce8b36d/attachment.htm>
+
+From adilger at whamcloud.com  Sun Jan 30 11:13:04 2011
+From: adilger at whamcloud.com (Andreas Dilger)
+Date: Sun, 30 Jan 2011 12:13:04 -0700
+Subject: [Lustre-devel] How can the name_to_handle() syscall benefit
+	Lustre
+In-Reply-To: <AANLkTikENzMTe_M=OPEUTKbHy+7FR=LP3sPUUDGKvWx+@mail.gmail.com>
+References: <AANLkTikENzMTe_M=OPEUTKbHy+7FR=LP3sPUUDGKvWx+@mail.gmail.com>
+Message-ID: <6DF98AF0-95CC-4C5B-A40F-E5F3244CE18D@whamcloud.com>
+
+This is something that I think would be very useful for Lustre in conjunction with the Lustre MPI ADIO driver. The MPI rank-0 node could do the path traversal and generate a file handle via name_to_handle() and then MPI broadcast the file handle to all of the other MPI processes, which can use it to open the shared file. This could save many thousands of MDS RPCs to do path traversal for each client in a large MPI job. 
+
+Cheers, Andreas
+
+On 2011-01-29, at 12:16, Vilobh Meshram <vilobh.meshram at gmail.com> wrote:
+
+> Hi All,
+> 
+> How can the name_to_handle() syscall benefit Lustre ?
+> 
+> Any insights will be helpful.
+> 
+> Thanks,
+> Vilobh
+> Graduate Research Associate
+> Department of Computer Science
+> The Ohio State University Columbus Ohio
+> _______________________________________________
+> Lustre-devel mailing list
+> Lustre-devel at lists.lustre.org
+> http://lists.lustre.org/mailman/listinfo/lustre-devel
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20110130/2d7eaa4a/attachment.htm>
+
+From jsimmons at infradead.org  Mon Jan 31 08:52:36 2011
+From: jsimmons at infradead.org (James Simmons)
+Date: Mon, 31 Jan 2011 16:52:36 +0000 (GMT)
+Subject: [Lustre-devel] How can the name_to_handle() syscall benefit
+ Lustre
+In-Reply-To: <6DF98AF0-95CC-4C5B-A40F-E5F3244CE18D@whamcloud.com>
+References: <AANLkTikENzMTe_M=OPEUTKbHy+7FR=LP3sPUUDGKvWx+@mail.gmail.com>
+	<6DF98AF0-95CC-4C5B-A40F-E5F3244CE18D@whamcloud.com>
+Message-ID: <alpine.LFD.2.00.1101311645200.19399@casper.infradead.org>
+
+
+> This is something that I think would be very useful for Lustre in conjunction with the Lustre MPI ADIO driver. The MPI rank-0 node
+> could do the path traversal and generate a file handle via name_to_handle() and then MPI broadcast the file handle to all of the
+> other MPI processes, which can use it to open the shared file. This could save many thousands of MDS RPCs to do path traversal for
+> each client in a large MPI job.?
+
+I thought the name_to_handle syscall idea was shot down? 
+ 
+> Cheers, Andreas
+> 
+> On 2011-01-29, at 12:16, Vilobh Meshram <vilobh.meshram at gmail.com> wrote:
+> 
+>       Hi All,
+> How can the name_to_handle() syscall benefit Lustre ?
+> 
+> Any insights will be helpful.
+> 
+> Thanks,
+> Vilobh
+> Graduate Research Associate
+> Department of Computer Science
+> The Ohio State University Columbus Ohio
+> 
+>       _______________________________________________
+>       Lustre-devel mailing list
+>       Lustre-devel at lists.lustre.org
+>       http://lists.lustre.org/mailman/listinfo/lustre-devel
+> 
+> 
+> 
+
+From adilger at whamcloud.com  Mon Jan 31 13:35:01 2011
+From: adilger at whamcloud.com (Andreas Dilger)
+Date: Mon, 31 Jan 2011 14:35:01 -0700
+Subject: [Lustre-devel] How can the name_to_handle() syscall benefit
+	Lustre
+In-Reply-To: <alpine.LFD.2.00.1101311645200.19399@casper.infradead.org>
+References: <AANLkTikENzMTe_M=OPEUTKbHy+7FR=LP3sPUUDGKvWx+@mail.gmail.com>
+	<6DF98AF0-95CC-4C5B-A40F-E5F3244CE18D@whamcloud.com>
+	<alpine.LFD.2.00.1101311645200.19399@casper.infradead.org>
+Message-ID: <E99BB0DE-BCF4-4B0D-82D1-FE6A19D487E2@whamcloud.com>
+
+On 2011-01-31, at 09:52, James Simmons wrote:
+> Andreas Dilger wrote:
+>> This is something that I think would be very useful for Lustre in conjunction with the Lustre MPI ADIO driver. The MPI rank-0 node
+>> could do the path traversal and generate a file handle via name_to_handle() and then MPI broadcast the file handle to all of the
+>> other MPI processes, which can use it to open the shared file. This could save many thousands of MDS RPCs to do path traversal for
+>> each client in a large MPI job. 
+> 
+> I thought the name_to_handle syscall idea was shot down? 
+
+I don't think it was shot down, as much as it hasn't yet been accepted.  I've tried to support it in a form that would be useful to Lustre/MPI, and while it isn't quite where I'd like it to be, I think the flaws in the implementation are not insurmountable.
+
+The current proposal is lacking a well-defined permanent filesystem identifier in each handle (i.e. a UUID as part of the public fh structure), but I think Lustre can still include the UUID as part of the private fh and have the userspace code map that back to a specific Lustre mountpoint, since it would be implemented as part of the Lustre ADIO layer.
+
+>> On 2011-01-29, at 12:16, Vilobh Meshram <vilobh.meshram at gmail.com> wrote:
+>> How can the name_to_handle() syscall benefit Lustre ?
+>> 
+>> Any insights will be helpful.
+>> 
+>> Thanks,
+>> Vilobh
+>> Graduate Research Associate
+>> Department of Computer Science
+>> The Ohio State University Columbus Ohio
+>> 
+>>      _______________________________________________
+>>      Lustre-devel mailing list
+>>      Lustre-devel at lists.lustre.org
+>>      http://lists.lustre.org/mailman/listinfo/lustre-devel
+>> 
+>> 
+>> 
+
+
+Cheers, Andreas
+--
+Andreas Dilger 
+Principal Engineer
+Whamcloud, Inc.
+
+
+
+
+

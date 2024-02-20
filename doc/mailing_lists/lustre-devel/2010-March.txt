@@ -1,0 +1,1109 @@
+From Melanie.Gao at Sun.COM  Sun Mar  7 16:50:37 2010
+From: Melanie.Gao at Sun.COM (melanie gao)
+Date: Mon, 08 Mar 2010 08:50:37 +0800
+Subject: [Lustre-devel] build numbering for future Lustre releases
+Message-ID: <4B9449DD.3070909@sun.com>
+
+hello Lustre users,
+
+My name is Melanie Gao.  I'm a program manager in the Lustre team and
+will be managing the release that comes after 2.0.
+
+We're making some changes to the way we number Lustre builds and I
+wanted to give you a heads-up.  Here's a summary of the changes:
+
+1. The first build of a release will be called 2.x.0.001.  So for
+example for a Lustre 2.1 release, the first build would be 2.1.0.001.
+
+2. We will increment the dot-dot-dot numbers monotonically (by one's
+instead of by ten's).  That is to say, the builds will be numbered as
+follows:
+2.1.0.001
+2.1.0.002
+2.1.0.003
+
+3. We will append "alpha" or "beta" at the end of every build so that
+it's clear that it's not the GA build.  If the build is a milestone
+build we'll append "alpha1" or "beta1".  That is to say, the builds will
+be numbered as follows:
+2.1.0.001.alpha (not a milestone)
+2.1.0.002.alpha (not a milestone)
+2.1.0.003.alpha1 (first alpha milestone build)
+2.1.0.004.alpha (not a milestone)
+2.1.0.005.alpha2 (second alpha milestone build)
+...
+2.1.0.012.beta1 (first beta milestone build)
+2.1.0.013.beta (not a milestone)
+2.1.0.014.beta2  (second beta milestone build)
+
+4. The final GA build will have nothing appended at the end but we
+will make it clear when we release it that it's the GA build.  Assuming
+build 35 was the GA build for Lustre 2.1, the final build number
+would be 2.1.0.035.
+
+We are making changes to lustre-version.ac to accommodate these
+changes.  You can see the progress of this work under bug #22234.
+
+If you have any questions please respond to this email and I'll be happy
+to answer them.
+
+kind regards,
+melanie
+
+
+From Tom.Wang at Sun.COM  Mon Mar 22 16:09:39 2010
+From: Tom.Wang at Sun.COM (Tom.Wang)
+Date: Mon, 22 Mar 2010 19:09:39 -0400
+Subject: [Lustre-devel] readdir for striped dir
+Message-ID: <4BA7F8B3.8050104@sun.com>
+
+In CMD, one directory can be striped to several MDTs according to the 
+hash value of each entry (calculated by its name). Suppose we have N 
+MDTs and hash range is 0 to MAX_HASH. First server will keep records 
+with hashes [ 0 ... MAX_HASH / N  - 1], second one with hashes [MAX_HASH 
+/ N ... 2 * MAX_HASH / N] and so on.  Currently, it uses the same hash 
+policy with the one used on disk(ldiskfs/ext3 hash), so when reading 
+striped directory, the entries from different stripe objects can be 
+mapped on client side cache simply, actually this page cache is only 
+maintained in llite layer. But this bonding of CMD split-dir protocal 
+with on-disk hash seems not good, and it even brings more problems when 
+porting MDT to kdmu.  
+
+This dir-entry page cache should be moved to mdc layer, and each stripe 
+object will have its own page cache. It will need 2 lookups for locating 
+an entry in the page cache, first locating the stripe 
+objects(ll_stripe_offset will be added in ll_file_data to indicate the 
+stripe offset), then got the page by offset(f_pos) inside the 
+stripe_object. The entry page cache can even be organized as the favor 
+of different purposes, for example readdir-plus, dir-extent lock. Idealy 
+we can reuse the cl_page on mdc layer, but that might need object 
+layering on metadata stack. In the first step probably register some 
+page callback for mdc to manage the page cache.
+
+
+From adilger at sun.com  Mon Mar 22 21:22:22 2010
+From: adilger at sun.com (Andreas Dilger)
+Date: Mon, 22 Mar 2010 22:22:22 -0600
+Subject: [Lustre-devel] readdir for striped dir
+In-Reply-To: <4BA7F8B3.8050104@sun.com>
+References: <4BA7F8B3.8050104@sun.com>
+Message-ID: <A3F904D6-6838-426D-BA21-333281606AC8@sun.com>
+
+On 2010-03-22, at 17:09, Tom.Wang wrote:
+> In CMD, one directory can be striped to several MDTs according to the
+> hash value of each entry (calculated by its name). Suppose we have N
+> MDTs and hash range is 0 to MAX_HASH. First server will keep records
+> with hashes [ 0 ... MAX_HASH / N  - 1], second one with hashes  
+> [MAX_HASH
+> / N ... 2 * MAX_HASH / N] and so on.  Currently, it uses the same hash
+> policy with the one used on disk(ldiskfs/ext3 hash), so when reading
+> striped directory, the entries from different stripe objects can be
+> mapped on client side cache simply, actually this page cache is only
+> maintained in llite layer. But this bonding of CMD split-dir protocal
+> with on-disk hash seems not good, and it even brings more problems  
+> when
+> porting MDT to kdmu.
+>
+> This dir-entry page cache should be moved to mdc layer, and each  
+> stripe
+> object will have its own page cache. It will need 2 lookups for  
+> locating
+> an entry in the page cache, first locating the stripe
+> objects(ll_stripe_offset will be added in ll_file_data to indicate the
+> stripe offset), then got the page by offset(f_pos) inside the
+> stripe_object. The entry page cache can even be organized as the favor
+> of different purposes, for example readdir-plus, dir-extent lock.  
+> Idealy
+> we can reuse the cl_page on mdc layer, but that might need object
+> layering on metadata stack. In the first step probably register some
+> page callback for mdc to manage the page cache.
+
+
+Tom, could you please explain the proposed mechanism for hashing in  
+this scheme?    Will there be one hash function at the LMV level to  
+select the dirstripe, and a second one at the MDC level?  Does this  
+imply that the client still needs to know the hashing scheme used by  
+the backing storage?  At least this allows a different hash per  
+dirstripe, which is important for DMU because the hash seed is  
+different for each directory.
+
+Cheers, Andreas
+--
+Andreas Dilger
+Sr. Staff Engineer, Lustre Group
+Sun Microsystems of Canada, Inc.
+
+
+
+From Tom.Wang at Sun.COM  Tue Mar 23 04:29:16 2010
+From: Tom.Wang at Sun.COM (Tom.Wang)
+Date: Tue, 23 Mar 2010 07:29:16 -0400
+Subject: [Lustre-devel] readdir for striped dir
+In-Reply-To: <A3F904D6-6838-426D-BA21-333281606AC8@sun.com>
+References: <4BA7F8B3.8050104@sun.com>
+	<A3F904D6-6838-426D-BA21-333281606AC8@sun.com>
+Message-ID: <4BA8A60C.4000504@sun.com>
+
+Hello,
+Andreas Dilger wrote:
+> On 2010-03-22, at 17:09, Tom.Wang wrote:
+>   
+>> In CMD, one directory can be striped to several MDTs according to the
+>> hash value of each entry (calculated by its name). Suppose we have N
+>> MDTs and hash range is 0 to MAX_HASH. First server will keep records
+>> with hashes [ 0 ... MAX_HASH / N  - 1], second one with hashes  
+>> [MAX_HASH
+>> / N ... 2 * MAX_HASH / N] and so on.  Currently, it uses the same hash
+>> policy with the one used on disk(ldiskfs/ext3 hash), so when reading
+>> striped directory, the entries from different stripe objects can be
+>> mapped on client side cache simply, actually this page cache is only
+>> maintained in llite layer. But this bonding of CMD split-dir protocal
+>> with on-disk hash seems not good, and it even brings more problems  
+>> when
+>> porting MDT to kdmu.
+>>
+>> This dir-entry page cache should be moved to mdc layer, and each  
+>> stripe
+>> object will have its own page cache. It will need 2 lookups for  
+>> locating
+>> an entry in the page cache, first locating the stripe
+>> objects(ll_stripe_offset will be added in ll_file_data to indicate the
+>> stripe offset), then got the page by offset(f_pos) inside the
+>> stripe_object. The entry page cache can even be organized as the favor
+>> of different purposes, for example readdir-plus, dir-extent lock.  
+>> Idealy
+>> we can reuse the cl_page on mdc layer, but that might need object
+>> layering on metadata stack. In the first step probably register some
+>> page callback for mdc to manage the page cache.
+>>     
+>
+>
+> Tom, could you please explain the proposed mechanism for hashing in  
+> this scheme?    Will there be one hash function at the LMV level to  
+> select the dirstripe, and a second one at the MDC level?Does this  
+> imply that the client still needs to know the hashing scheme used by  
+> the backing storage?  At least this allows a different hash per  
+> dirstripe, which is important for DMU because the hash seed is  
+> different for each directory.
+>   
+Client does not need to know the hash scheme of the backing storage.
+
+LMV will use new hash function to select stripe object (mdc), which 
+could be independent with the one
+used in the storage.  In mdc level, it just need to map the entries of 
+each dir stripe object in the cache,
+we can index the cache in anyway as we want, probably hash order (as the 
+server storage) is a good choice,
+because client can easily find and cancel the pages by the hash in later 
+dir-extent lock. Note: Even in this case,
+client does not need to know server hash scheme at all, since server 
+will set the hash-offset of these pages, client just
+need to put these pages on the cache by hash-offset. 
+
+Currently, the cache will only be touched by readdir.  If the cache will 
+be used by readdir-plus later, i.e. we need locate
+the entry by name, then client must use the same hash as the server 
+storage, but server will tell client which hash function
+it use.  Yes, different hash per dirstripe should not be a problem here.
+
+Thanks
+WangDi
+
+> Cheers, Andreas
+> --
+> Andreas Dilger
+> Sr. Staff Engineer, Lustre Group
+> Sun Microsystems of Canada, Inc.
+>
+> _______________________________________________
+> Lustre-devel mailing list
+> Lustre-devel at lists.lustre.org
+> http://lists.lustre.org/mailman/listinfo/lustre-devel
+>   
+
+
+
+From nikita.danilov at clusterstor.com  Tue Mar 23 09:15:34 2010
+From: nikita.danilov at clusterstor.com (Nikita Danilov)
+Date: Tue, 23 Mar 2010 19:15:34 +0300
+Subject: [Lustre-devel] readdir for striped dir
+In-Reply-To: <4BA8A60C.4000504@sun.com>
+References: <4BA7F8B3.8050104@sun.com>
+	<A3F904D6-6838-426D-BA21-333281606AC8@sun.com>
+	<4BA8A60C.4000504@sun.com>
+Message-ID: <8acda98c1003230915n3e75ac05pe8095bb910c5153b@mail.gmail.com>
+
+On 23 March 2010 14:29, Tom.Wang <Tom.Wang at sun.com> wrote:
+> Hello,
+
+Hello,
+
+[...]
+
+>
+> LMV will use new hash function to select stripe object (mdc), which could be
+> independent with the one
+> used in the storage. ?In mdc level, it just need to map the entries of each
+> dir stripe object in the cache,
+> we can index the cache in anyway as we want, probably hash order (as the
+> server storage) is a good choice,
+> because client can easily find and cancel the pages by the hash in later
+> dir-extent lock. Note: Even in this case,
+> client does not need to know server hash scheme at all, since server will
+> set the hash-offset of these pages, client just
+> need to put these pages on the cache by hash-offset.
+> Currently, the cache will only be touched by readdir. ?If the cache will be
+> used by readdir-plus later, i.e. we need locate
+> the entry by name, then client must use the same hash as the server storage,
+> but server will tell client which hash function
+> it use. ?Yes, different hash per dirstripe should not be a problem here.
+
+If I understand correctly, the scheme has an advantage of cleaner
+solution for readdir scalability than "hash adjust" hack of CMD3 (see
+comment in lmv/lmv_obd.c:lmv_readpage()). The problem, to remind, is
+that if a number of clients readdir the same split directory, they all
+hammer the same servers one after another, negating the advantages of
+meta-data clustering. The solution is to cyclically shift hash space
+by an offset depending on the client, so that clients load servers
+uniformly. With 2-level hashing, this shifting can be done entirely
+within new LMV hash function.
+
+>
+> Thanks
+> WangDi
+
+Thank you,
+Nikita.
+
+
+From Tom.Wang at Sun.COM  Tue Mar 23 05:35:53 2010
+From: Tom.Wang at Sun.COM (Tom.Wang)
+Date: Tue, 23 Mar 2010 08:35:53 -0400
+Subject: [Lustre-devel] readdir for striped dir
+In-Reply-To: <8acda98c1003230915n3e75ac05pe8095bb910c5153b@mail.gmail.com>
+References: <4BA7F8B3.8050104@sun.com>
+	<A3F904D6-6838-426D-BA21-333281606AC8@sun.com>
+	<4BA8A60C.4000504@sun.com>
+	<8acda98c1003230915n3e75ac05pe8095bb910c5153b@mail.gmail.com>
+Message-ID: <4BA8B5A9.3020107@sun.com>
+
+Nikita Danilov wrote:
+> On 23 March 2010 14:29, Tom.Wang <Tom.Wang at sun.com> wrote:
+>   
+>> Hello,
+>>     
+>
+> Hello,
+>
+> [...]
+>
+>   
+>> LMV will use new hash function to select stripe object (mdc), which could be
+>> independent with the one
+>> used in the storage.  In mdc level, it just need to map the entries of each
+>> dir stripe object in the cache,
+>> we can index the cache in anyway as we want, probably hash order (as the
+>> server storage) is a good choice,
+>> because client can easily find and cancel the pages by the hash in later
+>> dir-extent lock. Note: Even in this case,
+>> client does not need to know server hash scheme at all, since server will
+>> set the hash-offset of these pages, client just
+>> need to put these pages on the cache by hash-offset.
+>> Currently, the cache will only be touched by readdir.  If the cache will be
+>> used by readdir-plus later, i.e. we need locate
+>> the entry by name, then client must use the same hash as the server storage,
+>> but server will tell client which hash function
+>> it use.  Yes, different hash per dirstripe should not be a problem here.
+>>     
+>
+> If I understand correctly, the scheme has an advantage of cleaner
+> solution for readdir scalability than "hash adjust" hack of CMD3 (see
+> comment in lmv/lmv_obd.c:lmv_readpage()). The problem, to remind, is
+> that if a number of clients readdir the same split directory, they all
+> hammer the same servers one after another, negating the advantages of
+> meta-data clustering. The solution is to cyclically shift hash space
+> by an offset depending on the client, so that clients load servers
+> uniformly. With 2-level hashing, this shifting can be done entirely
+> within new LMV hash function.
+>   
+Yes, in this case, these clients should start from different 
+stripe-offset in
+readdir.
+
+Thanks
+Wangdi
+>   
+>> Thanks
+>> WangDi
+>>     
+>
+> Thank you,
+> Nikita.
+>   
+
+
+
+From adilger at sun.com  Tue Mar 23 11:23:02 2010
+From: adilger at sun.com (Andreas Dilger)
+Date: Tue, 23 Mar 2010 12:23:02 -0600
+Subject: [Lustre-devel] readdir for striped dir
+In-Reply-To: <8acda98c1003230915n3e75ac05pe8095bb910c5153b@mail.gmail.com>
+References: <4BA7F8B3.8050104@sun.com>
+	<A3F904D6-6838-426D-BA21-333281606AC8@sun.com>
+	<4BA8A60C.4000504@sun.com>
+	<8acda98c1003230915n3e75ac05pe8095bb910c5153b@mail.gmail.com>
+Message-ID: <AB4A89B7-B642-42D2-A5B4-6A5CDF5AAEC2@sun.com>
+
+Hi Nikita,
+
+On 2010-03-23, at 10:15, Nikita Danilov wrote:
+> On 23 March 2010 14:29, Tom.Wang <Tom.Wang at sun.com> wrote:
+>>
+>> LMV will use new hash function to select stripe object (mdc), which  
+>> could be
+>> independent with the one used in the storage.  In mdc level, it  
+>> just need to map the entries of each dir stripe object in the  
+>> cache, we can index the cache in anyway as we want, probably hash  
+>> order (as the server storage) is a good choice, because client can  
+>> easily find and cancel the pages by the hash in later dir-extent  
+>> lock. Note: Even in this case, client does not need to know server  
+>> hash scheme at all, since server will set the hash-offset of these  
+>> pages, client just need to put these pages on the cache by hash- 
+>> offset.
+>>
+>> Currently, the cache will only be touched by readdir.  If the cache  
+>> will be
+>> used by readdir-plus later, i.e. we need locate the entry by name,  
+>> then client must use the same hash as the server storage, but  
+>> server will tell client which hash function it use.  Yes, different  
+>> hash per dirstripe should not be a problem here.
+>
+> If I understand correctly, the scheme has an advantage of cleaner
+> solution for readdir scalability than "hash adjust" hack of CMD3 (see
+> comment in lmv/lmv_obd.c:lmv_readpage()).
+
+Yes, I saw this for the first time just a few days ago and had to  
+shield my eyes :-).
+
+> The problem, to remind, is that if a number of clients readdir the  
+> same split directory, they all hammer the same servers one after  
+> another, negating the advantages of meta-data clustering. The  
+> solution is to cyclically shift hash space by an offset depending on  
+> the client, so that clients load servers uniformly. With 2-level  
+> hashing, this shifting can be done entirely within new LMV hash  
+> function.
+
+
+Sure.  Even without the 2-level hashing I wondered why the readdir  
+pages weren't simply pre-fetched from a random MDT index (N %  
+nstripes) by each client into its cache.
+
+One question is whether it is important for applications to get  
+entries back from readdir in a consistent order between invocations,  
+which would imply that N should be persistent across calls (e.g.  
+NID).  If it is important for the application to get the entries in  
+the same order, it would mean higher latency on some clients to return  
+the first page, but thereafter the clients would all be pre-fetching  
+round-robin.  In aggregate it would speed up performance, however, by  
+distributing the RPC traffic more evenly, and also by starting the  
+disk IO on all of the MDTs concurrently instead of in series.
+
+Cheers, Andreas
+--
+Andreas Dilger
+Sr. Staff Engineer, Lustre Group
+Sun Microsystems of Canada, Inc.
+
+
+
+From nikita.danilov at clusterstor.com  Tue Mar 23 12:14:04 2010
+From: nikita.danilov at clusterstor.com (Nikita Danilov)
+Date: Tue, 23 Mar 2010 22:14:04 +0300
+Subject: [Lustre-devel] readdir for striped dir
+In-Reply-To: <AB4A89B7-B642-42D2-A5B4-6A5CDF5AAEC2@sun.com>
+References: <4BA7F8B3.8050104@sun.com>
+	<A3F904D6-6838-426D-BA21-333281606AC8@sun.com>
+	<4BA8A60C.4000504@sun.com>
+	<8acda98c1003230915n3e75ac05pe8095bb910c5153b@mail.gmail.com>
+	<AB4A89B7-B642-42D2-A5B4-6A5CDF5AAEC2@sun.com>
+Message-ID: <8acda98c1003231214i1771bd0q5eae1097cc4daedf@mail.gmail.com>
+
+On 23 March 2010 21:23, Andreas Dilger <adilger at sun.com> wrote:
+> Hi Nikita,
+
+Hello Andreas,
+
+>
+> On 2010-03-23, at 10:15, Nikita Danilov wrote:
+>>
+
+[...]
+
+>>
+>> If I understand correctly, the scheme has an advantage of cleaner
+>> solution for readdir scalability than "hash adjust" hack of CMD3 (see
+>> comment in lmv/lmv_obd.c:lmv_readpage()).
+>
+> Yes, I saw this for the first time just a few days ago and had to shield my
+> eyes :-).
+
+Hehe, wild days, happy memories.
+
+>
+>> The problem, to remind, is that if a number of clients readdir the same
+>> split directory, they all hammer the same servers one after another,
+>> negating the advantages of meta-data clustering. The solution is to
+>> cyclically shift hash space by an offset depending on the client, so that
+>> clients load servers uniformly. With 2-level hashing, this shifting can be
+>> done entirely within new LMV hash function.
+>
+>
+> Sure. ?Even without the 2-level hashing I wondered why the readdir pages
+> weren't simply pre-fetched from a random MDT index (N % nstripes) by each
+> client into its cache.
+
+Do you mean that a client reads from servers in order N, N + 1, ..., N
+- 1? Or that all clients read pages from servers in the same order 1,
+2, ... nrstripes and in addition every client pre-fetches from servers
+N, N + 1, ..., N - 1?
+
+As to the first case, a directory entry hash value is used as a value
+of ->d_off field in struct dirent. Historically this field means byte
+offset in a directory file and hash adjustment tries to maintain its
+monotonicity through readdir iterations.
+
+>
+> One question is whether it is important for applications to get entries back
+> from readdir in a consistent order between invocations, which would imply
+> that N should be persistent across calls (e.g. NID). ?If it is important for
+> the application to get the entries in the same order, it would mean higher
+> latency on some clients to return the first page, but thereafter the clients
+> would all be pre-fetching round-robin. ?In aggregate it would speed up
+> performance, however, by distributing the RPC traffic more evenly, and also
+> by starting the disk IO on all of the MDTs concurrently instead of in
+> series.
+
+POSIX doesn't guarantee readdir repeatability, I am not sure about NT.
+
+>
+> Cheers, Andreas
+
+Thank you,
+Nikita.
+
+
+From adilger at sun.com  Wed Mar 24 15:23:24 2010
+From: adilger at sun.com (Andreas Dilger)
+Date: Wed, 24 Mar 2010 16:23:24 -0600
+Subject: [Lustre-devel] readdir for striped dir
+In-Reply-To: <8acda98c1003231214i1771bd0q5eae1097cc4daedf@mail.gmail.com>
+References: <4BA7F8B3.8050104@sun.com>
+	<A3F904D6-6838-426D-BA21-333281606AC8@sun.com>
+	<4BA8A60C.4000504@sun.com>
+	<8acda98c1003230915n3e75ac05pe8095bb910c5153b@mail.gmail.com>
+	<AB4A89B7-B642-42D2-A5B4-6A5CDF5AAEC2@sun.com>
+	<8acda98c1003231214i1771bd0q5eae1097cc4daedf@mail.gmail.com>
+Message-ID: <CDDB8DAF-F32B-44B6-863C-FF48A4E90BA5@sun.com>
+
+On 2010-03-23, at 13:14, Nikita Danilov wrote:
+> On 23 March 2010 21:23, Andreas Dilger <adilger at sun.com> wrote:
+>>
+>>> The problem, to remind, is that if a number of clients readdir the  
+>>> same
+>>> split directory, they all hammer the same servers one after another,
+>>> negating the advantages of meta-data clustering. The solution is to
+>>> cyclically shift hash space by an offset depending on the client,  
+>>> so that
+>>> clients load servers uniformly. With 2-level hashing, this  
+>>> shifting can be
+>>> done entirely within new LMV hash function.
+>>
+>> Sure.  Even without the 2-level hashing I wondered why the readdir  
+>> pages
+>> weren't simply pre-fetched from a random MDT index (N % nstripes)  
+>> by each
+>> client into its cache.
+>
+> Do you mean that a client reads from servers in order N, N + 1, ..., N
+> - 1? Or that all clients read pages from servers in the same order 1,
+> 2, ... nrstripes and in addition every client pre-fetches from servers
+> N, N + 1, ..., N - 1?
+
+What I meant was that each client starts its read on a different  
+stripe (e.g. dir_stripe_index = client_nid % num_stripes), and reads(- 
+ahead, optionally) chunks in (approximately?) round-robin order from  
+the starting index, but it still returns the readdir data back to  
+userspace as if it was reading starting at dir_stripe_index = 0.
+
+That implies that, depending on the client NID, the client may buffer  
+up to (num_stripes - 1) reads (pages or MB, depending on how much is  
+read per RPC) until it gets to the 0th stripe index and can start  
+returning entries from that stripe to userspace.  The readahead of  
+directory stripes should always be offset from where it is currently  
+processing, so that the clients continue to distribute load across  
+MDTs even when they are working from cache.
+
+> As to the first case, a directory entry hash value is used as a value
+> of ->d_off field in struct dirent. Historically this field means byte
+> offset in a directory file and hash adjustment tries to maintain its
+> monotonicity through readdir iterations.
+
+Agreed, though in the case of DMU backing storage (or even ldiskfs  
+with a different hash function) there will be entries in each page  
+read from each MDT that may have overlapping values.  There will need  
+to be some way to disambiguate hash X that was read from MDT 0 from  
+hash X from MDT 1.
+
+It may be that the prefetching described above will help this.  If the  
+client is doing hash-ordered reads from each MDT, it could be merging  
+the entries on the client to return to userspace in strict hash order,  
+even though the client doesn't know the underlying hash function  
+used.  Presumably, with a well-behaved hash function, the entries in  
+each stripe are uniformly distributed, so progress will be made  
+through all stripes in a relatively uniform manner (i.e. reads will be  
+going to all MDTs at about the same rate).
+
+>> One question is whether it is important for applications to get  
+>> entries back
+>> from readdir in a consistent order between invocations, which would  
+>> imply
+>> that N should be persistent across calls (e.g. NID).  If it is  
+>> important for
+>> the application to get the entries in the same order, it would mean  
+>> higher
+>> latency on some clients to return the first page, but thereafter  
+>> the clients
+>> would all be pre-fetching round-robin.  In aggregate it would speed  
+>> up
+>> performance, however, by distributing the RPC traffic more evenly,  
+>> and also
+>> by starting the disk IO on all of the MDTs concurrently instead of in
+>> series.
+>
+> POSIX doesn't guarantee readdir repeatability, I am not sure about NT.
+
+
+In SUSv2 I didn't see any mention of entry ordering, per se, though  
+telldir() and seekdir() should presumably be repeatable for NFS re- 
+export, which implies that the user-visible ordering can't change  
+randomly between invocations, and it shouldn't change between clients  
+or clustered NFS export would fail.
+
+Cheers, Andreas
+--
+Andreas Dilger
+Sr. Staff Engineer, Lustre Group
+Sun Microsystems of Canada, Inc.
+
+
+
+From Oleg.Drokin at Sun.COM  Thu Mar 25 09:26:30 2010
+From: Oleg.Drokin at Sun.COM (Oleg Drokin)
+Date: Thu, 25 Mar 2010 12:26:30 -0400
+Subject: [Lustre-devel] readdir for striped dir
+In-Reply-To: <CDDB8DAF-F32B-44B6-863C-FF48A4E90BA5@sun.com>
+References: <4BA7F8B3.8050104@sun.com>
+	<A3F904D6-6838-426D-BA21-333281606AC8@sun.com>
+	<4BA8A60C.4000504@sun.com>
+	<8acda98c1003230915n3e75ac05pe8095bb910c5153b@mail.gmail.com>
+	<AB4A89B7-B642-42D2-A5B4-6A5CDF5AAEC2@sun.com>
+	<8acda98c1003231214i1771bd0q5eae1097cc4daedf@mail.gmail.com>
+	<CDDB8DAF-F32B-44B6-863C-FF48A4E90BA5@sun.com>
+Message-ID: <CD9F5176-C004-4D5C-B7D7-E6DDE586269A@sun.com>
+
+Hello!
+
+On Mar 24, 2010, at 6:23 PM, Andreas Dilger wrote:
+> In SUSv2 I didn't see any mention of entry ordering, per se, though  
+> telldir() and seekdir() should presumably be repeatable for NFS re- 
+> export, which implies that the user-visible ordering can't change  
+> randomly between invocations, and it shouldn't change between clients  
+> or clustered NFS export would fail.
+
+We just need to remember starting MDS in the cookie and then the cookie
+would be 100% repeatable. (or derive that in some other 100% repeatable
+client-neutral way, but without having all clients to always choose the
+same order for new readdirs of the same dir of course)
+
+We need to do it anyway so that we don't end up returning some entries
+we already returned in the past in clustered NFS reexport environment.
+
+Bye,
+    Oelg
+
+
+From kernmonk at gmail.com  Fri Mar 26 21:54:26 2010
+From: kernmonk at gmail.com (Leena M.)
+Date: Sat, 27 Mar 2010 10:24:26 +0530
+Subject: [Lustre-devel] Lustre Test systems
+Message-ID: <e49baca61003262154u43137b1fn7bfdb95148dcb3d4@mail.gmail.com>
+
+I am an experienced Filesystem developer. I am interested in
+contributing to Lustre filesystem. I wanted to know if there are
+any test-systems provided by Sun as in the case of opensolaris test bed.
+
+Regards,
+Leena
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20100327/2fcaf92e/attachment.htm>
+
+From adilger at sun.com  Sat Mar 27 02:15:09 2010
+From: adilger at sun.com (Andreas Dilger)
+Date: Sat, 27 Mar 2010 03:15:09 -0600
+Subject: [Lustre-devel] Lustre Test systems
+In-Reply-To: <e49baca61003262154u43137b1fn7bfdb95148dcb3d4@mail.gmail.com>
+References: <e49baca61003262154u43137b1fn7bfdb95148dcb3d4@mail.gmail.com>
+Message-ID: <BE8FC7BF-CB87-4D5B-B7CD-66B4019EAA21@sun.com>
+
+On 2010-03-26, at 22:54, Leena M. wrote:
+> I am an experienced Filesystem developer. I am interested in
+> contributing to Lustre filesystem. I wanted to know if there are
+> any test-systems provided by Sun as in the case of opensolaris test  
+> bed.
+
+
+It is possible to develop and test Lustre (for basic functionality) on  
+a laptop running a single virtual machine.  No extra hardware required.
+
+Cheers, Andreas
+--
+Andreas Dilger
+Sr. Staff Engineer, Lustre Group
+Sun Microsystems of Canada, Inc.
+
+
+
+From erblichs at earthlink.net  Sun Mar 28 12:37:47 2010
+From: erblichs at earthlink.net (Mitchell Erblich)
+Date: Sun, 28 Mar 2010 12:37:47 -0700
+Subject: [Lustre-devel] Lustre Test systems
+In-Reply-To: <e49baca61003262154u43137b1fn7bfdb95148dcb3d4@mail.gmail.com>
+References: <e49baca61003262154u43137b1fn7bfdb95148dcb3d4@mail.gmail.com>
+Message-ID: <AF445234-1AF3-4EFF-8B89-581A624880B8@earthlink.net>
+
+FYI,
+
+	Many older working SPARC and/or Intel based Sun systems can be found 
+	on the secondary market.
+
+	Mitchell Erblich
+
+	
+On Mar 26, 2010, at 9:54 PM, Leena M. wrote:
+
+> I am an experienced Filesystem developer. I am interested in 
+> contributing to Lustre filesystem. I wanted to know if there are 
+> any test-systems provided by Sun as in the case of opensolaris test bed. 
+> 
+> Regards, 
+> Leena
+> _______________________________________________
+> Lustre-devel mailing list
+> Lustre-devel at lists.lustre.org
+> http://lists.lustre.org/mailman/listinfo/lustre-devel
+
+
+
+From kent at nsc.liu.se  Mon Mar 29 07:22:12 2010
+From: kent at nsc.liu.se (Kent =?iso-8859-1?Q?Engstr=F6m?=)
+Date: Mon, 29 Mar 2010 16:22:12 +0200
+Subject: [Lustre-devel] Lustre 1.8.2 client, Text file busy
+Message-ID: <m3iq8fus17.fsf@ceres.nsc.liu.se>
+
+[Cc: to the slurm-dev list as this has been discussed there.]
+
+After an upgrade to Lustre 1.8.2 (patchless client on top of Centos 5.4)
+on one of our compute clusters, we have been getting reports of 
+spurious "Text file busy" messages.
+
+I have not seen any reports on the Lustre lists about this yet.
+
+A colleague of mine was able to reproduce it reliably, and I've written
+a small reproducer script:
+
+$ cat reproducer.sh
+#!/bin/sh
+
+rm myscript
+cat <<EOF >myscript
+#!/bin/sh
+echo "running"
+EOF
+chmod +x myscript
+
+rm mycopy
+i=0
+while :; do
+  i=$(expr $i + 1)
+  echo COPY $i
+  cp myscript mycopy
+  echo RUN $i
+  ./mycopy
+  sleep 1
+done
+
+When I run this on a Lustre filesystem, I invariably get:
+
+$ ./reproducer.sh 
+COPY 1
+RUN 1
+running
+COPY 2
+RUN 2
+./reproducer.sh: ./mycopy: /bin/sh: bad interpreter: Text file busy
+COPY 3
+RUN 3
+running
+COPY 4
+RUN 4
+running
+COPY 5
+RUN 5
+running
+COPY 6
+RUN 6
+running
+...
+
+If I insert an "rm mycopy" command before the copy, I get no error.
+
+$ uname -r; rpm -q lustre
+2.6.18-164.15.1.el5
+lustre-1.8.2-2.6.18_164.15.1.el5_201003191115
+
+(patchless client built from the 1.8.2 source with "make rpms")
+
+The servers for the filesystem are running
+"lustre-1.6.7.1-2.6.18_92.1.17.el5_lustre.1.6.7.1smp".
+
+I've tested the same code on another cluster that mounts the same
+filesystem. It runs CentOS 4 with patchless client 
+lustre-1.6.7.2-2.6.9_89.0.19.ELsmp_201001151307.
+The error cannot be reproduced there.
+
+I also expect that there will be no "Text file busy" error when I revert
+a node on the first cluster to 1.6.7.1 and run the test script, which I
+will proceed to do now.
+
+-- 
+Kent Engstr?m, National Supercomputer Centre
+kent at nsc.liu.se, +46 13 28 4444
+
+
+From kent at nsc.liu.se  Mon Mar 29 07:57:49 2010
+From: kent at nsc.liu.se (Kent =?iso-8859-1?Q?Engstr=F6m?=)
+Date: Mon, 29 Mar 2010 16:57:49 +0200
+Subject: [Lustre-devel] Lustre 1.8.2 client, Text file busy
+In-Reply-To: <m3iq8fus17.fsf@ceres.nsc.liu.se> ("Kent =?iso-8859-1?Q?Engst?=
+	=?iso-8859-1?Q?r=F6m=22's?= message of
+	"Mon, 29 Mar 2010 16:22:12 +0200")
+References: <m3iq8fus17.fsf@ceres.nsc.liu.se>
+Message-ID: <m3vdcftbte.fsf@ceres.nsc.liu.se>
+
+kent at nsc.liu.se (Kent Engstr?m) writes:
+> After an upgrade to Lustre 1.8.2 (patchless client on top of Centos 5.4)
+> on one of our compute clusters, we have been getting reports of 
+> spurious "Text file busy" messages.
+...
+
+[Can reproduce on client running]
+> $ uname -r; rpm -q lustre
+> 2.6.18-164.15.1.el5
+> lustre-1.8.2-2.6.18_164.15.1.el5_201003191115
+...
+> I also expect that there will be no "Text file busy" error when I revert
+> a node on the first cluster to 1.6.7.1 and run the test script, which I
+> will proceed to do now.
+
+I have now tested on a node reverted to
+
+$ uname -r; rpm -q lustre
+2.6.18-164.11.1.el5
+lustre-1.6.7.1-2.6.18_164.11.1.el5_201001202236
+
+On that node, I could not reproduce the problem.
+
+
+-- 
+Kent Engstr?m, National Supercomputer Centre
+kent at nsc.liu.se, +46 13 28 4444
+
+
+From morrone2 at llnl.gov  Mon Mar 29 16:48:00 2010
+From: morrone2 at llnl.gov (Christopher J. Morrone)
+Date: Mon, 29 Mar 2010 16:48:00 -0700
+Subject: [Lustre-devel] [slurm-dev] Lustre 1.8.2 client, Text file busy
+In-Reply-To: <m3iq8fus17.fsf@ceres.nsc.liu.se>
+References: <m3iq8fus17.fsf@ceres.nsc.liu.se>
+Message-ID: <4BB13C30.7000309@llnl.gov>
+
+We opened bug 22492 on this issue.  Feel free to attach your reproducer 
+script and observations there!
+
+   https://bugzilla.lustre.org/show_bug.cgi?id=22492
+
+Chris
+
+Kent Engstr?m wrote:
+> [Cc: to the slurm-dev list as this has been discussed there.]
+> 
+> After an upgrade to Lustre 1.8.2 (patchless client on top of Centos 5.4)
+> on one of our compute clusters, we have been getting reports of 
+> spurious "Text file busy" messages.
+> 
+> I have not seen any reports on the Lustre lists about this yet.
+> 
+> A colleague of mine was able to reproduce it reliably, and I've written
+> a small reproducer script:
+> 
+> $ cat reproducer.sh
+> #!/bin/sh
+> 
+> rm myscript
+> cat <<EOF >myscript
+> #!/bin/sh
+> echo "running"
+> EOF
+> chmod +x myscript
+> 
+> rm mycopy
+> i=0
+> while :; do
+>   i=$(expr $i + 1)
+>   echo COPY $i
+>   cp myscript mycopy
+>   echo RUN $i
+>   ./mycopy
+>   sleep 1
+> done
+> 
+> When I run this on a Lustre filesystem, I invariably get:
+> 
+> $ ./reproducer.sh 
+> COPY 1
+> RUN 1
+> running
+> COPY 2
+> RUN 2
+> ./reproducer.sh: ./mycopy: /bin/sh: bad interpreter: Text file busy
+> COPY 3
+> RUN 3
+> running
+> COPY 4
+> RUN 4
+> running
+> COPY 5
+> RUN 5
+> running
+> COPY 6
+> RUN 6
+> running
+> ...
+> 
+> If I insert an "rm mycopy" command before the copy, I get no error.
+> 
+> $ uname -r; rpm -q lustre
+> 2.6.18-164.15.1.el5
+> lustre-1.8.2-2.6.18_164.15.1.el5_201003191115
+> 
+> (patchless client built from the 1.8.2 source with "make rpms")
+> 
+> The servers for the filesystem are running
+> "lustre-1.6.7.1-2.6.18_92.1.17.el5_lustre.1.6.7.1smp".
+> 
+> I've tested the same code on another cluster that mounts the same
+> filesystem. It runs CentOS 4 with patchless client 
+> lustre-1.6.7.2-2.6.9_89.0.19.ELsmp_201001151307.
+> The error cannot be reproduced there.
+> 
+> I also expect that there will be no "Text file busy" error when I revert
+> a node on the first cluster to 1.6.7.1 and run the test script, which I
+> will proceed to do now.
+> 
+
+
+
+From malexand at scaledinfra.com  Tue Mar 30 12:58:14 2010
+From: malexand at scaledinfra.com (Michael Alexander)
+Date: Tue, 30 Mar 2010 21:58:14 +0200
+Subject: [Lustre-devel] CfP with Extended Deadline 5th Workshop on
+	Virtualization in High-Performance Cloud Computing (VHPC'10)
+Message-ID: <A7704E60-0337-45F2-8F76-F39AB460880E@scaledinfra.com>
+
+Apologies if you received multiple copies of this message.
+
+
+=================================================================
+
+CALL FOR PAPERS
+
+5th Workshop on
+
+Virtualization in High-Performance Cloud Computing
+
+VHPC'10
+
+as part of Euro-Par 2010, Island of Ischia-Naples, Italy
+
+=================================================================
+
+Date: August 31, 2010
+
+Euro-Par 2009: http://www.europar2010.org/
+
+Workshop URL: http://vhpc.org
+
+SUBMISSION DEADLINE:
+
+Abstracts: April 4, 2010 (extended)
+Full Paper: June 19, 2010 (extended) 
+
+
+Scope:
+
+Virtualization has become a common abstraction layer in modern data
+centers, enabling resource owners to manage complex infrastructure
+independently of their applications. Conjointly virtualization is
+becoming a driving technology for a manifold of industry grade IT
+services. Piloted by the Amazon Elastic Computing Cloud services, the
+cloud concept includes the notion of a separation between resource
+owners and users, adding services such as hosted application
+frameworks and queuing. Utilizing the same infrastructure, clouds
+carry significant potential for use in high-performance scientific
+computing. The ability of clouds to provide for requests and releases
+of vast computing resource dynamically and close to the marginal cost
+of providing the services is unprecedented in the history of
+scientific and commercial computing.
+
+Distributed computing concepts that leverage federated resource access
+are popular within the grid community, but have not seen previously
+desired deployed levels so far. Also, many of the scientific
+datacenters have not adopted virtualization or cloud concepts yet.
+
+This workshop aims to bring together industrial providers with the
+scientific community in order to foster discussion, collaboration and
+mutual exchange of knowledge and experience.
+
+The workshop will be one day in length, composed of 20 min paper
+presentations, each followed by 10 min discussion sections.
+Presentations may be accompanied by interactive demonstrations. It
+concludes with a 30 min panel discussion by presenters.
+
+TOPICS
+
+Topics include, but are not limited to, the following subjects:
+
+- Virtualization in cloud, cluster and grid HPC environments
+- VM cloud, cluster load distribution algorithms
+- Cloud, cluster and grid filesystems
+- QoS and and service level guarantees
+- Cloud programming models, APIs and databases
+- Software as a service (SaaS)
+- Cloud provisioning
+- Virtualized I/O
+- VMMs and storage virtualization
+- MPI, PVM on virtual machines
+- High-performance network virtualization
+- High-speed interconnects
+- Hypervisor extensions
+- Tools for cluster and grid computing
+- Xen/other VMM cloud/cluster/grid tools
+- Raw device access from VMs
+- Cloud reliability, fault-tolerance, and security
+- Cloud load balancing
+- VMs - power efficiency
+- Network architectures for VM-based environments
+- VMMs/Hypervisors
+- Hardware support for virtualization
+- Fault tolerant VM environments
+- Workload characterizations for VM-based environments
+- Bottleneck management
+- Metering
+- VM-based cloud performance modeling
+- Cloud security, access control and data integrity
+- Performance management and tuning hosts and guest VMs
+- VMM performance tuning on various load types
+- Research and education use cases
+- Cloud use cases
+- Management of VM environments and clouds
+- Deployment of VM-based environments
+
+
+
+PAPER SUBMISSION
+
+Papers submitted to the workshop will be reviewed by at least two
+members of the program committee and external reviewers. Submissions
+should include abstract, key words, the e-mail address of the
+corresponding author, and must not exceed 10 pages, including tables
+and figures at a main font size no smaller than 11 point. Submission
+of a paper should be regarded as a commitment that, should the paper
+be accepted, at least one of the authors will register and attend the
+conference to present the work.
+
+Accepted papers will be published in the Springer LNCS series - the
+format must be according to the Springer LNCS Style. Initial
+submissions are in PDF, accepted papers will be requested to provided
+source files.
+
+Format Guidelines: http://www.springer.de/comp/lncs/authors.html
+
+Submission Link: http://edas.info/newPaper.php?c=8553
+
+
+IMPORTANT DATES
+
+April 4 - Abstract submission due (extended)
+May 19 - Full paper submission (extended)
+July 14 - Acceptance notification
+August 3 - Camera-ready version due
+August 31 - September 3 - conference
+
+
+CHAIR
+
+Michael Alexander (chair), scaledinfra technologies GmbH, Austria
+Gianluigi Zanetti (co-chair), CRS4, Italy
+
+
+PROGRAM COMMITTEE
+
+Padmashree Apparao, Intel Corp., USA
+Volker Buege, University of Karlsruhe, Germany
+Roberto Canonico, University of Napoli Federico II, Italy
+Tommaso Cucinotta, Scuola Superiore Sant'Anna, Italy
+Werner Fischer, Thomas Krenn AG, Germany
+William Gardner, University of Guelph, Canada
+Wolfgang Gentzsch, DEISA. Max Planck Gesellschaft, Germany
+Derek Groen, UVA, The Netherlands
+Marcus Hardt, Forschungszentrum Karlsruhe, Germany
+Sverre Jarp, CERN, Switzerland
+Shantenu Jha, Louisiana State University, USA
+Xuxian Jiang, NC State, USA
+Kenji Kaneda, Google, Japan
+Yves Kemp, DESY Hamburg, Germany
+Ignacio Llorente, Universidad Complutense de Madrid, Spain
+Naoya Maruyama, Tokyo Institute of Technology, Japan
+Jean-Marc Menaud, Ecole des Mines de Nantes, France
+Anastassios Nano, National Technical University of Athens, Greece
+Oliver Oberst, Karlsruhe Institute of Technology, Germany
+Jose Renato Santos, HP Labs, USA
+Borja Sotomayor, University of Chicago, USA
+Yoshio Turner, HP Labs, USA
+Kurt Tuschku, University of Vienna, Austria
+Lizhe Wang, Indiana University, USA
+Chao-Tung Yang, Tunghai University, Taiwan
+
+
+DURATION: Workshop Duration is one day.
+
+GENERAL INFORMATION
+
+The workshop will be held as part of Euro-Par 2010,
+Island of Ischia-Naples, Italy.
+Euro-Par 2010: http://www.europar2010.org/
+
+
+
+

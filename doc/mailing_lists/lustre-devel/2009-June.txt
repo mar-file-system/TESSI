@@ -1,0 +1,1174 @@
+From nic at cray.com  Tue Jun  2 10:12:40 2009
+From: nic at cray.com (Nicholas Henke)
+Date: Tue, 02 Jun 2009 12:12:40 -0500
+Subject: [Lustre-devel] faking LNET scale
+In-Reply-To: <49E8CB7A.1090106@sun.com>
+References: <49E8B7E9.5080101@cray.com> <49E8CB7A.1090106@sun.com>
+Message-ID: <4A255D88.10409@cray.com>
+
+Liang Zhen wrote:
+> Nic,
+> It's very late night for me now, my head is not clear enough for me to 
+> make sure whether I'm saying something crazy, :)
+> LNet always thinks target is remote network(needs router) if it can't 
+> find a NI with same network ID, for example, if local NI is (ptl0) and 
+> caller wants to send message to (ptl1), then LNet will:
+> 1. Try to find local  NI for ptl1, and failed then:
+> 2. try to find if ptl1 is a remote network and whether there is router 
+> for this network (ptl1)
+> 
+> So if you want your server has only one NI instance and can talk with a 
+> set of different networks, and at the same time, it can talk with other 
+> remote networks via routers,  I would suggest:
+> 1. create a new command, for example: lctl add_local_net ptl0 ptl[1-N], 
+> which means LNet should allow NI(ptl0) accessing networks( ptl[1-N] as 
+> local networks.
+> 2. add a new structure in LNet, i.e:
+> struct  {
+>      struct list_head ln_list;
+>    __u32                ln_net;
+>     lnet_ni_t          *ln_localni;
+>     ......
+> }lnet_localnet_t;
+> As you see, it's very like current structure lnet_remotenet_t, which is 
+> pending on lnet_t::ln_remote_nets; we can create a lnet_locallnet_t 
+> object and add it to global list (i.e: lnet_t::ln_local_nets) by the 
+> command we mentioned above: lctl add_local_net
+> 3. once upper layer caller sending message, lnet_send() should check 
+> lnet_t::ln_local_nets firstly (before thinking it's a remote network and 
+> checking on lnet_t::ln_remote_nets), if it is on 
+> lnet_t::ln_local_netsthen we can take the local NI. on 
+> lnet_locanet_t::ln_localni;
+> 4. We need add a new flag for LND, only LND with the flag can support 
+> command lctl add_local_net.
+> 5. make the LND wouldn't reject messages from different networks.
+> again, hope I'm answering what you are asking, :)
+
+This is almost working - I'm running into one problem: lnet_accept wants to 
+match the ni->ni_nid against the requested NID. It is failing as the nets don't 
+match (ptl1 vs ptl0).
+
+It looks like there are a fair number of places like this, most using 
+lnet_ptlcompat_match{net,nid}.
+
+How should I handle those? Add another clause like ptlcompat (like ln_aliases) 
+and if that is set (we have aliases set), do a search to find the alias and see 
+if there is an alias that would allow NIDNET(lnet_net) == NIDNET(ptl_net)?
+
+Is there a cleaner way?
+
+Nic
+
+
+From adilger at sun.com  Wed Jun  3 02:50:47 2009
+From: adilger at sun.com ('Andreas Dilger')
+Date: Wed, 03 Jun 2009 03:50:47 -0600
+Subject: [Lustre-devel] create performance
+In-Reply-To: <20090602193838.GA18161@Sun.COM>
+References: <49AEE953.2030401@sun.com> <m3ocwg61jc.fsf@bzzz.home.net>
+	<49B00E4D.2080806@sun.com> <20090305214620.GJ3199@webber.adilger.int>
+	<049301c99e5f$10ee3c60$32cab520$@com>
+	<20090309060534.GK3199@webber.adilger.int>
+	<20090602193838.GA18161@Sun.COM>
+Message-ID: <20090603095047.GE9002@webber.adilger.int>
+
+On Jun 02, 2009  14:38 -0500, Nicolas Williams wrote:
+> On Mon, Mar 09, 2009 at 12:05:34AM -0600, 'Andreas Dilger' wrote:
+> > On Mar 06, 2009  13:25 +0000, Eric Barton wrote:
+> > > OST object placement is a hard problem with conflicting requirements
+> > > including...
+> > > 
+> > > 1. Even server space balance
+> > > 2. Even server load balance
+> > > 3. Minimal network congestion
+> > > 4. Scalable ultra-wide file layout descriptor
+> > > 5. Scalable placement algorithm
+> > > 
+> > > Implementing a placement algorithm with a centralized server clearly
+> > > isn't scalable and will have to be reworked for CMD.  A starting
+> > > point might be to explore how to ensure CROW goes some way to
+> > > satisfy requirements 1-3 above.
+> 
+> CROW should satisfy #4 easily because it would allow us to have the same
+> OST-side FID for all stripes of a file, which combined with a
+> compression of the stripe configuration of the file (the ordered list of
+> OSTs) should result in fixed-sized FID for all files.  (For compat,
+> small FIDs can be expanded when talking to old clients.)
+
+CROW itself isn't required for wide striping.  It is possible to allocate
+FID sequences to OSTs in a manner that will allow widely striped files
+to be specified in a compact manner.
+
+The main problem with widely-striped files is that they add overhead to
+file IO operations, because the client might potentially have to get
+hundreds or thousands of locks per file.
+
+> CROW should be mostly orthogonal to #1-3 and #5 though, except that a
+> good compression technique for the stripe configuration might make it
+> easier to get even server space and load balance.  Imagine an algorithm
+> that takes a list of OSTs, stripe count and index as inputs and quickly
+> outputs an ordered list of <strip-count> OSTs, such that for each index
+> value you get a pseudo-random permutation of a pseudo-randomly picked
+> combination of <strip-count> OSTs.  Then we could monotonically
+> increment that index as a way to generate the next new file's placement.
+> 
+> For this use an LFSR would be a perfect way to get pseudo-randomness (we
+> don't need cryptographic strength for this purpose).  The index becomes
+> a seed for the LFSR.  We might need two indexes, actually, one for the
+> combination of OSTs and one for the permutation thereof.  With a
+> pseudo-random distribution of combinations and permutations we ought to
+> get a fair distribution of data and load.
+
+In our previous testing, any kind of random OST selection is sub-optimal
+compared to round robin.  The problem is that RNG/PRNG OST selection,
+while uniform on average, is definitely non-uniform locally, and this
+results in non-uniform OST selection and clients competing for OSS/OST
+resources.
+
+For example, if 100 MPI clients are creating 100 files on 100 OSTs, then
+on average there would be 1 file/OST, but typically some OSTs will have 2
+or 3 OSTs, while others are idle.  This will result in IO being 2-3x
+slower on those OSTs, and often result in the entire IO being slower 2-3x.
+
+While we do something similar to this for the case of unbalanced OSTs,
+we want to move to a round-robin scheme even in the case of unbalanced
+OSTs.  This would use an "freespace accumulator" similar to a Bresenham
+line algorithm, so that OSTs which are below the average freespace will
+be skipped until their "accumulated freespace" is temporarily above average.
+
+> > > BTW, I've long believed that it's a mistake not to give Lustre any
+> > > inkling that all the creates done by a FPP parallel application are
+> > > somehow related - e.g. via a cluster-wide job identifier.  Surely
+> > > file-per-process placement is very close to shared file placement
+> > > (minus extent locking conflicts :)?
+> > 
+> > Yes, I agree.  In theory it should be possible to extract this kind
+> > of information from the client processes themselves, either by
+> > examining the process environment (some MPI job launchers store the
+> > MPI rank there for pre-launch shell scripts) or by comparing the
+> > filenames being created by the clients.  Any file-per-process job
+> > will invariably create filenames with the rank in the filename.
+> 
+> Sounds like a good idea, and configurable via regexes (ick, I know).
+> 
+> Even better would be a way to associate a cluster job ID with a set of
+> processes.  This could be done via Linux keyrings, say.
+
+This is probably easiest to start with MPI-IO ADIO ioctls directly to
+Lustre.  Once we know it helps we can look at other mechanisms to get
+this information from applications that don't use MPI-IO.
+
+Cheers, Andreas
+--
+Andreas Dilger
+Sr. Staff Engineer, Lustre Group
+Sun Microsystems of Canada, Inc.
+
+
+
+From Nicolas.Williams at sun.com  Tue Jun  2 12:38:43 2009
+From: Nicolas.Williams at sun.com (Nicolas Williams)
+Date: Tue, 2 Jun 2009 14:38:43 -0500
+Subject: [Lustre-devel] create performance
+In-Reply-To: <20090309060534.GK3199@webber.adilger.int>
+References: <49AEE953.2030401@sun.com> <m3ocwg61jc.fsf@bzzz.home.net>
+	<49B00E4D.2080806@sun.com>
+	<20090305214620.GJ3199@webber.adilger.int>
+	<049301c99e5f$10ee3c60$32cab520$@com>
+	<20090309060534.GK3199@webber.adilger.int>
+Message-ID: <20090602193838.GA18161@Sun.COM>
+
+On Mon, Mar 09, 2009 at 12:05:34AM -0600, 'Andreas Dilger' wrote:
+> On Mar 06, 2009  13:25 +0000, Eric Barton wrote:
+> > OST object placement is a hard problem with conflicting requirements
+> > including...
+> > 
+> > 1. Even server space balance
+> > 2. Even server load balance
+> > 3. Minimal network congestion
+> > 4. Scalable ultra-wide file layout descriptor
+> > 5. Scalable placement algorithm
+> > 
+> > Implementing a placement algorithm with a centralized server clearly
+> > isn't scalable and will have to be reworked for CMD.  A starting
+> > point might be to explore how to ensure CROW goes some way to
+> > satisfy requirements 1-3 above.
+
+CROW should satisfy #4 easily because it would allow us to have the same
+OST-side FID for all stripes of a file, which combined with a
+compression of the stripe configuration of the file (the ordered list of
+OSTs) should result in fixed-sized FID for all files.  (For compat,
+small FIDs can be expanded when talking to old clients.)
+
+CROW should be mostly orthogonal to #1-3 and #5 though, except that a
+good compression technique for the stripe configuration might make it
+easier to get even server space and load balance.  Imagine an algorithm
+that takes a list of OSTs, stripe count and index as inputs and quickly
+outputs an ordered list of <strip-count> OSTs, such that for each index
+value you get a pseudo-random permutation of a pseudo-randomly picked
+combination of <strip-count> OSTs.  Then we could monotonically
+increment that index as a way to generate the next new file's placement.
+
+For this use an LFSR would be a perfect way to get pseudo-randomness (we
+don't need cryptographic strength for this purpose).  The index becomes
+a seed for the LFSR.  We might need two indexes, actually, one for the
+combination of OSTs and one for the permutation thereof.  With a
+pseudo-random distribution of combinations and permutations we ought to
+get a fair distribution of data and load.
+
+> While CROW can help avoid latency for precreating objects (which can
+> avoid some of the object allocation imbalances hit today when OSTs
+> are slow precreating objects), it doesn't really fundamentally help
+> to balance space and performance of the OSTs.  With any filesystem
+> with more than a handful of OSTs there shouldn't be any reason why
+> the OSTs precreating can't keep up with the MDS create rate.  Johann
+> and I were discussing this problem and I suspect it is only a defect
+> in the object precreation code and not a fundamental problem int the
+> design.
+> 
+> I definitely agree that for CMD we will have distributed object
+> allocation, but so far it isn't clear whether having more than the
+> MDSes and/or WBC clients doing the allocation will improve the
+> situation or make it worse.
+
+We really should use CROW for these reasons:
+
+ - CROW enables fixed sized FIDs no matter how large the stripe count
+ - no need to go destroy unused pre-created files on MGS reboot
+
+> > BTW, I've long believed that it's a mistake not to give Lustre any
+> > inkling that all the creates done by a FPP parallel application are
+> > somehow related - e.g. via a cluster-wide job identifier.  Surely
+> > file-per-process placement is very close to shared file placement
+> > (minus extent locking conflicts :)?
+> 
+> Yes, I agree.  In theory it should be possible to extract this kind
+> of information from the client processes themselves, either by
+> examining the process environment (some MPI job launchers store the
+> MPI rank there for pre-launch shell scripts) or by comparing the
+> filenames being created by the clients.  Any file-per-process job
+> will invariably create filenames with the rank in the filename.
+
+Sounds like a good idea, and configurable via regexes (ick, I know).
+
+Even better would be a way to associate a cluster job ID with a set of
+processes.  This could be done via Linux keyrings, say.
+
+Nico
+-- 
+
+
+From Alexey.Lyashkov at Sun.COM  Thu Jun  4 22:05:32 2009
+From: Alexey.Lyashkov at Sun.COM (Alexey Lyashkov)
+Date: Fri, 05 Jun 2009 09:05:32 +0400
+Subject: [Lustre-devel] [RFC] new activate/deactivate design
+Message-ID: <1244178332.19922.23.camel@berloga.shadowland>
+
+==== 0. create lov device. 
+
+1) disk-obd need to be passed into attach method in order to use disk
+operation in any lov method and to pass it to osc layer (for llog init,
+as an example)
+
+==== 1. add target to lov 
+
+Process of adding a new target to lov is as follows: 
+a) call osc to read llog CATALOG id and internally init llog subsystem
+(done as part of bug 18800);
+This step is need for avoid situation when we start replay requests
+(unlink as an example) but llog subsystem isn't init in this time, so
+can be have space leak in situation dual failure (client and mds
+restart)
+
+b) lov reads last objid from lov-objid file, adjusts max lov ea size and
+notifies osc about its last known object id. If mds or llite will need
+this, they can ask lov via get_info method;
+How this counted in mdc/mds, but this need move knowledge about LOV EA
+structure into mds/mdc layer, which is small layering problem.
+ 
+
+c) add osc target to a global pool.
+
+
+=== 2. ACTIVATE event 
+
+
+2.1 activate notify event is converted from ptlrpc import event when
+import changes its state to FULL. 
+import changes its state from DISCONNECT to FULL in connect interpret,
+which runs in ptlrpcd context, so should never be blocked. 
+
+However connect interpret can block in the following cases:
+1) client is evicted and need to flush own locks;
+2) VBR failed and need to flush own locks;
+3) need to send some events from connect FSM, which can block in
+handlers.
+
+So I think we need more generic way in order to avoid blocking in
+connect interpret function, instead of having ll_sync thread on mds and
+invalidate thread on ptlrpc layers - for this we need run some initial
+checks and spawn new kernel thread, which can run connect FSM. This way
+don't need own threads in mds (ll_sync thread) and invalidate thread and
+avoid problems similar to blocking activate event in lov with delete osc
+target, and also simplify the code. 
+
+
+2.2 ACTIVATE event should be processed in the following order:
+-> osc -> lov -> [llite | mds]. 
+
+
+osc layer must be prepared before lov can work:
+1) mark oscc as recovery mode, which indicates that create will be
+permitted at near future. 
+2) let ost know this is mds connection (via KEY_MDS_CONN or via connect
+flag) 
+3) connect mds llog to ost side and replay them. 
+4) send event to lov layer 
+
+lov should: 
+1) mark target as active 
+2) reset QoS penalty, so allow to select this ost in creation process 
+3) pass event to upper layer (mds or llite) 
+
+mds/llite should:
+1) nothing now.
+
+after this event is finished, a second event should be sent to osc -
+recovery finished, which clears flag RECOVERY at oscc. 
+
+3. remove OSC target 
+
+3.1 
+in some cases cluster administrator want to remove OST from cluster. In
+this case OST should be deactivated on all clients and servers, and
+removed from configuration. 
+
+3.2 deactivate osc target 
+To deactivate OSC target we need to send config llog update which
+changes the state of 
+
+osc and does following steps:
+1) mark import as imp_deactive - this forbids pinger to send pings;
+2) send special notify event DEACTIVATE, which should be:
+a) mark target as deactivate on lov layer (disconnect should not touch
+this flag!);
+b) cancel all locks on this export, similar to invalidate, but without
+discarding data, and LDLM_FL_LOCAL flag.
+
+
+3.3 remove osc target 
+
+To remove OST target, llog updates with remove target command should be
+sent. After receiving this commands, a client or MDS should check that
+this OST is deactivated and flush index from all pools. Then this LOV
+target should be removed.
+
+-- 
+Alexey Lyashkov <Alexey.Lyashkov at Sun.COM>
+Sun Microsystems
+
+
+
+From Zhen.Liang at Sun.COM  Fri Jun  5 01:57:46 2009
+From: Zhen.Liang at Sun.COM (Liang Zhen)
+Date: Fri, 05 Jun 2009 16:57:46 +0800
+Subject: [Lustre-devel] faking LNET scale
+In-Reply-To: <4A255D88.10409@cray.com>
+References: <49E8B7E9.5080101@cray.com> <49E8CB7A.1090106@sun.com>
+	<4A255D88.10409@cray.com>
+Message-ID: <4A28DE0A.5050406@sun.com>
+
+Hi Nic,
+For incoming requests, I think we can share the same network aliases 
+with outgoing messsages (i.e: lnet_t::ln_local_nets in my previous 
+mail), matching on the aliases list could be embedded in 
+lnet_ptlcompat_match{net,nid} and lnet_net2ni_locked so we don't need 
+worry about changing code everywhere.
+
+Regards
+Liang
+
+Nicholas Henke wrote:
+> Liang Zhen wrote:
+>> Nic,
+>> It's very late night for me now, my head is not clear enough for me 
+>> to make sure whether I'm saying something crazy, :)
+>> LNet always thinks target is remote network(needs router) if it can't 
+>> find a NI with same network ID, for example, if local NI is (ptl0) 
+>> and caller wants to send message to (ptl1), then LNet will:
+>> 1. Try to find local  NI for ptl1, and failed then:
+>> 2. try to find if ptl1 is a remote network and whether there is 
+>> router for this network (ptl1)
+>>
+>> So if you want your server has only one NI instance and can talk with 
+>> a set of different networks, and at the same time, it can talk with 
+>> other remote networks via routers,  I would suggest:
+>> 1. create a new command, for example: lctl add_local_net ptl0 
+>> ptl[1-N], which means LNet should allow NI(ptl0) accessing networks( 
+>> ptl[1-N] as local networks.
+>> 2. add a new structure in LNet, i.e:
+>> struct  {
+>>      struct list_head ln_list;
+>>    __u32                ln_net;
+>>     lnet_ni_t          *ln_localni;
+>>     ......
+>> }lnet_localnet_t;
+>> As you see, it's very like current structure lnet_remotenet_t, which 
+>> is pending on lnet_t::ln_remote_nets; we can create a 
+>> lnet_locallnet_t object and add it to global list (i.e: 
+>> lnet_t::ln_local_nets) by the command we mentioned above: lctl 
+>> add_local_net
+>> 3. once upper layer caller sending message, lnet_send() should check 
+>> lnet_t::ln_local_nets firstly (before thinking it's a remote network 
+>> and checking on lnet_t::ln_remote_nets), if it is on 
+>> lnet_t::ln_local_netsthen we can take the local NI. on 
+>> lnet_locanet_t::ln_localni;
+>> 4. We need add a new flag for LND, only LND with the flag can support 
+>> command lctl add_local_net.
+>> 5. make the LND wouldn't reject messages from different networks.
+>> again, hope I'm answering what you are asking, :)
+>
+> This is almost working - I'm running into one problem: lnet_accept 
+> wants to match the ni->ni_nid against the requested NID. It is failing 
+> as the nets don't match (ptl1 vs ptl0).
+>
+> It looks like there are a fair number of places like this, most using 
+> lnet_ptlcompat_match{net,nid}.
+>
+> How should I handle those? Add another clause like ptlcompat (like 
+> ln_aliases) and if that is set (we have aliases set), do a search to 
+> find the alias and see if there is an alias that would allow 
+> NIDNET(lnet_net) == NIDNET(ptl_net)?
+>
+> Is there a cleaner way?
+>
+> Nic
+
+
+
+From Zhen.Liang at Sun.COM  Mon Jun  8 08:36:18 2009
+From: Zhen.Liang at Sun.COM (Liang Zhen)
+Date: Mon, 08 Jun 2009 23:36:18 +0800
+Subject: [Lustre-devel] Linux kernel lock smp scalability
+Message-ID: <4A2D2FF2.7080703@sun.com>
+
+Hi there,
+Some interesting data from 16-cores system, FYI
+
+Regards
+Liang
+-------------- next part --------------
+A non-text attachment was scrubbed...
+Name: smp_lock.pdf
+Type: application/pdf
+Size: 31679 bytes
+Desc: not available
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20090608/9ed018ae/attachment.pdf>
+
+From eeb at sun.com  Mon Jun  8 10:10:37 2009
+From: eeb at sun.com (Eric Barton)
+Date: Mon, 08 Jun 2009 18:10:37 +0100
+Subject: [Lustre-devel] Linux kernel lock smp scalability
+In-Reply-To: <4A2D2FF2.7080703@sun.com>
+References: <4A2D2FF2.7080703@sun.com>
+Message-ID: <015f01c9e85c$0b0238a0$2106a9e0$@com>
+
+Liang,
+
+Here's a graph of _aggregate_ ops/sec...
+
+> -----Original Message-----
+> From: lustre-devel-bounces at lists.lustre.org [mailto:lustre-devel-bounces at lists.lustre.org] On Behalf Of Liang Zhen
+> Sent: 08 June 2009 4:36 PM
+> To: 'lustre-devel'
+> Subject: [Lustre-devel] Linux kernel lock smp scalability
+> 
+> Hi there,
+> Some interesting data from 16-cores system, FYI
+> 
+> Regards
+> Liang
+-------------- next part --------------
+A non-text attachment was scrubbed...
+Name: smp lockops graph.pdf
+Type: application/pdf
+Size: 37263 bytes
+Desc: not available
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20090608/a52c1d18/attachment.pdf>
+
+From Nathan.Rutman at Sun.COM  Tue Jun 16 20:04:28 2009
+From: Nathan.Rutman at Sun.COM (Nathaniel Rutman)
+Date: Tue, 16 Jun 2009 20:04:28 -0700
+Subject: [Lustre-devel] Thinking of Hacks around bug #12329
+In-Reply-To: <20090514212833.GN3209@webber.adilger.int>
+References: <9c21eeae0905131106w23032105tdcf9a2399fb550df@mail.gmail.com>
+	<20090514062224.GD3209@webber.adilger.int>
+	<13983758-B9C5-4770-A4AC-39AAF75C6980@sun.com>
+	<C4317953-7323-4FD0-9D36-A78DA94EF216@sun.com>
+	<20090514212833.GN3209@webber.adilger.int>
+Message-ID: <4A385D3C.6080906@sun.com>
+
+Sorry for taking so long to respond...
+
+Andreas Dilger wrote:
+> On May 14, 2009  11:48 -0400, Oleg Drokin wrote:
+>   
+>> On May 14, 2009, at 10:25 AM, Oleg Drokin wrote:
+>>     
+>>> Actually just to combat situqtion like this MGCs are doing a bit of a
+>>> pause
+>>> for a few seconds before refetching config, I remember there was a bug
+>>> and this measure was introduced as a fix.
+>>>       
+>> Nic actually tuned in and said that the backoff (set at 3 seconds now)
+>> is certainly not enough, since it takes this long to only mount actual
+>> on-disk fs
+This is probably the easiest thing to try out for fixing bug 12329.   
+Put this up at 30s or 60s or something -- it's just the amount of time 
+it takes to update after a config change.  These will be rare and 
+asynchronous, so there's no real penalty for waiting.  Preventing 
+thousands of clients from trying to re-read the config log every few 
+seconds seems like a no-brainer.  See mgc_requeue_thread.
+>> Anyway that got me thinking that we have a "coarse-grained" locking  
+>> problem.  Since OSTs don't connect to other OSTs, they do not care about
+>> OST connections, and perhaps if we introduce bit-locks to MGS locks as
+>> well to indicate client type, then locks from OSTs would only be revoked
+>> when MDS connects or disconnects, MDS locks would only be revoked when
+>> OSTs connect or disconnect and client locks would be revoked always.
+>> Or alternatively we can split our single resource right now to a few  
+>> separate:
+>>     
+>> one for osts one for MDSes for example, sure that would mean clients  
+>> would not have to take two locks, but on the other hand there would
+>> be supposedly less information to reparse when one of those locks is
+>> invalidated.
+>>     
+>
+> I would tend to prefer the latter.  Having separate resource IDs for
+> the different llogs makes it a lot cleaner in the end.  Ideally,
+> picking a relatively unique resource ID for that config log would
+> allow us to separate the configs between different filesystems.
+>
+> The OSTs in fact don't really need to read the same llog as the client for
+> very many things (some shared tunables, perhaps), and there also isn't
+> a big problem IMHO to store the same tunables in two different config
+> llogs (one for servers and one for clients).  Generally, the server-side
+> tunables are not used by the client, and vice versa.  Probably the only
+> place that would need to read two config llogs is the MDS, which is both
+> a server and a client of the OSTs.
+>   
+The OSTs in fact do read a separate llog than the client.  But there is 
+still a single
+config lock per fs on the MGS, so that doesn't really matter.  Revoking 
+the lock
+causes everybody in the fs to try to update, even if there's nothing new 
+in their
+particular log.  Oleg's fine-grained idea, or simply separate locks, 
+would help in this case.
+But I think the big win is backing off the requeue time for big clusters.
+We could even automate this a bit; increase the requeue time on the 
+clients as the number of
+OSTs increase.
+
+
+From adilger at sun.com  Thu Jun 18 01:40:01 2009
+From: adilger at sun.com (Andreas Dilger)
+Date: Thu, 18 Jun 2009 02:40:01 -0600
+Subject: [Lustre-devel] Thinking of Hacks around bug #12329
+In-Reply-To: <4A385D3C.6080906@sun.com>
+References: <9c21eeae0905131106w23032105tdcf9a2399fb550df@mail.gmail.com>
+	<20090514062224.GD3209@webber.adilger.int>
+	<13983758-B9C5-4770-A4AC-39AAF75C6980@sun.com>
+	<C4317953-7323-4FD0-9D36-A78DA94EF216@sun.com>
+	<20090514212833.GN3209@webber.adilger.int> <4A385D3C.6080906@sun.com>
+Message-ID: <20090618084001.GN13073@webber.adilger.int>
+
+On Jun 16, 2009  20:04 -0700, Nathaniel Rutman wrote:
+> Andreas Dilger wrote:
+> > On May 14, 2009  11:48 -0400, Oleg Drokin wrote:
+> >   
+> >> On May 14, 2009, at 10:25 AM, Oleg Drokin wrote:
+> >>> Actually just to combat situqtion like this MGCs are doing a bit of a
+> >>> pause
+> >>> for a few seconds before refetching config, I remember there was a bug
+> >>> and this measure was introduced as a fix.
+> >>       
+> >> Nic actually tuned in and said that the backoff (set at 3 seconds now)
+> >> is certainly not enough, since it takes this long to only mount actual
+> >> on-disk fs
+>
+> This is probably the easiest thing to try out for fixing bug 12329.   
+> Put this up at 30s or 60s or something -- it's just the amount of time 
+> it takes to update after a config change.  These will be rare and 
+> asynchronous, so there's no real penalty for waiting.  Preventing 
+> thousands of clients from trying to re-read the config log every few 
+> seconds seems like a no-brainer.  See mgc_requeue_thread.
+
+The one potential problem with this is that if the MDS creates a file
+on one of the newly-added OSTs, but the clients don't see this OST for
+60s then there is a big window for hitting an IO error due to the "bad"
+striping (from the POV of that client).  I don't _think_ there is any
+coordiation between refreshing the config lock and doing other IO...
+
+> >> Anyway that got me thinking that we have a "coarse-grained" locking  
+> >> problem.  Since OSTs don't connect to other OSTs, they do not care about
+> >> OST connections, and perhaps if we introduce bit-locks to MGS locks as
+> >> well to indicate client type, then locks from OSTs would only be revoked
+> >> when MDS connects or disconnects, MDS locks would only be revoked when
+> >> OSTs connect or disconnect and client locks would be revoked always.
+> >> Or alternatively we can split our single resource right now to a few  
+> >> separate:
+> >>     
+> >> one for osts one for MDSes for example, sure that would mean clients  
+> >> would not have to take two locks, but on the other hand there would
+> >> be supposedly less information to reparse when one of those locks is
+> >> invalidated.
+> >
+> > I would tend to prefer the latter.  Having separate resource IDs for
+> > the different llogs makes it a lot cleaner in the end.  Ideally,
+> > picking a relatively unique resource ID for that config log would
+> > allow us to separate the configs between different filesystems.
+> >
+> > The OSTs in fact don't really need to read the same llog as the client for
+> > very many things (some shared tunables, perhaps), and there also isn't
+> > a big problem IMHO to store the same tunables in two different config
+> > llogs (one for servers and one for clients).  Generally, the server-side
+> > tunables are not used by the client, and vice versa.  Probably the only
+> > place that would need to read two config llogs is the MDS, which is both
+> > a server and a client of the OSTs.
+>   
+> The OSTs in fact do read a separate llog than the client.  But there is 
+> still a single config lock per fs on the MGS, so that doesn't really matter.
+> Revoking the lock causes everybody in the fs to try to update, even if
+> there's nothing new in their particular log.  Oleg's fine-grained idea,
+> or simply separate locks, would help in this case.
+
+Yes, I think this is fairly important for very large filesystems, since
+there appears to be some kind of O(n^2) behaviour going on with respect
+to many OSTs connecting, trying to get the single config lock (which
+they don't really need in the end) and then slowing everything down.
+
+Cheers, Andreas
+--
+Andreas Dilger
+Sr. Staff Engineer, Lustre Group
+Sun Microsystems of Canada, Inc.
+
+
+
+From hornc at cray.com  Thu Jun 18 16:10:18 2009
+From: hornc at cray.com (Chris Horn)
+Date: Thu, 18 Jun 2009 18:10:18 -0500
+Subject: [Lustre-devel] Imperative Recovery - forcing failover server stop
+	blocking
+Message-ID: <4A3AC95A.10302@cray.com>
+
+Hello lustre-devel,
+
+Some thoughts/questions on one aspect of Imperative Recovery.
+
+Via Eric Barton:
+
+"Actually imperative recovery is just explicit notification of clients
+to reconnect and explicit notification of the failover server not to
+block for any more clients to reconnect."
+
+Since backup servers immediately begin replay once all clients have
+reconnected we only care about the case where we have dead/dying
+clients, or maybe when clients are "too slow".  In these cases we are
+seeking the ability to short circuit the recovery window, however this
+is equivalent to simply having a short(er) recovery window in the first
+place. 
+
+It seems as though an ability to short circuit is only going to be
+useful if we can distinguish between the case where we only need a short
+recovery window vs. the case where we need that extra time.  My question
+is, what are the use cases where this applies?
+
+My intuition is the following:
+Case 1:  x/y clients which are dead, (y-x)/y clients connected to the
+backup server (all clients that can connect have done so).  We want to
+go ahead and short circuit. 
+
+Case 2:  x/y clients which are dead, (y-x-z)/y clients connected to the
+backup server (z slow clients).  We want more time for the z slow
+clients to connect.
+
+Am I missing a use case?  If not then my next question is, do we want to
+distinguish between these two cases?  If we do want to distinguish
+between these two cases, then imperative recovery needs a mechanism to
+distinguish between them in addition to the explicit notification of
+clients and explicit notification of the failover server. 
+
+If we want to treat these cases the same then imperative recovery
+reduces to allowing the recovery window timeout to be tunable (if it
+isn't already), and the explicit notification of clients to reconnect
+(which still nets a huge improvement over the current implementation). 
+I can imagine having an ability to end a server's recovery window early
+might be useful to system admins in some circumstances, but I don't see
+its utility in an automated failover solution.
+
+Chris Horn
+
+
+From johann at sun.com  Fri Jun 19 14:18:41 2009
+From: johann at sun.com (Johann Lombardi)
+Date: Fri, 19 Jun 2009 23:18:41 +0200
+Subject: [Lustre-devel] Imperative Recovery - forcing failover server
+ stop blocking
+In-Reply-To: <4A3AC95A.10302@cray.com>
+References: <4A3AC95A.10302@cray.com>
+Message-ID: <447088AD-0C97-4314-A5AA-D7179C9C5C63@sun.com>
+
+On Jun 19, 2009, at 1:10 AM, Chris Horn wrote:
+> Since backup servers immediately begin replay once all clients have
+> reconnected we only care about the case where we have dead/dying
+> clients, or maybe when clients are "too slow".
+
+Actually, the problem is that all the clients can be considered as "too
+slow". Before reconnecting to the failover partner, a client will
+first wait for a request to timeout, then it will retry to connect to  
+the
+same server (for flappy network) and only after those 2 timeouts,
+the client will attempt to connect to the the backup server.
+This means that the server has to extend the recovery window
+accordingly to make sure that all clients can join recovery.
+The situation is even worst if you do failover with N servers or
+if each target can be reached via several nids on the same host.
+
+The idea of imperative recovery is to tell the clients to reconnect
+immediately to the failover partner. This should reduce the overall
+recovery time.
+
+> In these cases we are seeking the ability to short circuit the  
+> recovery window,
+> however this is equivalent to simply having a short(er) recovery  
+> window in the first
+> place.
+
+Well, if we just reduce the recovery window, some clients will not
+join recovery which cannot fully completed (= everything is replayed).
+
+> It seems as though an ability to short circuit is only going to be
+> useful if we can distinguish between the case where we only need a  
+> short
+> recovery window vs. the case where we need that extra time.  My  
+> question
+> is, what are the use cases where this applies?
+>
+> My intuition is the following:
+> Case 1:  x/y clients which are dead, (y-x)/y clients connected to the
+> backup server (all clients that can connect have done so).  We want to
+> go ahead and short circuit.
+
+That's the 2nd aspect of imperative recovery. We want to notify the
+server when all clients that were supposed to reconnect should
+have done so already. Basically, the idea is to tell the server that
+no new clients will reconnect now and that it is not needed to wait
+any longer for new clients to join (the x clients).
+
+> Case 2:  x/y clients which are dead, (y-x-z)/y clients connected to  
+> the
+> backup server (z slow clients).  We want more time for the z slow
+> clients to connect.
+
+In fact, with imperative recovery, we should no longer have slow
+clients since a client no longer needs to detect the server failure
+by itself, but instead will be told explicitly to reconnect to the
+failover partner w/o any delay.
+
+HTH
+
+Cheers,
+Johann
+
+
+From hornc at cray.com  Fri Jun 19 15:10:58 2009
+From: hornc at cray.com (Chris Horn)
+Date: Fri, 19 Jun 2009 17:10:58 -0500
+Subject: [Lustre-devel] Imperative Recovery - forcing failover server
+ stop blocking
+In-Reply-To: <447088AD-0C97-4314-A5AA-D7179C9C5C63@sun.com>
+References: <4A3AC95A.10302@cray.com>
+	<447088AD-0C97-4314-A5AA-D7179C9C5C63@sun.com>
+Message-ID: <4A3C0CF2.1080809@cray.com>
+
+Oops, I forgot to cc lustre-devel.
+
+Johann Lombardi wrote:
+
+> > On Jun 19, 2009, at 1:10 AM, Chris Horn wrote:
+>   
+>> >> It seems as though an ability to short circuit is only going to be
+>> >> useful if we can distinguish between the case where we only need a short
+>> >> recovery window vs. the case where we need that extra time.  My question
+>> >> is, what are the use cases where this applies?
+>> >>
+>> >> My intuition is the following:
+>> >> Case 1:  x/y clients which are dead, (y-x)/y clients connected to the
+>> >> backup server (all clients that can connect have done so).  We want to
+>> >> go ahead and short circuit.
+>>     
+> >
+> > That's the 2nd aspect of imperative recovery. We want to notify the
+> > server when all clients that were supposed to reconnect should
+> > have done so already. Basically, the idea is to tell the server that
+> > no new clients will reconnect now and that it is not needed to wait
+> > any longer for new clients to join (the x clients).
+>   
+I just want to verify that in order to use this 2nd aspect of imperative
+recovery we need some method of determining client health, yes?
+
+
+Chris Horn
+
+
+
+From eeb at Sun.COM  Mon Jun 22 10:53:01 2009
+From: eeb at Sun.COM (Eric Barton)
+Date: Mon, 22 Jun 2009 18:53:01 +0100
+Subject: [Lustre-devel] Imperative Recovery - forcing failover server
+ stop blocking
+In-Reply-To: <4A3C0CF2.1080809@cray.com>
+References: <4A3AC95A.10302@cray.com>
+	<447088AD-0C97-4314-A5AA-D7179C9C5C63@sun.com>
+	<4A3C0CF2.1080809@cray.com>
+Message-ID: <06b201c9f362$49015b20$db041160$@com>
+
+Chris,
+
+Comment inline...
+
+> -----Original Message-----
+> From: lustre-devel-bounces at lists.lustre.org [mailto:lustre-devel-bounces at lists.lustre.org] On Behalf Of Chris Horn
+> Sent: 19 June 2009 11:11 PM
+> To: lustre-devel at lists.lustre.org
+> Subject: Re: [Lustre-devel] Imperative Recovery - forcing failover server stop blocking
+> 
+> Oops, I forgot to cc lustre-devel.
+> 
+> Johann Lombardi wrote:
+> 
+> > > On Jun 19, 2009, at 1:10 AM, Chris Horn wrote:
+> >
+> >> >> It seems as though an ability to short circuit is only going to be
+> >> >> useful if we can distinguish between the case where we only need a short
+> >> >> recovery window vs. the case where we need that extra time.  My question
+> >> >> is, what are the use cases where this applies?
+> >> >>
+> >> >> My intuition is the following:
+> >> >> Case 1:  x/y clients which are dead, (y-x)/y clients connected to the
+> >> >> backup server (all clients that can connect have done so).  We want to
+> >> >> go ahead and short circuit.
+> >>
+> > >
+> > > That's the 2nd aspect of imperative recovery. We want to notify the
+> > > server when all clients that were supposed to reconnect should
+> > > have done so already. Basically, the idea is to tell the server that
+> > > no new clients will reconnect now and that it is not needed to wait
+> > > any longer for new clients to join (the x clients).
+> >
+> I just want to verify that in order to use this 2nd aspect of imperative
+> recovery we need some method of determining client health, yes?
+
+Yes.  
+
+Consider a utility that runs on a client to notify it to reconnect to a
+failover server, and which completes with a success status only when the
+client has reconnected successfully.
+
+If you run this utility on all clients after starting a failover server,
+you can notify the server to close the recovery window once all instances have
+completed since that tells you that all clients are healthy and ready to
+participate in recovery.
+
+Of course, you can decide to stop waiting and proceed with the server
+notification at any time you like.  You can base this decision on a timeout,
+knowing how many clients have reconnected successfully, or any other criterion
+you chose - i.e. you are now the effective arbiter of client health.
+
+    Cheers,
+              Eric
+
+
+
+
+From hornc at cray.com  Mon Jun 22 11:21:10 2009
+From: hornc at cray.com (Chris Horn)
+Date: Mon, 22 Jun 2009 13:21:10 -0500
+Subject: [Lustre-devel] Imperative Recovery - forcing failover server
+ stop blocking
+In-Reply-To: <06b201c9f362$49015b20$db041160$@com>
+References: <4A3AC95A.10302@cray.com>
+	<447088AD-0C97-4314-A5AA-D7179C9C5C63@sun.com>
+	<4A3C0CF2.1080809@cray.com> <06b201c9f362$49015b20$db041160$@com>
+Message-ID: <4A3FCB96.4010201@cray.com>
+
+Eric Barton wrote:
+> Consider a utility that runs on a client to notify it to reconnect to a
+> failover server, and which completes with a success status only when the
+> client has reconnected successfully.
+>   
+Would this be equivalent to monitoring the "completed_clients" field of
+the recovery_status proc file?
+> If you run this utility on all clients after starting a failover server,
+> you can notify the server to close the recovery window once all instances have
+> completed since that tells you that all clients are healthy and ready to
+> participate in recovery.
+>   
+Won't the server already begin replay by this time, since it has
+received connections from all clients?  Thus rendering our notification
+to the server (to close the recovery window) redundant?
+> Of course, you can decide to stop waiting and proceed with the server
+> notification at any time you like.  You can base this decision on a timeout,
+> knowing how many clients have reconnected successfully, or any other criterion
+> you chose - i.e. you are now the effective arbiter of client health.
+>   
+Our initial plan was to do just this.  We would have a proxy running on
+the bootnode to aggregate client responses.  It would wait some
+configurable timeout period, say clnt_timeout, and if it received a # of
+responses equal to obd->obd_max_recoverable_clients, it would go ahead
+and notify the server to stop waiting for responses immediately (though
+this is the situation described in the last comment).  If the timeout
+expired it would notify the server to stop waiting.  However, it
+occurred to me that we would get the same behavior by simply tuning the
+server's recovery window down to whatever value we were going to assign
+clnt_timeout.  It seemed we were going through an awful lot of trouble
+to gain a tunable recovery_window.  I'm not sure if this is a result of
+our choosing poor criterion upon which to notify the server to stop
+waiting, or if there is something else (a use case perhaps) that I'm
+missing.
+>     Cheers,
+>               Eric
+>
+>
+>   
+
+
+From behlendorf1 at llnl.gov  Mon Jun 22 12:27:54 2009
+From: behlendorf1 at llnl.gov (Brian Behlendorf)
+Date: Mon, 22 Jun 2009 12:27:54 -0700
+Subject: [Lustre-devel] Imperative Recovery - forcing failover server
+	stop blocking
+In-Reply-To: <4A3FCB96.4010201@cray.com>
+References: <4A3AC95A.10302@cray.com> <06b201c9f362$49015b20$db041160$@com>
+	<4A3FCB96.4010201@cray.com>
+Message-ID: <200906221227.57876.behlendorf1@llnl.gov>
+
+
+> However, it occurred to me that we would get the same behavior by simply
+> tuning the server's recovery window down to whatever value we were going
+> to assign  clnt_timeout.
+
+Chris, for similiar reasons I put together a patch to do exactly this with a 
+lustre server mount option.  There is a 1.6.x version in bugziilla 18948, 
+attachment 23447, and a version pending inclusion in lustre 1.8.2.  It adds 
+the following two options with the idea being they can be set to whatever is 
+reasonable for your system.
+
+recovery_time_soft= timeout
+Allow 'timeout' seconds for clients to reconnect for recovery after a server
+crash.  This timeout will be incrementally extended if it is about to expire
+and the server is still handling new connections from recoverable clients.
+The default soft recovery timeout is set to 300 seconds (5 minutes).
+
+recovery_time_hard= timeout
+The server will be allowed to incrementally extend its timeout up to a hard
+maximum of 'timeout' seconds.  The default hard recovery timeout is set to
+900 seconds (15 minutes).
+
+-- 
+Thanks,
+Brian
+-------------- next part --------------
+A non-text attachment was scrubbed...
+Name: not available
+Type: application/pgp-signature
+Size: 189 bytes
+Desc: not available
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20090622/a0be32dc/attachment.pgp>
+
+From eeb at sun.com  Tue Jun 23 05:49:53 2009
+From: eeb at sun.com (Eric Barton)
+Date: Tue, 23 Jun 2009 13:49:53 +0100
+Subject: [Lustre-devel] Imperative Recovery - forcing failover server
+ stop blocking
+In-Reply-To: <4A3FCB96.4010201@cray.com>
+References: <4A3AC95A.10302@cray.com>
+	<447088AD-0C97-4314-A5AA-D7179C9C5C63@sun.com>
+	<4A3C0CF2.1080809@cray.com>
+	<06b201c9f362$49015b20$db041160$@com> <4A3FCB96.4010201@cray.com>
+Message-ID: <003301c9f401$1adb8af0$5092a0d0$@com>
+
+
+Chris,
+
+> Eric Barton wrote:
+> > Consider a utility that runs on a client to notify it to reconnect
+> > to a failover server, and which completes with a success status
+> > only when the client has reconnected successfully.
+>
+> Would this be equivalent to monitoring the "completed_clients" field
+> of the recovery_status proc file?
+
+No, this is for accounting clients that have actually completed
+recovery, not clients which have reconnected and are therefore ready
+to participate in recovery - you'd want 'connected_clients' for that.
+
+But actually, counting reconnected clients is only half the story.
+Currently clients don't even start to participate in recovery until
+they detect an error communicating with the failed server - i.e. after
+a timeout _and_ a failed reconnection attempt.  This utility
+eliminates this latency by notifying the client explicitly to
+reconnect NOW.
+
+> > If you run this utility on all clients after starting a failover
+> > server, you can notify the server to close the recovery window
+> > once all instances have completed since that tells you that all
+> > clients are healthy and ready to participate in recovery.
+>
+> Won't the server already begin replay by this time, since it has
+> received connections from all clients?  Thus rendering our
+> notification to the server (to close the recovery window) redundant?
+
+Yes, in the optimistic event that all clients reconnected.  
+
+> > Of course, you can decide to stop waiting and proceed with the
+> > server notification at any time you like.  You can base this
+> > decision on a timeout, knowing how many clients have reconnected
+> > successfully, or any other criterion you chose - i.e. you are now
+> > the effective arbiter of client health.
+>
+> Our initial plan was to do just this.  We would have a proxy running
+> on the bootnode to aggregate client responses.  It would wait some
+> configurable timeout period, say clnt_timeout, and if it received a
+> # of responses equal to obd->obd_max_recoverable_clients, it would
+> go ahead and notify the server to stop waiting for responses
+> immediately (though this is the situation described in the last
+> comment).  If the timeout expired it would notify the server to stop
+> waiting.  However, it occurred to me that we would get the same
+> behavior by simply tuning the server's recovery window down to
+> whatever value we were going to assign clnt_timeout.  It seemed we
+> were going through an awful lot of trouble to gain a tunable
+> recovery_window.  I'm not sure if this is a result of our choosing
+> poor criterion upon which to notify the server to stop waiting, or
+> if there is something else (a use case perhaps) that I'm missing.
+
+Yes, of course, you can just tune down the recovery window in the
+knowledge that explicit notification has speeded the whole process of
+client reconnection.  However if you have better knowledge about
+client health than Lustre can have - e.g. hardware-specific health
+monitoring, or just using the success/failure of the explicit
+notification method itself - then why not use it to control exactly
+when to stop waiting for dead clients?
+
+-- 
+
+        Cheers,
+                   Eric
+
+
+
+From adilger at sun.com  Tue Jun 23 07:53:16 2009
+From: adilger at sun.com (Andreas Dilger)
+Date: Tue, 23 Jun 2009 16:53:16 +0200
+Subject: [Lustre-devel] Imperative Recovery - forcing failover
+ server	stop blocking
+In-Reply-To: <003301c9f401$1adb8af0$5092a0d0$@com>
+References: <4A3AC95A.10302@cray.com>
+	<447088AD-0C97-4314-A5AA-D7179C9C5C63@sun.com>
+	<4A3C0CF2.1080809@cray.com>
+	<06b201c9f362$49015b20$db041160$@com> <4A3FCB96.4010201@cray.com>
+	<003301c9f401$1adb8af0$5092a0d0$@com>
+Message-ID: <20090623145316.GC31668@webber.adilger.int>
+
+On Jun 23, 2009  13:49 +0100, Eric Barton wrote:
+> Yes, of course, you can just tune down the recovery window in the
+> knowledge that explicit notification has speeded the whole process of
+> client reconnection.  However if you have better knowledge about
+> client health than Lustre can have - e.g. hardware-specific health
+> monitoring, or just using the success/failure of the explicit
+> notification method itself - then why not use it to control exactly
+> when to stop waiting for dead clients?
+
+Yes, to restate this in a different way - the only way that Lustre itself
+knows that some client will NOT be participating is after the timeout has
+expired.  If there is some external mechanism that can inform Lustre that
+one or more clients are dead and will not be participating in recovery
+then the recovery does not need to wait for the timeout.
+
+Cheers, Andreas
+--
+Andreas Dilger
+Sr. Staff Engineer, Lustre Group
+Sun Microsystems of Canada, Inc.
+
+
+
+From hornc at cray.com  Tue Jun 23 07:59:43 2009
+From: hornc at cray.com (Chris Horn)
+Date: Tue, 23 Jun 2009 09:59:43 -0500
+Subject: [Lustre-devel] Imperative Recovery - forcing failover server
+ stop blocking
+In-Reply-To: <20090623145316.GC31668@webber.adilger.int>
+References: <4A3AC95A.10302@cray.com>
+	<447088AD-0C97-4314-A5AA-D7179C9C5C63@sun.com>
+	<4A3C0CF2.1080809@cray.com> <06b201c9f362$49015b20$db041160$@com>
+	<4A3FCB96.4010201@cray.com> <003301c9f401$1adb8af0$5092a0d0$@com>
+	<20090623145316.GC31668@webber.adilger.int>
+Message-ID: <4A40EDDF.3060008@cray.com>
+
+Okay, thanks everyone for your input.  Utilizing an external source of
+client health information is not something that we had incorporated into
+our initial design, so when I saw the need for this information I wanted
+to ensure that it was in fact necessary.
+
+@Brian, thanks for doing the work on tunable recovery and pointing me to
+that patch.
+
+
+From rread at sun.com  Tue Jun 23 10:20:42 2009
+From: rread at sun.com (Robert Read)
+Date: Tue, 23 Jun 2009 10:20:42 -0700
+Subject: [Lustre-devel] Imperative Recovery - forcing failover
+ server	stop blocking
+In-Reply-To: <20090623145316.GC31668@webber.adilger.int>
+References: <4A3AC95A.10302@cray.com>
+	<447088AD-0C97-4314-A5AA-D7179C9C5C63@sun.com>
+	<4A3C0CF2.1080809@cray.com>
+	<06b201c9f362$49015b20$db041160$@com> <4A3FCB96.4010201@cray.com>
+	<003301c9f401$1adb8af0$5092a0d0$@com>
+	<20090623145316.GC31668@webber.adilger.int>
+Message-ID: <3A1C008D-287F-42DE-B1F8-2D6D042A1138@sun.com>
+
+
+On Jun 23, 2009, at 07:53 , Andreas Dilger wrote:
+
+> On Jun 23, 2009  13:49 +0100, Eric Barton wrote:
+>> Yes, of course, you can just tune down the recovery window in the
+>> knowledge that explicit notification has speeded the whole process of
+>> client reconnection.  However if you have better knowledge about
+>> client health than Lustre can have - e.g. hardware-specific health
+>> monitoring, or just using the success/failure of the explicit
+>> notification method itself - then why not use it to control exactly
+>> when to stop waiting for dead clients?
+>
+> Yes, to restate this in a different way - the only way that Lustre  
+> itself
+> knows that some client will NOT be participating is after the  
+> timeout has
+> expired.  If there is some external mechanism that can inform Lustre  
+> that
+> one or more clients are dead and will not be participating in recovery
+> then the recovery does not need to wait for the timeout.
+
+The external mechanism should just evict the known dead clients from  
+the server as soon as it discovers them so the server can begin  
+recovery as soon as the live clients connect. Then we don't need to  
+worry about the timeout.
+
+robert
+
+
+
+

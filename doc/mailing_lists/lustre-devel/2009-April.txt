@@ -1,0 +1,4064 @@
+From eeb at sun.com  Wed Apr  1 01:17:17 2009
+From: eeb at sun.com (Eric Barton)
+Date: Wed, 01 Apr 2009 09:17:17 +0100
+Subject: [Lustre-devel] WBC HLD outline
+In-Reply-To: <200903240058.30343.alexander.zarochentsev@sun.com>
+References: <200903240058.30343.alexander.zarochentsev@sun.com>
+Message-ID: <00a001c9b2a2$45665430$d032fc90$@com>
+
+Zam,
+
+Some notes on the WBC HLD outline
+
+1. The requirement is for 32K creates/second on one node of small
+   files with a random size of up to 64K.  It's basically HPCS IO
+   Scenario 4.
+
+2. Reintegration must change the filesystem from one consistent state
+   to another consistent state _atomically_.
+
+3. Not all the updates in a batch for 1 server need to have the same
+   epoch number - i.e. being forced to advance your epoch
+   (e.g. because you acquired a lock) doesn't force you to create
+   a new batch.
+
+   I think this got mentioned in other emails.
+
+4. Most readers won't know what "bulk transfers are used" for batches.
+
+5. Is ensuring file data is delayed until file creation is
+   reintegrated sufficient for correct operation?  Are we not
+   effectively doing create-on-write with a WBC?  I'm sure there
+   are more issues (e.g. orphans).
+
+   Does including the OSTs in epoch recovery solve all the issues?  If
+   so, what are the expected bounds on client redo and server undo
+   storage?  Can we avoid needing server undo for data with some
+   compromises?  Can we exploit the DMU at all?
+
+6. The section on recovering from WBC client death seems imprecise.
+   Is (a) just describing V1-4 in Nikita's original post - similarly
+   (b) for V1-2, V3'-5'?  Also, for (c) I think we may have discussed
+   the possibility of always sending updates as the full operation +
+   context to select which updates apply locally so that an operation
+   can always be recovered from any of its updates.
+
+    Cheers,
+              Eric
+
+
+
+From nic at cray.com  Wed Apr  1 05:55:38 2009
+From: nic at cray.com (Nic Henke)
+Date: Wed, 01 Apr 2009 07:55:38 -0500
+Subject: [Lustre-devel] SeaStar message priority
+In-Reply-To: <74EA92D6-25E8-42DA-A4FD-BDDCED233244@Sun.COM>
+References: <74EA92D6-25E8-42DA-A4FD-BDDCED233244@Sun.COM>
+Message-ID: <49D3644A.9090001@cray.com>
+
+Oleg Drokin wrote:
+> Hello!
+>
+>    It came to my attention that seastar network does not implement  
+> message priorities for various reasons.
+>    I really think there is very valid case for the priorities of some  
+> sort to allow MPI and other
+>    latency-critical traffic to go in front of bulk IO traffic on the  
+> wire.
+>   
+In the ptllnd, the bulk traffic is setup via short messages, so if the
+barrier is sent right after the write() returns, it really isn't backed
+up behind the bulk data.
+
+>    Consider this test I was running the other day on Jaguar. The  
+> application writes 250M of data from every
+>    core with plain write() system call, the write() syscall returns  
+> very fast (less than 0.5 sec == 400+Mb/sec
+>    app-perceived bandwidth) because the data just goes to the memory  
+> cache to be flushed later.
+>    Then I do 2 barriers one by one with nothing in between.
+>    If I run it at sufficient scale (say 1200 cores), the first barrier  
+> takes 4.5 seconds to complete and
+>    the second one 1.5 seconds, all due to MPI RPCs being stuck behind  
+> huge bulk data requests on the clients,
+>    presumably (I do not have any other good explanations at least).
+>    This makes for a lot of wasted time in applications that would like  
+> to use the buffering capabilities provided
+>    by the OS.
+>   
+This sounds much more like barrier jitter than backup. The network is
+capable of servicing the 250M in < .15s. It would be my guess that some
+of the writes() are taking longer than others and this is causing the
+barrier to be delayed.
+
+A few questions:
+- how many OSS/OSTs are you writing to ?
+- can you post the MPI app you are using to do this ?
+
+The application folks @ ORNL should be able to help you use Craypat or
+Apprentice to get some runtime data on this app to find where the time
+is going. Until we have hard data, I don't think we can blame the network.
+
+Cheers,
+Nic
+
+
+
+From lee at sandia.gov  Wed Apr  1 07:26:45 2009
+From: lee at sandia.gov (Lee Ward)
+Date: Wed, 1 Apr 2009 08:26:45 -0600
+Subject: [Lustre-devel] SeaStar message priority
+In-Reply-To: <74EA92D6-25E8-42DA-A4FD-BDDCED233244@Sun.COM>
+References: <74EA92D6-25E8-42DA-A4FD-BDDCED233244@Sun.COM>
+Message-ID: <1238596005.5091.31.camel@wheel>
+
+On Tue, 2009-03-31 at 22:43 -0600, Oleg Drokin wrote:
+> Hello!
+> 
+>    It came to my attention that seastar network does not implement  
+> message priorities for various reasons.
+
+That is incorrect. The seastar network does implement at least one
+priority scheme based on age. It's not something an application can play
+with if I remember right.
+
+>    I really think there is very valid case for the priorities of some  
+> sort to allow MPI and other
+>    latency-critical traffic to go in front of bulk IO traffic on the  
+> wire.
+
+That would be very difficult to implement without making starvation
+scenarios trivial.
+
+>    Consider this test I was running the other day on Jaguar. The  
+> application writes 250M of data from every
+>    core with plain write() system call, the write() syscall returns  
+> very fast (less than 0.5 sec == 400+Mb/sec
+>    app-perceived bandwidth) because the data just goes to the memory  
+> cache to be flushed later.
+>    Then I do 2 barriers one by one with nothing in between.
+>    If I run it at sufficient scale (say 1200 cores), the first barrier  
+> takes 4.5 seconds to complete and
+>    the second one 1.5 seconds, all due to MPI RPCs being stuck behind  
+> huge bulk data requests on the clients,
+>    presumably (I do not have any other good explanations at least).
+>    This makes for a lot of wasted time in applications that would like  
+> to use the buffering capabilities provided
+>    by the OS.
+
+I strongly suspect OS jitter, probably related to FS activity, is a much
+more likely explanation for the above. If just one node has the
+process/rank suspended then it can't service the barrier; All will wait
+until it can.
+
+Jitter gets a bad rap. Usually for good reason. However, in this case,
+it doesn't seem something to worry overly much about as it will cease.
+Your test says the 1st barrier after the write completes in 4.5 sec and
+the 2nd in 1.5 sec. That seems to imply the jitter is settling pretty
+rapidly. Jitter is really only bad when it is chronic.
+
+To me, you are worrying way too much about the situation immediately
+after a write. Checkpoints are relatively rare, with long periods
+between. Why worry about something that's only going to affect a very
+small portion of the overall job? As long as the jitter dissipates in a
+short time, things will work out fine.
+
+Maybe you could convince yourself of the efficacy of write-back caching
+in this scenario by altering the  app to do an fsync() after the write
+phase on the node but before the barrier? If the app can get back to
+computing, even with the jitter-disrupted barrier, faster than it could
+by waiting for the outstanding dirty buffers to be flushed then it's a
+net win to just live with the jitter, no?
+
+		--Lee
+
+> 
+>    Do you think something like this could be organized if not for  
+> current revision then at least for the next
+>    version?
+> 
+> Bye,
+>      Oleg
+>   
+>   
+> _______________________________________________
+> Lustre-devel mailing list
+> Lustre-devel at lists.lustre.org
+> http://lists.lustre.org/mailman/listinfo/lustre-devel
+> 
+
+
+
+
+From Oleg.Drokin at Sun.COM  Wed Apr  1 08:02:04 2009
+From: Oleg.Drokin at Sun.COM (Oleg Drokin)
+Date: Wed, 01 Apr 2009 11:02:04 -0400
+Subject: [Lustre-devel] SeaStar message priority
+In-Reply-To: <49D3644A.9090001@cray.com>
+References: <74EA92D6-25E8-42DA-A4FD-BDDCED233244@Sun.COM>
+	<49D3644A.9090001@cray.com>
+Message-ID: <55153681-EA57-489A-ACD0-6A65EC03B6AB@Sun.COM>
+
+Hello!
+
+On Apr 1, 2009, at 8:55 AM, Nic Henke wrote:
+>>   It came to my attention that seastar network does not implement
+>> message priorities for various reasons.
+>>   I really think there is very valid case for the priorities of some
+>> sort to allow MPI and other
+>>   latency-critical traffic to go in front of bulk IO traffic on the
+>> wire.
+> In the ptllnd, the bulk traffic is setup via short messages, so if the
+> barrier is sent right after the write() returns, it really isn't  
+> backed
+> up behind the bulk data.
+
+Yes, it is.
+Lustre starts to send RPCs as soon as 1M (+16) pages of data per RPC  
+become
+available for sending.
+So by the time write() syscall for 250M returns, I already potentially  
+have
+16 (stripe count) * 4 (core count) * 8 (rpcs in flight) MB in flight
+from this particular node (since chances are OSTs already accepted the
+transfers if there are free threads).
+
+> This sounds much more like barrier jitter than backup. The network is
+> capable of servicing the 250M in < .15s. It would be my guess that  
+> some
+> of the writes() are taking longer than others and this is causing the
+> barrier to be delayed.
+
+No.
+I time each individual write separately.
+I know all writes start at the same time (there is barrier before them),
+I know that each write finishes in aprox 0.5 sec as well.
+
+> A few questions:
+> - how many OSS/OSTs are you writing to ?
+
+up to 16 * 4 from a single node.
+
+> - can you post the MPI app you are using to do this ?
+
+Sure.
+Attached. (with example output)
+
+> The application folks @ ORNL should be able to help you use Craypat or
+> Apprentice to get some runtime data on this app to find where the time
+> is going. Until we have hard data, I don't think we can blame the  
+> network.
+
+Interesting idea.
+Please notice if I run the code at a scale of 4, barrier is instant.
+As I scale up node count, barrier time begins to rise.
+
+In the output you can see I run the code twice in a row.
+This is done to make sure the grant is primed in case it was not, to  
+take
+entire amount of data into the cache (otherwise in some runs some
+individual writes take significant time to complete invalidating the  
+test).
+Another thing of note is that since I did not want to take any chances,
+the working files are precreated externally so that no files
+share any ost for a single node, and the app itself just opens the  
+files,
+not creates them.
+
+
+Bye,
+     Oleg
+-------------- next part --------------
+A non-text attachment was scrubbed...
+Name: writespeed-big.c
+Type: application/octet-stream
+Size: 3955 bytes
+Desc: not available
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20090401/adcae1f6/attachment.obj>
+-------------- next part --------------
+A non-text attachment was scrubbed...
+Name: writespeed_big.o555745
+Type: application/octet-stream
+Size: 320418 bytes
+Desc: not available
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20090401/adcae1f6/attachment-0001.obj>
+-------------- next part --------------
+A non-text attachment was scrubbed...
+Name: writespeed_big.pbs
+Type: application/octet-stream
+Size: 362 bytes
+Desc: not available
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20090401/adcae1f6/attachment-0002.obj>
+
+From Nathan.Rutman at Sun.COM  Wed Apr  1 08:13:09 2009
+From: Nathan.Rutman at Sun.COM (Nathaniel Rutman)
+Date: Wed, 01 Apr 2009 08:13:09 -0700
+Subject: [Lustre-devel] Start the MGS first?
+In-Reply-To: <1238011240.6090.16.camel@pc.interlinx.bc.ca>
+References: <49CA8A73.9080103@sun.com>
+	<1238011240.6090.16.camel@pc.interlinx.bc.ca>
+Message-ID: <49D38485.3090801@sun.com>
+
+Brian J. Murrell wrote:
+> On Wed, 2009-03-25 at 12:48 -0700, Nathaniel Rutman wrote:
+>   
+>> As of Lustre 1.6, servers can be started in any order (after the initial registration at first startup).  Internally, this required significant bending of our connection rules, and with a move toward ZFS becomes even more burdensome.  
+>> So my question to the Lustre community is this: would anyone strenuously object to a startup ordering requirement that the MGS must be started before any other servers?  
+>> This would probably be in the Lustre 3.0 timeframe.  It is also likely that we will have to divorce the MGS and MDT onto separate devices -- no more "combo" MDT/MGSes. 
+>>     
+>
+> I'll ask before anyone else does... would this require the MGS be
+> available at any time a server (or client?) needs to start rather than
+> the optional behaviour (for anything but first time server starts) that
+> we currently enjoy?  IOW, does this make the MGS a much more critical
+> component of the filesystem than it is currently?
+>   
+yes.    It's already required for client starts.  What we would do is 
+have the MDT / OST server mounts block until the MGS is up, probably 
+with a timeout.
+And yes, this will be some amount less flexible than the current startup 
+order, but we gain advantages from it - simplified import states, more 
+centralized configuration, single-path disk access.  The question is how 
+burdensome really will this limitation be.  So far I have not heard very 
+much gnashing of teeth and rending of garments.
+
+
+From Oleg.Drokin at Sun.COM  Wed Apr  1 08:14:19 2009
+From: Oleg.Drokin at Sun.COM (Oleg Drokin)
+Date: Wed, 01 Apr 2009 11:14:19 -0400
+Subject: [Lustre-devel] SeaStar message priority
+In-Reply-To: <1238596005.5091.31.camel@wheel>
+References: <74EA92D6-25E8-42DA-A4FD-BDDCED233244@Sun.COM>
+	<1238596005.5091.31.camel@wheel>
+Message-ID: <D3750FED-36ED-4B07-9499-A8ABA7A2FCDA@Sun.COM>
+
+Hello!
+
+On Apr 1, 2009, at 10:26 AM, Lee Ward wrote:
+>>   It came to my attention that seastar network does not implement
+>> message priorities for various reasons.
+> That is incorrect. The seastar network does implement at least one
+> priority scheme based on age. It's not something an application can  
+> play
+> with if I remember right.
+
+Well, then it's as good as none for our purposes, I think?
+
+> I strongly suspect OS jitter, probably related to FS activity, is a  
+> much
+> more likely explanation for the above. If just one node has the
+> process/rank suspended then it can't service the barrier; All will  
+> wait
+> until it can.
+
+That's of course right and possible too.
+Though given how nothing else is running on the nodes, I would think
+it is somewhat irrelevant, since there is nothing else to give  
+resources to.
+The Lustre processing of the outgoing queue is pretty fast in itself at
+this phase.
+Do you think it would be useful if I just run 1 thread per node, there  
+would be
+3 empty cores to adsorb all the jitter there might be then?
+
+> Jitter gets a bad rap. Usually for good reason. However, in this case,
+> it doesn't seem something to worry overly much about as it will cease.
+> Your test says the 1st barrier after the write completes in 4.5 sec  
+> and
+> the 2nd in 1.5 sec. That seems to imply the jitter is settling pretty
+> rapidly. Jitter is really only bad when it is chronic.
+
+Well, 4.5*1200 = 1.5 hours of completely wasted cputime for my  
+specific job.
+So I thought it would be a good idea to get to the root of it.
+We hear many arguments here at the lab that "what good the buffered io  
+is for
+me when my app performance is degraded if I don't do sync. I'll just do
+the sync and be over with it". Of course I believe there is still  
+benefit to not
+doing the sync, but that's just me.
+
+> To me, you are worrying way too much about the situation immediately
+> after a write. Checkpoints are relatively rare, with long periods
+> between. Why worry about something that's only going to affect a very
+> small portion of the overall job? As long as the jitter dissipates  
+> in a
+> short time, things will work out fine.
+
+I worry abut it specifically because users tend to do sync after the  
+write and that
+wastes a lot of time. So as a result - I want as much of data to enter  
+into cache
+and then trickle out all by itself and I want users not to see any bad  
+effects
+(or otherwise to show to them that there are still benefits).
+
+> Maybe you could convince yourself of the efficacy of write-back  
+> caching
+> in this scenario by altering the  app to do an fsync() after the write
+> phase on the node but before the barrier? If the app can get back to
+> computing, even with the jitter-disrupted barrier, faster than it  
+> could
+> by waiting for the outstanding dirty buffers to be flushed then it's a
+> net win to just live with the jitter, no?
+
+I do not need to convince myself. IT's the app programmers that are  
+fixated
+on "oh, look, my program is slower after the write if I do not do  
+sync, I must
+do sync!"
+
+Bye,
+     Oleg
+
+
+From Nathan.Rutman at Sun.COM  Wed Apr  1 08:16:40 2009
+From: Nathan.Rutman at Sun.COM (Nathaniel Rutman)
+Date: Wed, 01 Apr 2009 08:16:40 -0700
+Subject: [Lustre-devel] [Lustre-discuss] Start the MGS first?
+In-Reply-To: <1238103314.4115.11.camel@sledge.emsl.pnl.gov>
+References: <49CA8A73.9080103@sun.com>
+	<1238103314.4115.11.camel@sledge.emsl.pnl.gov>
+Message-ID: <49D38558.2040709@sun.com>
+
+Kevin Fox wrote:
+> On Wed, 2009-03-25 at 12:48 -0700, Nathaniel Rutman wrote:
+>   
+>> As of Lustre 1.6, servers can be started in any order (after the
+>> initial registration at first startup).  Internally, this required
+>> significant bending of our connection rules, and with a move toward
+>> ZFS becomes even more burdensome. 
+>> So my question to the Lustre community is this: would anyone
+>> strenuously object to a startup ordering requirement that the MGS must
+>> be started before any other servers? 
+>> This would probably be in the Lustre 3.0 timeframe.  It is also likely
+>> that we will have to divorce the MGS and MDT onto separate devices --
+>> no more "combo" MDT/MGSes.
+>>
+>>     
+>
+> "server startup" being, things wont start working until the MGS is up,
+> or, server startup commands will fail if the MGS is not up?
+>
+> The former, is much better then the latter. It allows the system to
+> potentially bring itself back up automatically if things get rebooted
+> (power bump, spike, etc).
+>
+>   
+The former.  Server mount commands would just block until the MGS was 
+available (probably with an optional timeout).  So the only thing that 
+would fail is serialized startup of OST before MGS -- independent, 
+unordered startup would sort itself out.
+> Kevin
+>
+>   
+>>>>  NR> I think the only reason to have a local config file is to be
+>>>>         
+>> able to
+>>     
+>>>>  NR> start a server in the absence of the MGS.  How much effort do
+>>>>         
+>> we want
+>>     
+>>>>  NR> to expend to be able to keep that ability?  I don't think
+>>>>         
+>> it's a huge
+>>     
+>>>>  NR> burden to say "MGS must be started first".
+>>>>         
+>> _______________________________________________
+>> Lustre-discuss mailing list
+>> Lustre-discuss at lists.lustre.org
+>> http://lists.lustre.org/mailman/listinfo/lustre-discuss
+>>
+>>
+>>     
+>
+> _______________________________________________
+> Lustre-devel mailing list
+> Lustre-devel at lists.lustre.org
+> http://lists.lustre.org/mailman/listinfo/lustre-devel
+>   
+
+
+
+From lee at sandia.gov  Wed Apr  1 08:58:26 2009
+From: lee at sandia.gov (Lee Ward)
+Date: Wed, 1 Apr 2009 09:58:26 -0600
+Subject: [Lustre-devel] SeaStar message priority
+In-Reply-To: <D3750FED-36ED-4B07-9499-A8ABA7A2FCDA@Sun.COM>
+References: <74EA92D6-25E8-42DA-A4FD-BDDCED233244@Sun.COM>
+	<1238596005.5091.31.camel@wheel>
+	<D3750FED-36ED-4B07-9499-A8ABA7A2FCDA@Sun.COM>
+Message-ID: <1238601506.5091.65.camel@wheel>
+
+On Wed, 2009-04-01 at 09:14 -0600, Oleg Drokin wrote:
+> Hello!
+> 
+> On Apr 1, 2009, at 10:26 AM, Lee Ward wrote:
+> >>   It came to my attention that seastar network does not implement
+> >> message priorities for various reasons.
+> > That is incorrect. The seastar network does implement at least one
+> > priority scheme based on age. It's not something an application can  
+> > play
+> > with if I remember right.
+> 
+> Well, then it's as good as none for our purposes, I think?
+
+Other than that traffic moves (only very roughly) in a fair manner and
+that packets from different nodes can arrive out of order, I guess.
+
+I think my point was that there is already a priority scheme in the
+Seastar. Are there additional bits related to priority that you might
+use, also?
+
+> 
+> > I strongly suspect OS jitter, probably related to FS activity, is a  
+> > much
+> > more likely explanation for the above. If just one node has the
+> > process/rank suspended then it can't service the barrier; All will  
+> > wait
+> > until it can.
+> 
+> That's of course right and possible too.
+> Though given how nothing else is running on the nodes, I would think
+> it is somewhat irrelevant, since there is nothing else to give  
+> resources to.
+
+How and where memory is used on two nodes is different. How, where,
+when, scheduling occurs on two nodes is different. Any two nodes, even
+running the same app with barrier synchronization, perform things at
+different times outside of the barriers; They very quickly desynchronize
+in the presence of jitter.
+
+> The Lustre processing of the outgoing queue is pretty fast in itself at
+> this phase.
+> Do you think it would be useful if I just run 1 thread per node, there  
+> would be
+> 3 empty cores to adsorb all the jitter there might be then?
+
+You will still get jitter. I would hope less, though, so it wouldn't
+hurt to try to leave at least one idle core. We've toyed with the idea
+of leaving a core idle for IO and other background processing in the
+past. The idea was a non-starter with our apps folks though. Maybe the
+ORNL folks will feel differently?
+
+> 
+> > Jitter gets a bad rap. Usually for good reason. However, in this case,
+> > it doesn't seem something to worry overly much about as it will cease.
+> > Your test says the 1st barrier after the write completes in 4.5 sec  
+> > and
+> > the 2nd in 1.5 sec. That seems to imply the jitter is settling pretty
+> > rapidly. Jitter is really only bad when it is chronic.
+> 
+> Well, 4.5*1200 = 1.5 hours of completely wasted cputime for my  
+> specific job.
+
+That 1200 is the number of checkpoints? If so, I agree. If it's the
+number of nodes, I do not.
+
+> So I thought it would be a good idea to get to the root of it.
+> We hear many arguments here at the lab that "what good the buffered io  
+> is for
+> me when my app performance is degraded if I don't do sync. I'll just do
+> the sync and be over with it". Of course I believe there is still  
+> benefit to not
+> doing the sync, but that's just me.
+
+If the time to settle the jitter is on the order of 10 seconds but it
+takes 15 seconds to sync, it would be better to live with the jitter,
+no? I suggested an experiment to make this comparison. Why argue with
+them? just do the experiment and you can know which strategy is better.
+
+> 
+> > To me, you are worrying way too much about the situation immediately
+> > after a write. Checkpoints are relatively rare, with long periods
+> > between. Why worry about something that's only going to affect a very
+> > small portion of the overall job? As long as the jitter dissipates  
+> > in a
+> > short time, things will work out fine.
+> 
+> I worry abut it specifically because users tend to do sync after the  
+> write and that
+> wastes a lot of time. So as a result - I want as much of data to enter  
+> into cache
+> and then trickle out all by itself and I want users not to see any bad  
+> effects
+> (or otherwise to show to them that there are still benefits).
+
+Users tend to do sync for more reasons than making the IO deterministic.
+They should be doing it so that they can have some faith that the last
+checkpoint is actually persistent when interrupted.
+
+However, they should do the sync right before they enter the IO phase,
+in order to also get the benefits of write-back caching. Not after the
+IO phase. In the event of an interrupt, this forces them to throw away
+an in-progress checkpoint and the last one before that, to be safe, but
+the one before the last should be good.
+
+The apps could also be more reasonable about their checkpoints, I've
+noticed. Often, for us anyway, the machine just behaves. If the app
+began by assuming the machine was unreliable but as it ran for longer
+and longer periods, it could (I argue should) allow the period between
+checkpoints to grow. If the idea is to make progress, as I'm told, then
+on a well behaved machine far fewer checkpoints are required. Most apps,
+though, just use a fixed period and waste a lot of time doing their
+checkpoints when the machine is being nice to them.
+
+> 
+> > Maybe you could convince yourself of the efficacy of write-back  
+> > caching
+> > in this scenario by altering the  app to do an fsync() after the write
+> > phase on the node but before the barrier? If the app can get back to
+> > computing, even with the jitter-disrupted barrier, faster than it  
+> > could
+> > by waiting for the outstanding dirty buffers to be flushed then it's a
+> > net win to just live with the jitter, no?
+> 
+> I do not need to convince myself. IT's the app programmers that are  
+> fixated
+> on "oh, look, my program is slower after the write if I do not do  
+> sync, I must
+> do sync!"
+
+Try the experiment. Show them the data. They are, in theory, reasoning
+people, right?
+
+In some cases, your app programmers will be unfortunately correct. An
+app that uses so much memory that the system cannot buffer the entire
+write will incur at least some issues while doing IO; Some of the IO
+must move synchronously and that amount will differ from node to node.
+This will have the effect of magnifying this post-IO jitter they are so
+worried about. It is also why I wrote in the original requirements for
+Lustre that if write-back caching is employed there must be a way to
+turn it off.
+
+If they aren't sizing their app for the node's physical memory, though,
+I would think that the experiment should show that write-back caching is
+a win.
+
+		--Lee
+
+> 
+> Bye,
+>      Oleg
+> 
+
+
+
+
+From eeb at sun.com  Wed Apr  1 09:20:36 2009
+From: eeb at sun.com (Eric Barton)
+Date: Wed, 01 Apr 2009 17:20:36 +0100
+Subject: [Lustre-devel] SeaStar message priority
+In-Reply-To: <1238601506.5091.65.camel@wheel>
+References: <74EA92D6-25E8-42DA-A4FD-BDDCED233244@Sun.COM>
+	<1238596005.5091.31.camel@wheel>
+	<D3750FED-36ED-4B07-9499-A8ABA7A2FCDA@Sun.COM>
+	<1238601506.5091.65.camel@wheel>
+Message-ID: <004101c9b2e5$cc74ee80$655ecb80$@com>
+
+Lee,
+
+I completely agree with your comments on measurement.  I'd
+really, really like to see some.
+
+    Cheers,
+              Eric
+
+> -----Original Message-----
+> From: lustre-devel-bounces at lists.lustre.org [mailto:lustre-devel-bounces at lists.lustre.org] On Behalf Of Lee Ward
+> Sent: 01 April 2009 4:58 PM
+> To: Oleg Drokin
+> Cc: Lustre Development Mailing List
+> Subject: Re: [Lustre-devel] SeaStar message priority
+> 
+> On Wed, 2009-04-01 at 09:14 -0600, Oleg Drokin wrote:
+> > Hello!
+> >
+> > On Apr 1, 2009, at 10:26 AM, Lee Ward wrote:
+> > >>   It came to my attention that seastar network does not implement
+> > >> message priorities for various reasons.
+> > > That is incorrect. The seastar network does implement at least one
+> > > priority scheme based on age. It's not something an application can
+> > > play
+> > > with if I remember right.
+> >
+> > Well, then it's as good as none for our purposes, I think?
+> 
+> Other than that traffic moves (only very roughly) in a fair manner and
+> that packets from different nodes can arrive out of order, I guess.
+> 
+> I think my point was that there is already a priority scheme in the
+> Seastar. Are there additional bits related to priority that you might
+> use, also?
+> 
+> >
+> > > I strongly suspect OS jitter, probably related to FS activity, is a
+> > > much
+> > > more likely explanation for the above. If just one node has the
+> > > process/rank suspended then it can't service the barrier; All will
+> > > wait
+> > > until it can.
+> >
+> > That's of course right and possible too.
+> > Though given how nothing else is running on the nodes, I would think
+> > it is somewhat irrelevant, since there is nothing else to give
+> > resources to.
+> 
+> How and where memory is used on two nodes is different. How, where,
+> when, scheduling occurs on two nodes is different. Any two nodes, even
+> running the same app with barrier synchronization, perform things at
+> different times outside of the barriers; They very quickly desynchronize
+> in the presence of jitter.
+> 
+> > The Lustre processing of the outgoing queue is pretty fast in itself at
+> > this phase.
+> > Do you think it would be useful if I just run 1 thread per node, there
+> > would be
+> > 3 empty cores to adsorb all the jitter there might be then?
+> 
+> You will still get jitter. I would hope less, though, so it wouldn't
+> hurt to try to leave at least one idle core. We've toyed with the idea
+> of leaving a core idle for IO and other background processing in the
+> past. The idea was a non-starter with our apps folks though. Maybe the
+> ORNL folks will feel differently?
+> 
+> >
+> > > Jitter gets a bad rap. Usually for good reason. However, in this case,
+> > > it doesn't seem something to worry overly much about as it will cease.
+> > > Your test says the 1st barrier after the write completes in 4.5 sec
+> > > and
+> > > the 2nd in 1.5 sec. That seems to imply the jitter is settling pretty
+> > > rapidly. Jitter is really only bad when it is chronic.
+> >
+> > Well, 4.5*1200 = 1.5 hours of completely wasted cputime for my
+> > specific job.
+> 
+> That 1200 is the number of checkpoints? If so, I agree. If it's the
+> number of nodes, I do not.
+> 
+> > So I thought it would be a good idea to get to the root of it.
+> > We hear many arguments here at the lab that "what good the buffered io
+> > is for
+> > me when my app performance is degraded if I don't do sync. I'll just do
+> > the sync and be over with it". Of course I believe there is still
+> > benefit to not
+> > doing the sync, but that's just me.
+> 
+> If the time to settle the jitter is on the order of 10 seconds but it
+> takes 15 seconds to sync, it would be better to live with the jitter,
+> no? I suggested an experiment to make this comparison. Why argue with
+> them? just do the experiment and you can know which strategy is better.
+> 
+> >
+> > > To me, you are worrying way too much about the situation immediately
+> > > after a write. Checkpoints are relatively rare, with long periods
+> > > between. Why worry about something that's only going to affect a very
+> > > small portion of the overall job? As long as the jitter dissipates
+> > > in a
+> > > short time, things will work out fine.
+> >
+> > I worry abut it specifically because users tend to do sync after the
+> > write and that
+> > wastes a lot of time. So as a result - I want as much of data to enter
+> > into cache
+> > and then trickle out all by itself and I want users not to see any bad
+> > effects
+> > (or otherwise to show to them that there are still benefits).
+> 
+> Users tend to do sync for more reasons than making the IO deterministic.
+> They should be doing it so that they can have some faith that the last
+> checkpoint is actually persistent when interrupted.
+> 
+> However, they should do the sync right before they enter the IO phase,
+> in order to also get the benefits of write-back caching. Not after the
+> IO phase. In the event of an interrupt, this forces them to throw away
+> an in-progress checkpoint and the last one before that, to be safe, but
+> the one before the last should be good.
+> 
+> The apps could also be more reasonable about their checkpoints, I've
+> noticed. Often, for us anyway, the machine just behaves. If the app
+> began by assuming the machine was unreliable but as it ran for longer
+> and longer periods, it could (I argue should) allow the period between
+> checkpoints to grow. If the idea is to make progress, as I'm told, then
+> on a well behaved machine far fewer checkpoints are required. Most apps,
+> though, just use a fixed period and waste a lot of time doing their
+> checkpoints when the machine is being nice to them.
+> 
+> >
+> > > Maybe you could convince yourself of the efficacy of write-back
+> > > caching
+> > > in this scenario by altering the  app to do an fsync() after the write
+> > > phase on the node but before the barrier? If the app can get back to
+> > > computing, even with the jitter-disrupted barrier, faster than it
+> > > could
+> > > by waiting for the outstanding dirty buffers to be flushed then it's a
+> > > net win to just live with the jitter, no?
+> >
+> > I do not need to convince myself. IT's the app programmers that are
+> > fixated
+> > on "oh, look, my program is slower after the write if I do not do
+> > sync, I must
+> > do sync!"
+> 
+> Try the experiment. Show them the data. They are, in theory, reasoning
+> people, right?
+> 
+> In some cases, your app programmers will be unfortunately correct. An
+> app that uses so much memory that the system cannot buffer the entire
+> write will incur at least some issues while doing IO; Some of the IO
+> must move synchronously and that amount will differ from node to node.
+> This will have the effect of magnifying this post-IO jitter they are so
+> worried about. It is also why I wrote in the original requirements for
+> Lustre that if write-back caching is employed there must be a way to
+> turn it off.
+> 
+> If they aren't sizing their app for the node's physical memory, though,
+> I would think that the experiment should show that write-back caching is
+> a win.
+> 
+> 		--Lee
+> 
+> >
+> > Bye,
+> >      Oleg
+> >
+> 
+> 
+> _______________________________________________
+> Lustre-devel mailing list
+> Lustre-devel at lists.lustre.org
+> http://lists.lustre.org/mailman/listinfo/lustre-devel
+
+
+
+From Oleg.Drokin at Sun.COM  Wed Apr  1 09:35:29 2009
+From: Oleg.Drokin at Sun.COM (Oleg Drokin)
+Date: Wed, 01 Apr 2009 12:35:29 -0400
+Subject: [Lustre-devel] SeaStar message priority
+In-Reply-To: <1238601506.5091.65.camel@wheel>
+References: <74EA92D6-25E8-42DA-A4FD-BDDCED233244@Sun.COM>
+	<1238596005.5091.31.camel@wheel>
+	<D3750FED-36ED-4B07-9499-A8ABA7A2FCDA@Sun.COM>
+	<1238601506.5091.65.camel@wheel>
+Message-ID: <F939F52D-614F-4CA8-A80F-50CE31E3303A@Sun.COM>
+
+Hello!
+
+On Apr 1, 2009, at 11:58 AM, Lee Ward wrote:
+> I think my point was that there is already a priority scheme in the
+> Seastar. Are there additional bits related to priority that you might
+> use, also?
+
+But if we cannot use it, there is none.
+Like we want mpi rpcs go out first to some degree.
+
+>>> I strongly suspect OS jitter, probably related to FS activity, is a
+>>> much
+>>> more likely explanation for the above. If just one node has the
+>>> process/rank suspended then it can't service the barrier; All will
+>>> wait
+>>> until it can.
+>> That's of course right and possible too.
+>> Though given how nothing else is running on the nodes, I would think
+>> it is somewhat irrelevant, since there is nothing else to give
+>> resources to.
+> How and where memory is used on two nodes is different. How, where,
+
+That's irrelevant.
+
+> when, scheduling occurs on two nodes is different. Any two nodes, even
+> running the same app with barrier synchronization, perform things at
+> different times outside of the barriers; They very quickly  
+> desynchronize
+> in the presence of jitter.
+
+But since the only thing I have in my app inside barriers is write call,
+there is no much way to desynchronize.
+
+>> The Lustre processing of the outgoing queue is pretty fast in  
+>> itself at
+>> this phase.
+>> Do you think it would be useful if I just run 1 thread per node,  
+>> there
+>> would be
+>> 3 empty cores to adsorb all the jitter there might be then?
+> You will still get jitter. I would hope less, though, so it wouldn't
+> hurt to try to leave at least one idle core. We've toyed with the idea
+> of leaving a core idle for IO and other background processing in the
+> past. The idea was a non-starter with our apps folks though. Maybe the
+> ORNL folks will feel differently?
+
+No, I do not think they would like the idea to forfeit 1/4 of their
+CPU just so io is better.
+If the jitter is due to cpu occupied with io, and apps stalled due to  
+this
+(though I have hard time believing an app to be not given a cpu for  
+4.5 seconds,
+even though there are potentially 4 idle cpus, or even 3 (remember  
+other cores are
+also idle waiting on a barrier).
+
+>>> Jitter gets a bad rap. Usually for good reason. However, in this  
+>>> case,
+>>> it doesn't seem something to worry overly much about as it will  
+>>> cease.
+>>> Your test says the 1st barrier after the write completes in 4.5 sec
+>>> and
+>>> the 2nd in 1.5 sec. That seems to imply the jitter is settling  
+>>> pretty
+>>> rapidly. Jitter is really only bad when it is chronic.
+>> Well, 4.5*1200 = 1.5 hours of completely wasted cputime for my
+>> specific job.
+> That 1200 is the number of checkpoints? If so, I agree. If it's the
+> number of nodes, I do not.
+
+1200 is number of cores waiting on a barrier.
+Every core spends 4.5 seconds == total wasted single-cpu core time is  
+1.5 hours.
+And the more often this happens the worse.
+
+>> So I thought it would be a good idea to get to the root of it.
+>> We hear many arguments here at the lab that "what good the buffered  
+>> io
+>> is for
+>> me when my app performance is degraded if I don't do sync. I'll  
+>> just do
+>> the sync and be over with it". Of course I believe there is still
+>> benefit to not
+>> doing the sync, but that's just me.
+> If the time to settle the jitter is on the order of 10 seconds but it
+> takes 15 seconds to sync, it would be better to live with the jitter,
+> no? I suggested an experiment to make this comparison. Why argue with
+> them? just do the experiment and you can know which strategy is  
+> better.
+
+I know which one is better. I did the experiment. (though I have no  
+realistic way
+to measure when "jitter" settles out).
+
+>>> To me, you are worrying way too much about the situation immediately
+>>> after a write. Checkpoints are relatively rare, with long periods
+>>> between. Why worry about something that's only going to affect a  
+>>> very
+>>> small portion of the overall job? As long as the jitter dissipates
+>>> in a
+>>> short time, things will work out fine.
+>> I worry abut it specifically because users tend to do sync after the
+>> write and that
+>> wastes a lot of time. So as a result - I want as much of data to  
+>> enter
+>> into cache
+>> and then trickle out all by itself and I want users not to see any  
+>> bad
+>> effects
+>> (or otherwise to show to them that there are still benefits).
+> Users tend to do sync for more reasons than making the IO  
+> deterministic.
+> They should be doing it so that they can have some faith that the last
+> checkpoint is actually persistent when interrupted.
+
+For that they only need to do fsync before their next checkpoint,
+to make sure that the previous one completed.
+
+> However, they should do the sync right before they enter the IO phase,
+> in order to also get the benefits of write-back caching. Not after the
+> IO phase. In the event of an interrupt, this forces them to throw away
+> an in-progress checkpoint and the last one before that, to be safe,  
+> but
+> the one before the last should be good.
+
+Right.
+Yet they do some microbenchmark and decide it is bad idea.
+Besides, reducing jitter, or whatever is the cause for the delays
+would still be useful.
+
+> In some cases, your app programmers will be unfortunately correct. An
+> app that uses so much memory that the system cannot buffer the entire
+> write will incur at least some issues while doing IO; Some of the IO
+> must move synchronously and that amount will differ from node to node.
+> This will have the effect of magnifying this post-IO jitter they are  
+> so
+> worried about. It is also why I wrote in the original requirements for
+
+Why would it? There still is potentially a benefit for the available
+cache size.
+
+> Lustre that if write-back caching is employed there must be a way to
+> turn it off.
+
+There is around 3 ways to do that that I am aware of.
+
+Bye,
+     Oleg
+
+
+From Michael.Booth at Sun.COM  Wed Apr  1 04:41:44 2009
+From: Michael.Booth at Sun.COM (Michael Booth)
+Date: Wed, 01 Apr 2009 07:41:44 -0400
+Subject: [Lustre-devel] Oleg/Mike Work on Apps Metrics - FW: Mike	Booth
+ week ending 2009.03.15
+In-Reply-To: <5D5BFAF6-9BE2-4778-AE81-A5EEF2A7026A@Sun.COM>
+References: <D691F7E6-6030-4EB9-896C-77201445D865@Sun.COM>
+	<C5E2A328.36EE0%Daniel.Ferber@Sun.Com>
+	<015c01c9a5a7$cb2f83a0$618e8ae0$@com>
+	<52E982EB-3ADE-46FA-A7BC-D1645961DF0B@Sun.COM>
+	<018101c9a5b6$25dbc300$71934900$@com>
+	<48A6CF99-F630-4581-9FFC-05E3AFF66FA0@Sun.COM>
+	<023201c9a636$a987e4b0$fc97ae10$@com>
+	<5CE22E46-771C-47EE-9CAC-26A37C87C466@sun.com>
+	<20090331185111.GL3199@webber.adilger.int> <49D2E0FC.4040605@sun.com>
+	<9BDC2632-E80E-4BA8-9ACF-8D7E70A9B236@Sun.COM>
+	<5D5BFAF6-9BE2-4778-AE81-A5EEF2A7026A@Sun.COM>
+Message-ID: <D68D6931-6B66-468A-A869-9097FC36A08D@Sun.COM>
+
+
+
+On Apr 1, 2009, at 12:34 AM, Oleg Drokin wrote:
+
+> Hello!
+>
+> On Mar 31, 2009, at 11:55 PM, Michael Booth wrote:
+>> (My Opinion) The large size of the I/O request put onto the SeaStar
+>> by the Lustre client is giving it an artificially high priority.
+>> Barriers are just a few bytes, the I/Os from the client are in
+>> megabytes.   SeaStar has no priority in is queue, but  the amount of
+>> time it takes to clear megabyte request results in a priority that
+>> is thousands of times more impact on the hardware than the small
+>> synchronization requests of many collectives.  I am wondering if the
+>> interference from I/O to computation is more an artifact of message
+>> size and bursts,  than of congestion or routing inefficiencies in
+>> seastar..
+>> If there are hundreds of megabytes of request queued up on the
+>> network, and there is no priority way to push a barrier or other
+>> small mpi request up on the queue, it is bound to create a  
+>> disruption.
+>> To borrow the elevator metaphor from Eric,  if all the elevators are
+>> queued up from 8:00 to 9:00 delivering office supplies on carts that
+>> occupy the entire elevator, maybe the carts should be smaller, and
+>> limited to a few per elevator trip.
+>
+> As we discussed in the past, just sending small i/o messages is going
+> to uncover all kinds of slowdowns all the way back to the disk  
+> storage,
+> and the collateral damage would be other tasks that do need fast i/o
+> and do send big chunks of data.
+>
+> Bye,
+>     Oleg
+> _______________________________________________
+
+Don't take my explanation as a general suggestion for all I/O, It is a  
+suggestion for I/O taking place during times of need for high response  
+for mpi.  How to know when the need is high is another issue.
+
+To over extend the metaphor, can the size of the office supply carts  
+be small and the amount number allowed on the elevator up be limited  
+from 8:00 to 9:00 am when the office people traffic is in need of high  
+response?
+
+It is clear to the application  when they are doing synchronous i/o  
+and don't care so much about mpi response and when they are in a stage  
+that a collective response is important.  For example:  the barrier  
+after an fsync is definitely desiring highest response to I/O  
+request.   After a barrier is complete, mpi would likely need highest  
+response, until another user synchronous i/o call, (not to include  
+printf's).  I could even be an explicit call to the Lustre client from  
+the application to switch the priority between states.
+
+Mike
+
+
+
+From lee at sandia.gov  Wed Apr  1 12:13:20 2009
+From: lee at sandia.gov (Lee Ward)
+Date: Wed, 1 Apr 2009 13:13:20 -0600
+Subject: [Lustre-devel] SeaStar message priority
+In-Reply-To: <F939F52D-614F-4CA8-A80F-50CE31E3303A@Sun.COM>
+References: <74EA92D6-25E8-42DA-A4FD-BDDCED233244@Sun.COM>
+	<1238596005.5091.31.camel@wheel>
+	<D3750FED-36ED-4B07-9499-A8ABA7A2FCDA@Sun.COM>
+	<1238601506.5091.65.camel@wheel>
+	<F939F52D-614F-4CA8-A80F-50CE31E3303A@Sun.COM>
+Message-ID: <1238613200.5091.184.camel@wheel>
+
+On Wed, 2009-04-01 at 10:35 -0600, Oleg Drokin wrote:
+> Hello!
+> 
+> On Apr 1, 2009, at 11:58 AM, Lee Ward wrote:
+> > I think my point was that there is already a priority scheme in the
+> > Seastar. Are there additional bits related to priority that you might
+> > use, also?
+> 
+> But if we cannot use it, there is none.
+> Like we want mpi rpcs go out first to some degree.
+
+If you don't want to follow up, I'm ok with that. It's up to you.
+
+I understood what you want. There are at least two things I can imagine
+that would better the situation without trying to leverage something in
+the network, itself.
+
+1) Partition the adapter CAM so that there is always room to accommodate
+a user-space receive.
+2) Prioritize injection to favor sends originating from user-space.
+
+One or both of these might already be implemented. I don't know.
+
+> 
+> >>> I strongly suspect OS jitter, probably related to FS activity, is a
+> >>> much
+> >>> more likely explanation for the above. If just one node has the
+> >>> process/rank suspended then it can't service the barrier; All will
+> >>> wait
+> >>> until it can.
+> >> That's of course right and possible too.
+> >> Though given how nothing else is running on the nodes, I would think
+> >> it is somewhat irrelevant, since there is nothing else to give
+> >> resources to.
+> > How and where memory is used on two nodes is different. How, where,
+> 
+> That's irrelevant.
+> 
+> > when, scheduling occurs on two nodes is different. Any two nodes, even
+> > running the same app with barrier synchronization, perform things at
+> > different times outside of the barriers; They very quickly  
+> > desynchronize
+> > in the presence of jitter.
+> 
+> But since the only thing I have in my app inside barriers is write call,
+> there is no much way to desynchronize.
+
+Modify your test to report the length of time each node spent in the
+barrier (not just rank 0, as it is written now) immediately after the
+write call, then? If you are correct, they will all be roughly the same.
+If they have desynchronized, most will have very long wait times but at
+least one will be relatively short.
+
+> 
+> >> The Lustre processing of the outgoing queue is pretty fast in  
+> >> itself at
+> >> this phase.
+> >> Do you think it would be useful if I just run 1 thread per node,  
+> >> there
+> >> would be
+> >> 3 empty cores to adsorb all the jitter there might be then?
+> > You will still get jitter. I would hope less, though, so it wouldn't
+> > hurt to try to leave at least one idle core. We've toyed with the idea
+> > of leaving a core idle for IO and other background processing in the
+> > past. The idea was a non-starter with our apps folks though. Maybe the
+> > ORNL folks will feel differently?
+> 
+> No, I do not think they would like the idea to forfeit 1/4 of their
+> CPU just so io is better.
+> If the jitter is due to cpu occupied with io, and apps stalled due to  
+> this
+> (though I have hard time believing an app to be not given a cpu for  
+> 4.5 seconds,
+> even though there are potentially 4 idle cpus, or even 3 (remember  
+> other cores are
+> also idle waiting on a barrier).
+
+Oh, I'm sure they're getting the CPU. They just won't come out of the
+barrier until all have processed the operation. The rates at which the
+nodes reach the barrier will be different. The rates at which they
+proceed through will be different. The only invariant after a barrier is
+that all the involved ranks *have* reached that point. Nothing about
+when that happened is stated or implied.
+
+> 
+> >>> Jitter gets a bad rap. Usually for good reason. However, in this  
+> >>> case,
+> >>> it doesn't seem something to worry overly much about as it will  
+> >>> cease.
+> >>> Your test says the 1st barrier after the write completes in 4.5 sec
+> >>> and
+> >>> the 2nd in 1.5 sec. That seems to imply the jitter is settling  
+> >>> pretty
+> >>> rapidly. Jitter is really only bad when it is chronic.
+> >> Well, 4.5*1200 = 1.5 hours of completely wasted cputime for my
+> >> specific job.
+> > That 1200 is the number of checkpoints? If so, I agree. If it's the
+> > number of nodes, I do not.
+> 
+> 1200 is number of cores waiting on a barrier.
+> Every core spends 4.5 seconds == total wasted single-cpu core time is  
+> 1.5 hours.
+
+It doesn't work that way. The barrier operation is implemented as a
+collective on the Cray. What you are missing in the math above is that
+every core waited during the *same* 4.5 second period. Total wasted time
+is only 4.5 seconds then.
+
+> And the more often this happens the worse.
+> 
+> >> So I thought it would be a good idea to get to the root of it.
+> >> We hear many arguments here at the lab that "what good the buffered  
+> >> io
+> >> is for
+> >> me when my app performance is degraded if I don't do sync. I'll  
+> >> just do
+> >> the sync and be over with it". Of course I believe there is still
+> >> benefit to not
+> >> doing the sync, but that's just me.
+> > If the time to settle the jitter is on the order of 10 seconds but it
+> > takes 15 seconds to sync, it would be better to live with the jitter,
+> > no? I suggested an experiment to make this comparison. Why argue with
+> > them? just do the experiment and you can know which strategy is  
+> > better.
+> 
+> I know which one is better. I did the experiment. (though I have no  
+> realistic way
+> to measure when "jitter" settles out).
+
+Which was better then? By how much? Were you just measuring a barrier or
+do those numbers still work out when the app uses the network heavily
+after doing it's writes?
+
+> 
+> >>> To me, you are worrying way too much about the situation immediately
+> >>> after a write. Checkpoints are relatively rare, with long periods
+> >>> between. Why worry about something that's only going to affect a  
+> >>> very
+> >>> small portion of the overall job? As long as the jitter dissipates
+> >>> in a
+> >>> short time, things will work out fine.
+> >> I worry abut it specifically because users tend to do sync after the
+> >> write and that
+> >> wastes a lot of time. So as a result - I want as much of data to  
+> >> enter
+> >> into cache
+> >> and then trickle out all by itself and I want users not to see any  
+> >> bad
+> >> effects
+> >> (or otherwise to show to them that there are still benefits).
+> > Users tend to do sync for more reasons than making the IO  
+> > deterministic.
+> > They should be doing it so that they can have some faith that the last
+> > checkpoint is actually persistent when interrupted.
+> 
+> For that they only need to do fsync before their next checkpoint,
+> to make sure that the previous one completed.
+> 
+> > However, they should do the sync right before they enter the IO phase,
+> > in order to also get the benefits of write-back caching. Not after the
+> > IO phase. In the event of an interrupt, this forces them to throw away
+> > an in-progress checkpoint and the last one before that, to be safe,  
+> > but
+> > the one before the last should be good.
+> 
+> Right.
+> Yet they do some microbenchmark and decide it is bad idea.
+> Besides, reducing jitter, or whatever is the cause for the delays
+> would still be useful.
+
+You're making a wonderful argument for Catamount :)
+
+> 
+> > In some cases, your app programmers will be unfortunately correct. An
+> > app that uses so much memory that the system cannot buffer the entire
+> > write will incur at least some issues while doing IO; Some of the IO
+> > must move synchronously and that amount will differ from node to node.
+> > This will have the effect of magnifying this post-IO jitter they are  
+> > so
+> > worried about. It is also why I wrote in the original requirements for
+> 
+> Why would it? There still is potentially a benefit for the available
+> cache size.
+
+In a fitted application, there is no useful amount of memory left over
+for the cache. Using it, then, is just unnecessary overhead.
+
+As I said, there's a very real possibility your app programmers are
+correct. It goes beyond memory. Any resource under intense pressure due
+to contention offers the possibility that it can take longer to perform
+it's requests independently than to serialize them. For instance, if an
+app does not use all of memory then there is plenty of room for Lustre
+to cache. Since these apps presumably are going to communicate after the
+IO phase (why else the barrier after the IO?) then they will contend
+heavily with the Lustre client for the network interface and that
+interface does not deal well with such a situation on the Cray. I  can
+easily believe it would take longer for the app to get back to computing
+because of the asynchronous network traffic from the write-back than it
+would to just force the IO phase to complete, via fsync, and, after, do
+what it needs to do to get back to work. If, instead, an app does use
+all of the memory then it's blocked for a long time in the IO calls
+waiting for a free buffer, before the sync. If, when, that happens then
+the fsync is nearly a no-op as most of the dirty data have already been
+written.
+
+Were I an app programmer, I could easily come to the conclusion that the
+fsync is either useful or does not hurt.
+
+The only cooperative app I can think of that seems to be able to win
+universally is the one structured to:
+
+	for (;;) {
+		barrier
+		fsync
+		checkpoint
+		for (n = 0; n < TIME_STEPS_TWEEN_CHECKPOINT; n++) {
+			compute
+			communicate
+		}
+	}
+
+I don't know any that work that way though :(
+
+> 
+> > Lustre that if write-back caching is employed there must be a way to
+> > turn it off.
+> 
+> There is around 3 ways to do that that I am aware of.
+
+That's nice. It was a requirement, after all. ;)
+
+		--Lee
+
+> 
+> Bye,
+>      Oleg
+> 
+
+
+
+
+From nic at cray.com  Wed Apr  1 12:15:53 2009
+From: nic at cray.com (Nicholas Henke)
+Date: Wed, 01 Apr 2009 14:15:53 -0500
+Subject: [Lustre-devel] SeaStar message priority
+In-Reply-To: <F939F52D-614F-4CA8-A80F-50CE31E3303A@Sun.COM>
+References: <74EA92D6-25E8-42DA-A4FD-BDDCED233244@Sun.COM>	<1238596005.5091.31.camel@wheel>	<D3750FED-36ED-4B07-9499-A8ABA7A2FCDA@Sun.COM>	<1238601506.5091.65.camel@wheel>
+	<F939F52D-614F-4CA8-A80F-50CE31E3303A@Sun.COM>
+Message-ID: <49D3BD69.1070900@cray.com>
+
+Oleg Drokin wrote:
+> Hello!
+> 
+> On Apr 1, 2009, at 11:58 AM, Lee Ward wrote:
+>> I think my point was that there is already a priority scheme in the
+>> Seastar. Are there additional bits related to priority that you might
+>> use, also?
+> 
+> But if we cannot use it, there is none.
+> Like we want mpi rpcs go out first to some degree.
+
+If we have to deal with ordering - we are already sunk. The Lustre RPCs will go 
+out and affect MPI latency to some degree, introducing jitter into the calls and 
+affecting application performance.
+
+
+> 
+> But since the only thing I have in my app inside barriers is write call,
+> there is no much way to desynchronize.
+
+Incorrect - you are running your app on all 4 CPUs on the node at the same time 
+Lustre is sending RPCs. The kernel threads will get scheduled and run, pushing 
+your app to the side and desynchronizing the barrier for the app as a whole.
+
+
+> No, I do not think they would like the idea to forfeit 1/4 of their
+> CPU just so io is better.
+> If the jitter is due to cpu occupied with io, and apps stalled due to  
+> this
+> (though I have hard time believing an app to be not given a cpu for  
+> 4.5 seconds,
+> even though there are potentially 4 idle cpus, or even 3 (remember  
+> other cores are
+> also idle waiting on a barrier).
+
+This gets easier to swallow in the future with 12core and larger nodes - 1/12 is 
+much easier to sacrifice.
+
+What we really need to "prove" is where the delay is occurring. The MPI_Barrier 
+messages are 0-byte sends, effectively turning them into Portals headers and 
+these are sent and processed very fast. In fact, the total amount of data being 
+sent is _much_ less than the NIC is capable of. A rough estimate for 2 nodes 
+talking to each other is 1700 MB/s and 50K lnet pings/s.
+
+One thing to try is changing your aprun to use fewer CPUs per node:
+aprun -n 1200 -N [1,2,3] -cc 1-3.
+
+The -cc 1-3 will keep it off cpu 0 - a known location for some IRQs and other 
+servicing.
+
+You should also try to capture compute-node stats like cpu usage, # of threads 
+active during barrier, etc to help narrow down where the time is going.
+
+Nic
+
+
+
+
+
+
+From Oleg.Drokin at Sun.COM  Wed Apr  1 12:26:41 2009
+From: Oleg.Drokin at Sun.COM (Oleg Drokin)
+Date: Wed, 01 Apr 2009 15:26:41 -0400
+Subject: [Lustre-devel] SeaStar message priority
+In-Reply-To: <49D3BD69.1070900@cray.com>
+References: <74EA92D6-25E8-42DA-A4FD-BDDCED233244@Sun.COM>
+	<1238596005.5091.31.camel@wheel>
+	<D3750FED-36ED-4B07-9499-A8ABA7A2FCDA@Sun.COM>
+	<1238601506.5091.65.camel@wheel>
+	<F939F52D-614F-4CA8-A80F-50CE31E3303A@Sun.COM>
+	<49D3BD69.1070900@cray.com>
+Message-ID: <6A6E4D42-DFE4-4C5F-B969-470C2977FA70@Sun.COM>
+
+Hello!
+
+On Apr 1, 2009, at 3:15 PM, Nicholas Henke wrote:
+>> But since the only thing I have in my app inside barriers is write  
+>> call,
+>> there is no much way to desynchronize.
+> Incorrect - you are running your app on all 4 CPUs on the node at  
+> the same time Lustre is sending RPCs. The kernel threads will get  
+> scheduled and run, pushing your app to the side and desynchronizing  
+> the barrier for the app as a whole.
+
+But I am measuring each write and I see that none of them  
+significantly exceeds 0.5 seconds.
+Let it be 0.1 seconds difference.
+So then 4.5 seconds - 0.1 seconds for the write speed difference = 4.4  
+seconds.
+
+> What we really need to "prove" is where the delay is occurring. The  
+> MPI_Barrier messages are 0-byte sends, effectively turning them into  
+> Portals headers and these are sent and processed very fast. In fact,  
+> the total amount of data being sent is _much_ less than the NIC is  
+> capable of. A rough estimate for 2 nodes talking to each other is  
+> 1700 MB/s and 50K lnet pings/s.
+
+Yes. I understand this point.
+
+> One thing to try is changing your aprun to use fewer CPUs per node:
+> aprun -n 1200 -N [1,2,3] -cc 1-3.
+
+I just run with 1 cpu per node, 1200 threads. Leaving 3 cpus/core for  
+kernel and whatnot.
+The actual write syscall return time decreased, but the barrier is  
+not, even though we know
+that less data is in time at any given time now (due to only 16 osts  
+accessed per node, not 16*4).
+So something is going on, but I do not think we can blindly attribute  
+it to just "ah kernel ate your
+cpu for important things pushing the data"
+0: barrier after write time: 4.528383 sec
+0: barrier after write 2 time: 4.043252 sec
+
+The pre-write barrier took only 0.096675 sec (to rule out general  
+network congestion).
+
+Bye,
+     Oleg
+
+
+From Oleg.Drokin at Sun.COM  Wed Apr  1 13:17:13 2009
+From: Oleg.Drokin at Sun.COM (Oleg Drokin)
+Date: Wed, 01 Apr 2009 16:17:13 -0400
+Subject: [Lustre-devel] SeaStar message priority
+In-Reply-To: <1238613200.5091.184.camel@wheel>
+References: <74EA92D6-25E8-42DA-A4FD-BDDCED233244@Sun.COM>
+	<1238596005.5091.31.camel@wheel>
+	<D3750FED-36ED-4B07-9499-A8ABA7A2FCDA@Sun.COM>
+	<1238601506.5091.65.camel@wheel>
+	<F939F52D-614F-4CA8-A80F-50CE31E3303A@Sun.COM>
+	<1238613200.5091.184.camel@wheel>
+Message-ID: <1849D28F-423C-42F7-BE4A-EB0D79571557@Sun.COM>
+
+Hello!
+
+On Apr 1, 2009, at 3:13 PM, Lee Ward wrote:
+>> But if we cannot use it, there is none.
+>> Like we want mpi rpcs go out first to some degree.
+> If you don't want to follow up, I'm ok with that. It's up to you.
+> I understood what you want. There are at least two things I can  
+> imagine
+> that would better the situation without trying to leverage something  
+> in
+> the network, itself.
+> 1) Partition the adapter CAM so that there is always room to  
+> accommodate
+> a user-space receive.
+
+I cannot really comment on this option.
+
+> 2) Prioritize injection to favor sends originating from user-space.
+
+This is what I am speaking about, actually, perhaps not being able to  
+explain
+myself clearly. Except perhaps just userspace is too generic and a bit  
+more
+fine-grained controls would be more beneficial.
+
+> One or both of these might already be implemented. I don't know.
+
+The second option does not look like it is implemented.
+
+>>> when, scheduling occurs on two nodes is different. Any two nodes,  
+>>> even
+>>> running the same app with barrier synchronization, perform things at
+>>> different times outside of the barriers; They very quickly
+>>> desynchronize
+>>> in the presence of jitter.
+>> But since the only thing I have in my app inside barriers is write  
+>> call,
+>> there is no much way to desynchronize.
+> Modify your test to report the length of time each node spent in the
+> barrier (not just rank 0, as it is written now) immediately after the
+> write call, then? If you are correct, they will all be roughly the  
+> same.
+> If they have desynchronized, most will have very long wait times but  
+> at
+> least one will be relatively short.
+
+That's a fair point. I just scheduled the run.
+
+> Oh, I'm sure they're getting the CPU. They just won't come out of the
+> barrier until all have processed the operation. The rates at which the
+> nodes reach the barrier will be different. The rates at which they
+
+I believe the rates at which they come to the barrier are the aprox  
+the same.
+I do time the write system call. And the barrier is next to it. And  
+write
+system call has relatively small variability in time, so we can assume
+that all barriers start within 0.1 seconds from each other.
+
+> proceed through will be different. The only invariant after a  
+> barrier is
+> that all the involved ranks *have* reached that point. Nothing about
+> when that happened is stated or implied.
+
+Ok, I did not realize that, though that makes sense.
+I believe in my test the problem is on the sending side - i.e. the  
+bottleneck
+does not let all nodes to report that the point was reached by every  
+thread.
+But as soon as all nodes gathered, whatever control node sends the  
+messages
+(that are of course could be delayed in the queue if it is also doing  
+the io,
+hm, I wonder what node coordinates this (set of nodes?). Rank 0?) and  
+once injected, they should
+be processed instantly since we do not have any significant incoming  
+traffic on the
+nodes.
+Don't take my word for it of course, the test is already scheduled and  
+I'll share the results.
+
+>>>>> Jitter gets a bad rap. Usually for good reason. However, in this
+>>>>> case,
+>>>>> it doesn't seem something to worry overly much about as it will
+>>>>> cease.
+>>>>> Your test says the 1st barrier after the write completes in 4.5  
+>>>>> sec
+>>>>> and
+>>>>> the 2nd in 1.5 sec. That seems to imply the jitter is settling
+>>>>> pretty
+>>>>> rapidly. Jitter is really only bad when it is chronic.
+>>>> Well, 4.5*1200 = 1.5 hours of completely wasted cputime for my
+>>>> specific job.
+>>> That 1200 is the number of checkpoints? If so, I agree. If it's the
+>>> number of nodes, I do not.
+>> 1200 is number of cores waiting on a barrier.
+>> Every core spends 4.5 seconds == total wasted single-cpu core time is
+>> 1.5 hours.
+> It doesn't work that way. The barrier operation is implemented as a
+> collective on the Cray. What you are missing in the math above is that
+> every core waited during the *same* 4.5 second period. Total wasted  
+> time
+> is only 4.5 seconds then.
+
+I have a feeling we are speaking about different subjects here.
+You are speaking about wall-clock time. I am speaking about total cpu- 
+cycles
+wasted across all nodes.
+
+>>> If the time to settle the jitter is on the order of 10 seconds but  
+>>> it
+>>> takes 15 seconds to sync, it would be better to live with the  
+>>> jitter,
+>>> no? I suggested an experiment to make this comparison. Why argue  
+>>> with
+>>> them? just do the experiment and you can know which strategy is
+>>> better.
+>> I know which one is better. I did the experiment. (though I have no
+>> realistic way
+>> to measure when "jitter" settles out).
+> Which was better then? By how much? Were you just measuring a  
+> barrier or
+> do those numbers still work out when the app uses the network heavily
+> after doing it's writes?
+
+Unfortunately I do not have any real applications instrumented, so my  
+barrier
+is a substitute for "network-heavy app activity". I started with it  
+because
+app programmers I spoke with complained about how their network  
+latency is
+affected if they do buffered writes.
+The fsync takes upward from 10 seconds, depending on other load in the  
+system,
+I guess. I have no easy way to measure the jitter.
+I do not think writeout with or without fsync would take significantly  
+different
+time because the underlying io paths don't change, but that's non- 
+scientific.
+Unfortunately just doing a write, time the fsync then doing the write  
+again and
+wait the same amount of time as fsync took, then do another fsync and  
+see if it is
+instantly returned, since lustre only eagerly writes 1M chunks, and vm  
+pressure only
+ensures data older than 30 seconds would be pushed out. And that  
+before taking into
+account possible variability of the loads on OSTs over time (since I  
+cannot have
+entire Jaguar all for myself).
+
+>>> However, they should do the sync right before they enter the IO  
+>>> phase,
+>>> in order to also get the benefits of write-back caching. Not after  
+>>> the
+>>> IO phase. In the event of an interrupt, this forces them to throw  
+>>> away
+>>> an in-progress checkpoint and the last one before that, to be safe,
+>>> but
+>>> the one before the last should be good.
+>>
+>> Right.
+>> Yet they do some microbenchmark and decide it is bad idea.
+>> Besides, reducing jitter, or whatever is the cause for the delays
+>> would still be useful.
+> You're making a wonderful argument for Catamount :)
+
+Actually, catamount definitely has its strong points, but there are
+drawbacks as well. With Linux it's just another set of benefits and
+drawbacks.
+
+>>> In some cases, your app programmers will be unfortunately correct.  
+>>> An
+>>> app that uses so much memory that the system cannot buffer the  
+>>> entire
+>>> write will incur at least some issues while doing IO; Some of the IO
+>>> must move synchronously and that amount will differ from node to  
+>>> node.
+>>> This will have the effect of magnifying this post-IO jitter they are
+>>> so
+>>> worried about. It is also why I wrote in the original requirements  
+>>> for
+>> Why would it? There still is potentially a benefit for the available
+>> cache size.
+> In a fitted application, there is no useful amount of memory left over
+> for the cache. Using it, then, is just unnecessary overhead.
+
+Right. In this case it is even better to do non-caching io (directio  
+style)
+to reduce the memory copy overhead as well.
+
+> As I said, there's a very real possibility your app programmers are
+> correct. It goes beyond memory. Any resource under intense pressure  
+> due
+> to contention offers the possibility that it can take longer to  
+> perform
+> it's requests independently than to serialize them. For instance, if  
+> an
+> app does not use all of memory then there is plenty of room for Lustre
+> to cache. Since these apps presumably are going to communicate after  
+> the
+> IO phase (why else the barrier after the IO?) then they will contend
+> heavily with the Lustre client for the network interface and that
+> interface does not deal well with such a situation on the Cray. I  can
+> easily believe it would take longer for the app to get back to  
+> computing
+> because of the asynchronous network traffic from the write-back than  
+> it
+> would to just force the IO phase to complete, via fsync, and, after,  
+> do
+> what it needs to do to get back to work. If, instead, an app does use
+> all of the memory then it's blocked for a long time in the IO calls
+> waiting for a free buffer, before the sync. If, when, that happens  
+> then
+> the fsync is nearly a no-op as most of the dirty data have already  
+> been
+> written.
+
+This is all very true.
+Currently I am only focusing on applications that do leave enough space
+for the fs cache, since that's where the possible benefit is and there  
+is
+no drawback for applications that don't do cached io. (And this is the
+case for the app programmers I spoke with).
+
+> The only cooperative app I can think of that seems to be able to win
+> universally is the one structured to:
+>
+> 	for (;;) {
+> 		barrier
+> 		fsync
+> 		checkpoint
+> 		for (n = 0; n < TIME_STEPS_TWEEN_CHECKPOINT; n++) {
+> 			compute
+> 			communicate
+> 		}
+> 	}
+
+> I don't know any that work that way though :(
+
+We here at ORNL are trying hard to convice app programmers that this is
+indeed beneficial.
+Unfortunately it is not all that clean-cut, the machine itself behaves
+differently every time due to all different workloads going on is part
+of the problem too.
+Of course we stand in our way too, with the default 32Mb limit of  
+dirty cache
+per osc, in order to get meaningful caching size we need to stripe the  
+files
+over waay to many OSTs, and as a result the overall IO performance is
+degraded compared to just the case of outputting to a single OST from  
+every
+job, due to reduced randomness in IO pattern.
+
+Bye,
+     Oleg
+
+
+From Oleg.Drokin at Sun.COM  Wed Apr  1 19:46:08 2009
+From: Oleg.Drokin at Sun.COM (Oleg Drokin)
+Date: Wed, 01 Apr 2009 22:46:08 -0400
+Subject: [Lustre-devel] SeaStar message priority
+In-Reply-To: <1849D28F-423C-42F7-BE4A-EB0D79571557@Sun.COM>
+References: <74EA92D6-25E8-42DA-A4FD-BDDCED233244@Sun.COM>
+	<1238596005.5091.31.camel@wheel>
+	<D3750FED-36ED-4B07-9499-A8ABA7A2FCDA@Sun.COM>
+	<1238601506.5091.65.camel@wheel>
+	<F939F52D-614F-4CA8-A80F-50CE31E3303A@Sun.COM>
+	<1238613200.5091.184.camel@wheel>
+	<1849D28F-423C-42F7-BE4A-EB0D79571557@Sun.COM>
+Message-ID: <89655A8C-F417-461E-8D5E-8A6395200795@sun.com>
+
+Hello!
+
+On Apr 1, 2009, at 4:17 PM, Oleg Drokin wrote:
+
+>>>> when, scheduling occurs on two nodes is different. Any two nodes,  
+>>>> even
+>>>> running the same app with barrier synchronization, perform things  
+>>>> at
+>>>> different times outside of the barriers; They very quickly
+>>>> desynchronize
+>>>> in the presence of jitter.
+>>> But since the only thing I have in my app inside barriers is write  
+>>> call,
+>>> there is no much way to desynchronize.
+>> Modify your test to report the length of time each node spent in the
+>> barrier (not just rank 0, as it is written now) immediately after the
+>> write call, then? If you are correct, they will all be roughly the  
+>> same.
+>> If they have desynchronized, most will have very long wait times  
+>> but at
+>> least one will be relatively short.
+> That's a fair point. I just scheduled the run.
+
+Ok.
+The results are in. I scheduled 2 runs. One at 4 threads/node and one
+at 1 thread/node.
+
+For the 4 threads/node case the 1st barrier took anywhere from 1.497  
+sec to
+3.025 sec with rank 0 reporting 1.627 sec.
+The second barrier took 0.916 to 2.758 seconds with rank 0 reporting  
+1.992 sec.
+For the barrier 2 I can actually clearly observe that thread terminate  
+in
+groups of 4 with very close times, and ranks suggest those nids are on  
+the same
+nodes. On 1st barrier this trend is much less visible, though.
+
+On the 1 thread/node case the fastest 1st barrier was 7.515 seconds and
+slowest was 10.176
+For the 2nd barrier, fastest was 0.085 and slowest 2.756 which is  
+pretty close
+to the difference between fastest and slowest 1st barrier, since  
+amount of data
+written per node in this case 4 smaller, I guess we just flushed all  
+the data
+to the disk before the 1st barrier finished and the difference in  
+waiting was due
+to the differences in start times.
+
+As you can see, numbers tend to jump around, but there are still  
+relatively big delays
+due to something else than just threads getting out of sync.
+
+Bye,
+    Oleg
+
+
+From lee at sandia.gov  Wed Apr  1 21:28:12 2009
+From: lee at sandia.gov (Lee Ward)
+Date: Wed, 1 Apr 2009 22:28:12 -0600
+Subject: [Lustre-devel] SeaStar message priority
+In-Reply-To: <89655A8C-F417-461E-8D5E-8A6395200795@sun.com>
+References: <74EA92D6-25E8-42DA-A4FD-BDDCED233244@Sun.COM>
+	<1238596005.5091.31.camel@wheel>
+	<D3750FED-36ED-4B07-9499-A8ABA7A2FCDA@Sun.COM>
+	<1238601506.5091.65.camel@wheel>
+	<F939F52D-614F-4CA8-A80F-50CE31E3303A@Sun.COM>
+	<1238613200.5091.184.camel@wheel>
+	<1849D28F-423C-42F7-BE4A-EB0D79571557@Sun.COM>
+	<89655A8C-F417-461E-8D5E-8A6395200795@sun.com>
+Message-ID: <1238646492.5091.275.camel@wheel>
+
+On Wed, 2009-04-01 at 20:46 -0600, Oleg Drokin wrote:
+> Hello!
+> 
+> On Apr 1, 2009, at 4:17 PM, Oleg Drokin wrote:
+> 
+> >>>> when, scheduling occurs on two nodes is different. Any two nodes,  
+> >>>> even
+> >>>> running the same app with barrier synchronization, perform things  
+> >>>> at
+> >>>> different times outside of the barriers; They very quickly
+> >>>> desynchronize
+> >>>> in the presence of jitter.
+> >>> But since the only thing I have in my app inside barriers is write  
+> >>> call,
+> >>> there is no much way to desynchronize.
+> >> Modify your test to report the length of time each node spent in the
+> >> barrier (not just rank 0, as it is written now) immediately after the
+> >> write call, then? If you are correct, they will all be roughly the  
+> >> same.
+> >> If they have desynchronized, most will have very long wait times  
+> >> but at
+> >> least one will be relatively short.
+> > That's a fair point. I just scheduled the run.
+> 
+> Ok.
+> The results are in. I scheduled 2 runs. One at 4 threads/node and one
+> at 1 thread/node.
+> 
+> For the 4 threads/node case the 1st barrier took anywhere from 1.497  
+> sec to
+> 3.025 sec with rank 0 reporting 1.627 sec.
+> The second barrier took 0.916 to 2.758 seconds with rank 0 reporting  
+> 1.992 sec.
+> For the barrier 2 I can actually clearly observe that thread terminate  
+> in
+> groups of 4 with very close times, and ranks suggest those nids are on  
+> the same
+> nodes. On 1st barrier this trend is much less visible, though.
+> 
+> On the 1 thread/node case the fastest 1st barrier was 7.515 seconds and
+> slowest was 10.176
+> For the 2nd barrier, fastest was 0.085 and slowest 2.756 which is  
+> pretty close
+> to the difference between fastest and slowest 1st barrier, since  
+> amount of data
+> written per node in this case 4 smaller, I guess we just flushed all  
+> the data
+> to the disk before the 1st barrier finished and the difference in  
+> waiting was due
+> to the differences in start times.
+> 
+> As you can see, numbers tend to jump around, but there are still  
+> relatively big delays
+> due to something else than just threads getting out of sync.
+
+Agreed. It's something more than simple jitter.
+
+>From everything you have described, the nodes are otherwise idle. The
+only other thing I can think, then, of would be one or more Lustre
+client threads, injecting traffic into the network, which is where you
+started.
+
+A useful test might be to grab the MPI ping-pong from the test suite,
+modify it to slow it down a bit. Say 4 times a second? Augment it to
+report the ping-pong time and a time stamp. Augment your existing test
+to report time stamps for the beginning of the write call. Launch one,
+each, of these on your set of nodes; I.e., each node has both your write
+test and the ping-pong running at the same time. This presumes you can
+launch two mpi jobs onto your set of nodes. If not, come up with an
+equivalent that is supported?
+
+If the ping-pong latency goes way up at the write calls you can claim a
+correlation. Not definitive as correlation does not equal cause but it
+is pretty strong.
+
+If there is correlation, it means Cray has kind of messed up the portals
+implementation. The portals implementation would be attempting to send
+*everything* in order. All portals needs is for traffic to go in order
+per nid and pid pair. An implementation is free to mix in unrelated
+traffic, and should, to prevent one process from starving others.
+
+An idea... Does the Lustre service side restrict the number of
+simultaneous get operations it issues? I don't just mean to a particular
+client, but to all from a single server, be it OST or MDS. If not,
+consider it. If there are too many outstanding receives an arriving
+message may miss the corresponding CAM entry due to a flush. What
+happens after that can't be pretty. At one time, it caused the client to
+resend. Does it still? If so, and resends are occurring the affected
+clients have their bandwidth reduced by more than 50% for the affected
+operations. Since there is a barrier operation stuck behind it, well...
+
+Mr. Booth has suggested that the portals client might offer to send less
+data per transfer. This would allow latency sensitive sends to reach the
+front of the queue more quickly. It would also, I think, lower overall
+throughput. It's an idea worth considering but is a case of two evils.
+Can this be mitigated by peeking at the portals send queue in some way?
+If Lustre can identify outbound traffic in the queue that it didn't
+present then it could respond as Mr. Booth has suggested or back off on
+the rate at which it presents traffic, or both even? Initial latencies
+would be unchanged but would get better as the app did more
+communication, especially if it used the one-sided calls and overlapped
+them.
+
+I'm sorry, if it's contention for the adapter I don't see a work around
+without changing Lustre or Cray changing the driver to more fairly
+service the independent streams.
+
+In any case, right now, your apps guys suspicions probably have merit if
+it is indeed contention on the network adapter. They may really be
+better off forcing the IO to complete before moving to the next phase if
+that phase involves the network. How sad.
+
+You do need to do the test, though, before you try to "fix" anything.
+Right now, it's only supposition that contention for the network adapter
+is the evil here.
+
+		--Lee
+
+> 
+> Bye,
+>     Oleg
+> 
+
+
+
+
+From Oleg.Drokin at Sun.COM  Thu Apr  2 11:47:23 2009
+From: Oleg.Drokin at Sun.COM (Oleg Drokin)
+Date: Thu, 02 Apr 2009 14:47:23 -0400
+Subject: [Lustre-devel] OSD iterator interface
+Message-ID: <E14DEA02-826C-4F15-8A22-9FA616EFDBC4@Sun.COM>
+
+Hello!
+
+    While inspecting patches in bug 17560 it struck me as odd that we  
+are fetching the data one entry at a time from the filesystem, so I  
+asked a many-entries at a time
+    approach to be implemented. Now the patch in the bug just fills  
+the osd buffer with entries (after parsing them) and then actual user  
+(e.g. __mdd_readpage)
+    reparses the osd buffer and copies data to its own. This is a lot  
+of wasted processing, copies and then some extra memory usage.
+    So in my opinion the iterator interface should be reworked to  
+accept an iterator and a buffer and then __mdd_readdir will pass in  
+its own
+    parsing of the data (with possible generalized preparsing from osd  
+so that we are fs-neutral) and will directly fill its own buffer to  
+the amount it actually needs,
+    kind of like any kernel filldir functions already work right now.
+
+    Am I missing something stupid? Are there any objections, would  
+this break anything?
+
+Bye,
+     Oleg
+
+
+From di.wang at sun.com  Thu Apr  2 13:08:18 2009
+From: di.wang at sun.com (di wang)
+Date: Thu, 02 Apr 2009 16:08:18 -0400
+Subject: [Lustre-devel] OSD iterator interface
+In-Reply-To: <E14DEA02-826C-4F15-8A22-9FA616EFDBC4@Sun.COM>
+References: <E14DEA02-826C-4F15-8A22-9FA616EFDBC4@Sun.COM>
+Message-ID: <49D51B32.2020404@sun.com>
+
+Hello,
+
+In new MDS stack, osd suppose do not understand Directory (IMHO), and it 
+only provides
+index API. MDD  will  use  the index API  to fill the dir entries.
+
+The filldir in current EA index API is just for compatible with old version
+of  MDS.  Maybe we need bulk index API for readdir ?  But Alex should 
+know more.
+
+Thanks
+WangDi
+
+Oleg Drokin wrote:
+> Hello!
+>
+>     While inspecting patches in bug 17560 it struck me as odd that we  
+> are fetching the data one entry at a time from the filesystem, so I  
+> asked a many-entries at a time
+>     approach to be implemented. Now the patch in the bug just fills  
+> the osd buffer with entries (after parsing them) and then actual user  
+> (e.g. __mdd_readpage)
+>     reparses the osd buffer and copies data to its own. This is a lot  
+> of wasted processing, copies and then some extra memory usage.
+>     So in my opinion the iterator interface should be reworked to  
+> accept an iterator and a buffer and then __mdd_readdir will pass in  
+> its own
+>     parsing of the data (with possible generalized preparsing from osd  
+> so that we are fs-neutral) and will directly fill its own buffer to  
+> the amount it actually needs,
+>     kind of like any kernel filldir functions already work right now.
+>
+>     Am I missing something stupid? Are there any objections, would  
+> this break anything?
+>
+> Bye,
+>      Oleg
+> _______________________________________________
+> Lustre-devel mailing list
+> Lustre-devel at lists.lustre.org
+> http://lists.lustre.org/mailman/listinfo/lustre-devel
+>   
+
+
+
+From adilger at sun.com  Thu Apr  2 15:43:10 2009
+From: adilger at sun.com (Andreas Dilger)
+Date: Thu, 02 Apr 2009 16:43:10 -0600
+Subject: [Lustre-devel] Oleg/Mike Work on Apps Metrics - FW: Mike
+	Booth	week ending 2009.03.15
+In-Reply-To: <9BDC2632-E80E-4BA8-9ACF-8D7E70A9B236@Sun.COM>
+References: <C5E2A328.36EE0%Daniel.Ferber@Sun.Com>
+	<015c01c9a5a7$cb2f83a0$618e8ae0$@com>
+	<52E982EB-3ADE-46FA-A7BC-D1645961DF0B@Sun.COM>
+	<018101c9a5b6$25dbc300$71934900$@com>
+	<48A6CF99-F630-4581-9FFC-05E3AFF66FA0@Sun.COM>
+	<023201c9a636$a987e4b0$fc97ae10$@com>
+	<5CE22E46-771C-47EE-9CAC-26A37C87C466@sun.com>
+	<20090331185111.GL3199@webber.adilger.int> <49D2E0FC.4040605@sun.com>
+	<9BDC2632-E80E-4BA8-9ACF-8D7E70A9B236@Sun.COM>
+Message-ID: <20090402224310.GM3199@webber.adilger.int>
+
+On Mar 31, 2009  23:55 -0400, Michael Booth wrote:
+> On Mar 31, 2009, at 11:35 PM, di wang wrote:
+>> Andreas Dilger wrote:
+>>> If each compute timestep takes 0.1s during IO vs 0.01s without IO and
+>>> you would get 990 timesteps during the write flush in the second case
+>>> until the cache was cleared, vs. none in the first case.  I suspect
+>>> that the overhead of the MPI communication on the Lustre IO is small,
+>>> since the IO will be limited by the OST network and disk bandwidth,
+>>> which is generally a small fraction of the cross-sectional bandwidth.
+>>>
+>>> This could be tested fairly easily with a real application that is
+>>> doing computation between IO, instead of a benchmark that is only  
+>>> doing
+>>> IO or only sleeping between IO, simply by increasing the per-OSC write
+>>> cache limit from 32MB to e.g. 1GB in the above case (or 2GB to avoid  
+>>> the
+>>> case where 2 processes on the same node are writing to the same OST).
+>>> Then, measure the time taken for the application to do, say, 1M  
+>>> timesteps
+>>> and 100 checkpoints with the 32MB and the 2GB write cache sizes.
+>>
+>> Can we implement aio here? for  example  the  aio buffer can be treated  
+>> different as other dirty buffer, not
+>> being pushed aggressively to server. It seems with buffer_write, the  
+>> user have to deal with fs buffer cache
+>> issue in his application, not sure it is good for them, and we may not  
+>> even output these features to the
+>> application.
+
+I'm not sure what you mean.  Implementing AIO is _more_ complex for the
+application, and in essence the current IO is mostly async except when
+the client hits the max dirty limit.  The client will still flush the
+dirty data in the background (despite Michaels experiment), it just takes
+the VM some time to catch up.
+
+Linux VM /proc tunables can be tweaked on the client to have it be more
+aggressive about pushing out dirty data.  I suspect they are currently
+tuned for desktop workloads more than IO-intensive workloads.
+
+On Mar 31, 2009  23:55 -0400, Michael Booth wrote:
+> The large size of the I/O request put onto the SeaStar by  
+> the Lustre client is giving it an artificially high priority.  Barriers 
+> are just a few bytes, the I/Os from the client are in megabytes.   
+> SeaStar has no priority in is queue, but  the amount of time it takes to 
+> clear megabyte request results in a priority that is thousands of times 
+> more impact on the hardware than the small synchronization requests of 
+> many collectives.  I am wondering if the interference from I/O to 
+> computation is more an artifact of message size and bursts,  than of 
+> congestion or routing inefficiencies in seastar..
+>
+> If there are hundreds of megabytes of request queued up on the network, 
+> and there is no priority way to push a barrier or other small mpi request 
+> up on the queue, it is bound to create a disruption.
+
+Note that the Lustre IO REQUESTS are not very large in themselves (under
+512 bytes for a 1MB write), but it is the bulk xfer that is large.  The
+LND code could definitely cooperate with the network hardware to ensure
+that small requests get a decent share of the network bandwidth, and
+Lustre itself would also benefit from this (allowing e.g. lock requests
+to bypass the bulk IO traffic) but whether the network hardware can do
+this in any manner is a separate question.
+
+> To borrow the elevator metaphor from Eric,  if all the elevators are  
+> queued up from 8:00 to 9:00 delivering office supplies on carts that  
+> occupy the entire elevator, maybe the carts should be smaller, and  
+> limited to a few per elevator trip.
+
+A better analogy would be the elevators occasionally have a mail cart
+with tens or hundreds of requests for office supplies, and this can
+easily share the elevator with other workers.  Having a separate
+freight elevator to handle the supplies themselves is one way to do
+it, having the elevators alternate people and supplies is another,
+but cutting desks into small pieces so they can share space with
+people is not an option.
+
+Cheers, Andreas
+--
+Andreas Dilger
+Sr. Staff Engineer, Lustre Group
+Sun Microsystems of Canada, Inc.
+
+
+
+From Michael.Booth at Sun.COM  Fri Apr  3 11:27:16 2009
+From: Michael.Booth at Sun.COM (Michael Booth)
+Date: Fri, 03 Apr 2009 14:27:16 -0400
+Subject: [Lustre-devel] Oleg/Mike Work on Apps Metrics - FW: Mike	Booth
+ week ending 2009.03.15
+In-Reply-To: <20090402224310.GM3199@webber.adilger.int>
+References: <C5E2A328.36EE0%Daniel.Ferber@Sun.Com>
+	<015c01c9a5a7$cb2f83a0$618e8ae0$@com>
+	<52E982EB-3ADE-46FA-A7BC-D1645961DF0B@Sun.COM>
+	<018101c9a5b6$25dbc300$71934900$@com>
+	<48A6CF99-F630-4581-9FFC-05E3AFF66FA0@Sun.COM>
+	<023201c9a636$a987e4b0$fc97ae10$@com>
+	<5CE22E46-771C-47EE-9CAC-26A37C87C466@sun.com>
+	<20090331185111.GL3199@webber.adilger.int> <49D2E0FC.4040605@sun.com>
+	<9BDC2632-E80E-4BA8-9ACF-8D7E70A9B236@Sun.COM>
+	<20090402224310.GM3199@webber.adilger.int>
+Message-ID: <FAE995C9-D4E9-45C2-ACFC-147AC6CA86B0@Sun.COM>
+
+On Apr 2, 2009, at 6:43 PM, Andreas Dilger wrote:
+
+> On Mar 31, 2009  23:55 -0400, Michael Booth wrote:
+>> On Mar 31, 2009, at 11:35 PM, di wang wrote:
+>>> Andreas Dilger wrote:
+>>>> If each compute timestep takes 0.1s during IO vs 0.01s without IO  
+>>>> and
+>>>> you would get 990 timesteps during the write flush in the second  
+>>>> case
+>>>> until the cache was cleared, vs. none in the first case.  I suspect
+>>>> that the overhead of the MPI communication on the Lustre IO is  
+>>>> small,
+>>>> since the IO will be limited by the OST network and disk bandwidth,
+>>>> which is generally a small fraction of the cross-sectional  
+>>>> bandwidth.
+>>>>
+>>>> This could be tested fairly easily with a real application that is
+>>>> doing computation between IO, instead of a benchmark that is only
+>>>> doing
+>>>> IO or only sleeping between IO, simply by increasing the per-OSC  
+>>>> write
+>>>> cache limit from 32MB to e.g. 1GB in the above case (or 2GB to  
+>>>> avoid
+>>>> the
+>>>> case where 2 processes on the same node are writing to the same  
+>>>> OST).
+>>>> Then, measure the time taken for the application to do, say, 1M
+>>>> timesteps
+>>>> and 100 checkpoints with the 32MB and the 2GB write cache sizes.
+>>>
+>>> Can we implement aio here? for  example  the  aio buffer can be  
+>>> treated
+>>> different as other dirty buffer, not
+>>> being pushed aggressively to server. It seems with buffer_write, the
+>>> user have to deal with fs buffer cache
+>>> issue in his application, not sure it is good for them, and we may  
+>>> not
+>>> even output these features to the
+>>> application.
+>
+> I'm not sure what you mean.  Implementing AIO is _more_ complex for  
+> the
+> application, and in essence the current IO is mostly async except when
+> the client hits the max dirty limit.  The client will still flush the
+> dirty data in the background (despite Michaels experiment), it just  
+> takes
+> the VM some time to catch up.
+
+even after an fsync?
+
+The experiment was to see if the dirty cache is in fact being voided  
+as designed.
+
+
+
+for (writesize = small;writesize<hundeds of megabytes;writesize 
++=increment){
+  for (sixty iterations){
+   write<---- writesize
+  timer1
+  fsync
+  timer2}}
+
+Run again, but sleep
+
+for (writesize = small;writesize<hundeds of megabytes;writesize 
++=increment){
+  for (sixty iterations){
+   write<---- writesize
+  sleep(1 second)
+  timer1
+  fsync
+timer2}}
+
+for each iteration, take the best time for each fsync, and plot the  
+speedup that the second routine
+has for it's fsync over the non-slept fsync.   The results
+
+-------------- next part --------------
+A non-text attachment was scrubbed...
+Name: pastedGraphic.pdf
+Type: application/pdf
+Size: 26637 bytes
+Desc: not available
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20090403/39d8a9fc/attachment.pdf>
+-------------- next part --------------
+
+
+
+To me this is not behavior that is consistent with the design  
+behavior.  Are there tests for writes to assure that the cache is  
+behaving as designed?
+
+another way to view this is to calculate the amount of data that is  
+moved during the 1 second of sleep.
+
+-------------- next part --------------
+A non-text attachment was scrubbed...
+Name: pastedGraphic.pdf
+Type: application/pdf
+Size: 27283 bytes
+Desc: not available
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20090403/39d8a9fc/attachment-0001.pdf>
+-------------- next part --------------
+
+
+
+This seems to show a "bug" in how much dirty data is shipped off to  
+disk.   Again,, I don't think that cache is clearing like it was  
+designed.
+
+
+>
+> Linux VM /proc tunables can be tweaked on the client to have it be  
+> more
+> aggressive about pushing out dirty data.  I suspect they are currently
+> tuned for desktop workloads more than IO-intensive workloads.
+
+I would not characterize these as i/o intensive,, they are large bulk  
+sequential writes,, the cache design is for good performance assuming  
+most of what is written is also read right away,, yes this is good for  
+desktops, but really in the way for checkpoint restart and data  
+dumping Scientific applications.
+
+>
+> On Mar 31, 2009  23:55 -0400, Michael Booth wrote:
+>> The large size of the I/O request put onto the SeaStar by
+>> the Lustre client is giving it an artificially high priority.   
+>> Barriers
+>> are just a few bytes, the I/Os from the client are in megabytes.
+>> SeaStar has no priority in is queue, but  the amount of time it  
+>> takes to
+>> clear megabyte request results in a priority that is thousands of  
+>> times
+>> more impact on the hardware than the small synchronization requests  
+>> of
+>> many collectives.  I am wondering if the interference from I/O to
+>> computation is more an artifact of message size and bursts,  than of
+>> congestion or routing inefficiencies in seastar..
+>>
+>> If there are hundreds of megabytes of request queued up on the  
+>> network,
+>> and there is no priority way to push a barrier or other small mpi  
+>> request
+>> up on the queue, it is bound to create a disruption.
+>
+> Note that the Lustre IO REQUESTS are not very large in themselves  
+> (under
+> 512 bytes for a 1MB write), but it is the bulk xfer that is large.   
+> The
+> LND code could definitely cooperate with the network hardware to  
+> ensure
+> that small requests get a decent share of the network bandwidth, and
+> Lustre itself would also benefit from this (allowing e.g. lock  
+> requests
+> to bypass the bulk IO traffic) but whether the network hardware can do
+> this in any manner is a separate question.
+
+Some codes see 80% slowdown after writes due to collectives that are  
+chocked out by background i/o.
+
+>
+>> To borrow the elevator metaphor from Eric,  if all the elevators are
+>> queued up from 8:00 to 9:00 delivering office supplies on carts that
+>> occupy the entire elevator, maybe the carts should be smaller, and
+>> limited to a few per elevator trip.
+>
+> A better analogy would be the elevators occasionally have a mail cart
+> with tens or hundreds of requests for office supplies, and this can
+> easily share the elevator with other workers.  Having a separate
+> freight elevator to handle the supplies themselves is one way to do
+> it, having the elevators alternate people and supplies is another,
+> but cutting desks into small pieces so they can share space with
+> people is not an option.
+
+I don't want to cut the desks up,, just want to be sure that small  
+collective messages are not slowed down orders of magnitude by what  
+should be a background process.
+
+>
+> Cheers, Andreas
+> --
+> Andreas Dilger
+> Sr. Staff Engineer, Lustre Group
+> Sun Microsystems of Canada, Inc.
+>
+> _______________________________________________
+> Lustre-devel mailing list
+> Lustre-devel at lists.lustre.org
+> http://lists.lustre.org/mailman/listinfo/lustre-devel
+
+Mike
+
+
+
+From Alexander.Zarochentsev at Sun.COM  Sun Apr  5 13:50:27 2009
+From: Alexander.Zarochentsev at Sun.COM (Alexander Zarochentsev)
+Date: Sun, 05 Apr 2009 23:50:27 +0300
+Subject: [Lustre-devel] [RFC] two ideas for Meta Data Write Back Cache
+Message-ID: <200904060050.27903.alexander.zarochentsev@sun.com>
+
+Hello,
+
+There are ideas about WBC client MD stack, WBC protocol and changes 
+needed at server side. They are Global OSD and another idea (let's name 
+it CMD3+) explained in the WBC HLD outline draft.
+ 
+Brief descriptions of the ideas:
+
+GOSD: 
+
+a portable component (called MDS in Alex's presentation) transates MD 
+operations into OSD operations (updates).
+
+MDS may be at client side (WBC-client), proxy server or MD server.
+
+The MDS component is very similar to current MDD (Local MD server) layer 
+in CMD3 server stack. I.e. it works like a local MD server, but the OSD 
+layer below is not local, it is GOSD. 
+
+It is simple as the local MD server and simplifies MD server stack a 
+lot. Current MD stack processes MD operations at any level of MDT, CMM 
+and MDD. First two levels should understand what is CMD and MDD layer 
+should understand that some MD operations can be partial. It sounds 
+like a unneeded complication. With GOSD those layers will be replaced 
+by only one as simple as MDD layer! (however LDLM locking should be 
+added).
+
+CMD3+:
+
+The component running on WBC client is based on MDT excluding transport 
+things. Code reuse is possible.
+
+The WBC protocol logically is the current MD protocol with the partial 
+MD operations (object create w/o name, for example). Partial operations 
+are already used between MD servers for distributed MD operations. MD 
+operations will be packed into batches.
+
+Both ideas (GOSD and CMD3+) assume a cache manager at WBC client to do 
+caching & redo-logging of operations.
+
+I think CMD3+ has minimum impact to current Lustre-2.x design. It is 
+closer to the original goal of just implementation of WBC feature. But 
+the GOSD is an attractive idea and may be potentially better.
+
+With GOSD I am worrying about making Lustre 2.x unstable for some period 
+of time. It would be good to think about a plan of incremental 
+integration of new stack into existing code.
+
+It is a request for comments and new ideas because design mistakes would 
+be too costly.
+
+Thanks,
+-- 
+Alexander "Zam" Zarochentsev
+Staff Engineer
+Lustre Group, Sun Microsystems
+
+
+From Alexander.Zarochentsev at Sun.COM  Sun Apr  5 21:29:25 2009
+From: Alexander.Zarochentsev at Sun.COM (Alexander Zarochentsev)
+Date: Mon, 06 Apr 2009 07:29:25 +0300
+Subject: [Lustre-devel] two ideas for Meta Data Write Back Cache
+Message-ID: <200904060829.26043.alexander.zarochentsev@sun.com>
+
+Hello,
+
+There are ideas about WBC client MD stack, WBC protocol and changes 
+needed at server side. They are Global OSD and another idea (let's name 
+it CMD3+) explained in the WBC HLD outline draft.
+ 
+Brief descriptions of the ideas:
+
+GOSD: 
+
+a portable component (called MDS in Alex's presentation) transates MD 
+operations into OSD operations (updates).
+
+MDS may be at client side (WBC-client), proxy server or MD server.
+
+The MDS component is very similar to current MDD (Local MD server) layer 
+in CMD3 server stack. I.e. it works like a local MD server, but the OSD 
+layer below is not local, it is GOSD. 
+
+It is simple as the local MD server and simplifies MD server stack a 
+lot. Current MD stack processes MD operations at any level of MDT, CMM 
+and MDD. First two levels should understand what is CMD and MDD layer 
+should understand that some MD operations can be partial. It sounds 
+like a unneeded complication. With GOSD those layers will be replaced 
+by only one as simple as MDD layer! (however LDLM locking should be 
+added).
+
+CMD3+:
+
+The component running on WBC client is based on MDT excluding transport 
+things. Code reuse is possible.
+
+The WBC protocol logically is the current MD protocol with the partial 
+MD operations (object create w/o name, for example). Partial operations 
+are already used between MD servers for distributed MD operations. MD 
+operations will be packed into batches.
+
+Both ideas (GOSD and CMD3+) assume a cache manager at WBC client to do 
+caching & redo-logging of operations.
+
+I think CMD3+ has minimum impact to current Lustre-2.x design. It is 
+closer to the original goal of just implementation of WBC feature. But 
+the GOSD is an attractive idea and may be potentially better.
+
+With GOSD I am worrying about making Lustre 2.x unstable for some period 
+of time. It would be good to think about a plan of incremental 
+integration of new stack into existing code.
+
+It is a request for comments and new ideas because design mistakes would 
+be too costly.
+
+Thanks,
+-- 
+Alexander "Zam" Zarochentsev
+Staff Engineer
+Lustre Group, Sun Microsystems
+
+
+From bzzz at sun.com  Mon Apr  6 00:21:48 2009
+From: bzzz at sun.com (Alex Zhuravlev)
+Date: Mon, 06 Apr 2009 11:21:48 +0400
+Subject: [Lustre-devel] OSD iterator interface
+In-Reply-To: <49D51B32.2020404@sun.com>
+References: <E14DEA02-826C-4F15-8A22-9FA616EFDBC4@Sun.COM>
+	<49D51B32.2020404@sun.com>
+Message-ID: <m3tz526ycz.fsf@bzzz.home.net>
+
+
+I agree with what Oleg said. I think there are two-stages processing here:
+1) osd should be able to clean "value" from compatibility stuff like inodes
+2) mdd should be able to store this value in own buffer in, possible, some
+   efficient form
+
+>>>>> di wang (dw) writes:
+
+ dw> Hello,
+ dw> In new MDS stack, osd suppose do not understand Directory (IMHO), and
+ dw> it only provides
+ dw> index API. MDD  will  use  the index API  to fill the dir entries.
+
+ dw> The filldir in current EA index API is just for compatible with old version
+ dw> of  MDS.  Maybe we need bulk index API for readdir ?  But Alex should
+ dw> know more.
+
+ dw> Thanks
+ dw> WangDi
+
+ dw> Oleg Drokin wrote:
+ >> Hello!
+ >> 
+ >> While inspecting patches in bug 17560 it struck me as odd that
+ >> we  are fetching the data one entry at a time from the filesystem,
+ >> so I  asked a many-entries at a time
+ >> approach to be implemented. Now the patch in the bug just fills
+ >> the osd buffer with entries (after parsing them) and then actual
+ >> user  (e.g. __mdd_readpage)
+ >> reparses the osd buffer and copies data to its own. This is a
+ >> lot  of wasted processing, copies and then some extra memory usage.
+ >> So in my opinion the iterator interface should be reworked to
+ >> accept an iterator and a buffer and then __mdd_readdir will pass in
+ >> its own
+ >> parsing of the data (with possible generalized preparsing from
+ >> osd  so that we are fs-neutral) and will directly fill its own
+ >> buffer to  the amount it actually needs,
+ >> kind of like any kernel filldir functions already work right now.
+ >> 
+ >> Am I missing something stupid? Are there any objections, would
+ >> this break anything?
+ >> 
+ >> Bye,
+ >> Oleg
+ >> _______________________________________________
+ >> Lustre-devel mailing list
+ >> Lustre-devel at lists.lustre.org
+ >> http://lists.lustre.org/mailman/listinfo/lustre-devel
+ >> 
+
+
+-- 
+thanks, Alex
+
+
+From Alexander.Zarochentsev at Sun.COM  Mon Apr  6 02:39:02 2009
+From: Alexander.Zarochentsev at Sun.COM (Alexander Zarochentsev)
+Date: Mon, 06 Apr 2009 13:39:02 +0400
+Subject: [Lustre-devel] [RFC] two ideas for Meta Data Write Back Cache
+Message-ID: <200904061339.02850.alexander.zarochentsev@sun.com>
+
+... lustre-devel@ doesn't want to deliver the message, so I am adding CC 
+list this time.
+
+Hello,
+
+There are ideas about WBC client MD stack, WBC protocol and changes 
+needed at server side. They are Global OSD and another idea (let's name 
+it CMD3+) explained in the WBC HLD outline draft.
+ 
+Brief descriptions of the ideas:
+
+GOSD: 
+
+a portable component (called MDS in Alex's presentation) transates MD 
+operations into OSD operations (updates).
+
+MDS may be at client side (WBC-client), proxy server or MD server.
+
+The MDS component is very similar to current MDD (Local MD server) layer 
+in CMD3 server stack. I.e. it works like a local MD server, but the OSD 
+layer below is not local, it is GOSD. 
+
+It is simple as the local MD server and simplifies MD server stack a 
+lot. Current MD stack processes MD operations at any level of MDT, CMM 
+and MDD. First two levels should understand what is CMD and MDD layer 
+should understand that some MD operations can be partial. It sounds 
+like a unneeded complication. With GOSD those layers will be replaced 
+by only one as simple as MDD layer! (however LDLM locking should be 
+added).
+
+CMD3+:
+
+The component running on WBC client is based on MDT excluding transport 
+things. Code reuse is possible.
+
+The WBC protocol logically is the current MD protocol with the partial 
+MD operations (object create w/o name, for example). Partial operations 
+are already used between MD servers for distributed MD operations. MD 
+operations will be packed into batches.
+
+Both ideas (GOSD and CMD3+) assume a cache manager at WBC client to do 
+caching & redo-logging of operations.
+
+I think CMD3+ has minimum impact to current Lustre-2.x design. It is 
+closer to the original goal of just implementation of WBC feature. But 
+the GOSD is an attractive idea and may be potentially better.
+
+With GOSD I am worrying about making Lustre 2.x unstable for some period 
+of time. It would be good to think about a plan of incremental 
+integration of new stack into existing code.
+
+It is a request for comments and new ideas because design mistakes would 
+be too costly.
+
+Thanks,
+-- 
+Alexander "Zam" Zarochentsev
+Staff Engineer
+Lustre Group, Sun Microsystems
+
+
+From adilger at sun.com  Mon Apr  6 03:03:45 2009
+From: adilger at sun.com (Andreas Dilger)
+Date: Mon, 06 Apr 2009 04:03:45 -0600
+Subject: [Lustre-devel] [RFC] two ideas for Meta Data Write Back Cache
+In-Reply-To: <200904061339.02850.alexander.zarochentsev@sun.com>
+References: <200904061339.02850.alexander.zarochentsev@sun.com>
+Message-ID: <20090406100345.GO3199@webber.adilger.int>
+
+On Apr 06, 2009  13:39 +0400, Alexander Zarochentsev wrote:
+> There are ideas about WBC client MD stack, WBC protocol and changes 
+> needed at server side. They are Global OSD and another idea (let's name 
+> it CMD3+) explained in the WBC HLD outline draft.
+>  
+> Brief descriptions of the ideas:
+> 
+> GOSD: 
+> 
+> a portable component (called MDS in Alex's presentation) transates MD 
+> operations into OSD operations (updates).
+> 
+> MDS may be at client side (WBC-client), proxy server or MD server.
+> 
+> The MDS component is very similar to current MDD (Local MD server) layer 
+> in CMD3 server stack. I.e. it works like a local MD server, but the OSD 
+> layer below is not local, it is GOSD. 
+> 
+> It is simple as the local MD server and simplifies MD server stack a 
+> lot. Current MD stack processes MD operations at any level of MDT, CMM 
+> and MDD. First two levels should understand what is CMD and MDD layer 
+> should understand that some MD operations can be partial. It sounds 
+> like a unneeded complication. With GOSD those layers will be replaced 
+> by only one as simple as MDD layer! (however LDLM locking should be 
+> added).
+
+My internal thoughts (in the absence of ever haven taken a close look
+at the HEAD MD stack) have always been that we would essentially be
+moving the CMM to the client, and have it always connect to remote
+MDTs (i.e. no local MDD) if we want to split "operations" into "updates".
+
+I'd always visualized that the MDT accepts "operations" (as it does
+today) and CMM is the component that decides what parts of the operation
+are local (passed to MDD) and which are remote (passed to MDC).
+
+Maybe the MD stack layering isn't quite as clean as this?
+
+> CMD3+:
+> 
+> The component running on WBC client is based on MDT excluding transport 
+> things. Code reuse is possible.
+> 
+> The WBC protocol logically is the current MD protocol with the partial 
+> MD operations (object create w/o name, for example). Partial operations 
+
+partial operations == updates?
+
+> are already used between MD servers for distributed MD operations. MD 
+> operations will be packed into batches.
+> 
+> Both ideas (GOSD and CMD3+) assume a cache manager at WBC client to do 
+> caching & redo-logging of operations.
+> 
+> I think CMD3+ has minimum impact to current Lustre-2.x design. It is 
+> closer to the original goal of just implementation of WBC feature. But 
+> the GOSD is an attractive idea and may be potentially better.
+> 
+> With GOSD I am worrying about making Lustre 2.x unstable for some period 
+> of time. It would be good to think about a plan of incremental 
+> integration of new stack into existing code.
+
+Wouldn't GOSD just end up being a new ptlrpc interface that exports the
+OSD protocol to the network?  This would mean that we need to be able
+to have multiple services working on the same OSD (both MDD for classic
+clients, and GOSD for WBC clients).  That isn't a terrible idea, because
+we have also discussed having both MDT and OST exports of the same OSD
+so that we can efficiently store small files directly on the MDT and/or
+scale the number of MDTs == OSTs for massive metadata performance.
+
+I'd like to keep this kind of layering in mind also.  Whether it makes
+sense to export yet another network protocol to clients, or instead to
+add new operations to the existing service handlers so that they can
+handle all of the operation types (with efficient passthrough to lower
+layers as needed) and be able to multiplex the underlying device
+to clients.
+
+Cheers, Andreas
+--
+Andreas Dilger
+Sr. Staff Engineer, Lustre Group
+Sun Microsystems of Canada, Inc.
+
+
+
+From Alexander.Zarochentsev at Sun.COM  Mon Apr  6 03:23:51 2009
+From: Alexander.Zarochentsev at Sun.COM (Alexander Zarochentsev)
+Date: Mon, 06 Apr 2009 13:23:51 +0300
+Subject: [Lustre-devel] WBC HLD outline
+In-Reply-To: <00a001c9b2a2$45665430$d032fc90$@com>
+References: <200903240058.30343.alexander.zarochentsev@sun.com>
+	<00a001c9b2a2$45665430$d032fc90$@com>
+Message-ID: <200904061423.51437.alexander.zarochentsev@sun.com>
+
+Hello Eric,
+
+Thanks for the review,
+
+On 1 April 2009 12:17:17 Eric Barton wrote:
+> Zam,
+>
+> Some notes on the WBC HLD outline
+
+[...]
+
+>
+> 5. Is ensuring file data is delayed until file creation is
+>    reintegrated sufficient for correct operation?  Are we not
+>    effectively doing create-on-write with a WBC?  I'm sure there
+>    are more issues (e.g. orphans).
+>
+>    Does including the OSTs in epoch recovery solve all the issues? 
+> If so, what are the expected bounds on client redo and server undo
+> storage?  Can we avoid needing server undo for data with some
+> compromises?  Can we exploit the DMU at all?
+
+I think we can't avoid tagging OST object creation w/ epoch counter.
+Would Lustre users complain if file writes are out-of-epochs?
+
+So a write to existing OST object may survive loosing the context of MD 
+operations where the write operation was issued, object 
+creation/deletion may not.
+
+The alternative is to implement undo logging for file data. It would 
+require support from underlaying server fs. It could be done for 
+ldiskfs, not sure about DMU.
+
+There is a security problem with out-of-epochs writes and setting 
+file attributes (especially permissions):
+chmod 400 foo; cat /etc/secret-file >> foo. Chmod/chown can be a special 
+case which triggers wbc flush.
+
+> 6. The section on recovering from WBC client death seems imprecise.
+>    Is (a) just describing V1-4 in Nikita's original post - similarly
+>    (b) for V1-2, V3'-5'?  Also, for (c) I think we may have discussed
+>    the possibility of always sending updates as the full operation +
+>    context to select which updates apply locally so that an operation
+>    can always be recovered from any of its updates.
+
+It is only a rough schema of client eviction to list what support might 
+be needed in wbc protocol, like sending full MD op instead of update-- 
+what you just mentioned. BTW, I thought Epochs HLD would cover the 
+detailed algorithm descriptions, no?
+
+>     Cheers,
+>               Eric
+
+Thanks,
+-- 
+Alexander "Zam" Zarochentsev
+Staff Engineer
+Lustre Group, Sun Microsystems
+
+
+From bzzz at sun.com  Mon Apr  6 03:26:40 2009
+From: bzzz at sun.com (Alex Zhuravlev)
+Date: Mon, 06 Apr 2009 14:26:40 +0400
+Subject: [Lustre-devel] [RFC] two ideas for Meta Data Write Back Cache
+In-Reply-To: <20090406100345.GO3199@webber.adilger.int>
+References: <200904061339.02850.alexander.zarochentsev@sun.com>
+	<20090406100345.GO3199@webber.adilger.int>
+Message-ID: <m3zleu5b8f.fsf@bzzz.home.net>
+
+>>>>> Andreas Dilger (AD) writes:
+
+ AD> My internal thoughts (in the absence of ever haven taken a close look
+ AD> at the HEAD MD stack) have always been that we would essentially be
+ AD> moving the CMM to the client, and have it always connect to remote
+ AD> MDTs (i.e. no local MDD) if we want to split "operations" into "updates".
+
+ AD> I'd always visualized that the MDT accepts "operations" (as it does
+ AD> today) and CMM is the component that decides what parts of the operation
+ AD> are local (passed to MDD) and which are remote (passed to MDC).
+
+few thoughts here:
+1) in order to organize local cache with all this you'd need to do translate
+   once more before md stack (you can't cache create, you can cache directory
+   entries and objects). at same time you need local cache to access just made
+   changes. translation is already done by MDD. if you don't run MDD locally
+   you have to duplicate that code (to some extent) for WBC
+
+2) "create w/o name" (this is what MDT accepts these days) isn't operation,
+   it's partial operation. but for partial operations we already have OSD
+   - clear, simple and generic. having one more "partial operations" adds
+   nothing besides confusion, IMHO
+
+3) local MDD is meaningless with CMD. CMD is distributed thing and I think
+   any implementation of CMD using "metadata operations" (even partial,
+   in contrast with updates in terms of OSD API) is a hack. exactly like we
+   did in CMD1/CMD2 implementing local operations with calls to vfs_create()
+   and distributed operations with special entries in fsfilt. instead of all
+   this we should just use OSD always and properly.
+
+4) the only rational reason behind current design in CMD3 was that rollback
+   reqiured to make remote operations before any local one (to align epoch)
+   - but it's very likely we don't this any more. thanks god (some ones will
+   understand what i meant ;)
+
+5) running MDD on MDS for WBC clients also adds nothing in terms of functionality
+   or clearness, but adds code duplicating OSD
+
+ >> are already used between MD servers for distributed MD operations. MD 
+ >> operations will be packed into batches.
+ >> 
+ >> Both ideas (GOSD and CMD3+) assume a cache manager at WBC client to do 
+ >> caching & redo-logging of operations.
+ >> 
+ >> I think CMD3+ has minimum impact to current Lustre-2.x design. It is 
+ >> closer to the original goal of just implementation of WBC feature. But 
+ >> the GOSD is an attractive idea and may be potentially better.
+ >> 
+ >> With GOSD I am worrying about making Lustre 2.x unstable for some period 
+ >> of time. It would be good to think about a plan of incremental 
+ >> integration of new stack into existing code.
+
+ AD> Wouldn't GOSD just end up being a new ptlrpc interface that exports the
+ AD> OSD protocol to the network?  This would mean that we need to be able
+ AD> to have multiple services working on the same OSD (both MDD for classic
+ AD> clients, and GOSD for WBC clients).  That isn't a terrible idea, because
+ AD> we have also discussed having both MDT and OST exports of the same OSD
+ AD> so that we can efficiently store small files directly on the MDT and/or
+ AD> scale the number of MDTs == OSTs for massive metadata performance.
+
+yes, with gosd you essentially have your object storage exported in terms
+of same API as local storage. you can use that to implement remote services
+(proxy, wbc).
+
+ AD> I'd like to keep this kind of layering in mind also.  Whether it makes
+ AD> sense to export yet another network protocol to clients, or instead to
+ AD> add new operations to the existing service handlers so that they can
+ AD> handle all of the operation types (with efficient passthrough to lower
+ AD> layers as needed) and be able to multiplex the underlying device
+ AD> to clients.
+
+I think it's not "another" network protocol. I think it's right low level
+protocol.  meaning that instead of having very limited set of partial metadata
+operations like "create w/o name", "link w/o inode", etc we may have very
+simple, generic protocol allowing us to do anything with remote storage.
+
+for example, the core of replication with this protocol could look like
+at one node you log osd operations (optional module inbetween regular disk osd
+and upper layers like mdd), then you just send those operations to virtially
+any node in the cluster and execute them there - you got things replicated.
+
+
+-- 
+thanks, Alex
+
+
+From danilov at gmail.com  Mon Apr  6 00:43:01 2009
+From: danilov at gmail.com (Nikita Danilov)
+Date: Mon, 6 Apr 2009 11:43:01 +0400
+Subject: [Lustre-devel] OSD iterator interface
+In-Reply-To: <m3tz526ycz.fsf@bzzz.home.net>
+References: <E14DEA02-826C-4F15-8A22-9FA616EFDBC4@Sun.COM>
+	<49D51B32.2020404@sun.com> <m3tz526ycz.fsf@bzzz.home.net>
+Message-ID: <8acda98c0904060043j289382dfodea4616cb6883f9c@mail.gmail.com>
+
+2009/4/6 Alex Zhuravlev <bzzz at sun.com>
+
+Hello,
+
+
+> I agree with what Oleg said. I think there are two-stages processing here:
+> 1) osd should be able to clean "value" from compatibility stuff like inodes
+> 2) mdd should be able to store this value in own buffer in, possible, some
+>   efficient form
+>
+> >>>>> di wang (dw) writes:
+>
+
+[...]
+
+
+>
+>  >>
+>  >> Am I missing something stupid? Are there any objections, would
+>  >> this break anything?
+>
+
+the  reason dt_it_ops have one-entry-at-a-time interface is that originally
+iterators were able to update indices as well. *E.g.*, it was expected that
+/orphan index processing would read one entry, handle it, and then delete it
+from the index (a possibly mistaken belief in the virtue of simplicity and
+evilness of premature optimization also played its r?le). Eventually all
+existing use cases for the updating iterators were eliminated and ->set_*()
+methods were dropped from dt_it_ops.
+
+
+>  >>
+>  >> Bye,
+>  >> Oleg
+>
+
+Nikita.
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20090406/5b040647/attachment.htm>
+
+From di.wang at sun.com  Mon Apr  6 15:02:14 2009
+From: di.wang at sun.com (di wang)
+Date: Mon, 06 Apr 2009 18:02:14 -0400
+Subject: [Lustre-devel] [RFC] two ideas for Meta Data Write Back Cache
+In-Reply-To: <m3zleu5b8f.fsf@bzzz.home.net>
+References: <200904061339.02850.alexander.zarochentsev@sun.com>
+	<20090406100345.GO3199@webber.adilger.int>
+	<m3zleu5b8f.fsf@bzzz.home.net>
+Message-ID: <49DA7BE6.6070006@sun.com>
+
+
+> 2) "create w/o name" (this is what MDT accepts these days) isn't operation,
+>    it's partial operation. but for partial operations we already have OSD
+>    - clear, simple and generic. having one more "partial operations" adds
+>    nothing besides confusion, IMHO
+>   
+I am not sure you can( or should) translate all the MD partial 
+operation  into object  RPC for these partial
+MD operation.  For example rename,  (a/b  ---> c/d,  a/b in MDS1, c/d in 
+MDS2).
+
+     RPC goes to MDS1.
+
+     1) delete d (entry and object) from c in MDS2.
+     2) create b entry under c in MDS2.
+     3) delete b entry under a in MDS1.
+
+So if you do 1) and 2) by object rpc (skip mdd), then you might need 
+create create all 4 objects
+(a and b are local object, c and d are remote object),  and permission 
+check locally (whether
+you can delete d under c). Not sure it is a good way.  And also some 
+quota stuff are handled
+in these partial operation in remote MDD, so I am not sure we should 
+skip mdd totally here.
+Am I miss sth?
+
+Thanks
+WangDi
+
+
+From di.wang at sun.com  Mon Apr  6 15:12:30 2009
+From: di.wang at sun.com (di wang)
+Date: Mon, 06 Apr 2009 18:12:30 -0400
+Subject: [Lustre-devel] Oleg/Mike Work on Apps Metrics - FW: Mike Booth
+ week ending 2009.03.15
+In-Reply-To: <20090402224310.GM3199@webber.adilger.int>
+References: <C5E2A328.36EE0%Daniel.Ferber@Sun.Com>
+	<015c01c9a5a7$cb2f83a0$618e8ae0$@com>
+	<52E982EB-3ADE-46FA-A7BC-D1645961DF0B@Sun.COM>
+	<018101c9a5b6$25dbc300$71934900$@com>
+	<48A6CF99-F630-4581-9FFC-05E3AFF66FA0@Sun.COM>
+	<023201c9a636$a987e4b0$fc97ae10$@com>
+	<5CE22E46-771C-47EE-9CAC-26A37C87C466@sun.com>
+	<20090331185111.GL3199@webber.adilger.int> <49D2E0FC.4040605@sun.com>
+	<9BDC2632-E80E-4BA8-9ACF-8D7E70A9B236@Sun.COM>
+	<20090402224310.GM3199@webber.adilger.int>
+Message-ID: <49DA7E4E.2080401@sun.com>
+
+Hello,
+
+Andreas Dilger wrote:
+> I'm not sure what you mean.  Implementing AIO is _more_ complex for the
+> application, and in essence the current IO is mostly async except when
+> the client hits the max dirty limit.  The client will still flush the
+> dirty data in the background (despite Michaels experiment), it just takes
+> the VM some time to catch up.
+>
+> Linux VM /proc tunables can be tweaked on the client to have it be more
+> aggressive about pushing out dirty data.  I suspect they are currently
+> tuned for desktop workloads more than IO-intensive workloads.
+>
+>
+>   
+I am not sure the current IO is "async" enough, since it still includes 
+some sync "process", for example,
+locks, read for partial page, some other stack overhead in commit_write, 
+sometimes you can not ignore
+these overhead. For example, even without hit the dirty max limit, you 
+might get quite different write time
+for writing same data. I guess some of the reason might be the VM is 
+just "out of control".
+
+With AIO,
+
+1) The application  can  skip  these "sync" process?  For example by 
+creating an daemon to do the those routine  process.
+2) We can control the write_page(sent to OST) ourselves, instead of rely 
+on VM.
+3) These aio pages do not need comply the dirty max limit in the 
+submit_io(AIO) process,
+   So user application do "real" memory for writing.                 
+
+Yes, AIO will be indeed complex for the application, but not that much, 
+IMHO.                             
+
+Thanks
+Wangdi
+
+>
+>   
+
+
+
+From bzzz at sun.com  Mon Apr  6 21:27:05 2009
+From: bzzz at sun.com (Alex Zhuravlev)
+Date: Tue, 07 Apr 2009 08:27:05 +0400
+Subject: [Lustre-devel] [RFC] two ideas for Meta Data Write Back Cache
+In-Reply-To: <49DA7BE6.6070006@sun.com>
+References: <200904061339.02850.alexander.zarochentsev@sun.com>
+	<20090406100345.GO3199@webber.adilger.int>
+	<m3zleu5b8f.fsf@bzzz.home.net> <49DA7BE6.6070006@sun.com>
+Message-ID: <m3y6ud3x7q.fsf@bzzz.home.net>
+
+>>>>> di wang (dw) writes:
+
+ dw> I am not sure you can( or should) translate all the MD partial 
+ dw> operation  into object  RPC for these partial
+ dw> MD operation.  For example rename,  (a/b  ---> c/d,  a/b in MDS1, c/d in 
+ dw> MDS2).
+
+ dw>      RPC goes to MDS1.
+
+ dw>      1) delete d (entry and object) from c in MDS2.
+ dw>      2) create b entry under c in MDS2.
+ dw>      3) delete b entry under a in MDS1.
+
+ dw> So if you do 1) and 2) by object rpc (skip mdd), then you might need 
+ dw> create create all 4 objects
+ dw> (a and b are local object, c and d are remote object),  and permission 
+ dw> check locally (whether
+ dw> you can delete d under c). Not sure it is a good way.  
+
+sorry, I don't quite understand what you mean. for this rename you'd need to:
+
+if you're worried about additional RPCs, then we can (should) optimize this
+with intents-like mechanism: mdd_rename() (or caller initialize intent
+describing rename in terms of fids and names), then network-aware layer
+(something like current MDC accepting OSD API) can put additional osd calls
+into enqueue RPC.
+
+for example, when it finds enqueue on c, it can form compound RPC consisting
+of: enqueue itself, osd's attr_get(c), osd's lookup(c, d)
+
+also notice, for such rename you need to check that you won't create
+disconnected subtree, which is much worse than just few additional RPCs.
+
+ dw> And also some quota stuff are handled
+ dw> in these partial operation in remote MDD, so I am not sure we should 
+ dw> skip mdd totally here.
+ dw> Am I miss sth?
+
+can you explain why do we need MDD on a server for quota?
+
+given we're about to use OSD for data and metadata I'd think that:
+1) for chown/chgrp MDD (wherever it runs) finds LOV EA and uses epoch
+   (for example) to change uid/gid on MDS and all OSTs in atomical manner
+2) quota code isn't part of data or metadata stack, rather it's side
+   service like ldlm
+3) quota code register hooks (or probably adds very small module right
+   above OSD) to see all quota-related activity: attr_set, write,
+   index insert, etc
+
+also I think we still don't have proper design for quota, this is yet to be
+done to implement quota for DMU.
+
+
+thanks, Alex
+
+
+From adilger at sun.com  Mon Apr  6 23:18:43 2009
+From: adilger at sun.com (Andreas Dilger)
+Date: Mon, 06 Apr 2009 23:18:43 -0700
+Subject: [Lustre-devel] WBC HLD outline
+In-Reply-To: <200904061423.51437.alexander.zarochentsev@sun.com>
+References: <200903240058.30343.alexander.zarochentsev@sun.com>
+	<00a001c9b2a2$45665430$d032fc90$@com>
+	<200904061423.51437.alexander.zarochentsev@sun.com>
+Message-ID: <20090407061843.GA3204@webber.adilger.int>
+
+On Apr 06, 2009  13:23 +0300, Alexander Zarochentsev wrote:
+> On 1 April 2009 12:17:17 Eric Barton wrote:
+> I think we can't avoid tagging OST object creation w/ epoch counter.
+> Would Lustre users complain if file writes are out-of-epochs?
+> 
+> There is a security problem with out-of-epochs writes and setting 
+> file attributes (especially permissions):
+> chmod 400 foo; cat /etc/secret-file >> foo. Chmod/chown can be a special 
+> case which triggers wbc flush.
+
+While this example has been given many times as a security issue that
+forces many strange actions on the part of Lustre, the example is
+fundamentally broken because POSIX allows "foo" to be opened before the
+chmod, and kept open until after the write and then read the "secret-file"
+content.  The "foo" file needs to be created securely in the first place
+to be safe.
+
+> > 6. The section on recovering from WBC client death seems imprecise.
+> >    Is (a) just describing V1-4 in Nikita's original post - similarly
+> >    (b) for V1-2, V3'-5'?  Also, for (c) I think we may have discussed
+> >    the possibility of always sending updates as the full operation +
+> >    context to select which updates apply locally so that an operation
+> >    can always be recovered from any of its updates.
+> 
+> It is only a rough schema of client eviction to list what support might 
+> be needed in wbc protocol, like sending full MD op instead of update-- 
+> what you just mentioned. BTW, I thought Epochs HLD would cover the 
+> detailed algorithm descriptions, no?
+
+Cheers, Andreas
+--
+Andreas Dilger
+Sr. Staff Engineer, Lustre Group
+Sun Microsystems of Canada, Inc.
+
+
+
+From bzzz at sun.com  Mon Apr  6 23:30:11 2009
+From: bzzz at sun.com (Alex Zhuravlev)
+Date: Tue, 07 Apr 2009 10:30:11 +0400
+Subject: [Lustre-devel] WBC HLD outline
+In-Reply-To: <20090407061843.GA3204@webber.adilger.int>
+References: <200903240058.30343.alexander.zarochentsev@sun.com>
+	<00a001c9b2a2$45665430$d032fc90$@com>
+	<200904061423.51437.alexander.zarochentsev@sun.com>
+	<20090407061843.GA3204@webber.adilger.int>
+Message-ID: <m3k55x3rik.fsf@bzzz.home.net>
+
+>>>>> Andreas Dilger (AD) writes:
+
+ AD> On Apr 06, 2009  13:23 +0300, Alexander Zarochentsev wrote:
+ >> On 1 April 2009 12:17:17 Eric Barton wrote:
+ >> I think we can't avoid tagging OST object creation w/ epoch counter.
+ >> Would Lustre users complain if file writes are out-of-epochs?
+ >> 
+ >> There is a security problem with out-of-epochs writes and setting 
+ >> file attributes (especially permissions):
+ >> chmod 400 foo; cat /etc/secret-file >> foo. Chmod/chown can be a special 
+ >> case which triggers wbc flush.
+
+ AD> While this example has been given many times as a security issue that
+ AD> forces many strange actions on the part of Lustre, the example is
+ AD> fundamentally broken because POSIX allows "foo" to be opened before the
+ AD> chmod, and kept open until after the write and then read the "secret-file"
+ AD> content.  The "foo" file needs to be created securely in the first place
+ AD> to be safe.
+
+yup, and there is no way in posix to even check whether file is opened.
+
+my take on this and similar security related issues is that we probably
+should provide two modes:
+1) strict, when no optimizations in order of flush is done
+2) relaxed, when order is not garanteed and user should use some form of sync
+   but lustre can improve performance
+
+
+-- 
+thanks, Alex
+
+
+From danilov at gmail.com  Tue Apr  7 00:50:29 2009
+From: danilov at gmail.com (Nikita Danilov)
+Date: Tue, 7 Apr 2009 11:50:29 +0400
+Subject: [Lustre-devel] WBC HLD outline
+In-Reply-To: <m3k55x3rik.fsf@bzzz.home.net>
+References: <200903240058.30343.alexander.zarochentsev@sun.com>
+	<00a001c9b2a2$45665430$d032fc90$@com>
+	<200904061423.51437.alexander.zarochentsev@sun.com>
+	<20090407061843.GA3204@webber.adilger.int>
+	<m3k55x3rik.fsf@bzzz.home.net>
+Message-ID: <8acda98c0904070050p269492eeq89f18191997f230@mail.gmail.com>
+
+2009/4/7 Alex Zhuravlev <bzzz at sun.com>
+
+> >>>>> Andreas Dilger (AD) writes:
+
+
+Hello,
+
+
+>
+>
+>  AD> On Apr 06, 2009  13:23 +0300, Alexander Zarochentsev wrote:
+>  >> On 1 April 2009 12:17:17 Eric Barton wrote:
+>  >> I think we can't avoid tagging OST object creation w/ epoch counter.
+>  >> Would Lustre users complain if file writes are out-of-epochs?
+>  >>
+>  >> There is a security problem with out-of-epochs writes and setting
+>  >> file attributes (especially permissions):
+>  >> chmod 400 foo; cat /etc/secret-file >> foo. Chmod/chown can be a
+> special
+>  >> case which triggers wbc flush.
+>
+>  AD> While this example has been given many times as a security issue that
+>  AD> forces many strange actions on the part of Lustre, the example is
+>  AD> fundamentally broken because POSIX allows "foo" to be opened before
+> the
+>  AD> chmod, and kept open until after the write and then read the
+> "secret-file"
+>  AD> content.  The "foo" file needs to be created securely in the first
+> place
+>  AD> to be safe.
+
+
+the original "partial write-back" problem was demonstrated with the use case
+
+$ mkdir -m 0700 a # nobody but me can access things under "a"
+$ umask 000
+$ mkdir -m 0777 -p a/b/c/d
+$ echo "secret data" > a/b/c/d/file
+$ sync # time passes...
+$ echo > a/b/c/d/file # truncate secret data
+$ chmod 777 a # relax permissions
+
+Note that here an ordering between data and meta-data updates on _different_
+objects is important.
+
+
+>
+> yup, and there is no way in posix to even check whether file is opened.
+>
+> my take on this and similar security related issues is that we probably
+> should provide two modes:
+> 1) strict, when no optimizations in order of flush is done
+> 2) relaxed, when order is not garanteed and user should use some form of
+> sync
+>   but lustre can improve performance
+
+
+The old (and outdated) WBC HLD has a section "Partial write-out" describing
+these issues.
+
+--
+> thanks, Alex
+
+
+Nikita.
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20090407/0c4ebdd4/attachment.htm>
+
+From adilger at sun.com  Tue Apr  7 00:54:03 2009
+From: adilger at sun.com (Andreas Dilger)
+Date: Tue, 07 Apr 2009 00:54:03 -0700
+Subject: [Lustre-devel] Oleg/Mike Work on Apps Metrics - FW: Mike
+	Booth	week ending 2009.03.15
+In-Reply-To: <49DA7E4E.2080401@sun.com>
+References: <52E982EB-3ADE-46FA-A7BC-D1645961DF0B@Sun.COM>
+	<018101c9a5b6$25dbc300$71934900$@com>
+	<48A6CF99-F630-4581-9FFC-05E3AFF66FA0@Sun.COM>
+	<023201c9a636$a987e4b0$fc97ae10$@com>
+	<5CE22E46-771C-47EE-9CAC-26A37C87C466@sun.com>
+	<20090331185111.GL3199@webber.adilger.int> <49D2E0FC.4040605@sun.com>
+	<9BDC2632-E80E-4BA8-9ACF-8D7E70A9B236@Sun.COM>
+	<20090402224310.GM3199@webber.adilger.int> <49DA7E4E.2080401@sun.com>
+Message-ID: <20090407075403.GO3204@webber.adilger.int>
+
+On Apr 06, 2009  18:12 -0400, di wang wrote:
+> I am not sure the current IO is "async" enough, since it still includes  
+> some sync "process", for example, locks, read for partial page, some
+> other stack overhead in commit_write, sometimes you can not ignore
+> these overhead. For example, even without hit the dirty max limit, you  
+> might get quite different write time for writing same data. I guess
+> some of the reason might be the VM is just "out of control".
+>
+> With AIO,
+>
+> 1) The application  can  skip  these "sync" process?  For example by  
+> creating an daemon to do the those routine  process.
+> 2) We can control the write_page(sent to OST) ourselves, instead of rely  
+> on VM.
+> 3) These aio pages do not need comply the dirty max limit in the  
+> submit_io(AIO) process, So user application do "real" memory for writing.
+>
+> Yes, AIO will be indeed complex for the application, but not that much,  
+
+There was just a discussion about Linux AIO today (from former Linux AIO
+maintainer, as it is currently unmaintained) and his statements were that
+AIO is not really async at all, as it will block for local filesystems
+on any file allocation, or any buffered IO.  Only preallocated files and
+O_DIRECT even have a chance at AIO, and even that will not always work.
+
+Cheers, Andreas
+--
+Andreas Dilger
+Sr. Staff Engineer, Lustre Group
+Sun Microsystems of Canada, Inc.
+
+
+
+From Alexander.Zarochentsev at Sun.COM  Wed Apr  8 09:41:28 2009
+From: Alexander.Zarochentsev at Sun.COM (Alexander Zarochentsev)
+Date: Wed, 08 Apr 2009 20:41:28 +0400
+Subject: [Lustre-devel] WBC HLD outline
+In-Reply-To: <8acda98c0904070050p269492eeq89f18191997f230@mail.gmail.com>
+References: <200903240058.30343.alexander.zarochentsev@sun.com>
+	<m3k55x3rik.fsf@bzzz.home.net>
+	<8acda98c0904070050p269492eeq89f18191997f230@mail.gmail.com>
+Message-ID: <200904082041.28945.alexander.zarochentsev@sun.com>
+
+Hello Nikita!
+
+On 7 April 2009 11:50:29 Nikita Danilov wrote:
+> 2009/4/7 Alex Zhuravlev <bzzz at sun.com>
+>
+> > >>>>> Andreas Dilger (AD) writes:
+>
+> Hello,
+>
+> >  AD> On Apr 06, 2009  13:23 +0300, Alexander Zarochentsev wrote:
+> >  >> On 1 April 2009 12:17:17 Eric Barton wrote:
+> >  >> I think we can't avoid tagging OST object creation w/ epoch
+> >  >> counter. Would Lustre users complain if file writes are
+> >  >> out-of-epochs?
+> >  >>
+> >  >> There is a security problem with out-of-epochs writes and
+> >  >> setting file attributes (especially permissions):
+> >  >> chmod 400 foo; cat /etc/secret-file >> foo. Chmod/chown can be
+> >  >> a
+> >
+> > special
+> >
+> >  >> case which triggers wbc flush.
+> >
+> >  AD> While this example has been given many times as a security
+> > issue that AD> forces many strange actions on the part of Lustre,
+> > the example is AD> fundamentally broken because POSIX allows "foo"
+> > to be opened before the
+> >  AD> chmod, and kept open until after the write and then read the
+> > "secret-file"
+> >  AD> content.  The "foo" file needs to be created securely in the
+> > first place
+> >  AD> to be safe.
+>
+> the original "partial write-back" problem was demonstrated with the
+> use case
+>
+> $ mkdir -m 0700 a # nobody but me can access things under "a"
+> $ umask 000
+> $ mkdir -m 0777 -p a/b/c/d
+> $ echo "secret data" > a/b/c/d/file
+> $ sync # time passes...
+> $ echo > a/b/c/d/file # truncate secret data
+> $ chmod 777 a # relax permissions
+>
+> Note that here an ordering between data and meta-data updates on
+> _different_ objects is important.
+
+If we only guarantee no reordering in MD updates, Lustre behavior would 
+be like ext3 without data journalling? I think it is not terrible.
+
+> > yup, and there is no way in posix to even check whether file is
+> > opened.
+> >
+> > my take on this and similar security related issues is that we
+> > probably should provide two modes:
+> > 1) strict, when no optimizations in order of flush is done
+> > 2) relaxed, when order is not garanteed and user should use some
+> > form of sync
+> >   but lustre can improve performance
+>
+> The old (and outdated) WBC HLD has a section "Partial write-out"
+> describing these issues.
+>
+> --
+>
+> > thanks, Alex
+>
+> Nikita.
+
+-- 
+Alexander "Zam" Zarochentsev
+Staff Engineer
+Lustre Group, Sun Microsystems
+
+
+From Oleg.Drokin at Sun.COM  Wed Apr  8 20:04:47 2009
+From: Oleg.Drokin at Sun.COM (Oleg Drokin)
+Date: Wed, 08 Apr 2009 23:04:47 -0400
+Subject: [Lustre-devel] WBC HLD outline
+In-Reply-To: <m3k55x3rik.fsf@bzzz.home.net>
+References: <200903240058.30343.alexander.zarochentsev@sun.com>
+	<00a001c9b2a2$45665430$d032fc90$@com>
+	<200904061423.51437.alexander.zarochentsev@sun.com>
+	<20090407061843.GA3204@webber.adilger.int>
+	<m3k55x3rik.fsf@bzzz.home.net>
+Message-ID: <2508C191-5730-4B4D-990C-9465C57DC18D@sun.com>
+
+Hello!
+
+On Apr 7, 2009, at 2:30 AM, Alex Zhuravlev wrote:
+> AD> While this example has been given many times as a security issue  
+> that
+> AD> forces many strange actions on the part of Lustre, the example is
+> AD> fundamentally broken because POSIX allows "foo" to be opened  
+> before the
+> AD> chmod, and kept open until after the write and then read the  
+> "secret-file"
+> AD> content.  The "foo" file needs to be created securely in the  
+> first place
+> AD> to be safe.
+> yup, and there is no way in posix to even check whether file is  
+> opened.
+
+I do not know if file leases are POSIX or not (and cannot check right  
+now),
+but they do in fact allow you not only to ensure the file is not  
+opened in certain
+mode, but would also allow you to get notified when somebody attempts  
+to open
+a file on which you have obtained such a lease.
+
+Bye,
+    Oleg
+
+
+From danilov at gmail.com  Thu Apr  9 01:58:41 2009
+From: danilov at gmail.com (Nikita Danilov)
+Date: Thu, 9 Apr 2009 12:58:41 +0400
+Subject: [Lustre-devel] WBC HLD outline
+In-Reply-To: <200904082041.28945.alexander.zarochentsev@sun.com>
+References: <200903240058.30343.alexander.zarochentsev@sun.com>
+	<m3k55x3rik.fsf@bzzz.home.net>
+	<8acda98c0904070050p269492eeq89f18191997f230@mail.gmail.com>
+	<200904082041.28945.alexander.zarochentsev@sun.com>
+Message-ID: <8acda98c0904090158k722a13c5o96d624671734f7e2@mail.gmail.com>
+
+2009/4/8 Alexander Zarochentsev <Alexander.Zarochentsev at sun.com>
+
+> Hello Nikita!
+>
+> On 7 April 2009 11:50:29 Nikita Danilov wrote:
+> > 2009/4/7 Alex Zhuravlev <bzzz at sun.com>
+> >
+> > > >>>>> Andreas Dilger (AD) writes:
+> >
+> > Hello,
+> >
+>
+
+[...]
+
+
+> > $ echo > a/b/c/d/file # truncate secret data
+> > $ chmod 777 a # relax permissions
+> >
+> > Note that here an ordering between data and meta-data updates on
+> > _different_ objects is important.
+>
+> If we only guarantee no reordering in MD updates, Lustre behavior would
+> be like ext3 without data journalling? I think it is not terrible.
+
+
+It's not terrible, but it is non-intuitive, in my opinion. More enlightened
+file systems, like ZFS, reiser4, and NTFS provide stronger consistency
+guarantees, ignoring the petty distinctions between data and meta-data. :-)
+
+But even limiting consistency to meta-data leaves some issues opened. For
+example, think about an md proxy server acting as a WBC client for a higher
+tier server. To be efficient such proxy might need to cache very large
+amount of meta-data, and it most likely cannot afford to keep a log of all
+operations. In this situation, when a lock on a top-level directory gets a
+blocking AST, proxy would have --to guarantee ordering of visible meta-data
+updates-- to write back all cached dirty meta-data under this directory
+before the lock can be cancelled, which might result in unacceptable
+latency.
+
+>
+> > > thanks, Alex
+> >
+> > Nikita.
+>
+> --
+> Alexander "Zam" Zarochentsev
+>
+
+Nikita.
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20090409/ffcd5ed0/attachment.htm>
+
+From nic at cray.com  Fri Apr 17 10:10:01 2009
+From: nic at cray.com (Nicholas Henke)
+Date: Fri, 17 Apr 2009 12:10:01 -0500
+Subject: [Lustre-devel] faking LNET scale
+Message-ID: <49E8B7E9.5080101@cray.com>
+
+Greetings -
+
+	I was looking into ways to simulate scale at the LNET level. It would allow us 
+to test the LNDs better with less hardware, not to mention things like LNet 
+SelfTest and friends.
+
+	With the work in bug 15332 to add multiple nets per NIC, it seemed fairly close 
+that we could use that to generate multiple LND connections from a single NIC. 
+Ideally we'd have a server or router that would have just one LND instance 
+(ptl0) and the client nodes with multiple interfaces (ptl1, ptl2, ...). This 
+would increase the load on those server nodes to something interesting.
+
+However, to do this either hacking up lnet_ptlcompat_matchXXX to look at another 
+flag besides the_lnet.ln_ptlcompat or some other way of allowing a server with a 
+single NET (ptl0) to accept requests from a variety of nets (ptl1, ptl2, etc). 
+One cannot use multiple interfaces for the same net type with ln_ptlcompat enabled.
+
+	Is there a better way to do this ? What would be the least abusive of th e rules ?
+
+Cheers,
+Nic
+
+
+From Zhen.Liang at Sun.COM  Fri Apr 17 11:33:30 2009
+From: Zhen.Liang at Sun.COM (Liang Zhen)
+Date: Sat, 18 Apr 2009 02:33:30 +0800
+Subject: [Lustre-devel] faking LNET scale
+In-Reply-To: <49E8B7E9.5080101@cray.com>
+References: <49E8B7E9.5080101@cray.com>
+Message-ID: <49E8CB7A.1090106@sun.com>
+
+Nic,
+It's very late night for me now, my head is not clear enough for me to 
+make sure whether I'm saying something crazy, :)
+LNet always thinks target is remote network(needs router) if it can't 
+find a NI with same network ID, for example, if local NI is (ptl0) and 
+caller wants to send message to (ptl1), then LNet will:
+1. Try to find local  NI for ptl1, and failed then:
+2. try to find if ptl1 is a remote network and whether there is router 
+for this network (ptl1)
+
+So if you want your server has only one NI instance and can talk with a 
+set of different networks, and at the same time, it can talk with other 
+remote networks via routers,  I would suggest:
+1. create a new command, for example: lctl add_local_net ptl0 ptl[1-N], 
+which means LNet should allow NI(ptl0) accessing networks( ptl[1-N] as 
+local networks.
+2. add a new structure in LNet, i.e:
+struct  {
+      struct list_head ln_list;
+    __u32                ln_net;
+     lnet_ni_t          *ln_localni;
+     ......
+}lnet_localnet_t;
+As you see, it's very like current structure lnet_remotenet_t, which is 
+pending on lnet_t::ln_remote_nets; we can create a lnet_locallnet_t 
+object and add it to global list (i.e: lnet_t::ln_local_nets) by the 
+command we mentioned above: lctl add_local_net
+3. once upper layer caller sending message, lnet_send() should check 
+lnet_t::ln_local_nets firstly (before thinking it's a remote network and 
+checking on lnet_t::ln_remote_nets), if it is on 
+lnet_t::ln_local_netsthen we can take the local NI. on 
+lnet_locanet_t::ln_localni;
+4. We need add a new flag for LND, only LND with the flag can support 
+command lctl add_local_net.
+5. make the LND wouldn't reject messages from different networks.
+again, hope I'm answering what you are asking, :)
+
+Regards
+Liang
+
+Nicholas Henke wrote:
+> Greetings -
+>
+> 	I was looking into ways to simulate scale at the LNET level. It would allow us 
+> to test the LNDs better with less hardware, not to mention things like LNet 
+> SelfTest and friends.
+>
+> 	With the work in bug 15332 to add multiple nets per NIC, it seemed fairly close 
+> that we could use that to generate multiple LND connections from a single NIC. 
+> Ideally we'd have a server or router that would have just one LND instance 
+> (ptl0) and the client nodes with multiple interfaces (ptl1, ptl2, ...). This 
+> would increase the load on those server nodes to something interesting.
+>
+> However, to do this either hacking up lnet_ptlcompat_matchXXX to look at another 
+> flag besides the_lnet.ln_ptlcompat or some other way of allowing a server with a 
+> single NET (ptl0) to accept requests from a variety of nets (ptl1, ptl2, etc). 
+> One cannot use multiple interfaces for the same net type with ln_ptlcompat enabled.
+>
+> 	Is there a better way to do this ? What would be the least abusive of th e rules ?
+>
+> Cheers,
+> Nic
+> _______________________________________________
+> Lustre-devel mailing list
+> Lustre-devel at lists.lustre.org
+> http://lists.lustre.org/mailman/listinfo/lustre-devel
+>   
+
+
+
+From nic at cray.com  Sat Apr 18 05:35:33 2009
+From: nic at cray.com (Nic Henke)
+Date: Sat, 18 Apr 2009 07:35:33 -0500
+Subject: [Lustre-devel] faking LNET scale
+In-Reply-To: <49E8CB7A.1090106@sun.com>
+References: <49E8B7E9.5080101@cray.com> <49E8CB7A.1090106@sun.com>
+Message-ID: <49E9C915.3080107@cray.com>
+
+Liang Zhen wrote:
+> Nic,
+> It's very late night for me now, my head is not clear enough for me to
+> make sure whether I'm saying something crazy, :)
+Liang,
+    Thanks for the notes - at worst this is crazy interesting :-) This
+looks very doable - I've not dug into the code to see if there are any
+implementation gotchas - but it looks like it should work. I'll let you
+know what I come up with.
+
+Cheers,
+Nic
+
+> LNet always thinks target is remote network(needs router) if it can't
+> find a NI with same network ID, for example, if local NI is (ptl0) and
+> caller wants to send message to (ptl1), then LNet will:
+> 1. Try to find local  NI for ptl1, and failed then:
+> 2. try to find if ptl1 is a remote network and whether there is router
+> for this network (ptl1)
+>
+> So if you want your server has only one NI instance and can talk with
+> a set of different networks, and at the same time, it can talk with
+> other remote networks via routers,  I would suggest:
+> 1. create a new command, for example: lctl add_local_net ptl0
+> ptl[1-N], which means LNet should allow NI(ptl0) accessing networks(
+> ptl[1-N] as local networks.
+> 2. add a new structure in LNet, i.e:
+> struct  {
+>      struct list_head ln_list;
+>    __u32                ln_net;
+>     lnet_ni_t          *ln_localni;
+>     ......
+> }lnet_localnet_t;
+> As you see, it's very like current structure lnet_remotenet_t, which
+> is pending on lnet_t::ln_remote_nets; we can create a lnet_locallnet_t
+> object and add it to global list (i.e: lnet_t::ln_local_nets) by the
+> command we mentioned above: lctl add_local_net
+> 3. once upper layer caller sending message, lnet_send() should check
+> lnet_t::ln_local_nets firstly (before thinking it's a remote network
+> and checking on lnet_t::ln_remote_nets), if it is on
+> lnet_t::ln_local_netsthen we can take the local NI. on
+> lnet_locanet_t::ln_localni;
+> 4. We need add a new flag for LND, only LND with the flag can support
+> command lctl add_local_net.
+> 5. make the LND wouldn't reject messages from different networks.
+> again, hope I'm answering what you are asking, :)
+>
+> Regards
+> Liang
+
+
+
+From He.Huang at Sun.COM  Wed Apr 22 14:37:46 2009
+From: He.Huang at Sun.COM (Isaac Huang)
+Date: Wed, 22 Apr 2009 17:37:46 -0400
+Subject: [Lustre-devel] faking LNET scale
+In-Reply-To: <49E8B7E9.5080101@cray.com>
+References: <49E8B7E9.5080101@cray.com>
+Message-ID: <20090422213746.GZ6559@sun.com>
+
+On Fri, Apr 17, 2009 at 12:10:01PM -0500, Nicholas Henke wrote:
+> ......
+> However, to do this either hacking up lnet_ptlcompat_matchXXX to look at another 
+> flag besides the_lnet.ln_ptlcompat or some other way of allowing a server with a 
+> single NET (ptl0) to accept requests from a variety of nets (ptl1, ptl2, etc). 
+> One cannot use multiple interfaces for the same net type with ln_ptlcompat enabled.
+
+Note that Portals compatibility (lnet_ptlcompat_, the_lnet.ln_ptlcompat, and friends)
+have already been removed from lnet HEAD, on which all 2.x and future releases will 
+be based.
+
+> 	Is there a better way to do this ? What would be the least abusive of th e rules ?
+
+If you only have limited number of test nodes, one way to drive the
+network as hard as possible is to have all nodes use a very high
+ptllnd peercredits option and run LST test with a high concurrency
+(with the latest LST patch from 15332).
+
+Thanks,
+Isaac
+
+
+From nic at cray.com  Wed Apr 22 15:20:10 2009
+From: nic at cray.com (Nic Henke)
+Date: Wed, 22 Apr 2009 17:20:10 -0500
+Subject: [Lustre-devel] faking LNET scale
+In-Reply-To: <20090422213746.GZ6559@sun.com>
+References: <49E8B7E9.5080101@cray.com> <20090422213746.GZ6559@sun.com>
+Message-ID: <49EF981A.6030802@cray.com>
+
+Isaac Huang wrote:
+> On Fri, Apr 17, 2009 at 12:10:01PM -0500, Nicholas Henke wrote:
+>   
+>> ......
+>> However, to do this either hacking up lnet_ptlcompat_matchXXX to look at another 
+>> flag besides the_lnet.ln_ptlcompat or some other way of allowing a server with a 
+>> single NET (ptl0) to accept requests from a variety of nets (ptl1, ptl2, etc). 
+>> One cannot use multiple interfaces for the same net type with ln_ptlcompat enabled.
+>>     
+>
+> Note that Portals compatibility (lnet_ptlcompat_, the_lnet.ln_ptlcompat, and friends)
+> have already been removed from lnet HEAD, on which all 2.x and future releases will 
+> be based.
+>
+>   
+>> 	Is there a better way to do this ? What would be the least abusive of th e rules ?
+>>     
+>
+> If you only have limited number of test nodes, one way to drive the
+> network as hard as possible is to have all nodes use a very high
+> ptllnd peercredits option and run LST test with a high concurrency
+> (with the latest LST patch from 15332).
+>
+> Thanks,
+> Isaac
+>   
+I was more interested in scaling the number of peers/connections. The
+previous suggestion about doing a localnet check would help do that. 
+>From past experience, we don't often find too many issues just getting
+the data moving when changing to higher scale - it is all the mgmt of
+peers/connections that end up getting 'fun'.
+
+As you say - just using higher credits is usually sufficient to max out
+the network throughput for a given set of nodes.
+
+
+Nic
+
+
+From Zhen.Liang at Sun.COM  Thu Apr 23 07:42:58 2009
+From: Zhen.Liang at Sun.COM (Liang Zhen)
+Date: Thu, 23 Apr 2009 22:42:58 +0800
+Subject: [Lustre-devel] SMP scalability of our product
+Message-ID: <49F07E72.6090306@sun.com>
+
+Hi there,
+
+This week I got a chance to run our in-developing SMP scalable LNet on
+some real good hardwares:
+48 clients : 1 server, all of them are 2.5G HZ 16-cores, Mellanox IB HCA.
+
+We want to know network performance on the server when all these clients
+connect to the only server and send message or RDMA with it at the same
+time. Result is a big surprise, our ping rate is about 700% of the best
+number I have ever seen, 4K-sized read/write performance are 300% of
+current small-size RDMA performance:
+. Ping : 800,000K RPCs / Sec
+. 4K READ : 900+MB / Sec
+. 4K WRITE : 1200+MB / Sec
+
+Basically, We made these changes:
+. all global locks on hot logic path of LNet & LND are removed
+. global data are replaced with per-CPU data, each CPU has it's own
+lock, waitq, hashtable etc...
+. hash different requests to different CPUs
+. Try to avoid RPC bouncing between CPUs is possible
+. Use CPU affinity threads if possible, to avoid data bouncing between
+CPUs as well.
+
+We don't expect performance can change so much before testing, but the
+fact is, hardware can work much better if we program in the correct way.
+However, these testing results are from lnet_selftest, which is improved
+for SMP scalability as well, and it almost uses LNet in ideal way.
+
+So I try to run obdecho, which almost does nothing but directly call
+into ptlrpc, results make me fall back to real world, as you can see in
+the attachment, it can only get about 6% of LNet's RPC rates and 20% of
+LNet's small RDMA performance. Lockmeter and oprofile show that threads
+of ptlrpc spent about 60% of all CPU time on spinlock... of course, it's
+on 16-cores system and running insanity network testing, but SMP
+machines are cheaper than ever, more customers will buy fat cores
+machines, and customers always have more clients (network connections)
+than us.
+
+So, seems we still have a lot of work to do for SMP scalability, to make
+better use of customers' hardware, and I would like to share what learnt
+from this project in the recent future after I got time to write up.
+
+PS, another attachment is lockmeter, which can be applied to our RHEL5
+kernel (maybe there is newer version already), you can try if you are
+intereste
+d in.
+
+Regards
+Liang
+
+-------------- next part --------------
+A non-text attachment was scrubbed...
+Name: Selftest_vs_Ptlrpc.pdf
+Type: application/pdf
+Size: 92284 bytes
+Desc: not available
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20090423/edb22f2a/attachment.pdf>
+-------------- next part --------------
+A non-text attachment was scrubbed...
+Name: lockmeter-rhel5.tgz
+Type: application/x-compressed
+Size: 272819 bytes
+Desc: not available
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20090423/edb22f2a/attachment.bin>
+
+From adilger at sun.com  Mon Apr 27 14:27:14 2009
+From: adilger at sun.com (Andreas Dilger)
+Date: Mon, 27 Apr 2009 15:27:14 -0600
+Subject: [Lustre-devel] CMD + OST FID range mapping
+In-Reply-To: <49F56A52.4030808@sun.com>
+References: <200904250507.n3P57ttg021967@lustre.sun.com>
+	<20090427081443.GE3209@webber.adilger.int> <49F56A52.4030808@sun.com>
+Message-ID: <20090427212714.GF3209@webber.adilger.int>
+
+On Apr 27, 2009  12:18 +0400, Alex Zhuravlev wrote:
+> btw, I looked at interoperability page on the wiki, but haven't understood
+> exact encoding of group:objid in fid structure. could you explain it, please?
+
+It isn't documented on the wiki yet.  My proposal is for FID-on-OST to
+pass the 64-bit SEQ number in the 64-bit o_gr field (similar to how we
+pass the MDS number there today), the main difference being that the
+SEQ number is a proper sequence number and assigned to a specific MDT-OST
+pair instead of being the same MDT index on all OSTs.  Since FID-on-OST
+is only needed for CMD we do not need to implement this immediately.
+For existing objects we would use the l_ost_idx + l_object_id
+
+Likely, we would assign a large range of SEQ numbers to each OST, and
+then sub-assign those to the MDTs as needed (exactly the way MDTs assign
+individual SEQ numbers to clients) so that the FLDB remains contiguous
+for the majority of uses.
+
+Note there isn't a big problem with migrating SEQ numbers between OSTs
+because these numbers are not exposed to userspace in any manner that
+requires them to remain constant (unlink filesystem inode numbers and
+tar/nfs/etc).  That means for normal file migrations/rebalancing we
+can just assign new object numbers during the migration and rewrite the
+LOV EA layout.
+
+If we are doing whole-OST content migration we could consider copying
+the objects and migrating entire sequence numbers, but Eric pointed out
+to me we would likely want to do space balancing at that point anyways,
+so it might make sense to always just allocate new OST objects for
+any migration.  We don't need to scan the filesystem to find the files
+referencing these objects, because the OST objects contain backpointers
+to the inodes that they are part of.
+
+For on-the-wire usage, we can keep the OID in the low 32 bits of the
+obdo.o_id field, and the high 32-bit of the obdo.o_id is the VER field
+from the FID.  That said, since we would need to special-case the
+seq/oid/ver mapping to the lock resource ids for "FID" vs "IDIF" values,
+it could go either way.
+
+For existing objects (group == 0) we can use the l_ost_idx + l_object_id
+to locate it (as stored in the lov_mds_md today) and treat o_gr == 0
+specially to indicate an IDIF OST FID, just as the MDT treats IGIF FIDs
+differently when generating a lock resource value to maintain compatibility.
+
+There is also the unused l_ost_gen for each OST object in the LOV EA which
+could be used to distinguish the "ver" field of the FID if we wanted it
+to remain separate from the o_id on disk.
+
+
+In summary for objects (note VER is flexible and could fit in a few
+places until we had an obdo_v2 and/or LOV_V4 that held a proper FID):
+
+		SEQ				OID		VER
+lu_fid:		seq:64				oid:32		ver:32
+IDIF:		seq:31 1: ost_idx:16 o_id_hi:16	o_id_lo:32	0:
+obdo (wire):	o_gr:64				o_id:32		o_id:32_hi
+LOVEA(disk):	o_gr:64				o_id:32		o_id:32_hi
+
+The IDIF would only be used if we need to represent an old objid as a FID
+(e.g. if we exported it for an OST changelog, or in a obdo_v2 or LOV_V4).
+
+Cheers, Andreas
+--
+Andreas Dilger
+Sr. Staff Engineer, Lustre Group
+Sun Microsystems of Canada, Inc.
+
+
+
+From ben at terascala.com  Mon Apr 27 07:09:07 2009
+From: ben at terascala.com (Ben Evans)
+Date: Mon, 27 Apr 2009 10:09:07 -0400
+Subject: [Lustre-devel] lustre on nehalem
+Message-ID: <2C7DE72B9BD00F44BAECA5B0CBB873955C393B@hermes.terascala.com>
+
+Have any of you successfully built and loaded Lustre on a Nehalem
+system, and if so, what kernel did you use?
+
+ 
+
+--
+
+Ben Evans  ben at terascala.com
+
+Principal Engineer
+
+Terascala Inc.
+
+Office:  508-588-1501 x223
+
+www.terascala.com
+
+ 
+
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20090427/3c61e80e/attachment.htm>
+
+From eeb at sun.com  Wed Apr 29 18:21:00 2009
+From: eeb at sun.com (Eric Barton)
+Date: Thu, 30 Apr 2009 02:21:00 +0100
+Subject: [Lustre-devel] faking LNET scale
+In-Reply-To: <49E8CB7A.1090106@sun.com>
+References: <49E8B7E9.5080101@cray.com> <49E8CB7A.1090106@sun.com>
+Message-ID: <03f001c9c931$ec4b5430$c4e1fc90$@com>
+
+Why not just instantiate all the NIs on the server?  LNDs that
+support multiple NIs typically have a single set of global tables,
+so it should still stress the LND just fine.  Also having n different
+targets (one for each LNET) on the server actually simplifies
+client configuration too - if you only have a single target, lustre
+would, by default, only use one client NID to get to it.
+
+
+    Cheers,
+              Eric
+
+
+
+> -----Original Message-----
+> From: lustre-devel-bounces at lists.lustre.org [mailto:lustre-devel-bounces at lists.lustre.org] On Behalf Of Liang Zhen
+> Sent: 17 April 2009 7:34 PM
+> To: Nicholas Henke
+> Cc: lustre-devel at lists.lustre.org
+> Subject: Re: [Lustre-devel] faking LNET scale
+> 
+> Nic,
+> It's very late night for me now, my head is not clear enough for me to
+> make sure whether I'm saying something crazy, :)
+> LNet always thinks target is remote network(needs router) if it can't
+> find a NI with same network ID, for example, if local NI is (ptl0) and
+> caller wants to send message to (ptl1), then LNet will:
+> 1. Try to find local  NI for ptl1, and failed then:
+> 2. try to find if ptl1 is a remote network and whether there is router
+> for this network (ptl1)
+> 
+> So if you want your server has only one NI instance and can talk with a
+> set of different networks, and at the same time, it can talk with other
+> remote networks via routers,  I would suggest:
+> 1. create a new command, for example: lctl add_local_net ptl0 ptl[1-N],
+> which means LNet should allow NI(ptl0) accessing networks( ptl[1-N] as
+> local networks.
+> 2. add a new structure in LNet, i.e:
+> struct  {
+>       struct list_head ln_list;
+>     __u32                ln_net;
+>      lnet_ni_t          *ln_localni;
+>      ......
+> }lnet_localnet_t;
+> As you see, it's very like current structure lnet_remotenet_t, which is
+> pending on lnet_t::ln_remote_nets; we can create a lnet_locallnet_t
+> object and add it to global list (i.e: lnet_t::ln_local_nets) by the
+> command we mentioned above: lctl add_local_net
+> 3. once upper layer caller sending message, lnet_send() should check
+> lnet_t::ln_local_nets firstly (before thinking it's a remote network and
+> checking on lnet_t::ln_remote_nets), if it is on
+> lnet_t::ln_local_netsthen we can take the local NI. on
+> lnet_locanet_t::ln_localni;
+> 4. We need add a new flag for LND, only LND with the flag can support
+> command lctl add_local_net.
+> 5. make the LND wouldn't reject messages from different networks.
+> again, hope I'm answering what you are asking, :)
+> 
+> Regards
+> Liang
+> 
+> Nicholas Henke wrote:
+> > Greetings -
+> >
+> > 	I was looking into ways to simulate scale at the LNET level. It would allow us
+> > to test the LNDs better with less hardware, not to mention things like LNet
+> > SelfTest and friends.
+> >
+> > 	With the work in bug 15332 to add multiple nets per NIC, it seemed fairly close
+> > that we could use that to generate multiple LND connections from a single NIC.
+> > Ideally we'd have a server or router that would have just one LND instance
+> > (ptl0) and the client nodes with multiple interfaces (ptl1, ptl2, ...). This
+> > would increase the load on those server nodes to something interesting.
+> >
+> > However, to do this either hacking up lnet_ptlcompat_matchXXX to look at another
+> > flag besides the_lnet.ln_ptlcompat or some other way of allowing a server with a
+> > single NET (ptl0) to accept requests from a variety of nets (ptl1, ptl2, etc).
+> > One cannot use multiple interfaces for the same net type with ln_ptlcompat enabled.
+> >
+> > 	Is there a better way to do this ? What would be the least abusive of th e rules ?
+> >
+> > Cheers,
+> > Nic
+> > _______________________________________________
+> > Lustre-devel mailing list
+> > Lustre-devel at lists.lustre.org
+> > http://lists.lustre.org/mailman/listinfo/lustre-devel
+> >
+> 
+> _______________________________________________
+> Lustre-devel mailing list
+> Lustre-devel at lists.lustre.org
+> http://lists.lustre.org/mailman/listinfo/lustre-devel
+
+
+
+From cap at nsc.liu.se  Thu Apr 30 03:30:59 2009
+From: cap at nsc.liu.se (Peter Kjellstrom)
+Date: Thu, 30 Apr 2009 12:30:59 +0200
+Subject: [Lustre-devel] lustre on nehalem
+In-Reply-To: <2C7DE72B9BD00F44BAECA5B0CBB873955C393B@hermes.terascala.com>
+References: <2C7DE72B9BD00F44BAECA5B0CBB873955C393B@hermes.terascala.com>
+Message-ID: <200904301231.03825.cap@nsc.liu.se>
+
+On Monday 27 April 2009, Ben Evans wrote:
+> Have any of you successfully built and loaded Lustre on a Nehalem
+> system, and if so, what kernel did you use?
+
+We run the vanilla CentOS-5.3 kernel on some Nehalem systems. The same kernel 
+is on another system sucessfully used with patchless lustre-1.6.7.1.
+
+/Peter
+-------------- next part --------------
+A non-text attachment was scrubbed...
+Name: not available
+Type: application/pgp-signature
+Size: 189 bytes
+Desc: This is a digitally signed message part.
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20090430/5c4c0f53/attachment.pgp>
+
+From Terry.Rutledge at Sun.COM  Thu Apr 30 17:36:25 2009
+From: Terry.Rutledge at Sun.COM (Terry Rutledge)
+Date: Thu, 30 Apr 2009 17:36:25 -0700
+Subject: [Lustre-devel] New tags recently added to CVS
+Message-ID: <49FA4409.3010006@Sun.COM>
+
+Hi all,
+
+Just wanted to make you aware of a couple of new
+CVS tags that I've created.
+
+*HEAD:*
+*v1_9_170* - Biweekly build for the 2.0 Release.
+    This is not an official release, just a build
+    to be used for internal testing.
+
+*b_release_1_8_0:*
+*v1_8_0_RC7* - Seventh Release Candidate for the 1.8.0 Release.
+    Builds in progress, testing to start when builds complete.
+
+*b_release_1_6_7_1:*
+*v1_6_7_1* - This is the official release for Lustre 1.6.7.1.
+    Previously this was v1_6_7_1_RC3.  No change.
+
+
+I'll send further updates when I've created new tags.
+
+Terry
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20090430/5892cd94/attachment.htm>
+

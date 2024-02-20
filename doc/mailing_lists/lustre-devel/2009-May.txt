@@ -1,0 +1,1508 @@
+From eeb at sun.com  Tue May  5 04:48:32 2009
+From: eeb at sun.com (Eric Barton)
+Date: Tue, 05 May 2009 12:48:32 +0100
+Subject: [Lustre-devel] AT and ptlrpc SMP stuff
+In-Reply-To: <49FEE495.6040001@sun.com>
+References: <49F88EB6.4070306@sun.com> <49F90286.6090108@sun.com>
+	<49FA37FE.5010708@sun.com> <061001c9cc56$985b64f0$c9122ed0$@com>
+	<49FEE495.6040001@sun.com>
+Message-ID: <015401c9cd77$6aaf5e90$400e1bb0$@com>
+
+cc-ing Lustre-devel - this is of general interest.
+
+> -----Original Message-----
+> From: Zhen.Liang at Sun.COM [mailto:Zhen.Liang at Sun.COM]
+> Sent: 04 May 2009 1:50 PM
+> To: Eric Barton; Nathan.Rutman at Sun.COM
+> Cc: 'Robert Read'
+> Subject: Re: AT and ptlrpc SMP stuff
+> 
+> Nathan, Eric
+> 
+> I actually had a discussion with Eric last week, seems there could be
+> some problems:
+> 1. Stealing buffer or CPU load balance
+>     a) Stealing buffer
+>         New LNet always try to get buffer from current CPU to match
+> request, but if all bufferes on current CPU are exhausted, then it will
+> steal buffer from other CPUs, and it will wakeup service threads on
+> other CPU to handle the request as well. So it's possible that RPCs from
+> the same client are handled by different CPUs on the server.
+>     b) CPU load balance
+>         RPCs can be dispatched to other CPUs by current CPU, I don't
+> know whether it's necessary to have this(we may benefit very few or
+> nothing from bouncing RPCs between CPUs), if we have CPU load balance,
+> then requests can be handled by any CPU.
+> 
+> 2. Client connected to a lot of routers
+>     If client connected to more than one routers, then requests can be
+> forwared by any one of these routers. On the server side, requests from
+> different routers are very likely to be received by different LND
+> threads, and wake up different ptlrpc service threads on different CPUs,
+> so there is no bonding of CPU for clients in this case.
+> 
+> 3. The last one is more about LNet:
+> Eric, we actually talked about this a bit in East Palo Alto. Based on
+> current design, if there is only one router, then all requests will be
+> received by the same LND thread and delivered to ptlrpc service threads
+> on one CPU, so we will only use one or two CPUs on server, even worse on
+> the router, all messages are serialized on the peer structure of server,
+> we still have very high contention.
+
+[For people reading on lustre-devel, this refers to the improved SMP
+ scaling work Liang is doing]
+
+The problem for a server "hiding" behind a single router centers on the
+handling of traffic on the link between them - as you mention in another
+mail, that's not a problem for the upper layers in the stack since they
+can distribute the work over CPUs by hashing on the end-to-end peer NID.
+But I agree that at the lower levels, we need multiple connections each
+with separate CPU affinity to avoid contention and assure SMP scaling.
+
+> The only way I can find to resolve this problem is creating multiple
+> LNet networks between router and server, so both router and server can
+> have multiple peers & connections for remote side. Actually, I think
+> it's fair for router/server to take more credits, buffers, CPUs on
+> server/router then other clients. We have two options to get this:
+>    a)  static config by user, then we don't need change anything, but it
+> will increase complexity of network configuration, and some users may
+> feel confused.
+>    b) LNet can create sub-networks for network of  router&server (we can
+> make it tunable), requests will be balanced to different sub-networks.
+> We can make it almost transparent to user, it seems dorable to me but I
+> haven't estimated how much efforts we need.
+
+The more transparent, the better.  If _all_ configuration could be avoided,
+then so much the better.  Multiple connections to the same immediate
+physical peer at the LND level allow maximum SMP concurrency, but this is
+best detected/managed in the generic LNET code.  This seems to beg for
+adding explicit connection handling to the LND API and (as we've know since
+forever) would remove a lot of duplication between LNDs.
+
+However I think all we do right now is size the work and leave it pending.
+We _can_ achieve the same effect with explicit configuration and the most
+important use case right now is the MDS, which should be amply provisioned
+with routers where it matters.
+
+    Cheers,
+              Eric
+
+> 
+> Any suggestion?
+> 
+> Thanks
+> Liang
+> 
+> 
+> Eric Barton :
+> > Nathan,
+> >
+> > Please talk me through these issues.
+> >
+> >
+> >     Cheers,
+> >               Eric
+> >
+> >
+> >> -----Original Message-----
+> >> From: Nathan.Rutman at Sun.COM [mailto:Nathan.Rutman at Sun.COM]
+> >> Sent: 01 May 2009 12:45 AM
+> >> To: Liang Zhen
+> >> Cc: Eric Barton; Robert Read
+> >> Subject: Re: AT and ptlrpc SMP stuff
+> >>
+> >> Liang Zhen wrote:
+> >>
+> >>> Nathan,
+> >>>
+> >>> Yes, I don't know whether eeb has sent you the patch or not, so I put
+> >>> it in attachment.
+> >>>
+> >>> Basically, I move some members from ptlrpc_service to per-cpu data,
+> >>> and make service threads  be cpu affinity by default, in order to get
+> >>> rid of any possible global lock contention on RPC handling path, i.e
+> >>> ptlrpc_service::srv_lock. As you know, ptlrpc_service::srv_at_estimate
+> >>> is global for each service, so I'm thinking to move it to per-cpu data
+> >>> for two reasons:
+> >>> 1) at_add(...) needs spinlock, if we keep it on ptlrpc_service, then
+> >>> it's a kind of global spin on hot path, now we are sure that any spin
+> >>> on hot path will be amplified a lot on fat cores machine like 16 or 32.
+> >>> 2. Requests from same client tend to be handled by same thread & CPU
+> >>> on server, so I think it's reasonable to have per-CPU AT estimate etc...
+> >>> I really know few about this because I just looked into it for few
+> >>> days, expecting for your advisement for AT or anything about the patch
+> >>> (it's still a rough prototype)
+> >>>
+> >> I think there is no problem moving the at_estimate and at_lock to
+> >> per-cpu struct.  The server estimates might end up varying by cpu, but
+> >> since they are collected together by the clients from the RPC reply, the
+> >> clients will still continue to track the maximum estimate correctly.
+> >> They might see a little more "jitter" in the service estimate time, but
+> >> since they use a moving-maximum window (600sec by default), this jitter
+> >> will all get smoothed out.
+> >>
+> >> You will have to change ptlrpc_lprocfs_rd_timeouts to collect the
+> >> server-side service estimate from the per-cpu estimates, but I don't
+> >> think there's any need even here to do locking across the service
+> >> threads - just "max" each of the data points across the per-cpu values.
+> >> Hmm, actually a little trickiness comes in because we print the estimate
+> >> history (4 data points), but with per-cpu measurements the start time
+> >> (at_binstart) of the history values may vary.  IOW, the history is the
+> >> maximum estimate within a series of time slices (150s default), but
+> >> those slices may not line up between cpus.  So taking the max is not
+> >> truly the right thing to do, although it might not be worth much effort
+> >> to do any better.
+> >>
+> >>                  LCONSOLE_WARN("%s: This server is not able to keep up
+> >> with "
+> >> -                              "request traffic (cpu-bound).\n",
+> >> svc->srv_name);
+> >> +                              "request traffic (cpu-bound).\n",
+> >> +                              scd->scd_service->srv_name);
+> >> You could make this more fun:
+> >> (cpu bound on cpu #%d).\n", ...scd->scd_cpu_id
+> >>
+> >
+> >
+> >
+> >
+
+
+
+
+From Terry.Rutledge at Sun.COM  Tue May  5 10:56:27 2009
+From: Terry.Rutledge at Sun.COM (Terry Rutledge)
+Date: Tue, 05 May 2009 10:56:27 -0700
+Subject: [Lustre-devel] Branch created
+Message-ID: <4A007DCB.4060800@Sun.COM>
+
+Hi all,
+
+Just wanted to make you aware of the newly created branch:
+
+*b_release_1_8_1
+*
+When given permission to land to 1.8.2, please land on b1_8.
+When given permission to land to 1.8.1, please land on b_release_1_8_1.
+When given permission to land to 1.8.0.1, please land on b_release_1_8_0.
+
+We have removed the permission flag for 1.6.8, as we currently have no
+intention to do that release.  We still plan to release 1.6.7.2, branch
+b_release_1_6_7, with emphasis on RHEL 5.3 and OFED 1.4.1.
+
+Please consider all the above when requesting permission to land your fixes.
+
+Thanks,
+Terry
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20090505/202e8ba6/attachment.htm>
+
+From Zhen.Liang at Sun.COM  Tue May  5 23:24:52 2009
+From: Zhen.Liang at Sun.COM (Liang Zhen)
+Date: Wed, 06 May 2009 14:24:52 +0800
+Subject: [Lustre-devel] AT and ptlrpc SMP stuff
+In-Reply-To: <015401c9cd77$6aaf5e90$400e1bb0$@com>
+References: <49F88EB6.4070306@sun.com> <49F90286.6090108@sun.com>
+	<49FA37FE.5010708@sun.com> <061001c9cc56$985b64f0$c9122ed0$@com>
+	<49FEE495.6040001@sun.com> <015401c9cd77$6aaf5e90$400e1bb0$@com>
+Message-ID: <4A012D34.8030205@sun.com>
+
+Eric,
+
+Eric Barton wrote:
+>> The only way I can find to resolve this problem is creating multiple
+>> LNet networks between router and server, so both router and server can
+>> have multiple peers & connections for remote side. Actually, I think
+>> it's fair for router/server to take more credits, buffers, CPUs on
+>> server/router then other clients. We have two options to get this:
+>>    a)  static config by user, then we don't need change anything, but it
+>> will increase complexity of network configuration, and some users may
+>> feel confused.
+>>    b) LNet can create sub-networks for network of  router&server (we can
+>> make it tunable), requests will be balanced to different sub-networks.
+>> We can make it almost transparent to user, it seems dorable to me but I
+>> haven't estimated how much efforts we need.
+>>     
+>
+> The more transparent, the better.  If _all_ configuration could be avoided,
+> then so much the better.  Multiple connections to the same immediate
+> physical peer at the LND level allow maximum SMP concurrency, but this is
+> best detected/managed in the generic LNET code.  This seems to beg for
+> adding explicit connection handling to the LND API and (as we've know since
+> forever) would remove a lot of duplication between LNDs.
+>   
+
+I think we have two options here:
+1. As you said, multiple connections the same physical peer at LND 
+level, it's the ideal way but will take more efforts.
+2. I have feeling that this issue could somehow be covered by channel 
+bonding, which should be able to support bonding several LNet networks 
+to one. So we can aggregate throughput of connections on the same 
+physical NI(on different CPUs) as well as different physical NIs. 
+Negativity I can think of is that it will take more preallocated memory 
+resource at LND level for each network(i.e: preallocated TXs etc)
+
+Isaac, do you have any thought about this?
+
+Thanks
+Liang
+
+
+> However I think all we do right now is size the work and leave it pending.
+> We _can_ achieve the same effect with explicit configuration and the most
+> important use case right now is the MDS, which should be amply provisioned
+> with routers where it matters.
+>
+>     Cheers,
+>               Eric
+>
+>   
+>> Any suggestion?
+>>
+>> Thanks
+>> Liang
+>>
+>>
+>> Eric Barton :
+>>     
+>>> Nathan,
+>>>
+>>> Please talk me through these issues.
+>>>
+>>>
+>>>     Cheers,
+>>>               Eric
+>>>
+>>>
+>>>       
+>>>> -----Original Message-----
+>>>> From: Nathan.Rutman at Sun.COM [mailto:Nathan.Rutman at Sun.COM]
+>>>> Sent: 01 May 2009 12:45 AM
+>>>> To: Liang Zhen
+>>>> Cc: Eric Barton; Robert Read
+>>>> Subject: Re: AT and ptlrpc SMP stuff
+>>>>
+>>>> Liang Zhen wrote:
+>>>>
+>>>>         
+>>>>> Nathan,
+>>>>>
+>>>>> Yes, I don't know whether eeb has sent you the patch or not, so I put
+>>>>> it in attachment.
+>>>>>
+>>>>> Basically, I move some members from ptlrpc_service to per-cpu data,
+>>>>> and make service threads  be cpu affinity by default, in order to get
+>>>>> rid of any possible global lock contention on RPC handling path, i.e
+>>>>> ptlrpc_service::srv_lock. As you know, ptlrpc_service::srv_at_estimate
+>>>>> is global for each service, so I'm thinking to move it to per-cpu data
+>>>>> for two reasons:
+>>>>> 1) at_add(...) needs spinlock, if we keep it on ptlrpc_service, then
+>>>>> it's a kind of global spin on hot path, now we are sure that any spin
+>>>>> on hot path will be amplified a lot on fat cores machine like 16 or 32.
+>>>>> 2. Requests from same client tend to be handled by same thread & CPU
+>>>>> on server, so I think it's reasonable to have per-CPU AT estimate etc...
+>>>>> I really know few about this because I just looked into it for few
+>>>>> days, expecting for your advisement for AT or anything about the patch
+>>>>> (it's still a rough prototype)
+>>>>>
+>>>>>           
+>>>> I think there is no problem moving the at_estimate and at_lock to
+>>>> per-cpu struct.  The server estimates might end up varying by cpu, but
+>>>> since they are collected together by the clients from the RPC reply, the
+>>>> clients will still continue to track the maximum estimate correctly.
+>>>> They might see a little more "jitter" in the service estimate time, but
+>>>> since they use a moving-maximum window (600sec by default), this jitter
+>>>> will all get smoothed out.
+>>>>
+>>>> You will have to change ptlrpc_lprocfs_rd_timeouts to collect the
+>>>> server-side service estimate from the per-cpu estimates, but I don't
+>>>> think there's any need even here to do locking across the service
+>>>> threads - just "max" each of the data points across the per-cpu values.
+>>>> Hmm, actually a little trickiness comes in because we print the estimate
+>>>> history (4 data points), but with per-cpu measurements the start time
+>>>> (at_binstart) of the history values may vary.  IOW, the history is the
+>>>> maximum estimate within a series of time slices (150s default), but
+>>>> those slices may not line up between cpus.  So taking the max is not
+>>>> truly the right thing to do, although it might not be worth much effort
+>>>> to do any better.
+>>>>
+>>>>                  LCONSOLE_WARN("%s: This server is not able to keep up
+>>>> with "
+>>>> -                              "request traffic (cpu-bound).\n",
+>>>> svc->srv_name);
+>>>> +                              "request traffic (cpu-bound).\n",
+>>>> +                              scd->scd_service->srv_name);
+>>>> You could make this more fun:
+>>>> (cpu bound on cpu #%d).\n", ...scd->scd_cpu_id
+>>>>
+>>>>         
+>>>
+>>>
+>>>       
+>
+>
+>   
+
+
+
+From sjt.kar at gmail.com  Wed May  6 05:30:13 2009
+From: sjt.kar at gmail.com (Sujit Karataparambil)
+Date: Wed, 6 May 2009 18:00:13 +0530
+Subject: [Lustre-devel] AT and ptlrpc SMP stuff
+In-Reply-To: <4A012D34.8030205@sun.com>
+References: <49F88EB6.4070306@sun.com> <49F90286.6090108@sun.com>
+	<49FA37FE.5010708@sun.com> <061001c9cc56$985b64f0$c9122ed0$@com>
+	<49FEE495.6040001@sun.com> <015401c9cd77$6aaf5e90$400e1bb0$@com>
+	<4A012D34.8030205@sun.com>
+Message-ID: <921ca19c0905060530n6228abddhb1639b2b6a5e9cab@mail.gmail.com>
+
+Sorry I am an newbie here. My best efforts are to be pardoned.
+I have recently downloaded lustre and installed on ubuntu 8.10.
+Though did not have time to go through the code.
+
+I am new to lustre. But this seems to be an completely different
+approach to filesystems like jfs or xfs or even zfs. You seem to
+divide the interface to an client and seem to have filesystem
+drivers.
+
+Is there any support on LDN base on the Client side? or is setup
+on the meta data lookup or the Driver.
+
+The code ideally does need to look to be divided on the client
+side with a few stubs in the driver/meta data side.
+
+According to current development needs.
+
+Thanks,
+Sujit
+
+On Wed, May 6, 2009 at 11:54 AM, Liang Zhen <Zhen.Liang at sun.com> wrote:
+> Eric,
+>
+> Eric Barton wrote:
+>>> The only way I can find to resolve this problem is creating multiple
+>>> LNet networks between router and server, so both router and server can
+>>> have multiple peers & connections for remote side. Actually, I think
+>>> it's fair for router/server to take more credits, buffers, CPUs on
+>>> server/router then other clients. We have two options to get this:
+>>> ? ?a) ?static config by user, then we don't need change anything, but it
+>>> will increase complexity of network configuration, and some users may
+>>> feel confused.
+>>> ? ?b) LNet can create sub-networks for network of ?router&server (we can
+>>> make it tunable), requests will be balanced to different sub-networks.
+>>> We can make it almost transparent to user, it seems dorable to me but I
+>>> haven't estimated how much efforts we need.
+>>>
+>>
+>> The more transparent, the better. ?If _all_ configuration could be avoided,
+>> then so much the better. ?Multiple connections to the same immediate
+>> physical peer at the LND level allow maximum SMP concurrency, but this is
+>> best detected/managed in the generic LNET code. ?This seems to beg for
+>> adding explicit connection handling to the LND API and (as we've know since
+>> forever) would remove a lot of duplication between LNDs.
+>>
+>
+> I think we have two options here:
+> 1. As you said, multiple connections the same physical peer at LND
+> level, it's the ideal way but will take more efforts.
+> 2. I have feeling that this issue could somehow be covered by channel
+> bonding, which should be able to support bonding several LNet networks
+> to one. So we can aggregate throughput of connections on the same
+> physical NI(on different CPUs) as well as different physical NIs.
+> Negativity I can think of is that it will take more preallocated memory
+> resource at LND level for each network(i.e: preallocated TXs etc)
+>
+> Isaac, do you have any thought about this?
+>
+> Thanks
+> Liang
+>
+>
+>> However I think all we do right now is size the work and leave it pending.
+>> We _can_ achieve the same effect with explicit configuration and the most
+>> important use case right now is the MDS, which should be amply provisioned
+>> with routers where it matters.
+>>
+>> ? ? Cheers,
+>> ? ? ? ? ? ? ? Eric
+>>
+>>
+>>> Any suggestion?
+>>>
+>>> Thanks
+>>> Liang
+>>>
+>>>
+>>> Eric Barton :
+>>>
+>>>> Nathan,
+>>>>
+>>>> Please talk me through these issues.
+>>>>
+>>>>
+>>>> ? ? Cheers,
+>>>> ? ? ? ? ? ? ? Eric
+>>>>
+>>>>
+>>>>
+>>>>> -----Original Message-----
+>>>>> From: Nathan.Rutman at Sun.COM [mailto:Nathan.Rutman at Sun.COM]
+>>>>> Sent: 01 May 2009 12:45 AM
+>>>>> To: Liang Zhen
+>>>>> Cc: Eric Barton; Robert Read
+>>>>> Subject: Re: AT and ptlrpc SMP stuff
+>>>>>
+>>>>> Liang Zhen wrote:
+>>>>>
+>>>>>
+>>>>>> Nathan,
+>>>>>>
+>>>>>> Yes, I don't know whether eeb has sent you the patch or not, so I put
+>>>>>> it in attachment.
+>>>>>>
+>>>>>> Basically, I move some members from ptlrpc_service to per-cpu data,
+>>>>>> and make service threads ?be cpu affinity by default, in order to get
+>>>>>> rid of any possible global lock contention on RPC handling path, i.e
+>>>>>> ptlrpc_service::srv_lock. As you know, ptlrpc_service::srv_at_estimate
+>>>>>> is global for each service, so I'm thinking to move it to per-cpu data
+>>>>>> for two reasons:
+>>>>>> 1) at_add(...) needs spinlock, if we keep it on ptlrpc_service, then
+>>>>>> it's a kind of global spin on hot path, now we are sure that any spin
+>>>>>> on hot path will be amplified a lot on fat cores machine like 16 or 32.
+>>>>>> 2. Requests from same client tend to be handled by same thread & CPU
+>>>>>> on server, so I think it's reasonable to have per-CPU AT estimate etc...
+>>>>>> I really know few about this because I just looked into it for few
+>>>>>> days, expecting for your advisement for AT or anything about the patch
+>>>>>> (it's still a rough prototype)
+>>>>>>
+>>>>>>
+>>>>> I think there is no problem moving the at_estimate and at_lock to
+>>>>> per-cpu struct. ?The server estimates might end up varying by cpu, but
+>>>>> since they are collected together by the clients from the RPC reply, the
+>>>>> clients will still continue to track the maximum estimate correctly.
+>>>>> They might see a little more "jitter" in the service estimate time, but
+>>>>> since they use a moving-maximum window (600sec by default), this jitter
+>>>>> will all get smoothed out.
+>>>>>
+>>>>> You will have to change ptlrpc_lprocfs_rd_timeouts to collect the
+>>>>> server-side service estimate from the per-cpu estimates, but I don't
+>>>>> think there's any need even here to do locking across the service
+>>>>> threads - just "max" each of the data points across the per-cpu values.
+>>>>> Hmm, actually a little trickiness comes in because we print the estimate
+>>>>> history (4 data points), but with per-cpu measurements the start time
+>>>>> (at_binstart) of the history values may vary. ?IOW, the history is the
+>>>>> maximum estimate within a series of time slices (150s default), but
+>>>>> those slices may not line up between cpus. ?So taking the max is not
+>>>>> truly the right thing to do, although it might not be worth much effort
+>>>>> to do any better.
+>>>>>
+>>>>> ? ? ? ? ? ? ? ? ?LCONSOLE_WARN("%s: This server is not able to keep up
+>>>>> with "
+>>>>> - ? ? ? ? ? ? ? ? ? ? ? ? ? ? ?"request traffic (cpu-bound).\n",
+>>>>> svc->srv_name);
+>>>>> + ? ? ? ? ? ? ? ? ? ? ? ? ? ? ?"request traffic (cpu-bound).\n",
+>>>>> + ? ? ? ? ? ? ? ? ? ? ? ? ? ? ?scd->scd_service->srv_name);
+>>>>> You could make this more fun:
+>>>>> (cpu bound on cpu #%d).\n", ...scd->scd_cpu_id
+>>>>>
+>>>>>
+>>>>
+>>>>
+>>>>
+>>
+>>
+>>
+>
+> _______________________________________________
+> Lustre-devel mailing list
+> Lustre-devel at lists.lustre.org
+> http://lists.lustre.org/mailman/listinfo/lustre-devel
+>
+
+
+
+-- 
+-- Sujit K M
+
+
+From dmlb2000 at gmail.com  Wed May 13 11:06:57 2009
+From: dmlb2000 at gmail.com (David Brown)
+Date: Wed, 13 May 2009 11:06:57 -0700
+Subject: [Lustre-devel] Thinking of Hacks around bug #12329
+Message-ID: <9c21eeae0905131106w23032105tdcf9a2399fb550df@mail.gmail.com>
+
+Okay so since bug #12329 isn't so much fixed yet and we've been trying
+to do big I/O runs on our cluster but we keep bumping up to this
+issue.
+
+So I was thinking of some hacks to get around the issue with prep work
+prior to obtaining the big cluster to do whatever we want.
+
+Just a little background on what we've been doing. PNL (Pacific
+Northwest National Labs) has a unique cluster in the amount of local
+scratch disk we require on our compute nodes. Because of this fact we
+can take the big machine occasionally to do large scale I/O tests with
+Lustre. This helps us understand how Lustre scales for future use and
+how we might have to change the way we deal with our production Lustre
+systems when upgrading them. We have about 1Tb/s theoretical local
+scratch bandwidth on all of our compute nodes, we've only gotten a
+quarter of this in a lustre file system using half the system, as of
+yet.
+
+We've tried 4 times since to put that image on the entire cluster and
+see how well things work not getting any numbers so far.
+
+The file system created has the following characteristics
+
+1) 700Tb when df -h returns
+2) 4600 OSTs (well within the max of 8192)
+3) 2300 OSSs
+
+We could have an alternate configuration where we break the raid
+arrays and go a bit wider, 18000 OSTs on 2300 OSSs. But this would
+require modifications to lustre source code to make that happen.
+
+The bug above really hits us hard on this system, even on lustre
+1.8.0. It took 5 hours just to get 4096 OSTs mounted.
+
+As this is going on everything is in a constant state of reconnect,
+since the mgs/mdt is busy handling new incoming OSTs. I'm glad to say
+that the reconnects keep up and everything goes through the recovery
+as expected.  When we've paused the mount process, the cluster settles
+back down and df -h returns about 5 minutes afterwards, which is very
+acceptable. However, there's a linear increase in the amount of
+reconnects and traffic associated with those reconnects as the number
+of OSTs increase during the mounting. This causes an increase in time
+for the next OSTs that has to mount. Keep in mind that this is on a
+brand new file system, not upgrading, not currently running. I would
+expect this behavior wouldn't happen (or would be slightly different)
+if the file system was already created.
+
+Which leads me into the hack to get around the bug. I'm just wondering
+thoughts or ideas as to what to watch for (or if it would even work).
+
+Precreate mdt/mgs and ost images in a small form factor prior to
+production cluster time.
+
+1) pick a system and put lustre on it.
+2) setup an mdt/mgs combo and mount it
+3) create an ost and mount it
+4) umount it save the image (should only be 10M or so not sure what
+the smallest size would be).
+5) deactivate the new ost
+6) go to step 3 with the same disk you used before
+
+You'd end up with pre-created images of a lustre file system prior to
+deployment that you could dd onto all the drives in parallel quite
+fast.
+
+You could then run resize2fs on the file systems to fill up the OST to
+the appropriate size for that device (not sure how long this would
+take).
+
+Then you would run tunefs.lustre to change where the mgsnode and
+fsname is for that file system.
+
+Then all you'd have to do is mount and the bug may be averted, right?
+
+Just wondering if anyone has any thoughts or ideas on how to get
+around this issue.
+
+Thanks,
+- David Brown
+
+
+From adilger at sun.com  Wed May 13 23:22:24 2009
+From: adilger at sun.com (Andreas Dilger)
+Date: Thu, 14 May 2009 00:22:24 -0600
+Subject: [Lustre-devel] Thinking of Hacks around bug #12329
+In-Reply-To: <9c21eeae0905131106w23032105tdcf9a2399fb550df@mail.gmail.com>
+References: <9c21eeae0905131106w23032105tdcf9a2399fb550df@mail.gmail.com>
+Message-ID: <20090514062224.GD3209@webber.adilger.int>
+
+On May 13, 2009  11:06 -0700, David Brown wrote:
+> The file system created has the following characteristics
+> 
+> 1) 700Tb when df -h returns
+> 2) 4600 OSTs (well within the max of 8192)
+> 3) 2300 OSSs
+> 
+> We could have an alternate configuration where we break the raid
+> arrays and go a bit wider, 18000 OSTs on 2300 OSSs. But this would
+> require modifications to lustre source code to make that happen.
+
+Hmm, even projecting out to the future I'm not certain we will get
+to systems with 18000 OSTs.  The capacity of the disks is growing
+contiuously, and with ZFS we can have very large individual OSTs
+so even 2-3 years from now we're only looking at 1200 OSTs on 400 OSS
+nodes (115 PB filesystem with 30x4TB disks/OST in RAID-6 8+2 = 96TB/OST).
+
+> The bug above really hits us hard on this system, even on lustre
+> 1.8.0. It took 5 hours just to get 4096 OSTs mounted.
+
+Ouch.
+
+> As this is going on everything is in a constant state of reconnect,
+> since the mgs/mdt is busy handling new incoming OSTs. I'm glad to say
+> that the reconnects keep up and everything goes through the recovery
+> as expected.  When we've paused the mount process, the cluster settles
+> back down and df -h returns about 5 minutes afterwards, which is very
+> acceptable. However, there's a linear increase in the amount of
+> reconnects and traffic associated with those reconnects as the number
+> of OSTs increase during the mounting. This causes an increase in time
+> for the next OSTs that has to mount. Keep in mind that this is on a
+> brand new file system, not upgrading, not currently running. I would
+> expect this behavior wouldn't happen (or would be slightly different)
+> if the file system was already created.
+
+Sounds unpleasant.  I wonder if this is driven by the fact that the
+MGS clients (OSTs are also MGS clients) don't expect a huge amount of
+change at any one time so they try to refetch the updated config in
+an eager manner.  This probably increases the queue of requests on
+the MGS linearly with the number of OSTs, and new OST connections are
+getting backed up behind this.
+
+I was going to say that getting some RPC stats from the MGS service
+would be informative, but I can't see any MGS RPC stats file on my system...
+
+I wonder if a longer-term solution is to have the MGS push the config
+log changes to the clients, instead of having the clients pull them.
+
+> Precreate mdt/mgs and ost images in a small form factor prior to
+> production cluster time.
+> 
+> 1) pick a system and put lustre on it.
+> 2) setup an mdt/mgs combo and mount it
+> 3) create an ost and mount it
+> 4) umount it save the image (should only be 10M or so not sure what
+> the smallest size would be).
+
+You only really need to mount the OST filesystem with "-t ldiksfs",
+tar up the contents of the OST filesystem, and save the filesystem
+label ({fsname}-OSTnnnn).
+
+> 5) deactivate the new ost
+> 6) go to step 3 with the same disk you used before
+> 
+> You'd end up with pre-created images of a lustre file system prior to
+> deployment that you could dd onto all the drives in parallel quite
+> fast.
+> 
+> You could then run resize2fs on the file systems to fill up the OST to
+> the appropriate size for that device (not sure how long this would
+> take).
+
+If you only save the tar image, then you can just do a normal format
+of the OST filesystem (using the mke2fs options as reported during
+the mkfs.lustre run, with the proper label "-L {fsname}-OSTnnnn" for
+that OST index, mount it with "-t ldiskfs" and then extract the
+tarball into it.
+
+> Then you would run tunefs.lustre to change where the mgsnode and
+> fsname is for that file system.
+> 
+> Then all you'd have to do is mount and the bug may be averted, right?
+
+Probably, yes.
+
+
+Cheers, Andreas
+--
+Andreas Dilger
+Sr. Staff Engineer, Lustre Group
+Sun Microsystems of Canada, Inc.
+
+
+
+From Oleg.Drokin at Sun.COM  Thu May 14 07:25:26 2009
+From: Oleg.Drokin at Sun.COM (Oleg Drokin)
+Date: Thu, 14 May 2009 10:25:26 -0400
+Subject: [Lustre-devel] Thinking of Hacks around bug #12329
+In-Reply-To: <20090514062224.GD3209@webber.adilger.int>
+References: <9c21eeae0905131106w23032105tdcf9a2399fb550df@mail.gmail.com>
+	<20090514062224.GD3209@webber.adilger.int>
+Message-ID: <13983758-B9C5-4770-A4AC-39AAF75C6980@sun.com>
+
+Hello!
+
+On May 14, 2009, at 2:22 AM, Andreas Dilger wrote:
+> Sounds unpleasant.  I wonder if this is driven by the fact that the
+> MGS clients (OSTs are also MGS clients) don't expect a huge amount of
+> change at any one time so they try to refetch the updated config in
+> an eager manner.  This probably increases the queue of requests on
+> the MGS linearly with the number of OSTs, and new OST connections are
+> getting backed up behind this.
+
+Actually just to combat situqtion like this MGCs are doing a bit of a  
+pause
+for a few seconds before refetching config, I remember there was a bug
+and this measure was introduced as a fix.
+
+What's interesting is that I actually have 1200 OSTs system in a  
+single node
+and the mount (even format & mount) takes nowhere near 5 hours.
+In fact I am up to ~950 OSTs mounted in around 20 minutes or so, I  
+think,
+at which point the node usually OOMs. (and it's all in a heavily  
+swapping vmware too)
+And this setup does have some extra complications like hitting a bug  
+in MGC
+where every target establishes its own connection to MGS where only  
+one connection
+for entire node is needed, and then there is no dynamic lru enabled,  
+so mgc locks
+are just pushed out of the lru and I see constant attempts to requeue  
+the locks
+even if the mount is finished.
+Of course on the other hand even if I run mounts in parallel (and I  
+do), MGC does not
+rush inn with all of the requests in parallel still, I think.
+
+
+Bye,
+     Oleg
+
+
+From Oleg.Drokin at Sun.COM  Thu May 14 08:48:31 2009
+From: Oleg.Drokin at Sun.COM (Oleg Drokin)
+Date: Thu, 14 May 2009 11:48:31 -0400
+Subject: [Lustre-devel] Thinking of Hacks around bug #12329
+In-Reply-To: <13983758-B9C5-4770-A4AC-39AAF75C6980@sun.com>
+References: <9c21eeae0905131106w23032105tdcf9a2399fb550df@mail.gmail.com>
+	<20090514062224.GD3209@webber.adilger.int>
+	<13983758-B9C5-4770-A4AC-39AAF75C6980@sun.com>
+Message-ID: <C4317953-7323-4FD0-9D36-A78DA94EF216@sun.com>
+
+Hello!
+
+On May 14, 2009, at 10:25 AM, Oleg Drokin wrote:
+
+> Actually just to combat situqtion like this MGCs are doing a bit of a
+> pause
+> for a few seconds before refetching config, I remember there was a bug
+> and this measure was introduced as a fix.
+
+Nic actually tuned in and said that the backoff (set at 3 seconds now)
+is certainly not enough, since it takes this long to only mount actual
+on-disk fs.
+Anyway that got me thinking that we have a "coarse-grained" locking  
+problem.
+Since OSTs don't connect to other OSTs, they do not care about OT  
+connections,
+and perhaps if we introduce bit-locks to MGS locks as well to indicate  
+client
+type, then locks from OSTs would only be revoked when MDS connects or  
+disconnects,
+MDS locks would only be revoked when OSTs connect or disconnect and  
+client locks
+would be revoked always.
+Or alternatively we can split our single resource right now to a few  
+separate:
+one for osts one for MDSes for example, sure that would mean clients  
+would not have to
+take two locks, but on the other hand there would be supposedly less  
+information to
+reparse when one of those locks is invalidated.
+
+Nathan, what do you think?
+
+Bye,
+     Oleg
+
+
+From dmlb2000 at gmail.com  Thu May 14 09:05:48 2009
+From: dmlb2000 at gmail.com (David Brown)
+Date: Thu, 14 May 2009 09:05:48 -0700
+Subject: [Lustre-devel] Thinking of Hacks around bug #12329
+In-Reply-To: <20090514062224.GD3209@webber.adilger.int>
+References: <9c21eeae0905131106w23032105tdcf9a2399fb550df@mail.gmail.com>
+	<20090514062224.GD3209@webber.adilger.int>
+Message-ID: <9c21eeae0905140905u1aecbe95tfa2ed890668338ef@mail.gmail.com>
+
+> Hmm, even projecting out to the future I'm not certain we will get
+> to systems with 18000 OSTs. ?The capacity of the disks is growing
+> contiuously, and with ZFS we can have very large individual OSTs
+> so even 2-3 years from now we're only looking at 1200 OSTs on 400 OSS
+> nodes (115 PB filesystem with 30x4TB disks/OST in RAID-6 8+2 = 96TB/OST).
+>
+
+So How fast is this theoretical 115PB system?
+
+With innovations like SSDs getting cheeper and larger, we may get
+faster and better performance. However, I'm still not sure we're going
+to be keeping up with the curve that processors are going to be doing.
+
+However, I guess you guys really aren't too concerned about the
+processing power increasing particularly. Just make a file system that
+can save all the memory in a super computer in N minutes really.
+
+Also I'll be getting back with some interesting statistics on what
+each system is doing memory used processors working and an infiniband
+soft lockup detection that forces all ko2iblnd and prtlrpc kernel
+procs to go full bore putting the load average to 16+ for a single OSS
+(this does sound like a bug not sure if its already been noticed have
+to do a bugzilla search).
+
+Thanks,
+- David Brown
+
+
+From adilger at sun.com  Thu May 14 13:54:49 2009
+From: adilger at sun.com (Andreas Dilger)
+Date: Thu, 14 May 2009 14:54:49 -0600
+Subject: [Lustre-devel] Thinking of Hacks around bug #12329
+In-Reply-To: <9c21eeae0905140905u1aecbe95tfa2ed890668338ef@mail.gmail.com>
+References: <9c21eeae0905131106w23032105tdcf9a2399fb550df@mail.gmail.com>
+	<20090514062224.GD3209@webber.adilger.int>
+	<9c21eeae0905140905u1aecbe95tfa2ed890668338ef@mail.gmail.com>
+Message-ID: <20090514205449.GM3209@webber.adilger.int>
+
+On May 14, 2009  09:05 -0700, David Brown wrote:
+> > Hmm, even projecting out to the future I'm not certain we will get
+> > to systems with 18000 OSTs. ?The capacity of the disks is growing
+> > contiuously, and with ZFS we can have very large individual OSTs
+> > so even 2-3 years from now we're only looking at 1200 OSTs on 400 OSS
+> > nodes (115 PB filesystem with 30x4TB disks/OST in RAID-6 8+2 = 96TB/OST).
+> 
+> So How fast is this theoretical 115PB system?
+
+About 1.5TB/s fast, if the math holds true.
+
+> With innovations like SSDs getting cheeper and larger, we may get
+> faster and better performance. However, I'm still not sure we're going
+> to be keeping up with the curve that processors are going to be doing.
+
+Sure, we are already testing SSDs and what we can do to improve the
+filesystem to take advantage of them.  They aren't quite at the price
+point where people will be jumping on them, but I expect in a year or
+two they will become much more affordable.
+
+> However, I guess you guys really aren't too concerned about the
+> processing power increasing particularly. Just make a file system that
+> can save all the memory in a super computer in N minutes really.
+
+Well, CPU power -> more RAM to feed CPU -> more disk to feed/purge RAM.
+So even though CPU/RAM size is increasing exponentially, disk size and
+more importantly perf is not growing so quickly.  Even worse, seeks are
+almost static for spinning disks (8ms or so => 125 IOPS), so SSDs are
+really the only hope to keep up with filesystem requirements.
+
+Cheers, Andreas
+--
+Andreas Dilger
+Sr. Staff Engineer, Lustre Group
+Sun Microsystems of Canada, Inc.
+
+
+
+From adilger at sun.com  Thu May 14 14:28:33 2009
+From: adilger at sun.com (Andreas Dilger)
+Date: Thu, 14 May 2009 15:28:33 -0600
+Subject: [Lustre-devel] Thinking of Hacks around bug #12329
+In-Reply-To: <C4317953-7323-4FD0-9D36-A78DA94EF216@sun.com>
+References: <9c21eeae0905131106w23032105tdcf9a2399fb550df@mail.gmail.com>
+	<20090514062224.GD3209@webber.adilger.int>
+	<13983758-B9C5-4770-A4AC-39AAF75C6980@sun.com>
+	<C4317953-7323-4FD0-9D36-A78DA94EF216@sun.com>
+Message-ID: <20090514212833.GN3209@webber.adilger.int>
+
+On May 14, 2009  11:48 -0400, Oleg Drokin wrote:
+> On May 14, 2009, at 10:25 AM, Oleg Drokin wrote:
+>> Actually just to combat situqtion like this MGCs are doing a bit of a
+>> pause
+>> for a few seconds before refetching config, I remember there was a bug
+>> and this measure was introduced as a fix.
+>
+> Nic actually tuned in and said that the backoff (set at 3 seconds now)
+> is certainly not enough, since it takes this long to only mount actual
+> on-disk fs.
+
+> Anyway that got me thinking that we have a "coarse-grained" locking  
+> problem.  Since OSTs don't connect to other OSTs, they do not care about
+> OST connections, and perhaps if we introduce bit-locks to MGS locks as
+> well to indicate client type, then locks from OSTs would only be revoked
+> when MDS connects or disconnects, MDS locks would only be revoked when
+> OSTs connect or disconnect and client locks would be revoked always.
+> Or alternatively we can split our single resource right now to a few  
+> separate:
+
+> one for osts one for MDSes for example, sure that would mean clients  
+> would not have to take two locks, but on the other hand there would
+> be supposedly less information to reparse when one of those locks is
+> invalidated.
+
+I would tend to prefer the latter.  Having separate resource IDs for
+the different llogs makes it a lot cleaner in the end.  Ideally,
+picking a relatively unique resource ID for that config log would
+allow us to separate the configs between different filesystems.
+
+The OSTs in fact don't really need to read the same llog as the client for
+very many things (some shared tunables, perhaps), and there also isn't
+a big problem IMHO to store the same tunables in two different config
+llogs (one for servers and one for clients).  Generally, the server-side
+tunables are not used by the client, and vice versa.  Probably the only
+place that would need to read two config llogs is the MDS, which is both
+a server and a client of the OSTs.
+
+Cheers, Andreas
+--
+Andreas Dilger
+Sr. Staff Engineer, Lustre Group
+Sun Microsystems of Canada, Inc.
+
+
+
+From eeb at sun.com  Mon May 18 14:01:15 2009
+From: eeb at sun.com (Eric Barton)
+Date: Mon, 18 May 2009 22:01:15 +0100
+Subject: [Lustre-devel] [RFC] two ideas for Meta Data Write Back Cache
+In-Reply-To: <m3y6ud3x7q.fsf@bzzz.home.net>
+References: <200904061339.02850.alexander.zarochentsev@sun.com>
+	<20090406100345.GO3199@webber.adilger.int>
+	<m3zleu5b8f.fsf@bzzz.home.net>
+	<49DA7BE6.6070006@sun.com> <m3y6ud3x7q.fsf@bzzz.home.net>
+Message-ID: <016001c9d7fb$ca6f8880$5f4e9980$@com>
+
+Zam,
+
+A couple of things to consider when splitting up operations
+into updates....
+
+1. Each update must contain some information about its peer
+   updates so that in the absence of the client (e.g. on
+   client eviction) we can check that all the operations's
+   updates have been applied and apply a correction if not.
+
+   I think there is an advantage if every update includes
+   sufficient information to reconstruct all its peer
+   updates.
+
+2. The current security design grants capabilities to clients
+   to perform operations on Lustre objects.  If you allow
+   remote "raw" OSD ops, you're effectively distributing the
+   Lustre clustered server further - i.e. nodes allowed to
+   do such operations are being trusted just as much as
+   servers to keep the filesystem consistent.
+
+    Cheers,
+              Eric
+
+
+
+From fwang2 at gmail.com  Tue May 19 13:04:36 2009
+From: fwang2 at gmail.com (Feiyi Wang)
+Date: Tue, 19 May 2009 16:04:36 -0400
+Subject: [Lustre-devel] Lustre internal document
+Message-ID: <9cce1c9a0905191304m28d12ef0r1f444e0f20949536@mail.gmail.com>
+
+hi, folks
+
+As many of you know, we released a Lustre internal study report at LUG '09.
+Here is the download link, all review comments are welcome.
+
+http://apps.ornl.gov/~pts/prod/pubs/ldoc15218_report.pdf
+
+
+Thanks
+
+Feiyi
+
+
+From Peter.Bojanic at Sun.COM  Wed May 20 06:32:28 2009
+From: Peter.Bojanic at Sun.COM (Peter Bojanic)
+Date: Wed, 20 May 2009 09:32:28 -0400
+Subject: [Lustre-devel] Old Gen 1 InfiniBand LNDs: going, going...
+Message-ID: <A60922A2-4DBD-49B9-BAEE-C1365473238F@sun.com>
+
+All,
+
+We plan to drop the old generation 1 InfiniBand LNDs in Lustre 2.0.  
+Peter Jones mentioned this last June on the lustre-discuss list and no  
+one objected so I'm just double-checking before we pull the code from  
+HEAD. The affected LNDs are:
+
+* Cisco/TopSpin/Old-OpenIB
+* Voltaire
+* QLogic/Silverstorm/Infinicon
+
+All modern InfiniBand products are supported with the OFED LND  
+(o2iblnd).
+
+Thanks,
+Bojanic
+
+
+From bs_lists at aakef.fastmail.fm  Wed May 20 10:39:16 2009
+From: bs_lists at aakef.fastmail.fm (Bernd Schubert)
+Date: Wed, 20 May 2009 19:39:16 +0200
+Subject: [Lustre-devel] cvs question
+Message-ID: <200905201939.16472.bs_lists@aakef.fastmail.fm>
+
+Hello, 
+
+I just want to backport the patches of bug#18414 and there is merge conflict,
+something is missing. So I want to check with cvs what that is, but the
+result is a bit weird (on b1_6):
+
+cvs annotate lnet/libcfs/watchdog.c
+
+1.2          (eeb      09-Dec-04): static void lcw_cb(unsigned long data)
+1.2          (eeb      09-Dec-04): {
+1.2          (eeb      09-Dec-04):         struct lc_watchdog *lcw = (struct 
+lc_watchdog *)data;
+1.2          (eeb      09-Dec-04):
+1.2          (eeb      09-Dec-04):         ENTRY;
+1.2          (eeb      09-Dec-04):
+1.2          (eeb      09-Dec-04):         if (lcw->lcw_state != 
+LC_WATCHDOG_ENABLED) {
+1.2          (eeb      09-Dec-04):                 EXIT;
+1.2          (eeb      09-Dec-04):                 return;
+1.2          (eeb      09-Dec-04):         }
+1.2          (eeb      09-Dec-04):
+1.2          (eeb      09-Dec-04):         lcw->lcw_state = 
+LC_WATCHDOG_EXPIRED;
+1.2          (eeb      09-Dec-04):
+1.6          (nathan   10-Feb-07):         /* NB this warning should appear on 
+the console, but may not get into
+1.6          (nathan   10-Feb-07):          * the logs since we're running in 
+a softirq handler */
+1.6          (nathan   10-Feb-07):
+1.7          (nathan   26-Feb-07):         CWARN("Watchdog triggered for pid 
+%d: it was inactive for %lds\n",
+1.7          (nathan   26-Feb-07):               (int)lcw->lcw_pid, 
+cfs_duration_sec(lcw->lcw_time));
+1.6          (nathan   10-Feb-07):         lcw_dump(lcw);
+
+
+But this looks different than the file itself:
+
+
+static void lcw_cb(unsigned long data)
+{
+        struct lc_watchdog *lcw = (struct lc_watchdog *)data;
+        cfs_time_t current_time;
+        cfs_duration_t delta_time;
+        struct timeval timediff;
+
+        ENTRY;
+
+        if (lcw->lcw_state != LC_WATCHDOG_ENABLED) {
+                EXIT;
+                return;
+        }
+
+        lcw->lcw_state = LC_WATCHDOG_EXPIRED;
+        current_time = cfs_time_current();
+
+        delta_time = cfs_time_sub(current_time, lcw->lcw_last_touched);
+        cfs_duration_usec(delta_time, &timediff);
+
+
+
+So what is going on there? Where does for example
+
+current_time = cfs_time_current();
+
+come from? I'm confused as usual how cvs handles things.
+
+
+Thanks,
+Bernd
+
+
+
+
+
+From Brian.Murrell at Sun.COM  Wed May 20 11:41:21 2009
+From: Brian.Murrell at Sun.COM (Brian J. Murrell)
+Date: Wed, 20 May 2009 14:41:21 -0400
+Subject: [Lustre-devel] cvs question
+In-Reply-To: <200905201939.16472.bs_lists@aakef.fastmail.fm>
+References: <200905201939.16472.bs_lists@aakef.fastmail.fm>
+Message-ID: <1242844881.22400.178.camel@pc.interlinx.bc.ca>
+
+On Wed, 2009-05-20 at 19:39 +0200, Bernd Schubert wrote:
+> Hello, 
+
+Hi,
+
+> cvs annotate lnet/libcfs/watchdog.c
+> 
+> 1.2          (eeb      09-Dec-04): static void lcw_cb(unsigned long data)
+> 1.2          (eeb      09-Dec-04): {
+> 1.2          (eeb      09-Dec-04):         struct lc_watchdog *lcw = (struct 
+> lc_watchdog *)data;
+> 1.2          (eeb      09-Dec-04):
+> 1.2          (eeb      09-Dec-04):         ENTRY;
+> 1.2          (eeb      09-Dec-04):
+> 1.2          (eeb      09-Dec-04):         if (lcw->lcw_state != 
+> LC_WATCHDOG_ENABLED) {
+> 1.2          (eeb      09-Dec-04):                 EXIT;
+> 1.2          (eeb      09-Dec-04):                 return;
+> 1.2          (eeb      09-Dec-04):         }
+> 1.2          (eeb      09-Dec-04):
+> 1.2          (eeb      09-Dec-04):         lcw->lcw_state = 
+> LC_WATCHDOG_EXPIRED;
+> 1.2          (eeb      09-Dec-04):
+> 1.6          (nathan   10-Feb-07):         /* NB this warning should appear on 
+> the console, but may not get into
+> 1.6          (nathan   10-Feb-07):          * the logs since we're running in 
+> a softirq handler */
+> 1.6          (nathan   10-Feb-07):
+> 1.7          (nathan   26-Feb-07):         CWARN("Watchdog triggered for pid 
+> %d: it was inactive for %lds\n",
+> 1.7          (nathan   26-Feb-07):               (int)lcw->lcw_pid, 
+> cfs_duration_sec(lcw->lcw_time));
+> 1.6          (nathan   10-Feb-07):         lcw_dump(lcw);
+
+Notice the revision numbers.  They are all off of HEAD, which on b1_6,
+this file is almost certainly not.  Perhaps you need to add a "-r b1_6"
+to your cvs annotate command.
+
+b.
+
+-------------- next part --------------
+A non-text attachment was scrubbed...
+Name: not available
+Type: application/pgp-signature
+Size: 197 bytes
+Desc: This is a digitally signed message part
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20090520/cc8f8ce7/attachment.pgp>
+
+From jsimmons at infradead.org  Thu May 21 07:46:20 2009
+From: jsimmons at infradead.org (James Simmons)
+Date: Thu, 21 May 2009 15:46:20 +0100 (BST)
+Subject: [Lustre-devel] new to lustre and bug 18539
+Message-ID: <alpine.LFD.2.00.0905191416100.22823@casper.infradead.org>
+
+
+Hello!!
+
+	As you can tell I'm new to this project but I'm looking forward to 
+contributing. Recently I have worked on some patch for the lustre utilies 
+and I'm now looking to the core file system code. 
+	For my first dive into the code I'm tackling bug 18539. Of course 
+looking at the code base opened up alot of questions. Looking at what was
+recommended by Andreas Dilger was to make use of the oscc_flags. The other 
+part of the solution was to bump up the return value of osc_precreate.
+	My first set of questions delas with the places where the 
+oscc_flag is used in some fashion. I noticed one spot for its use was 
+osc_set_info_async. Looking through the code it appears to be only called 
+by a osc shrink grant which itself appears to happen on a osc disconnect.
+This is correct or is this function used in other places? The next 
+question is about osc_import_events. Does this function handle events 
+coming from multiple sources, clients, mds, ost? Also are these events
+the type that are sent out when a state changes versus someone sending a 
+rpc to request the state? 
+	My second set of questions deals with osc_statfs*. From the notes
+in the bugzilla osc_statfs_interpret is a MDS side function. Looking at 
+the code I noticed it is the call back to osc_statfs_async. Knowing 
+that osc_statfs_async is a obd_ops and thus has a wrapper, obd_statfs_async.
+I scanning the code for this and noticed that this wrapper used with the 
+proper obd_device for the osc was used in the lov layer. The two areas in 
+the lov layer where lov_statfs_async and qos_statfs_update handled this.
+If I remember right this is on the client side of the code. Where does the 
+mds fit into this? Lov_statfs_async is for when the client queries data 
+about the file. Whereas qos_statfs_update is what is called durning 
+inital file create or when the statfs info is to old. Please correct me if 
+I'm wrong. 
+
+
+From Oleg.Drokin at Sun.COM  Thu May 21 19:51:58 2009
+From: Oleg.Drokin at Sun.COM (Oleg Drokin)
+Date: Thu, 21 May 2009 22:51:58 -0400
+Subject: [Lustre-devel] new to lustre and bug 18539
+In-Reply-To: <alpine.LFD.2.00.0905191416100.22823@casper.infradead.org>
+References: <alpine.LFD.2.00.0905191416100.22823@casper.infradead.org>
+Message-ID: <EDB5B425-FEE9-43EA-B0B5-C082367D43DE@sun.com>
+
+Hello!
+
+On May 21, 2009, at 10:46 AM, James Simmons wrote:
+
+> 	For my first dive into the code I'm tackling bug 18539. Of course
+> looking at the code base opened up alot of questions. Looking at  
+> what was
+> recommended by Andreas Dilger was to make use of the oscc_flags. The  
+> other
+> part of the solution was to bump up the return value of osc_precreate.
+> 	My first set of questions delas with the places where the
+> oscc_flag is used in some fashion. I noticed one spot for its use was
+> osc_set_info_async. Looking through the code it appears to be only  
+> called
+> by a osc shrink grant which itself appears to happen on a osc  
+> disconnect.
+> This is correct or is this function used in other places? The next
+
+osc_set_info_async (though obd_set_info_async) is used in tons of  
+places.
+
+> question is about osc_import_events. Does this function handle events
+> coming from multiple sources, clients, mds, ost? Also are these events
+> the type that are sent out when a state changes versus someone  
+> sending a
+> rpc to request the state?
+
+I do not see such function in my tree.
+osc_import_event on the other hand is generic import state notification,
+Imports on OSC are only possible from(to) OSTs, so you get  
+notifications in there
+such as import becoming active/inactive/disconnected/invalid (there is
+a switch in there that lists all interesting events possible).
+
+>
+> 	My second set of questions deals with osc_statfs*. From the notes
+> in the bugzilla osc_statfs_interpret is a MDS side function. Looking  
+> at
+> the code I noticed it is the call back to osc_statfs_async. Knowing
+> that osc_statfs_async is a obd_ops and thus has a wrapper,  
+> obd_statfs_async.
+> I scanning the code for this and noticed that this wrapper used with  
+> the
+> proper obd_device for the osc was used in the lov layer. The two  
+> areas in
+> the lov layer where lov_statfs_async and qos_statfs_update handled  
+> this.
+> If I remember right this is on the client side of the code. Where  
+> does the
+> mds fit into this? Lov_statfs_async is for when the client queries  
+> data
+
+MDS is a client to OSTs, that's why it has client bits to deal with them
+(LOV and OSCs).
+
+Bye,
+     Oleg
+
+
+From jsimmons at infradead.org  Fri May 22 06:29:10 2009
+From: jsimmons at infradead.org (James Simmons)
+Date: Fri, 22 May 2009 14:29:10 +0100 (BST)
+Subject: [Lustre-devel] new to lustre and bug 18539
+In-Reply-To: <EDB5B425-FEE9-43EA-B0B5-C082367D43DE@sun.com>
+References: <alpine.LFD.2.00.0905191416100.22823@casper.infradead.org>
+	<EDB5B425-FEE9-43EA-B0B5-C082367D43DE@sun.com>
+Message-ID: <alpine.LFD.2.00.0905221406320.28089@casper.infradead.org>
+
+
+> > 	My second set of questions deals with osc_statfs*. From the notes
+> > in the bugzilla osc_statfs_interpret is a MDS side function. Looking at
+> > the code I noticed it is the call back to osc_statfs_async. Knowing
+> > that osc_statfs_async is a obd_ops and thus has a wrapper, obd_statfs_async.
+> > I scanning the code for this and noticed that this wrapper used with the
+> > proper obd_device for the osc was used in the lov layer. The two areas in
+> > the lov layer where lov_statfs_async and qos_statfs_update handled this.
+> > If I remember right this is on the client side of the code. Where does the
+> > mds fit into this? Lov_statfs_async is for when the client queries data
+> 
+> MDS is a client to OSTs, that's why it has client bits to deal with them
+> (LOV and OSCs).
+
+Because the lov is present also on the MDS as well as the client then the 
+callback, aa->aa_oi->oi_cb_up, is going to depend on it being a MDS or a 
+cleint. Correct or am I wrong? 
+
+
+From Oleg.Drokin at Sun.COM  Fri May 22 08:25:41 2009
+From: Oleg.Drokin at Sun.COM (Oleg Drokin)
+Date: Fri, 22 May 2009 11:25:41 -0400
+Subject: [Lustre-devel] new to lustre and bug 18539
+In-Reply-To: <alpine.LFD.2.00.0905221406320.28089@casper.infradead.org>
+References: <alpine.LFD.2.00.0905191416100.22823@casper.infradead.org>
+	<EDB5B425-FEE9-43EA-B0B5-C082367D43DE@sun.com>
+	<alpine.LFD.2.00.0905221406320.28089@casper.infradead.org>
+Message-ID: <2AC331CC-827A-4266-809D-85CE6756E717@Sun.COM>
+
+Hello!
+
+On May 22, 2009, at 9:29 AM, James Simmons wrote:
+
+>>> 	My second set of questions deals with osc_statfs*. From the notes
+>>> in the bugzilla osc_statfs_interpret is a MDS side function.  
+>>> Looking at
+>>> the code I noticed it is the call back to osc_statfs_async. Knowing
+>>> that osc_statfs_async is a obd_ops and thus has a wrapper,  
+>>> obd_statfs_async.
+>>> I scanning the code for this and noticed that this wrapper used  
+>>> with the
+>>> proper obd_device for the osc was used in the lov layer. The two  
+>>> areas in
+>>> the lov layer where lov_statfs_async and qos_statfs_update handled  
+>>> this.
+>>> If I remember right this is on the client side of the code. Where  
+>>> does the
+>>> mds fit into this? Lov_statfs_async is for when the client queries  
+>>> data
+>> MDS is a client to OSTs, that's why it has client bits to deal with  
+>> them
+>> (LOV and OSCs).
+> Because the lov is present also on the MDS as well as the client  
+> then the
+> callback, aa->aa_oi->oi_cb_up, is going to depend on it being a MDS  
+> or a
+> cleint. Correct or am I wrong?
+
+Actually what I see in the code is LOV always assigns the same value,  
+so it
+should be the same. On the other hand it is a possibility to pass down  
+such a callback
+from a layer above LOV, then it might be different.
+
+Bye,
+     Oleg
+
+
+From jsimmons at infradead.org  Fri May 22 10:21:07 2009
+From: jsimmons at infradead.org (James Simmons)
+Date: Fri, 22 May 2009 18:21:07 +0100 (BST)
+Subject: [Lustre-devel] bz-18539 and osc_statfs_interpret
+Message-ID: <alpine.LFD.2.00.0905221738460.28089@casper.infradead.org>
+
+
+Form bugzilla the approach recommended to set the oscc_flag was to use
+the MDS-side code in osc_statfs_interpret(). First question is why this 
+approach instead of defining a new osc_import_event. On the OST we will 
+be setting the state with something like: 
+
+/proc/fs/lustre/obdfilter/*/degraded_raid 
+
+So the flow will be from the OST to the OSC. Just curious why it is not 
+done this way.
+
+	The second question deals with setting the oscc_flag from 
+osc_statfs_interpret. After looking at the code I noticed oscc_flag is a 
+field in struct osc_creator. The only place I could find osc_creator was
+in struct client_obd which I could only find in struct obd_device or
+struct osc_brw_async_args which we are not using for this. 
+	Now for struct osc_async_args which is passed into 
+osc_statfs_interpret just contains a pointer to struct obd_info. Looking
+at the components for struct obd_info I don't see a easy way to get the 
+proper obd_device to get the client_obd I need. What am I missing? 
+ 
+  
+
+
+From adilger at sun.com  Sat May 23 08:48:58 2009
+From: adilger at sun.com (Andreas Dilger)
+Date: Sat, 23 May 2009 09:48:58 -0600
+Subject: [Lustre-devel] new to lustre and bug 18539
+In-Reply-To: <alpine.LFD.2.00.0905191416100.22823@casper.infradead.org>
+References: <alpine.LFD.2.00.0905191416100.22823@casper.infradead.org>
+Message-ID: <20090523154858.GB19035@webber.adilger.int>
+
+On May 21, 2009  15:46 +0100, James Simmons wrote:
+> 	For my first dive into the code I'm tackling bug 18539. Of course 
+> looking at the code base opened up alot of questions. Looking at what was
+> recommended by Andreas Dilger was to make use of the oscc_flags. The other 
+> part of the solution was to bump up the return value of osc_precreate.
+
+There are several parts to fixing this bug:
+1. have the OSC extract the os_state flags from the obd_statfs struct
+  * this can be done in the osc_statfs_interpret() function, which is
+    registered as the RPC completion callback from osc_statfs_async()
+  - there is the OS_STATE_READONLY which we already return in os_state
+    if the filesystem has detected an error and remounted read-only.
+    This can use a new OSCC_FLAG_RDONLY flag.
+  - the OS_STATE_DEGRADED flag would need to be set for degraded OSTs (see 3.),
+    and should get a new OSCC_FLAG_DEGRADED flag.
+  - the place to hold these returned states is in oscc_flags, which is what
+    the OSC object creation code uses to track its state
+2. have the OSC object creation code check for the OSCC_FLAG_RDONLY and
+   OSCC_FLAG_DEGRADED flags.
+   - use OSCC_FLAG_NOSPC as a template for the OSCC_FLAG_RDONLY behaviour,
+     since the code needs to be changed in many of the same places.
+     - current code uses OSCC_FLAG_NOSPC in the case of EROFS returns from
+       object precreation, but this isn't really correct as OSCC_FLAG_NOSPC
+       is incorrectly cleared in osc_set_info_async when a file is unlinked
+       even if the filesystem is read only.  I'm filing a separate bug
+       to fix this issue.
+   - in osc_precreate() it should check for OSCC_FLAG_DEGRADED and also
+     OSCC_FLAG_ROFS and OSCC_FLAG_NOSPC.  For ROFS it should treat it like
+     NOSPC (return 1000).  For DEGRADED it should return 2 (functional but
+     not preferred for allocation).
+3. having the OST notice that the LUN is degraded
+  - add a /proc/fs/lustre/obdfilter/{OST}/degraded file
+  - (separately) we would want to have this automated for MD RAID devices
+    but that doesn't need to be part of this patch
+  - in statfs it should check for this and return this state via os_state
+
+> 	My first set of questions delas with the places where the 
+> oscc_flag is used in some fashion. I noticed one spot for its use was 
+> osc_set_info_async. Looking through the code it appears to be only called 
+> by a osc shrink grant which itself appears to happen on a osc disconnect.
+> This is correct or is this function used in other places? The next 
+> question is about osc_import_events. Does this function handle events 
+> coming from multiple sources, clients, mds, ost? Also are these events
+> the type that are sent out when a state changes versus someone sending a 
+> rpc to request the state? 
+> 	My second set of questions deals with osc_statfs*. From the notes
+> in the bugzilla osc_statfs_interpret is a MDS side function. Looking at 
+> the code I noticed it is the call back to osc_statfs_async. Knowing 
+> that osc_statfs_async is a obd_ops and thus has a wrapper, obd_statfs_async.
+> I scanning the code for this and noticed that this wrapper used with the 
+> proper obd_device for the osc was used in the lov layer. The two areas in 
+> the lov layer where lov_statfs_async and qos_statfs_update handled this.
+> If I remember right this is on the client side of the code. Where does the 
+> mds fit into this? Lov_statfs_async is for when the client queries data 
+> about the file. Whereas qos_statfs_update is what is called durning 
+> inital file create or when the statfs info is to old. Please correct me if 
+> I'm wrong. 
+> _______________________________________________
+> Lustre-devel mailing list
+> Lustre-devel at lists.lustre.org
+> http://lists.lustre.org/mailman/listinfo/lustre-devel
+
+Cheers, Andreas
+--
+Andreas Dilger
+Sr. Staff Engineer, Lustre Group
+Sun Microsystems of Canada, Inc.
+
+
+
+From adilger at sun.com  Mon May 25 15:48:15 2009
+From: adilger at sun.com (Andreas Dilger)
+Date: Mon, 25 May 2009 16:48:15 -0600
+Subject: [Lustre-devel] bz-18539 and osc_statfs_interpret
+In-Reply-To: <alpine.LFD.2.00.0905221738460.28089@casper.infradead.org>
+References: <alpine.LFD.2.00.0905221738460.28089@casper.infradead.org>
+Message-ID: <20090525224814.GK19035@webber.adilger.int>
+
+On May 22, 2009  18:21 +0100, James Simmons wrote:
+> Form bugzilla the approach recommended to set the oscc_flag was to use
+> the MDS-side code in osc_statfs_interpret(). First question is why this 
+> approach instead of defining a new osc_import_event. On the OST we will 
+> be setting the state with something like: 
+> 
+> /proc/fs/lustre/obdfilter/*/degraded_raid 
+> 
+> So the flow will be from the OST to the OSC. Just curious why it is not 
+> done this way.
+
+The reason osc_import_event can't be used is that this is only a local
+event notification.  The "degraded_raid" state will be set on the OSS
+node, while the osc_import_event can only be called on the client node
+(in this case the MDS).
+
+> 	The second question deals with setting the oscc_flag from 
+> osc_statfs_interpret. After looking at the code I noticed oscc_flag is a 
+> field in struct osc_creator. The only place I could find osc_creator was
+> in struct client_obd which I could only find in struct obd_device or
+> struct osc_brw_async_args which we are not using for this. 
+> 	Now for struct osc_async_args which is passed into 
+> osc_statfs_interpret just contains a pointer to struct obd_info. Looking
+> at the components for struct obd_info I don't see a easy way to get the 
+> proper obd_device to get the client_obd I need. What am I missing? 
+
+You can get the struct obd_device pointer for the OBD in question via
+req->rq_export->exp_obd and get the proper struct osc_creator from that
+
+Cheers, Andreas
+--
+Andreas Dilger
+Sr. Staff Engineer, Lustre Group
+Sun Microsystems of Canada, Inc.
+
+
+

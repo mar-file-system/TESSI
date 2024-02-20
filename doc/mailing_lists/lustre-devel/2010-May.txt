@@ -1,0 +1,3909 @@
+From Michael.Kluge at tu-dresden.de  Mon May  3 01:41:32 2010
+From: Michael.Kluge at tu-dresden.de (Michael Kluge)
+Date: Mon, 03 May 2010 10:41:32 +0200
+Subject: [Lustre-devel] Lustre RPC visualization
+In-Reply-To: <4BD9CF75.8030204@oracle.com>
+References: <000c01cae6ee$1d4693d0$57d3bb70$@barton@oracle.com>
+	<4BD8E021.7050302@oracle.com> <4BD90FB9.5030702@tu-dresden.de>
+	<4BD9CF75.8030204@oracle.com>
+Message-ID: <4BDE8C3C.2050505@tu-dresden.de>
+
+Hi WangDi,
+
+I have a small problem understanding the logical order of the events. 
+Here is one example from the logs where the client reports an RPC as 
+completed before the server says that it has finished the RPC handling. 
+The difference is about 1.5 ms.
+
+Is that due to the fact that the server waits until the client has 
+ack'ed the result of the RPC? Or are the clocks between the servers not 
+well synchronized? Or are the timestamps in the logfile sometimes not 
+correct (log message could not be flushed or whatever)?
+
+In the first case I don't have a chance to figure out when the server 
+has finished working on the RPC and is going to send out the result, 
+correct?
+
+../debug_log/rpc_client.debug:00000100:00100000:1.0:1272565278.263430:0:3479:0:(client.c:1532:ptlrpc_check_set()) 
+Completed RPC pname:cluuid:pid:xid:nid:opc 
+ptlrpcd-brw:3f7723dc-06a3-0b5e-9e96-f5b86e8d1b1c:3479:1334380768266050:10.8.0.126 at tcp:4
+
+../debug_log/rpc_oss.debug:00000100:00100000:1.0:1272565278.265039:0:7385:0:(service.c:1672:ptlrpc_server_handle_request()) 
+Handled RPC pname:cluuid+ref:pid:xid:nid:opc 
+ll_ost_io_24:3f7723dc-06a3-0b5e-9e96-f5b86e8d1b1c+27:3479:x1334380768266050:12345-10.8.0.104 at tcp:4 
+Request procesed in 238391us (239698us total) trans 266 rc 0/0
+
+
+For this RPC I see in the oss log:
+
+1272565278.025337: incoming x1334380768266050
+1272565278.026649: Handling RPC x1334380768266050
+1272565278.265039: Handled RPC x1334380768266050:Request procesed in 
+238391us (239698us total)
+
+So, by doing the math I get: 265039-026649=238390 (just 1 off target, 
+might be wathever) and 265039-025337=239702 (4 off target). So I guess 
+the times reported by the last message are calculated by using a 
+different data source than the log time stamps?
+
+
+Regards, Michael
+
+
+Am 29.04.2010 20:27, schrieb di.wang:
+> Hello, Michael
+>
+> Here is a small debug log example you can use for your development.
+>
+> Thanks
+> WangDi
+> Michael Kluge wrote:
+>> Hi WangDi,
+>>
+>> OK, thanks for input. I'll go ahead and try to write a converter.
+>> Could you please collect a set test traces that belong together from a
+>> couple servers and clients and put them somewhere so that I can
+>> download them?
+>>
+>>
+>> Thanks, Michael
+>>
+>> Am 29.04.2010 03:25, schrieb di.wang:
+>>> Hello, Michael
+>>>
+>>> There is a logfile parser script in the attachment, which was written by
+>>> Eric.
+>>>
+>>> This script is very simple, but it should help you understand how we
+>>> retrieve time step information from lustre debug log. On the server
+>>> side, if you enable rpc_trace log, whenever the request arrive/start
+>>> being processed/end of processing, there will be corresponding records
+>>> being written into the debug log. Basically, you can get all the time
+>>> step information from these records (actually only two of these records
+>>> would be enough).
+>>>
+>>>
+>>> a.
+>>> 00000100:00100000:0.0:1272313858.472660:0:31581:0:(service.c:1625:ptlrpc_server_handle_request())
+>>>
+>>> Handling RPC pname:cluuid+ref:pid:xid:nid:opc
+>>> ll_mgs_00:7d4fb15c-1b1c-295f-e466-ea7d77089b52+10:4055:x1334115493386242:12345-0 at lo:400
+>>>
+>>>
+>>>
+>>> This record means the req will being handled, so you can get the start
+>>> time stamp(1272313858.472660) operation type (opc: 400, ping), xid
+>>> (1334115493386242), client nid(12345-0 at lo) and so on.
+>>>
+>>> b.
+>>> 00000100:00100000:0.0:1272313858.472687:0:31581:0:(service.c:1672:ptlrpc_server_handle_request())
+>>>
+>>> Handled RPC pname:cluuid+ref:pid:xid:nid:opc
+>>> ll_mgs_00:7d4fb15c-1b1c-295f-e466-ea7d77089b52+9:4055:x1334115493386242:12345-0 at lo:400
+>>>
+>>> Request procesed in 45us (77us total) trans 0 rc 0/0
+>>>
+>>> This record means the req is already being handled, so you can get the
+>>> end time stamp(1272313858.472687), operation type (opc: 400, ping), xid
+>>> (1334115493386242), client nid(12345-0 at lo) and so no.
+>>>
+>>> Note: (77us total) means how long it takes from the request arriving to
+>>> the end of processing. so you can also get the request arriving time
+>>> stamp here by (1272313858 - 77 = 1272312781).
+>>>
+>>>
+>>> So with these information you can draw the graph Eric mentioned in his
+>>> email. If you have any questions, please let me know.
+>>>
+>>> Thanks
+>>> WangDi
+>>>
+>>>
+>>> Eric Barton wrote:
+>>>>
+>>>> ------------------------------------------------------------------------
+>>>>
+>>>>
+>>>> Subject:
+>>>> RE: Visualising Lustre RPCs
+>>>> To:
+>>>> "Michael Kluge" <Michael.Kluge at tu-dresden.de>, "wangdi"
+>>>> <Tom.Wang at Sun.COM>
+>>>>
+>>>> To:
+>>>> "Michael Kluge" <Michael.Kluge at tu-dresden.de>, "wangdi"
+>>>> <Tom.Wang at Sun.COM>
+>>>> CC:
+>>>> <lustre-devel at lists.lustre.org>, "Galen M. Shipman" <gshipman at ornl.gov>
+>>>>
+>>>>
+>>>> Michael,
+>>>>
+>>>> The previous Lustre RPC visualisation effort I mentioned at the LUG
+>>>> used the
+>>>>
+>>>> Lustre debug log entries of type D_RPCTRACE. We disabled all but these
+>>>>
+>>>> log messages and then used the Lustre debug daemon to collect them
+>>>> while
+>>>>
+>>>> we ran I/O tests. We then ran a simple logfile parser which used just
+>>>> the log entries
+>>>>
+>>>> for request arrival?
+>>>>
+>>>> , start of processing and end of processing to graph request
+>>>>
+>>>> queue depth (arrival->end) and the number of requests being serviced
+>>>> by type
+>>>>
+>>>> over time ? e.g?
+>>>>
+>>>> read3d
+>>>>
+>>>> ?which shows request queue depth (vertical) over time (axis labelled
+>>>> 20-25) by
+>>>>
+>>>> server (axis labelled 0-80).
+>>>>
+>>>> *From:* Michael Kluge [mailto:Michael.Kluge at tu-dresden.de]
+>>>> *Sent:* 17 April 2010 6:26 AM
+>>>> *To:* Galen M. Shipman; Eric Barton
+>>>> *Subject:* Visualising Lustre RPCs
+>>>>
+>>>> Hi Galen, Eric,
+>>>>
+>>>> in order to get this little project started, I think what I need at
+>>>> first to
+>>>>
+>>>> write a prototype for a converter are the following things:
+>>>>
+>>>> A set of test traces collected on maybe a handful of clients and some
+>>>> servers
+>>>>
+>>>> is probably a good point to start with. It would be even better if we
+>>>> know
+>>>>
+>>>> what is in this traces so that we have an expectation what kind of
+>>>> things
+>>>>
+>>>> we want to see on the Vampir displays. This little program that Eric
+>>>> mentioned
+>>>>
+>>>> that can read the trace file would be very helpful as well. And as the
+>>>> last
+>>>>
+>>>> idea I have right now, a technical contact. I might come up with a
+>>>> couple
+>>>>
+>>>> of question after I have taken the first look onto the original trace
+>>>> data
+>>>>
+>>>> and before I start writing code.
+>>>>
+>>>> Regards, Michael
+>>>>
+>>>>
+>>>> --
+>>>>
+>>>> Michael Kluge, M.Sc.
+>>>>
+>>>> Technische Universit?t Dresden
+>>>> Center for Information Services and
+>>>> High Performance Computing (ZIH)
+>>>> D-01062 Dresden
+>>>> Germany
+>>>>
+>>>> Contact:
+>>>> Willersbau, Room WIL A 208
+>>>> Phone: (+49) 351 463-34217
+>>>> Fax: (+49) 351 463-37773
+>>>> e-mail: michael.kluge at tu-dresden.de
+>>>> <mailto:michael.kluge at tu-dresden.de>
+>>>> WWW: http://www.tu-dresden.de/zih
+>>
+>
+
+
+
+From andreas.dilger at oracle.com  Mon May  3 06:20:34 2010
+From: andreas.dilger at oracle.com (Andreas Dilger)
+Date: Mon, 3 May 2010 09:20:34 -0400
+Subject: [Lustre-devel] Lustre RPC visualization
+In-Reply-To: <4BDE8C3C.2050505@tu-dresden.de>
+References: <000c01cae6ee$1d4693d0$57d3bb70$@barton@oracle.com>
+	<4BD8E021.7050302@oracle.com> <4BD90FB9.5030702@tu-dresden.de>
+	<4BD9CF75.8030204@oracle.com> <4BDE8C3C.2050505@tu-dresden.de>
+Message-ID: <699F57EF-52E6-41D1-A04B-3C39D469D133@oracle.com>
+
+On 2010-05-03, at 04:41, Michael Kluge wrote:
+> I have a small problem understanding the logical order of the events. 
+> Here is one example from the logs where the client reports an RPC as 
+> completed before the server says that it has finished the RPC handling. 
+> The difference is about 1.5 ms.
+> 
+> Is that due to the fact that the server waits until the client has 
+> ack'ed the result of the RPC? Or are the clocks between the servers not 
+> well synchronized? Or are the timestamps in the logfile sometimes not 
+> correct (log message could not be flushed or whatever)?
+
+The timestamps on the log messages are only as accurate as the clocks on the nodes.  Lustre can run without synchronized clocks, using the client clock as the basis for the timestamps, but Lustre makes no effort to synchronize the client clocks.  For that you need to use NTP (easiest) or adjust the timestamps in the logs based on messages like this.
+
+> In the first case I don't have a chance to figure out when the server 
+> has finished working on the RPC and is going to send out the result, 
+> correct?
+> 
+> ../debug_log/rpc_client.debug:00000100:00100000:1.0:1272565278.263430:0:3479:0:(client.c:1532:ptlrpc_check_set()) 
+> Completed RPC pname:cluuid:pid:xid:nid:opc 
+> ptlrpcd-brw:3f7723dc-06a3-0b5e-9e96-f5b86e8d1b1c:3479:1334380768266050:10.8.0.126 at tcp:4
+> 
+> ../debug_log/rpc_oss.debug:00000100:00100000:1.0:1272565278.265039:0:7385:0:(service.c:1672:ptlrpc_server_handle_request()) 
+> Handled RPC pname:cluuid+ref:pid:xid:nid:opc 
+> ll_ost_io_24:3f7723dc-06a3-0b5e-9e96-f5b86e8d1b1c+27:3479:x1334380768266050:12345-10.8.0.104 at tcp:4 
+> Request procesed in 238391us (239698us total) trans 266 rc 0/0
+> 
+> 
+> For this RPC I see in the oss log:
+> 
+> 1272565278.025337: incoming x1334380768266050
+> 1272565278.026649: Handling RPC x1334380768266050
+> 1272565278.265039: Handled RPC x1334380768266050:Request procesed in 
+> 238391us (239698us total)
+> 
+> So, by doing the math I get: 265039-026649=238390 (just 1 off target, 
+> might be wathever) and 265039-025337=239702 (4 off target). So I guess 
+> the times reported by the last message are calculated by using a 
+> different data source than the log time stamps?
+
+The log timestamps are generated at the time the message is processed by the log system.  The processing times are themselves generated by accessing the clock and computing the processing before the message is printed.
+
+        do_gettimeofday(&work_start);
+        :
+        {handle RPC}
+        :
+        do_gettimeofday(&work_end);
+        timediff = cfs_timeval_sub(&work_end, &work_start, NULL);
+        CDEBUG(D_RPCTRACE, "request x"LPU64" opc %u from %s processed in "
+               "%ldus (%ldus total) trans "LPU64" rc %d/%d\n",
+
+
+
+> Am 29.04.2010 20:27, schrieb di.wang:
+>> Hello, Michael
+>> 
+>> Here is a small debug log example you can use for your development.
+>> 
+>> Thanks
+>> WangDi
+>> Michael Kluge wrote:
+>>> Hi WangDi,
+>>> 
+>>> OK, thanks for input. I'll go ahead and try to write a converter.
+>>> Could you please collect a set test traces that belong together from a
+>>> couple servers and clients and put them somewhere so that I can
+>>> download them?
+>>> 
+>>> 
+>>> Thanks, Michael
+>>> 
+>>> Am 29.04.2010 03:25, schrieb di.wang:
+>>>> Hello, Michael
+>>>> 
+>>>> There is a logfile parser script in the attachment, which was written by
+>>>> Eric.
+>>>> 
+>>>> This script is very simple, but it should help you understand how we
+>>>> retrieve time step information from lustre debug log. On the server
+>>>> side, if you enable rpc_trace log, whenever the request arrive/start
+>>>> being processed/end of processing, there will be corresponding records
+>>>> being written into the debug log. Basically, you can get all the time
+>>>> step information from these records (actually only two of these records
+>>>> would be enough).
+>>>> 
+>>>> 
+>>>> a.
+>>>> 00000100:00100000:0.0:1272313858.472660:0:31581:0:(service.c:1625:ptlrpc_server_handle_request())
+>>>> 
+>>>> Handling RPC pname:cluuid+ref:pid:xid:nid:opc
+>>>> ll_mgs_00:7d4fb15c-1b1c-295f-e466-ea7d77089b52+10:4055:x1334115493386242:12345-0 at lo:400
+>>>> 
+>>>> 
+>>>> 
+>>>> This record means the req will being handled, so you can get the start
+>>>> time stamp(1272313858.472660) operation type (opc: 400, ping), xid
+>>>> (1334115493386242), client nid(12345-0 at lo) and so on.
+>>>> 
+>>>> b.
+>>>> 00000100:00100000:0.0:1272313858.472687:0:31581:0:(service.c:1672:ptlrpc_server_handle_request())
+>>>> 
+>>>> Handled RPC pname:cluuid+ref:pid:xid:nid:opc
+>>>> ll_mgs_00:7d4fb15c-1b1c-295f-e466-ea7d77089b52+9:4055:x1334115493386242:12345-0 at lo:400
+>>>> 
+>>>> Request procesed in 45us (77us total) trans 0 rc 0/0
+>>>> 
+>>>> This record means the req is already being handled, so you can get the
+>>>> end time stamp(1272313858.472687), operation type (opc: 400, ping), xid
+>>>> (1334115493386242), client nid(12345-0 at lo) and so no.
+>>>> 
+>>>> Note: (77us total) means how long it takes from the request arriving to
+>>>> the end of processing. so you can also get the request arriving time
+>>>> stamp here by (1272313858 - 77 = 1272312781).
+>>>> 
+>>>> 
+>>>> So with these information you can draw the graph Eric mentioned in his
+>>>> email. If you have any questions, please let me know.
+>>>> 
+>>>> Thanks
+>>>> WangDi
+>>>> 
+>>>> 
+>>>> Eric Barton wrote:
+>>>>> 
+>>>>> ------------------------------------------------------------------------
+>>>>> 
+>>>>> 
+>>>>> Subject:
+>>>>> RE: Visualising Lustre RPCs
+>>>>> To:
+>>>>> "Michael Kluge" <Michael.Kluge at tu-dresden.de>, "wangdi"
+>>>>> <Tom.Wang at Sun.COM>
+>>>>> 
+>>>>> To:
+>>>>> "Michael Kluge" <Michael.Kluge at tu-dresden.de>, "wangdi"
+>>>>> <Tom.Wang at Sun.COM>
+>>>>> CC:
+>>>>> <lustre-devel at lists.lustre.org>, "Galen M. Shipman" <gshipman at ornl.gov>
+>>>>> 
+>>>>> 
+>>>>> Michael,
+>>>>> 
+>>>>> The previous Lustre RPC visualisation effort I mentioned at the LUG
+>>>>> used the
+>>>>> 
+>>>>> Lustre debug log entries of type D_RPCTRACE. We disabled all but these
+>>>>> 
+>>>>> log messages and then used the Lustre debug daemon to collect them
+>>>>> while
+>>>>> 
+>>>>> we ran I/O tests. We then ran a simple logfile parser which used just
+>>>>> the log entries
+>>>>> 
+>>>>> for request arrival?
+>>>>> 
+>>>>> , start of processing and end of processing to graph request
+>>>>> 
+>>>>> queue depth (arrival->end) and the number of requests being serviced
+>>>>> by type
+>>>>> 
+>>>>> over time ? e.g?
+>>>>> 
+>>>>> read3d
+>>>>> 
+>>>>> ?which shows request queue depth (vertical) over time (axis labelled
+>>>>> 20-25) by
+>>>>> 
+>>>>> server (axis labelled 0-80).
+>>>>> 
+>>>>> *From:* Michael Kluge [mailto:Michael.Kluge at tu-dresden.de]
+>>>>> *Sent:* 17 April 2010 6:26 AM
+>>>>> *To:* Galen M. Shipman; Eric Barton
+>>>>> *Subject:* Visualising Lustre RPCs
+>>>>> 
+>>>>> Hi Galen, Eric,
+>>>>> 
+>>>>> in order to get this little project started, I think what I need at
+>>>>> first to
+>>>>> 
+>>>>> write a prototype for a converter are the following things:
+>>>>> 
+>>>>> A set of test traces collected on maybe a handful of clients and some
+>>>>> servers
+>>>>> 
+>>>>> is probably a good point to start with. It would be even better if we
+>>>>> know
+>>>>> 
+>>>>> what is in this traces so that we have an expectation what kind of
+>>>>> things
+>>>>> 
+>>>>> we want to see on the Vampir displays. This little program that Eric
+>>>>> mentioned
+>>>>> 
+>>>>> that can read the trace file would be very helpful as well. And as the
+>>>>> last
+>>>>> 
+>>>>> idea I have right now, a technical contact. I might come up with a
+>>>>> couple
+>>>>> 
+>>>>> of question after I have taken the first look onto the original trace
+>>>>> data
+>>>>> 
+>>>>> and before I start writing code.
+>>>>> 
+>>>>> Regards, Michael
+>>>>> 
+>>>>> 
+>>>>> --
+>>>>> 
+>>>>> Michael Kluge, M.Sc.
+>>>>> 
+>>>>> Technische Universit?t Dresden
+>>>>> Center for Information Services and
+>>>>> High Performance Computing (ZIH)
+>>>>> D-01062 Dresden
+>>>>> Germany
+>>>>> 
+>>>>> Contact:
+>>>>> Willersbau, Room WIL A 208
+>>>>> Phone: (+49) 351 463-34217
+>>>>> Fax: (+49) 351 463-37773
+>>>>> e-mail: michael.kluge at tu-dresden.de
+>>>>> <mailto:michael.kluge at tu-dresden.de>
+>>>>> WWW: http://www.tu-dresden.de/zih
+>>> 
+>> 
+> 
+> _______________________________________________
+> Lustre-devel mailing list
+> Lustre-devel at lists.lustre.org
+> http://lists.lustre.org/mailman/listinfo/lustre-devel
+
+
+Cheers, Andreas
+--
+Andreas Dilger
+Lustre Technical Lead
+Oracle Corporation Canada Inc.
+
+
+
+From Michael.Kluge at tu-dresden.de  Mon May  3 11:10:33 2010
+From: Michael.Kluge at tu-dresden.de (Michael Kluge)
+Date: Mon, 03 May 2010 20:10:33 +0200
+Subject: [Lustre-devel] Lustre RPC visualization
+In-Reply-To: <699F57EF-52E6-41D1-A04B-3C39D469D133@oracle.com>
+References: <000c01cae6ee$1d4693d0$57d3bb70$@barton@oracle.com>
+	<4BD8E021.7050302@oracle.com> <4BD90FB9.5030702@tu-dresden.de>
+	<4BD9CF75.8030204@oracle.com> <4BDE8C3C.2050505@tu-dresden.de>
+	<699F57EF-52E6-41D1-A04B-3C39D469D133@oracle.com>
+Message-ID: <4BDF1199.2030007@tu-dresden.de>
+
+Hi Andreas,
+
+Am 03.05.2010 15:20, schrieb Andreas Dilger:
+> On 2010-05-03, at 04:41, Michael Kluge wrote:
+>> I have a small problem understanding the logical order of the events.
+>> Here is one example from the logs where the client reports an RPC as
+>> completed before the server says that it has finished the RPC handling.
+>> The difference is about 1.5 ms.
+>>
+>> Is that due to the fact that the server waits until the client has
+>> ack'ed the result of the RPC? Or are the clocks between the servers not
+>> well synchronized? Or are the timestamps in the logfile sometimes not
+>> correct (log message could not be flushed or whatever)?
+>
+> The timestamps on the log messages are only as accurate as the clocks on
+ > the nodes.  Lustre can run without synchronized clocks, using the client
+ > clock as the basis for the timestamps, but Lustre makes no effort to
+ > synchronize the client clocks.  For that you need to use NTP (easiest)
+>  or adjust the timestamps in the logs based on messages like this.
+
+OK, so logically the "Completed RPC" on the client side is supposed to 
+show up after the server has written his "Handled RPC" to its log (if 
+clocks are snyc'ed perfectly).
+
+One more question: RPC 1334380768266400 (in the log WangDi sent me) has 
+on the client side only a "Sending RPC" message, thus missing the 
+"Completed RPC". The server has all three (received,start work, done 
+work). Has this RPC vanished on the way back to the client? There is no 
+further indication what happend. The last timestamp in the client log is:
+1272565368.228628
+and the server says it finished the processing of the request at:
+1272565281.379471
+So the client log has been recorded long enough to contain the 
+"Completed RPC" message for this RPC if it arrived ever ...
+
+
+Regards, Michael
+
+
+>> In the first case I don't have a chance to figure out when the server
+>> has finished working on the RPC and is going to send out the result,
+>> correct?
+>>
+>> ../debug_log/rpc_client.debug:00000100:00100000:1.0:1272565278.263430:0:3479:0:(client.c:1532:ptlrpc_check_set())
+>> Completed RPC pname:cluuid:pid:xid:nid:opc
+>> ptlrpcd-brw:3f7723dc-06a3-0b5e-9e96-f5b86e8d1b1c:3479:1334380768266050:10.8.0.126 at tcp:4
+>>
+>> ../debug_log/rpc_oss.debug:00000100:00100000:1.0:1272565278.265039:0:7385:0:(service.c:1672:ptlrpc_server_handle_request())
+>> Handled RPC pname:cluuid+ref:pid:xid:nid:opc
+>> ll_ost_io_24:3f7723dc-06a3-0b5e-9e96-f5b86e8d1b1c+27:3479:x1334380768266050:12345-10.8.0.104 at tcp:4
+>> Request procesed in 238391us (239698us total) trans 266 rc 0/0
+>>
+>>
+>> For this RPC I see in the oss log:
+>>
+>> 1272565278.025337: incoming x1334380768266050
+>> 1272565278.026649: Handling RPC x1334380768266050
+>> 1272565278.265039: Handled RPC x1334380768266050:Request procesed in
+>> 238391us (239698us total)
+>>
+>> So, by doing the math I get: 265039-026649=238390 (just 1 off target,
+>> might be wathever) and 265039-025337=239702 (4 off target). So I guess
+>> the times reported by the last message are calculated by using a
+>> different data source than the log time stamps?
+>
+> The log timestamps are generated at the time the message is processed by the log system.  The processing times are themselves generated by accessing the clock and computing the processing before the message is printed.
+>
+>          do_gettimeofday(&work_start);
+>          :
+>          {handle RPC}
+>          :
+>          do_gettimeofday(&work_end);
+>          timediff = cfs_timeval_sub(&work_end,&work_start, NULL);
+>          CDEBUG(D_RPCTRACE, "request x"LPU64" opc %u from %s processed in "
+>                 "%ldus (%ldus total) trans "LPU64" rc %d/%d\n",
+>
+>
+>
+>> Am 29.04.2010 20:27, schrieb di.wang:
+>>> Hello, Michael
+>>>
+>>> Here is a small debug log example you can use for your development.
+>>>
+>>> Thanks
+>>> WangDi
+>>> Michael Kluge wrote:
+>>>> Hi WangDi,
+>>>>
+>>>> OK, thanks for input. I'll go ahead and try to write a converter.
+>>>> Could you please collect a set test traces that belong together from a
+>>>> couple servers and clients and put them somewhere so that I can
+>>>> download them?
+>>>>
+>>>>
+>>>> Thanks, Michael
+>>>>
+>>>> Am 29.04.2010 03:25, schrieb di.wang:
+>>>>> Hello, Michael
+>>>>>
+>>>>> There is a logfile parser script in the attachment, which was written by
+>>>>> Eric.
+>>>>>
+>>>>> This script is very simple, but it should help you understand how we
+>>>>> retrieve time step information from lustre debug log. On the server
+>>>>> side, if you enable rpc_trace log, whenever the request arrive/start
+>>>>> being processed/end of processing, there will be corresponding records
+>>>>> being written into the debug log. Basically, you can get all the time
+>>>>> step information from these records (actually only two of these records
+>>>>> would be enough).
+>>>>>
+>>>>>
+>>>>> a.
+>>>>> 00000100:00100000:0.0:1272313858.472660:0:31581:0:(service.c:1625:ptlrpc_server_handle_request())
+>>>>>
+>>>>> Handling RPC pname:cluuid+ref:pid:xid:nid:opc
+>>>>> ll_mgs_00:7d4fb15c-1b1c-295f-e466-ea7d77089b52+10:4055:x1334115493386242:12345-0 at lo:400
+>>>>>
+>>>>>
+>>>>>
+>>>>> This record means the req will being handled, so you can get the start
+>>>>> time stamp(1272313858.472660) operation type (opc: 400, ping), xid
+>>>>> (1334115493386242), client nid(12345-0 at lo) and so on.
+>>>>>
+>>>>> b.
+>>>>> 00000100:00100000:0.0:1272313858.472687:0:31581:0:(service.c:1672:ptlrpc_server_handle_request())
+>>>>>
+>>>>> Handled RPC pname:cluuid+ref:pid:xid:nid:opc
+>>>>> ll_mgs_00:7d4fb15c-1b1c-295f-e466-ea7d77089b52+9:4055:x1334115493386242:12345-0 at lo:400
+>>>>>
+>>>>> Request procesed in 45us (77us total) trans 0 rc 0/0
+>>>>>
+>>>>> This record means the req is already being handled, so you can get the
+>>>>> end time stamp(1272313858.472687), operation type (opc: 400, ping), xid
+>>>>> (1334115493386242), client nid(12345-0 at lo) and so no.
+>>>>>
+>>>>> Note: (77us total) means how long it takes from the request arriving to
+>>>>> the end of processing. so you can also get the request arriving time
+>>>>> stamp here by (1272313858 - 77 = 1272312781).
+>>>>>
+>>>>>
+>>>>> So with these information you can draw the graph Eric mentioned in his
+>>>>> email. If you have any questions, please let me know.
+>>>>>
+>>>>> Thanks
+>>>>> WangDi
+>>>>>
+>>>>>
+>>>>> Eric Barton wrote:
+>>>>>>
+>>>>>> ------------------------------------------------------------------------
+>>>>>>
+>>>>>>
+>>>>>> Subject:
+>>>>>> RE: Visualising Lustre RPCs
+>>>>>> To:
+>>>>>> "Michael Kluge"<Michael.Kluge at tu-dresden.de>, "wangdi"
+>>>>>> <Tom.Wang at Sun.COM>
+>>>>>>
+>>>>>> To:
+>>>>>> "Michael Kluge"<Michael.Kluge at tu-dresden.de>, "wangdi"
+>>>>>> <Tom.Wang at Sun.COM>
+>>>>>> CC:
+>>>>>> <lustre-devel at lists.lustre.org>, "Galen M. Shipman"<gshipman at ornl.gov>
+>>>>>>
+>>>>>>
+>>>>>> Michael,
+>>>>>>
+>>>>>> The previous Lustre RPC visualisation effort I mentioned at the LUG
+>>>>>> used the
+>>>>>>
+>>>>>> Lustre debug log entries of type D_RPCTRACE. We disabled all but these
+>>>>>>
+>>>>>> log messages and then used the Lustre debug daemon to collect them
+>>>>>> while
+>>>>>>
+>>>>>> we ran I/O tests. We then ran a simple logfile parser which used just
+>>>>>> the log entries
+>>>>>>
+>>>>>> for request arrival?
+>>>>>>
+>>>>>> , start of processing and end of processing to graph request
+>>>>>>
+>>>>>> queue depth (arrival->end) and the number of requests being serviced
+>>>>>> by type
+>>>>>>
+>>>>>> over time ? e.g?
+>>>>>>
+>>>>>> read3d
+>>>>>>
+>>>>>> ?which shows request queue depth (vertical) over time (axis labelled
+>>>>>> 20-25) by
+>>>>>>
+>>>>>> server (axis labelled 0-80).
+>>>>>>
+>>>>>> *From:* Michael Kluge [mailto:Michael.Kluge at tu-dresden.de]
+>>>>>> *Sent:* 17 April 2010 6:26 AM
+>>>>>> *To:* Galen M. Shipman; Eric Barton
+>>>>>> *Subject:* Visualising Lustre RPCs
+>>>>>>
+>>>>>> Hi Galen, Eric,
+>>>>>>
+>>>>>> in order to get this little project started, I think what I need at
+>>>>>> first to
+>>>>>>
+>>>>>> write a prototype for a converter are the following things:
+>>>>>>
+>>>>>> A set of test traces collected on maybe a handful of clients and some
+>>>>>> servers
+>>>>>>
+>>>>>> is probably a good point to start with. It would be even better if we
+>>>>>> know
+>>>>>>
+>>>>>> what is in this traces so that we have an expectation what kind of
+>>>>>> things
+>>>>>>
+>>>>>> we want to see on the Vampir displays. This little program that Eric
+>>>>>> mentioned
+>>>>>>
+>>>>>> that can read the trace file would be very helpful as well. And as the
+>>>>>> last
+>>>>>>
+>>>>>> idea I have right now, a technical contact. I might come up with a
+>>>>>> couple
+>>>>>>
+>>>>>> of question after I have taken the first look onto the original trace
+>>>>>> data
+>>>>>>
+>>>>>> and before I start writing code.
+>>>>>>
+>>>>>> Regards, Michael
+>>>>>>
+>>>>>>
+>>>>>> --
+>>>>>>
+>>>>>> Michael Kluge, M.Sc.
+>>>>>>
+>>>>>> Technische Universit?t Dresden
+>>>>>> Center for Information Services and
+>>>>>> High Performance Computing (ZIH)
+>>>>>> D-01062 Dresden
+>>>>>> Germany
+>>>>>>
+>>>>>> Contact:
+>>>>>> Willersbau, Room WIL A 208
+>>>>>> Phone: (+49) 351 463-34217
+>>>>>> Fax: (+49) 351 463-37773
+>>>>>> e-mail: michael.kluge at tu-dresden.de
+>>>>>> <mailto:michael.kluge at tu-dresden.de>
+>>>>>> WWW: http://www.tu-dresden.de/zih
+
+
+From robert.read at oracle.com  Mon May  3 11:57:47 2010
+From: robert.read at oracle.com (Robert Read)
+Date: Mon, 3 May 2010 11:57:47 -0700
+Subject: [Lustre-devel] Lustre RPC visualization
+In-Reply-To: <4BDF1199.2030007@tu-dresden.de>
+References: <000c01cae6ee$1d4693d0$57d3bb70$%barton@oracle.com>
+	<4BD8E021.7050302@oracle.com> <4BD90FB9.5030702@tu-dresden.de>
+	<4BD9CF75.8030204@oracle.com> <4BDE8C3C.2050505@tu-dresden.de>
+	<699F57EF-52E6-41D1-A04B-3C39D469D133@oracle.com>
+	<4BDF1199.2030007@tu-dresden.de>
+Message-ID: <17125253-B8D2-457A-8765-6A4FC42A2A9C@oracle.com>
+
+Hi Michael, 
+
+On May 3, 2010, at 11:10 , Michael Kluge wrote:
+
+> Hi Andreas,
+> 
+> Am 03.05.2010 15:20, schrieb Andreas Dilger:
+>> On 2010-05-03, at 04:41, Michael Kluge wrote:
+>>> I have a small problem understanding the logical order of the events.
+>>> Here is one example from the logs where the client reports an RPC as
+>>> completed before the server says that it has finished the RPC handling.
+>>> The difference is about 1.5 ms.
+>>> 
+>>> Is that due to the fact that the server waits until the client has
+>>> ack'ed the result of the RPC? Or are the clocks between the servers not
+>>> well synchronized? Or are the timestamps in the logfile sometimes not
+>>> correct (log message could not be flushed or whatever)?
+>> 
+>> The timestamps on the log messages are only as accurate as the clocks on
+>> the nodes.  Lustre can run without synchronized clocks, using the client
+>> clock as the basis for the timestamps, but Lustre makes no effort to
+>> synchronize the client clocks.  For that you need to use NTP (easiest)
+>> or adjust the timestamps in the logs based on messages like this.
+> 
+> OK, so logically the "Completed RPC" on the client side is supposed to 
+> show up after the server has written his "Handled RPC" to its log (if 
+> clocks are snyc'ed perfectly).
+> 
+> One more question: RPC 1334380768266400 (in the log WangDi sent me) has 
+> on the client side only a "Sending RPC" message, thus missing the 
+> "Completed RPC". The server has all three (received,start work, done 
+> work). Has this RPC vanished on the way back to the client? There is no 
+> further indication what happend. The last timestamp in the client log is:
+> 1272565368.228628
+> and the server says it finished the processing of the request at:
+> 1272565281.379471
+> So the client log has been recorded long enough to contain the 
+> "Completed RPC" message for this RPC if it arrived ever ...
+
+If the reply was never received then you should expect to see a timeout for that rpc in the log.
+
+It's also possible, though I'm not sure how likely in this case, that the trace buffer on the cpu that processed the completion has overflowed.  You can check if this is possible by finding the earliest message for each cpu and see if any of them of them is later than the expected time for this message.   
+
+cheers,
+robert
+
+> 
+> 
+> Regards, Michael
+> 
+> 
+>>> In the first case I don't have a chance to figure out when the server
+>>> has finished working on the RPC and is going to send out the result,
+>>> correct?
+>>> 
+>>> ../debug_log/rpc_client.debug:00000100:00100000:1.0:1272565278.263430:0:3479:0:(client.c:1532:ptlrpc_check_set())
+>>> Completed RPC pname:cluuid:pid:xid:nid:opc
+>>> ptlrpcd-brw:3f7723dc-06a3-0b5e-9e96-f5b86e8d1b1c:3479:1334380768266050:10.8.0.126 at tcp:4
+>>> 
+>>> ../debug_log/rpc_oss.debug:00000100:00100000:1.0:1272565278.265039:0:7385:0:(service.c:1672:ptlrpc_server_handle_request())
+>>> Handled RPC pname:cluuid+ref:pid:xid:nid:opc
+>>> ll_ost_io_24:3f7723dc-06a3-0b5e-9e96-f5b86e8d1b1c+27:3479:x1334380768266050:12345-10.8.0.104 at tcp:4
+>>> Request procesed in 238391us (239698us total) trans 266 rc 0/0
+>>> 
+>>> 
+>>> For this RPC I see in the oss log:
+>>> 
+>>> 1272565278.025337: incoming x1334380768266050
+>>> 1272565278.026649: Handling RPC x1334380768266050
+>>> 1272565278.265039: Handled RPC x1334380768266050:Request procesed in
+>>> 238391us (239698us total)
+>>> 
+>>> So, by doing the math I get: 265039-026649=238390 (just 1 off target,
+>>> might be wathever) and 265039-025337=239702 (4 off target). So I guess
+>>> the times reported by the last message are calculated by using a
+>>> different data source than the log time stamps?
+>> 
+>> The log timestamps are generated at the time the message is processed by the log system.  The processing times are themselves generated by accessing the clock and computing the processing before the message is printed.
+>> 
+>>         do_gettimeofday(&work_start);
+>>         :
+>>         {handle RPC}
+>>         :
+>>         do_gettimeofday(&work_end);
+>>         timediff = cfs_timeval_sub(&work_end,&work_start, NULL);
+>>         CDEBUG(D_RPCTRACE, "request x"LPU64" opc %u from %s processed in "
+>>                "%ldus (%ldus total) trans "LPU64" rc %d/%d\n",
+>> 
+>> 
+>> 
+>>> Am 29.04.2010 20:27, schrieb di.wang:
+>>>> Hello, Michael
+>>>> 
+>>>> Here is a small debug log example you can use for your development.
+>>>> 
+>>>> Thanks
+>>>> WangDi
+>>>> Michael Kluge wrote:
+>>>>> Hi WangDi,
+>>>>> 
+>>>>> OK, thanks for input. I'll go ahead and try to write a converter.
+>>>>> Could you please collect a set test traces that belong together from a
+>>>>> couple servers and clients and put them somewhere so that I can
+>>>>> download them?
+>>>>> 
+>>>>> 
+>>>>> Thanks, Michael
+>>>>> 
+>>>>> Am 29.04.2010 03:25, schrieb di.wang:
+>>>>>> Hello, Michael
+>>>>>> 
+>>>>>> There is a logfile parser script in the attachment, which was written by
+>>>>>> Eric.
+>>>>>> 
+>>>>>> This script is very simple, but it should help you understand how we
+>>>>>> retrieve time step information from lustre debug log. On the server
+>>>>>> side, if you enable rpc_trace log, whenever the request arrive/start
+>>>>>> being processed/end of processing, there will be corresponding records
+>>>>>> being written into the debug log. Basically, you can get all the time
+>>>>>> step information from these records (actually only two of these records
+>>>>>> would be enough).
+>>>>>> 
+>>>>>> 
+>>>>>> a.
+>>>>>> 00000100:00100000:0.0:1272313858.472660:0:31581:0:(service.c:1625:ptlrpc_server_handle_request())
+>>>>>> 
+>>>>>> Handling RPC pname:cluuid+ref:pid:xid:nid:opc
+>>>>>> ll_mgs_00:7d4fb15c-1b1c-295f-e466-ea7d77089b52+10:4055:x1334115493386242:12345-0 at lo:400
+>>>>>> 
+>>>>>> 
+>>>>>> 
+>>>>>> This record means the req will being handled, so you can get the start
+>>>>>> time stamp(1272313858.472660) operation type (opc: 400, ping), xid
+>>>>>> (1334115493386242), client nid(12345-0 at lo) and so on.
+>>>>>> 
+>>>>>> b.
+>>>>>> 00000100:00100000:0.0:1272313858.472687:0:31581:0:(service.c:1672:ptlrpc_server_handle_request())
+>>>>>> 
+>>>>>> Handled RPC pname:cluuid+ref:pid:xid:nid:opc
+>>>>>> ll_mgs_00:7d4fb15c-1b1c-295f-e466-ea7d77089b52+9:4055:x1334115493386242:12345-0 at lo:400
+>>>>>> 
+>>>>>> Request procesed in 45us (77us total) trans 0 rc 0/0
+>>>>>> 
+>>>>>> This record means the req is already being handled, so you can get the
+>>>>>> end time stamp(1272313858.472687), operation type (opc: 400, ping), xid
+>>>>>> (1334115493386242), client nid(12345-0 at lo) and so no.
+>>>>>> 
+>>>>>> Note: (77us total) means how long it takes from the request arriving to
+>>>>>> the end of processing. so you can also get the request arriving time
+>>>>>> stamp here by (1272313858 - 77 = 1272312781).
+>>>>>> 
+>>>>>> 
+>>>>>> So with these information you can draw the graph Eric mentioned in his
+>>>>>> email. If you have any questions, please let me know.
+>>>>>> 
+>>>>>> Thanks
+>>>>>> WangDi
+>>>>>> 
+>>>>>> 
+>>>>>> Eric Barton wrote:
+>>>>>>> 
+>>>>>>> ------------------------------------------------------------------------
+>>>>>>> 
+>>>>>>> 
+>>>>>>> Subject:
+>>>>>>> RE: Visualising Lustre RPCs
+>>>>>>> To:
+>>>>>>> "Michael Kluge"<Michael.Kluge at tu-dresden.de>, "wangdi"
+>>>>>>> <Tom.Wang at Sun.COM>
+>>>>>>> 
+>>>>>>> To:
+>>>>>>> "Michael Kluge"<Michael.Kluge at tu-dresden.de>, "wangdi"
+>>>>>>> <Tom.Wang at Sun.COM>
+>>>>>>> CC:
+>>>>>>> <lustre-devel at lists.lustre.org>, "Galen M. Shipman"<gshipman at ornl.gov>
+>>>>>>> 
+>>>>>>> 
+>>>>>>> Michael,
+>>>>>>> 
+>>>>>>> The previous Lustre RPC visualisation effort I mentioned at the LUG
+>>>>>>> used the
+>>>>>>> 
+>>>>>>> Lustre debug log entries of type D_RPCTRACE. We disabled all but these
+>>>>>>> 
+>>>>>>> log messages and then used the Lustre debug daemon to collect them
+>>>>>>> while
+>>>>>>> 
+>>>>>>> we ran I/O tests. We then ran a simple logfile parser which used just
+>>>>>>> the log entries
+>>>>>>> 
+>>>>>>> for request arrival?
+>>>>>>> 
+>>>>>>> , start of processing and end of processing to graph request
+>>>>>>> 
+>>>>>>> queue depth (arrival->end) and the number of requests being serviced
+>>>>>>> by type
+>>>>>>> 
+>>>>>>> over time ? e.g?
+>>>>>>> 
+>>>>>>> read3d
+>>>>>>> 
+>>>>>>> ?which shows request queue depth (vertical) over time (axis labelled
+>>>>>>> 20-25) by
+>>>>>>> 
+>>>>>>> server (axis labelled 0-80).
+>>>>>>> 
+>>>>>>> *From:* Michael Kluge [mailto:Michael.Kluge at tu-dresden.de]
+>>>>>>> *Sent:* 17 April 2010 6:26 AM
+>>>>>>> *To:* Galen M. Shipman; Eric Barton
+>>>>>>> *Subject:* Visualising Lustre RPCs
+>>>>>>> 
+>>>>>>> Hi Galen, Eric,
+>>>>>>> 
+>>>>>>> in order to get this little project started, I think what I need at
+>>>>>>> first to
+>>>>>>> 
+>>>>>>> write a prototype for a converter are the following things:
+>>>>>>> 
+>>>>>>> A set of test traces collected on maybe a handful of clients and some
+>>>>>>> servers
+>>>>>>> 
+>>>>>>> is probably a good point to start with. It would be even better if we
+>>>>>>> know
+>>>>>>> 
+>>>>>>> what is in this traces so that we have an expectation what kind of
+>>>>>>> things
+>>>>>>> 
+>>>>>>> we want to see on the Vampir displays. This little program that Eric
+>>>>>>> mentioned
+>>>>>>> 
+>>>>>>> that can read the trace file would be very helpful as well. And as the
+>>>>>>> last
+>>>>>>> 
+>>>>>>> idea I have right now, a technical contact. I might come up with a
+>>>>>>> couple
+>>>>>>> 
+>>>>>>> of question after I have taken the first look onto the original trace
+>>>>>>> data
+>>>>>>> 
+>>>>>>> and before I start writing code.
+>>>>>>> 
+>>>>>>> Regards, Michael
+>>>>>>> 
+>>>>>>> 
+>>>>>>> --
+>>>>>>> 
+>>>>>>> Michael Kluge, M.Sc.
+>>>>>>> 
+>>>>>>> Technische Universit?t Dresden
+>>>>>>> Center for Information Services and
+>>>>>>> High Performance Computing (ZIH)
+>>>>>>> D-01062 Dresden
+>>>>>>> Germany
+>>>>>>> 
+>>>>>>> Contact:
+>>>>>>> Willersbau, Room WIL A 208
+>>>>>>> Phone: (+49) 351 463-34217
+>>>>>>> Fax: (+49) 351 463-37773
+>>>>>>> e-mail: michael.kluge at tu-dresden.de
+>>>>>>> <mailto:michael.kluge at tu-dresden.de>
+>>>>>>> WWW: http://www.tu-dresden.de/zih
+> _______________________________________________
+> Lustre-devel mailing list
+> Lustre-devel at lists.lustre.org
+> http://lists.lustre.org/mailman/listinfo/lustre-devel
+
+
+
+From di.wang at oracle.com  Mon May  3 11:58:15 2010
+From: di.wang at oracle.com (di.wang)
+Date: Mon, 03 May 2010 14:58:15 -0400
+Subject: [Lustre-devel] Lustre RPC visualization
+In-Reply-To: <4BDF1199.2030007@tu-dresden.de>
+References: <000c01cae6ee$1d4693d0$57d3bb70$@barton@oracle.com>
+	<4BD8E021.7050302@oracle.com> <4BD90FB9.5030702@tu-dresden.de>
+	<4BD9CF75.8030204@oracle.com> <4BDE8C3C.2050505@tu-dresden.de>
+	<699F57EF-52E6-41D1-A04B-3C39D469D133@oracle.com>
+	<4BDF1199.2030007@tu-dresden.de>
+Message-ID: <4BDF1CC7.5020502@oracle.com>
+
+Michael Kluge wrote:
+> Hi Andreas,
+>
+> Am 03.05.2010 15:20, schrieb Andreas Dilger:
+>> On 2010-05-03, at 04:41, Michael Kluge wrote:
+>>> I have a small problem understanding the logical order of the events.
+>>> Here is one example from the logs where the client reports an RPC as
+>>> completed before the server says that it has finished the RPC handling.
+>>> The difference is about 1.5 ms.
+>>>
+>>> Is that due to the fact that the server waits until the client has
+>>> ack'ed the result of the RPC? Or are the clocks between the servers not
+>>> well synchronized? Or are the timestamps in the logfile sometimes not
+>>> correct (log message could not be flushed or whatever)?
+>>
+>> The timestamps on the log messages are only as accurate as the clocks on
+> > the nodes.  Lustre can run without synchronized clocks, using the 
+> client
+> > clock as the basis for the timestamps, but Lustre makes no effort to
+> > synchronize the client clocks.  For that you need to use NTP (easiest)
+>>  or adjust the timestamps in the logs based on messages like this.
+>
+> OK, so logically the "Completed RPC" on the client side is supposed to 
+> show up after the server has written his "Handled RPC" to its log (if 
+> clocks are snyc'ed perfectly).
+Yes.
+>
+> One more question: RPC 1334380768266400 (in the log WangDi sent me) 
+> has on the client side only a "Sending RPC" message, thus missing the 
+> "Completed RPC". The server has all three (received,start work, done 
+> work). Has this RPC vanished on the way back to the client? There is 
+> no further indication what happend. The last timestamp in the client 
+> log is:
+> 1272565368.228628
+> and the server says it finished the processing of the request at:
+> 1272565281.379471
+> So the client log has been recorded long enough to contain the 
+> "Completed RPC" message for this RPC if it arrived ever ...
+Logically, yes. But in some cases, some debug logs might be abandoned 
+for some reasons(actually, it happens not rarely), and probably you need 
+maintain an average time from server "Handled RPC" to client "Completed 
+RPC", then you just guess the client "Completed RPC" time in this case.
+
+Thanks
+WangDi
+
+>
+>
+> Regards, Michael
+>
+
+
+
+From steige at indiana.edu  Mon May  3 12:09:39 2010
+From: steige at indiana.edu (Teige,  Scott W)
+Date: Mon,  3 May 2010 15:09:39 -0400
+Subject: [Lustre-devel] Unsubscribe to list
+Message-ID: <20100503150939.zbvdmuj2hw4w08ko@webmail.iu.edu>
+
+Greetings,
+
+I subscribed to this list back when it was lustre-devel at clusterfs.com.
+My un-subscribe instructions no longer work, how do I un-subscribe?
+(same story for luster-discuss)
+
+Thanks,
+Scott
+
+
+
+From Brian.Murrell at oracle.com  Mon May  3 12:16:41 2010
+From: Brian.Murrell at oracle.com (Brian J. Murrell)
+Date: Mon, 03 May 2010 15:16:41 -0400
+Subject: [Lustre-devel] Unsubscribe to list
+In-Reply-To: <20100503150939.zbvdmuj2hw4w08ko@webmail.iu.edu>
+References: <20100503150939.zbvdmuj2hw4w08ko@webmail.iu.edu>
+Message-ID: <1272914201.4321.74.camel@pc.interlinx.bc.ca>
+
+On Mon, 2010-05-03 at 15:09 -0400, Teige, Scott W wrote: 
+> Greetings,
+
+Hi,
+
+> I subscribed to this list back when it was lustre-devel at clusterfs.com.
+> My un-subscribe instructions no longer work, how do I un-subscribe?
+> (same story for luster-discuss)
+
+In every message sent to the list, the following header are included:
+
+List-unsubscribe: <http://lists.lustre.org/mailman/listinfo/lustre-devel>, <mailto:lustre-devel-request at lists.lustre.org?subject=unsubscribe>
+
+But you might not be able to see that header if your MUA is not
+configured to show it, so we also append the following to every message
+send to the list(s).
+
+> Lustre-devel mailing list
+> Lustre-devel at lists.lustre.org
+> http://lists.lustre.org/mailman/listinfo/lustre-devel
+
+Follow the URL and you will find out how to unsubscribe.
+
+b.
+
+-------------- next part --------------
+A non-text attachment was scrubbed...
+Name: not available
+Type: application/pgp-signature
+Size: 197 bytes
+Desc: This is a digitally signed message part
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20100503/be863b96/attachment.pgp>
+
+From Michael.Kluge at tu-dresden.de  Mon May  3 12:32:12 2010
+From: Michael.Kluge at tu-dresden.de (Michael Kluge)
+Date: Mon, 03 May 2010 21:32:12 +0200
+Subject: [Lustre-devel] Lustre RPC visualization
+In-Reply-To: <4BDF1CC7.5020502@oracle.com>
+References: <000c01cae6ee$1d4693d0$57d3bb70$@barton@oracle.com>
+	<4BD8E021.7050302@oracle.com> <4BD90FB9.5030702@tu-dresden.de>
+	<4BD9CF75.8030204@oracle.com> <4BDE8C3C.2050505@tu-dresden.de>
+	<699F57EF-52E6-41D1-A04B-3C39D469D133@oracle.com>
+	<4BDF1199.2030007@tu-dresden.de> <4BDF1CC7.5020502@oracle.com>
+Message-ID: <4BDF24BC.9050701@tu-dresden.de>
+
+Hi WangDi,
+
+>> OK, so logically the "Completed RPC" on the client side is supposed to
+>> show up after the server has written his "Handled RPC" to its log (if
+>> clocks are snyc'ed perfectly).
+> Yes.
+
+Thanks.
+
+>> One more question: RPC 1334380768266400 (in the log WangDi sent me)
+>> has on the client side only a "Sending RPC" message, thus missing the
+>> "Completed RPC". The server has all three (received,start work, done
+>> work). Has this RPC vanished on the way back to the client? There is
+>> no further indication what happend. The last timestamp in the client
+>> log is:
+>> 1272565368.228628
+>> and the server says it finished the processing of the request at:
+>> 1272565281.379471
+>> So the client log has been recorded long enough to contain the
+>> "Completed RPC" message for this RPC if it arrived ever ...
+> Logically, yes. But in some cases, some debug logs might be abandoned
+> for some reasons(actually, it happens not rarely), and probably you need
+> maintain an average time from server "Handled RPC" to client "Completed
+> RPC", then you just guess the client "Completed RPC" time in this case.
+
+Oh my gosh ;) I don't want to start speculations about the helpfulness 
+of incomplete debug logs. Anyway, what can get lost? Any kind of message 
+on the servers and clients?  I think I'd like to know what cases have to 
+be handled while I try to track individual RPC's on their way.
+
+
+Regards, Michael
+
+
+From di.wang at oracle.com  Mon May  3 12:52:57 2010
+From: di.wang at oracle.com (di.wang)
+Date: Mon, 03 May 2010 15:52:57 -0400
+Subject: [Lustre-devel] Lustre RPC visualization
+In-Reply-To: <4BDF24BC.9050701@tu-dresden.de>
+References: <000c01cae6ee$1d4693d0$57d3bb70$%barton@oracle.com>
+	<4BD8E021.7050302@oracle.com> <4BD90FB9.5030702@tu-dresden.de>
+	<4BD9CF75.8030204@oracle.com> <4BDE8C3C.2050505@tu-dresden.de>
+	<699F57EF-52E6-41D1-A04B-3C39D469D133@oracle.com>
+	<4BDF1199.2030007@tu-dresden.de> <4BDF1CC7.5020502@oracle.com>
+	<4BDF24BC.9050701@tu-dresden.de>
+Message-ID: <4BDF2999.2000207@oracle.com>
+
+Michael Kluge wrote:
+>>> One more question: RPC 1334380768266400 (in the log WangDi sent me)
+>>> has on the client side only a "Sending RPC" message, thus missing the
+>>> "Completed RPC". The server has all three (received,start work, done
+>>> work). Has this RPC vanished on the way back to the client? There is
+>>> no further indication what happend. The last timestamp in the client
+>>> log is:
+>>> 1272565368.228628
+>>> and the server says it finished the processing of the request at:
+>>> 1272565281.379471
+>>> So the client log has been recorded long enough to contain the
+>>> "Completed RPC" message for this RPC if it arrived ever ...
+>>>       
+>> Logically, yes. But in some cases, some debug logs might be abandoned
+>> for some reasons(actually, it happens not rarely), and probably you need
+>> maintain an average time from server "Handled RPC" to client "Completed
+>> RPC", then you just guess the client "Completed RPC" time in this case.
+>>     
+>
+> Oh my gosh ;) I don't want to start speculations about the helpfulness 
+> of incomplete debug logs. Anyway, what can get lost? Any kind of message 
+> on the servers and clients?  I think I'd like to know what cases have to 
+> be handled while I try to track individual RPC's on their way.
+>   
+Any records can get lost here. Unfortunately, there are not any messages 
+indicate the missing happened. :(
+(Usually, I would check the time stamp in the log, i.e. no records for a 
+"long" time, for example several seconds, but this is not the accurate way).
+
+I guess you can just ignore these uncompleted records in your first 
+step?  Let's see how these incomplete log will
+impact the profiling result, then we will decide how to deal with this?
+
+Thanks
+Wangdi
+>
+> Regards, Michael
+> _______________________________________________
+> Lustre-devel mailing list
+> Lustre-devel at lists.lustre.org
+> http://lists.lustre.org/mailman/listinfo/lustre-devel
+>   
+
+
+
+From Michael.Kluge at tu-dresden.de  Mon May  3 13:04:11 2010
+From: Michael.Kluge at tu-dresden.de (Michael Kluge)
+Date: Mon, 03 May 2010 22:04:11 +0200
+Subject: [Lustre-devel] Lustre RPC visualization
+In-Reply-To: <4BDF2999.2000207@oracle.com>
+References: <000c01cae6ee$1d4693d0$57d3bb70$%barton@oracle.com>
+	<4BD8E021.7050302@oracle.com> <4BD90FB9.5030702@tu-dresden.de>
+	<4BD9CF75.8030204@oracle.com> <4BDE8C3C.2050505@tu-dresden.de>
+	<699F57EF-52E6-41D1-A04B-3C39D469D133@oracle.com>
+	<4BDF1199.2030007@tu-dresden.de> <4BDF1CC7.5020502@oracle.com>
+	<4BDF24BC.9050701@tu-dresden.de> <4BDF2999.2000207@oracle.com>
+Message-ID: <4BDF2C3B.8050505@tu-dresden.de>
+
+OK, sounds reasonable. I can put the number of ignored messages in an 
+additional counter. That should make the generated trace file more 
+descriptive.
+
+Regards, Michael
+
+Am 03.05.2010 21:52, schrieb di.wang:
+>> Anyway, what can get lost? Any kind of
+>> message on the servers and clients? I think I'd like to know what
+>> cases have to be handled while I try to track individual RPC's on
+>> their way.
+> Any records can get lost here. Unfortunately, there are not any messages
+> indicate the missing happened. :(
+> (Usually, I would check the time stamp in the log, i.e. no records for a
+> "long" time, for example several seconds, but this is not the accurate
+> way).
+>
+> I guess you can just ignore these uncompleted records in your first
+> step? Let's see how these incomplete log will
+> impact the profiling result, then we will decide how to deal with this?
+>
+
+
+From kenh at cmf.nrl.navy.mil  Tue May  4 07:19:37 2010
+From: kenh at cmf.nrl.navy.mil (Ken Hornstein)
+Date: Tue, 04 May 2010 10:19:37 -0400
+Subject: [Lustre-devel] lnet NAT friendliness
+Message-ID: <201005041419.o44EJbee026119@hedwig.cmf.nrl.navy.mil>
+
+In my work with the MacOS X client, I did some work from home.  While
+that had the added "benefit" of exposing the issues associated with the
+lack of attribute caching from the MacOS X client, I noticed something
+else: lnet is unfortunately rather NAT-unfriendly.
+
+Obviously putting your servers behind a NAT is extremely challenging, but
+I was operating in the not-so-uncommon situation where a client was behind
+a NAT and the servers all had publically routable IP addresses.  Note that
+I am aware that by default Lustre requires connections from reserved ports;
+I worked around that issue (until I discovered the way to turn off that
+check via a configuration knob).
+
+Specifically, I can connect to the MGS okay, but after that initial
+connection I get the following error from lnet_parse() on the client
+(okay, I reconstructed this from memory, but I think it is reasonably
+close)
+
+src server.addr at tcp: bad dest nid 1.2.3.4 at tcp (should have been sent direct)
+
+Where "1.2.3.4 at tcp" is the external address of my NAT box at home.  It
+is worth noting that there are no other known networking issues with
+this setup; if I put this machine on the external-facing network, I can
+mount the Lustre filesystem in queston fine.
+
+Obviously the problem here is that a message is being sent to my home
+box, but instead of using the "internal" IP address as the destination NID,
+the server is using the external address (the one it obviously is getting
+from the TCP socket).
+
+I haven't yet had a chance to play with this more, but it makes me wonder
+if anyone else has tried out Lustre from behind a NAT (with 2.0-based
+Lustre, obviously), and if they did, did it work for you?  I am perfectly
+willing to believe this is an issue with the Mac client, but from looking
+at the code it doesn't feel like it would be.
+
+Also ... it seems like it would be easy to add a configuration knob that
+would let you bypass this particular check, and that might make it work.
+Anyone have any thoughts about that?
+
+--Ken
+
+
+From Zhen.Liang at Sun.COM  Wed May  5 04:55:59 2010
+From: Zhen.Liang at Sun.COM (Liang Zhen)
+Date: Wed, 05 May 2010 19:55:59 +0800
+Subject: [Lustre-devel] lnet NAT friendliness
+In-Reply-To: <201005041419.o44EJbee026119@hedwig.cmf.nrl.navy.mil>
+References: <201005041419.o44EJbee026119@hedwig.cmf.nrl.navy.mil>
+Message-ID: <4BE15CCF.5080308@sun.com>
+
+Ken,
+
+LNet requires destination address of message to be same with address of 
+LNet NI (unless it's a router), I'm afraid it's not easy to make it  be 
+tunable.
+I would suggest to run lustre (lnet) router on the gateway (if your 
+gateway is Linux...)
+
+Regards
+Liang
+
+Ken Hornstein wrote:
+> In my work with the MacOS X client, I did some work from home.  While
+> that had the added "benefit" of exposing the issues associated with the
+> lack of attribute caching from the MacOS X client, I noticed something
+> else: lnet is unfortunately rather NAT-unfriendly.
+>
+> Obviously putting your servers behind a NAT is extremely challenging, but
+> I was operating in the not-so-uncommon situation where a client was behind
+> a NAT and the servers all had publically routable IP addresses.  Note that
+> I am aware that by default Lustre requires connections from reserved ports;
+> I worked around that issue (until I discovered the way to turn off that
+> check via a configuration knob).
+>
+> Specifically, I can connect to the MGS okay, but after that initial
+> connection I get the following error from lnet_parse() on the client
+> (okay, I reconstructed this from memory, but I think it is reasonably
+> close)
+>
+> src server.addr at tcp: bad dest nid 1.2.3.4 at tcp (should have been sent direct)
+>
+> Where "1.2.3.4 at tcp" is the external address of my NAT box at home.  It
+> is worth noting that there are no other known networking issues with
+> this setup; if I put this machine on the external-facing network, I can
+> mount the Lustre filesystem in queston fine.
+>
+> Obviously the problem here is that a message is being sent to my home
+> box, but instead of using the "internal" IP address as the destination NID,
+> the server is using the external address (the one it obviously is getting
+> from the TCP socket).
+>
+> I haven't yet had a chance to play with this more, but it makes me wonder
+> if anyone else has tried out Lustre from behind a NAT (with 2.0-based
+> Lustre, obviously), and if they did, did it work for you?  I am perfectly
+> willing to believe this is an issue with the Mac client, but from looking
+> at the code it doesn't feel like it would be.
+>
+> Also ... it seems like it would be easy to add a configuration knob that
+> would let you bypass this particular check, and that might make it work.
+> Anyone have any thoughts about that?
+>
+> --Ken
+> _______________________________________________
+> Lustre-devel mailing list
+> Lustre-devel at lists.lustre.org
+> http://lists.lustre.org/mailman/listinfo/lustre-devel
+>   
+
+
+
+From kenh at cmf.nrl.navy.mil  Wed May  5 05:38:58 2010
+From: kenh at cmf.nrl.navy.mil (Ken Hornstein)
+Date: Wed, 05 May 2010 08:38:58 -0400
+Subject: [Lustre-devel] lnet NAT friendliness
+In-Reply-To: <4BE15CCF.5080308@sun.com>
+Message-ID: <201005051238.o45Ccwtt006732@hedwig.cmf.nrl.navy.mil>
+
+>LNet requires destination address of message to be same with address of 
+>LNet NI (unless it's a router), I'm afraid it's not easy to make it  be 
+>tunable.
+>
+>I would suggest to run lustre (lnet) router on the gateway (if your 
+>gateway is Linux...)
+
+Well, that's not really feasible, because a) many times we don't
+control the gateway (think sitting in Starbucks; and while some people
+would say that they don't want to use Lustre from Starbucks, I would
+say, "Why not?"; with Kerberos authentication, I think it would be
+perfectly reasonable), and b) even if you control the gateway, that
+doesn't really scale, because while that might work for one person,
+I don't see how you would do it for more than one person (how would
+you configure the routing back if more than one person are using the
+same NAT address range?).
+
+I admit I have no love for NAT and I would prefer it if we were living
+in a world where the end-to-end principle worked everywhere, but that
+battle was lost years ago.
+
+So, I did a little more work on this last night.  And I respectfully
+disagree it would be hard to make those things tunable.  In fact, I
+got Lustre working fine with a few simple client-only changes.
+
+I ran into two issues.  First, in lib-move.c:lnet_parse(), the variable
+for_me is set if the network interface nid matches the destination nid.
+I simply set for_me to 1 all of the time, and that solved that problem.
+That's a one-line change, and it would be easy to make that tunable.
+
+However, that exposed another problem.  lnet_nid2ni_locked() would then
+fail because it would try to look up the network interface associated
+with the "external" address (I don't remember exactly who called this
+right now, but I suppose it doesn't matter).  You have to be more
+careful here, because if you just make lnet_nid2ni_locked() return the
+first match you end up returning the loopback interface and that makes
+other things unhappy.  What I settled on was just matching the first
+interface that had the same network and type.
+
+I made these two changes, and Lustre worked fine.  Okay, it wasn't
+exactly an exhaustive test: I cd'd to the filesystem and ran "ls -l".
+As noted before, the Lustre MacOS X client doesn't do any caching yet
+so issues with AST notifications may come up.  But I think this shows
+that making Lustre clients work from behind a NAT is not a set of huge
+changes, at least for the simple case.
+
+Are these changes appropriate for the general case?  No, and I wouldn't
+suggest otherwise.  But I think the case of a client with a single
+network interface from behind a NAT, these changes are reasonable; if
+they are made tunable and default to being off, I can't see how it
+would be harmful, and it might actually help some people.  I admit that
+it occurs to me that I don't know what would happen if more than one
+Lustre client was behind the same NAT in this situation.
+
+--Ken
+
+
+From oleg.drokin at oracle.com  Wed May  5 08:26:58 2010
+From: oleg.drokin at oracle.com (Oleg Drokin)
+Date: Wed, 5 May 2010 11:26:58 -0400
+Subject: [Lustre-devel] lnet NAT friendliness
+In-Reply-To: <201005051238.o45Ccwtt006732@hedwig.cmf.nrl.navy.mil>
+References: <201005051238.o45Ccwtt006732@hedwig.cmf.nrl.navy.mil>
+Message-ID: <E605710A-EB8D-4B51-8B1D-F3FECEA67045@oracle.com>
+
+Hello!
+
+On May 5, 2010, at 8:38 AM, Ken Hornstein wrote:
+
+>> LNet requires destination address of message to be same with address of 
+>> LNet NI (unless it's a router), I'm afraid it's not easy to make it  be 
+>> tunable.
+>> 
+>> I would suggest to run lustre (lnet) router on the gateway (if your 
+>> gateway is Linux...)
+> Well, that's not really feasible, because a) many times we don't
+> control the gateway (think sitting in Starbucks; and while some people
+> would say that they don't want to use Lustre from Starbucks, I would
+> say, "Why not?"; with Kerberos authentication, I think it would be
+> perfectly reasonable), and b) even if you control the gateway, that
+> doesn't really scale, because while that might work for one person,
+> I don't see how you would do it for more than one person (how would
+> you configure the routing back if more than one person are using the
+> same NAT address range?).
+> I admit I have no love for NAT and I would prefer it if we were living
+> in a world where the end-to-end principle worked everywhere, but that
+> battle was lost years ago.
+
+I would think using VPN from outside into your Lustre-supplying LAN should
+be enough to work around this problem somewhat easily with no code changes.
+
+Also provides an encrypted secure channel as a bonus.
+
+Bye,
+    Oleg
+
+
+From kenh at cmf.nrl.navy.mil  Wed May  5 08:31:39 2010
+From: kenh at cmf.nrl.navy.mil (Ken Hornstein)
+Date: Wed, 05 May 2010 11:31:39 -0400
+Subject: [Lustre-devel] lnet NAT friendliness
+In-Reply-To: <E605710A-EB8D-4B51-8B1D-F3FECEA67045@oracle.com>
+Message-ID: <201005051531.o45FVdNN009323@hedwig.cmf.nrl.navy.mil>
+
+>I would think using VPN from outside into your Lustre-supplying LAN should
+>be enough to work around this problem somewhat easily with no code changes.
+
+Sigh.  So, the official Oracle position in terms of LNet-NAT
+compatibility is to basically give up?  If that's the answer, then I'll
+shut up.  But really, do I have to justify this, or explain how VPNs
+aren't always an option?
+
+--Ken
+
+
+From Nicolas.Williams at oracle.com  Wed May  5 08:48:55 2010
+From: Nicolas.Williams at oracle.com (Nicolas Williams)
+Date: Wed, 5 May 2010 10:48:55 -0500
+Subject: [Lustre-devel] lnet NAT friendliness
+In-Reply-To: <201005051531.o45FVdNN009323@hedwig.cmf.nrl.navy.mil>
+References: <E605710A-EB8D-4B51-8B1D-F3FECEA67045@oracle.com>
+	<201005051531.o45FVdNN009323@hedwig.cmf.nrl.navy.mil>
+Message-ID: <20100505154855.GY9429@oracle.com>
+
+On Wed, May 05, 2010 at 11:31:39AM -0400, Ken Hornstein wrote:
+> >I would think using VPN from outside into your Lustre-supplying LAN should
+> >be enough to work around this problem somewhat easily with no code changes.
+
+There's another option: make the gateway an LNet router.
+
+> Sigh.  So, the official Oracle position in terms of LNet-NAT
+> compatibility is to basically give up?  If that's the answer, then I'll
+> shut up.  But really, do I have to justify this, or explain how VPNs
+> aren't always an option?
+
+I wouldn't say that's our "official" position.  For starters, you could
+file an RFE.  You could also contribute a fix.  But it won't be simple
+to fix.
+
+Lustre is layered above LNet, and LNet is layered above "LNDs", with
+each type of LND driving LNet over some type of network (IB, TCP/IP,
+...).  LNet has no concept of connections.  Therefore the state of TCP
+connections created by socklnd (the name of the TCP/IP LND) is
+completely irrelevant to LNet.  Which means that when some server has to
+send a message to a client... the server might have to establish a TCP
+connection (or three) with the client, which means... that the server
+must know how to connect to the client, and that is completely firewall-
+unfriendly.  Note too that LNet has no idea about the state of the
+services layered above it, so the socklnd cannot know if a particular
+peer will be needing to send messages, so as to proactively maintain TCP
+connections open with them so as to be able to receive those messages --
+it can only assume.
+
+The very statelessness of LNet makes NAT- and firewall-friendly-ness a
+difficult proposition.
+
+The fix, if it's at all possible, would require that clients's socklnds
+try to keep TCP connections open at all times to all nodes that the
+client has spoken to in the past.  That's pretty heavy-weight.  Consider
+too that a server is usually also a client: socklnd shouldn't behave
+that way in all cases, just in the cases of pure clients behind NATs.
+The fix might also require changes to timeout handling, and/or maybe
+even to LNet itself (to at least have a notion of peer node reachability
+event notification, or something of the sort).
+
+Nico
+-- 
+
+
+From kenh at cmf.nrl.navy.mil  Wed May  5 09:13:56 2010
+From: kenh at cmf.nrl.navy.mil (Ken Hornstein)
+Date: Wed, 05 May 2010 12:13:56 -0400
+Subject: [Lustre-devel] lnet NAT friendliness
+In-Reply-To: <20100505154855.GY9429@oracle.com>
+Message-ID: <201005051613.o45GDuqr009910@hedwig.cmf.nrl.navy.mil>
+
+>> >I would think using VPN from outside into your Lustre-supplying LAN should
+>> >be enough to work around this problem somewhat easily with no code changes.
+>
+>There's another option: make the gateway an LNet router.
+
+Did you see my previous message about this?  That simply isn't an option
+in many cases.
+
+>> Sigh.  So, the official Oracle position in terms of LNet-NAT
+>> compatibility is to basically give up?  If that's the answer, then I'll
+>> shut up.  But really, do I have to justify this, or explain how VPNs
+>> aren't always an option?
+>
+>I wouldn't say that's our "official" position.  For starters, you could
+>file an RFE.  You could also contribute a fix.  But it won't be simple
+>to fix.
+
+Did you see my original message about this?  A simple fix (which I will
+fully admit I only did an extremely brief amount of testing on) was
+only six lines of changes.  Sure, it's not appropriate as general
+changes to LNet, but I think making it configurable would be perfectly
+reasonable.  But I wrote the code, so I will fully admit that I'm biased
+about it.
+
+>Lustre is layered above LNet, and LNet is layered above "LNDs", with
+>each type of LND driving LNet over some type of network (IB, TCP/IP,
+>...).  LNet has no concept of connections.
+>[...]
+
+I understand all of that.  Sure, it's easy to come up with cases where
+this will fail.  But ... it looks like there are a few small changes
+that can be made that will make it work in some circumstances, as
+opposed to the current situation (where it will never work).  Maybe I'm
+wrong and further testing will reveal that this is a lot more
+complicated to make it work in even the simple case, but it seems a
+shame to not even investigate further.  But it seems the feedback I'm
+getting from the people at Oracle is, "Meh, don't bother".
+
+>The fix, if it's at all possible, would require that clients's socklnds
+>try to keep TCP connections open at all times to all nodes that the
+>client has spoken to in the past.  That's pretty heavy-weight.
+
+Actually, I will freely confess to not being the LNet expert ... but
+are socklnd TCP connections closed now when clients are idle?  With the
+pinger running (which is a requirement, from what I understand), it seems
+like you'd have a TCP connection going all of the time beween all clients
+and servers.  The pinger sends a packet every 20-25 seconds, right?
+
+--Ken
+
+
+From Nicolas.Williams at oracle.com  Wed May  5 09:32:45 2010
+From: Nicolas.Williams at oracle.com (Nicolas Williams)
+Date: Wed, 5 May 2010 11:32:45 -0500
+Subject: [Lustre-devel] lnet NAT friendliness
+In-Reply-To: <201005051613.o45GDuqr009910@hedwig.cmf.nrl.navy.mil>
+References: <20100505154855.GY9429@oracle.com>
+	<201005051613.o45GDuqr009910@hedwig.cmf.nrl.navy.mil>
+Message-ID: <20100505163245.GA9429@oracle.com>
+
+On Wed, May 05, 2010 at 12:13:56PM -0400, Ken Hornstein wrote:
+> >> >I would think using VPN from outside into your Lustre-supplying LAN should
+> >> >be enough to work around this problem somewhat easily with no code changes.
+> >
+> >There's another option: make the gateway an LNet router.
+> 
+> Did you see my previous message about this?  That simply isn't an option
+> in many cases.
+
+Yes, I did, but I was just adding a workaround that might work for
+others (it might not -- haven't tested it).
+
+> >I wouldn't say that's our "official" position.  For starters, you could
+> >file an RFE.  You could also contribute a fix.  But it won't be simple
+> >to fix.
+> 
+> Did you see my original message about this?  A simple fix (which I will
+> fully admit I only did an extremely brief amount of testing on) was
+> only six lines of changes.  Sure, it's not appropriate as general
+> changes to LNet, but I think making it configurable would be perfectly
+> reasonable.  But I wrote the code, so I will fully admit that I'm biased
+> about it.
+
+I did see that.  I hadn't followed it in detail, but just now I looked
+at the code you mentioned, and, on a pure client I think that makes
+sense.  See below.
+
+>                                 [...].  But it seems the feedback I'm
+> getting from the people at Oracle is, "Meh, don't bother".
+
+Well, we (or our customers) might have no use for it at this time; or
+perhaps it's just NAT hatred running in our veins (just kidding, though
+I suspect most people who've come in contact with NAT love/hate it).
+Doesn't mean we wouldn't take patches, or that we'd never have a use for
+it.  But the first priority is to make sure that the fix, if you'll
+contribute one, is sufficiently robust.  See below.
+
+> >The fix, if it's at all possible, would require that clients's socklnds
+> >try to keep TCP connections open at all times to all nodes that the
+> >client has spoken to in the past.  That's pretty heavy-weight.
+> 
+> Actually, I will freely confess to not being the LNet expert ... but
+> are socklnd TCP connections closed now when clients are idle?  With the
+> pinger running (which is a requirement, from what I understand), it seems
+> like you'd have a TCP connection going all of the time beween all clients
+> and servers.  The pinger sends a packet every 20-25 seconds, right?
+
+Perhaps my "that's pretty heavy-weight" comment was off the mark.
+However, I know very little about socklnd, and the key is to make sure
+it proactively re-connects in the face of timeouts so that servers can
+always send messages to the NATted clients.
+
+Nico
+-- 
+
+
+From adilger at dilger.ca  Wed May  5 23:02:12 2010
+From: adilger at dilger.ca (Andreas Dilger)
+Date: Thu, 6 May 2010 02:02:12 -0400
+Subject: [Lustre-devel] lnet NAT friendliness
+In-Reply-To: <201005051238.o45Ccwtt006732@hedwig.cmf.nrl.navy.mil>
+References: <201005051238.o45Ccwtt006732@hedwig.cmf.nrl.navy.mil>
+Message-ID: <16BE2AB9-4948-4506-8ED7-B05BD6DBE305@dilger.ca>
+
+On 2010-05-05, at 08:38, Ken Hornstein wrote:
+> So, I did a little more work on this last night.  And I respectfully
+> disagree it would be hard to make those things tunable.  In fact, I
+> got Lustre working fine with a few simple client-only changes.
+> 
+> I ran into two issues.  First, in lib-move.c:lnet_parse(), the variable
+> for_me is set if the network interface nid matches the destination nid.
+> I simply set for_me to 1 all of the time, and that solved that problem.
+> That's a one-line change, and it would be easy to make that tunable.
+
+The problem with setting "for_me = 1" all the time is that this would apparently break LNET routers completely because they would always think that the incoming message is for them, rather than something to be passed on to another peer (i.e. the "if (!the_lnet.ln_routing)" case).
+
+It seems that if the "extra" error checks in the "if (!for_me)" code were instead moved earlier and set "for_me = 1" it might be OK:
+
+       if (LNET_NIDNET(dest_nid) == LNET_NIDNET(ni->ni_nid)) {
+                /* should have gone direct */
+                for_me = 1;
+       } else if (lnet_islocalnid(dest_nid)) {
+                /* dest is another local NI; sender should have used
+                 * this node's NID on its own network */
+                for_me = 1;
+       }
+
+There still remains the issue with server-client reconnection, which will fail utterly for a NAT address, but as you wrote in another email, the pinger should keep the TCP connection open by virtue of sending messages often enough, or re-establish the connection if it fails.  There exists some possibility that the client could be evicted if the connection was lost at the time a lock callback was sent and the server couldn't re-establish the connection, but if you don't require 100% robustness (which you can't from Starbuck's WIFI anyway) then that is probably an acceptable outcome.
+
+That said, take this answer with a pile of salt, I'm not an LNET expert at all and I'm just poking around here as you are.  I trust Liang and Isaac with the LNET code totally, and if they tell me this is fundamentally broken, then I'll believe them.  It may be that Liang was referring to the server-client reconnection issue when he wrote that it couldn't be done easily, but I'll let him clarify in his own words.
+
+Cheers, Andreas
+Just some guy poking in LNET
+
+From Zhen.Liang at Sun.COM  Thu May  6 02:31:55 2010
+From: Zhen.Liang at Sun.COM (Liang Zhen)
+Date: Thu, 06 May 2010 17:31:55 +0800
+Subject: [Lustre-devel] lnet NAT friendliness
+In-Reply-To: <16BE2AB9-4948-4506-8ED7-B05BD6DBE305@dilger.ca>
+References: <201005051238.o45Ccwtt006732@hedwig.cmf.nrl.navy.mil>
+	<16BE2AB9-4948-4506-8ED7-B05BD6DBE305@dilger.ca>
+Message-ID: <4BE28C8B.1070100@sun.com>
+
+Ken, Andreas,
+
+Thanks for diving into code, :).
+As Andreas said, these changes may break rule of router easily (or 
+multiple interfaces setting in the future), so we have to be very 
+careful. Also, we may need more changes inside LNDs, I believe we have 
+more checking there.
+
+More interesting, I think you are using internal address to start LNet 
+on client, but servers are using external address to talk back to your 
+client (as you said, there is a message like : bad dst nid 1.2.3.4 at tcp, 
+which is external address). It's supposed to be broken at somewhere 
+because the socklnd connection should use source address in message 
+header which is internal (client should never know about the external 
+address),  but obviously it didn't, so I guess we probably have a 
+loophole in socklnd to even allow this happen, I will dig into code later.
+ 
+Anyway, you've already hacked out and it works fine,  so although need 
+more survey, I tend to agree it's possible for us to make this tunable 
+and bypass those checking at least for  LNet + socklnd,  if you don't 
+really care about server-client reconnection (Andreas, yes that's what I 
+meant)  and believe supporting one client with single NI behind NAT is 
+an important use-case even with limitations.
+
+Thanks
+Liang
+
+
+Andreas Dilger wrote:
+> On 2010-05-05, at 08:38, Ken Hornstein wrote:
+>   
+>> So, I did a little more work on this last night.  And I respectfully
+>> disagree it would be hard to make those things tunable.  In fact, I
+>> got Lustre working fine with a few simple client-only changes.
+>>
+>> I ran into two issues.  First, in lib-move.c:lnet_parse(), the variable
+>> for_me is set if the network interface nid matches the destination nid.
+>> I simply set for_me to 1 all of the time, and that solved that problem.
+>> That's a one-line change, and it would be easy to make that tunable.
+>>     
+>
+> The problem with setting "for_me = 1" all the time is that this would apparently break LNET routers completely because they would always think that the incoming message is for them, rather than something to be passed on to another peer (i.e. the "if (!the_lnet.ln_routing)" case).
+>
+> It seems that if the "extra" error checks in the "if (!for_me)" code were instead moved earlier and set "for_me = 1" it might be OK:
+>
+>        if (LNET_NIDNET(dest_nid) == LNET_NIDNET(ni->ni_nid)) {
+>                 /* should have gone direct */
+>                 for_me = 1;
+>        } else if (lnet_islocalnid(dest_nid)) {
+>                 /* dest is another local NI; sender should have used
+>                  * this node's NID on its own network */
+>                 for_me = 1;
+>        }
+>
+> There still remains the issue with server-client reconnection, which will fail utterly for a NAT address, but as you wrote in another email, the pinger should keep the TCP connection open by virtue of sending messages often enough, or re-establish the connection if it fails.  There exists some possibility that the client could be evicted if the connection was lost at the time a lock callback was sent and the server couldn't re-establish the connection, but if you don't require 100% robustness (which you can't from Starbuck's WIFI anyway) then that is probably an acceptable outcome.
+>
+> That said, take this answer with a pile of salt, I'm not an LNET expert at all and I'm just poking around here as you are.  I trust Liang and Isaac with the LNET code totally, and if they tell me this is fundamentally broken, then I'll believe them.  It may be that Liang was referring to the server-client reconnection issue when he wrote that it couldn't be done easily, but I'll let him clarify in his own words.
+>
+> Cheers, Andreas
+> Just some guy poking in LNET
+> _______________________________________________
+> Lustre-devel mailing list
+> Lustre-devel at lists.lustre.org
+> http://lists.lustre.org/mailman/listinfo/lustre-devel
+>   
+
+
+
+From kenh at cmf.nrl.navy.mil  Thu May  6 07:35:09 2010
+From: kenh at cmf.nrl.navy.mil (Ken Hornstein)
+Date: Thu, 06 May 2010 10:35:09 -0400
+Subject: [Lustre-devel] lnet NAT friendliness
+In-Reply-To: <4BE28C8B.1070100@sun.com>
+Message-ID: <201005061435.o46EZ9es021091@hedwig.cmf.nrl.navy.mil>
+
+>Thanks for diving into code, :).
+>As Andreas said, these changes may break rule of router easily (or 
+>multiple interfaces setting in the future), so we have to be very 
+>careful. Also, we may need more changes inside LNDs, I believe we have 
+>more checking there.
+
+Right, that's why I would only advocate turning off of those checks
+conditionally on standalone clients.
+
+>More interesting, I think you are using internal address to start LNet 
+>on client, but servers are using external address to talk back to your 
+>client (as you said, there is a message like : bad dst nid 1.2.3.4 at tcp, 
+>which is external address). It's supposed to be broken at somewhere 
+>because the socklnd connection should use source address in message 
+>header which is internal (client should never know about the external 
+>address),  but obviously it didn't, so I guess we probably have a 
+>loophole in socklnd to even allow this happen, I will dig into code later.
+
+>From what I can tell (again, not being the LNet expert), the server
+knows what the real address of the remote connection is (the external
+address), but it associates a particular TCP connection with a NID
+(which has the internal address), and it uses that TCP connection when
+it wants to talk to the NID.  So it all ends up working out, even though
+in theory it shouldn't.
+
+>Anyway, you've already hacked out and it works fine,  so although need 
+>more survey, I tend to agree it's possible for us to make this tunable 
+>and bypass those checking at least for  LNet + socklnd,  if you don't 
+>really care about server-client reconnection (Andreas, yes that's what I 
+>meant)  and believe supporting one client with single NI behind NAT is 
+>an important use-case even with limitations.
+
+Actually, now that I think more about it, more than one client behind a
+NAT might actually work fine.  What will probably fail is two clients
+behind two different NATs but having the same internal address.
+
+Let me code up a cleaner version of this patch (and make it adjustable)
+and see how that works out.
+
+--Ken
+
+
+From zhangys04 at gmail.com  Thu May  6 07:28:05 2010
+From: zhangys04 at gmail.com (Tonney Kaiven Cheung)
+Date: Thu, 6 May 2010 22:28:05 +0800
+Subject: [Lustre-devel] about the lustre simulator
+Message-ID: <u2kd272ddfb1005060728z145ef5e1pe419515e216e92dd@mail.gmail.com>
+
+Dear Everyone!
+
+I want to do some optimization about the Lustre' s Net Request Scheduler.
+Someone has told me that doing the job with the help of lustre simulator
+will make things easy. And I google the lustre simulator, but got no useful
+information. Would you please give me some information about the lustre
+simulator? Besides, would you please tell me that how does it work, whether
+works on line or download it to the local machine and run it?
+
+Thanks!
+
+Yuksam Cheung
+2010-05-06
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20100506/90249a68/attachment.htm>
+
+From zhangys04 at gmail.com  Thu May  6 07:28:09 2010
+From: zhangys04 at gmail.com (Tonney Kaiven Cheung)
+Date: Thu, 6 May 2010 22:28:09 +0800
+Subject: [Lustre-devel] about the lustre simulator
+Message-ID: <x2rd272ddfb1005060728xff976089ta0299ef12856da23@mail.gmail.com>
+
+Dear Everyone!
+
+I want to do some optimization about the Lustre' s Net Request Scheduler.
+Someone has told me that doing the job with the help of lustre simulator
+will make things easy. And I google the lustre simulator, but got no useful
+information. Would you please give me some information about the lustre
+simulator? Besides, would you please tell me that how does it work, whether
+works on line or download it to the local machine and run it?
+
+Thanks!
+
+Yuksam Cheung
+2010-05-06
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20100506/ebaa0958/attachment.htm>
+
+From di.wang at oracle.com  Thu May  6 08:04:13 2010
+From: di.wang at oracle.com (di.wang)
+Date: Thu, 06 May 2010 11:04:13 -0400
+Subject: [Lustre-devel] about the lustre simulator
+In-Reply-To: <u2kd272ddfb1005060728z145ef5e1pe419515e216e92dd@mail.gmail.com>
+References: <u2kd272ddfb1005060728z145ef5e1pe419515e216e92dd@mail.gmail.com>
+Message-ID: <4BE2DA6D.3020107@oracle.com>
+
+Tonney Kaiven Cheung wrote:
+> Dear Everyone!
+>  
+> I want to do some optimization about the Lustre' s Net Request 
+> Scheduler. Someone has told me that doing the job with the help of 
+> lustre simulator will make things easy. And I google the lustre 
+> simulator, but got no useful information. Would you please give me 
+> some information about the lustre simulator? Besides, would you please 
+> tell me that how does it work, whether works on line or download it to 
+> the local machine and run it?
+>  
+> Thanks!
+Did you check here https://bugzilla.lustre.org/show_bug.cgi?id=13634 ?
+
+Thanks
+WangDi
+>  
+> Yuksam Cheung
+> 2010-05-06
+> ------------------------------------------------------------------------
+>
+> _______________________________________________
+> Lustre-devel mailing list
+> Lustre-devel at lists.lustre.org
+> http://lists.lustre.org/mailman/listinfo/lustre-devel
+>   
+
+
+
+From zhangys04 at gmail.com  Sun May  9 02:25:20 2010
+From: zhangys04 at gmail.com (Tonney Kaiven Cheung)
+Date: Sun, 9 May 2010 17:25:20 +0800
+Subject: [Lustre-devel] about the lustre simulator
+Message-ID: <q2ud272ddfb1005090225sc0b0a7f0gfc00ddf3cc9b02f5@mail.gmail.com>
+
+Dear Everyone!
+
+I have already downloaded the lustre simulator from the bugzilla, and
+installed it in my system (CentOS 5.4 i386). But I do not know how to use
+it. After the installation finished, I could find a file
+named "simulation" in /usr/local/bin. But I still have no idea about how to
+simulate my NRS algorithm with it. Would you please give some information
+about it?
+
+Thanks!
+
+Yuksam Cheung
+2010-05-09
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20100509/0ff84f1e/attachment.htm>
+
+From morrone2 at llnl.gov  Mon May 10 12:56:12 2010
+From: morrone2 at llnl.gov (Christopher J. Morrone)
+Date: Mon, 10 May 2010 12:56:12 -0700
+Subject: [Lustre-devel] Luste/ZFS meeting 2:30
+Message-ID: <4BE864DC.8030704@llnl.gov>
+
+Lets have a Lustre/ZFS meeting at 2:30 in the collaboration area by 
+Brian's office.  We will discuss how we plan to get all of this work 
+done over the next year.
+
+Chris
+
+
+From eric.barton at oracle.com  Sun May 16 06:12:13 2010
+From: eric.barton at oracle.com (Eric Barton)
+Date: Sun, 16 May 2010 14:12:13 +0100
+Subject: [Lustre-devel] Lustre RPC visualization
+In-Reply-To: <4BEFBB07.4030403@tu-dresden.de>
+References: <000c01cae6ee$1d4693d0$57d3bb70$%barton@oracle.com>
+	<4BD8E021.7050302@oracle.com> <4BD90FB9.5030702@tu-dresden.de>
+	<4BD9CF75.8030204@oracle.com> <4BDE8C3C.2050505@tu-dresden.de>
+	<699F57EF-52E6-41D1-A04B-3C39D469D133@oracle.com>
+	<4BDF1199.2030007@tu-dresden.de> <4BDF1CC7.5020502@oracle.com>
+	<4BDF24BC.9050701@tu-dresden.de> <4BDF2999.2000207@oracle.com>
+	<4BEFBB07.4030403@tu-dresden.de>
+Message-ID: <009101caf4f9$67e1dd50$37a597f0$@barton@oracle.com>
+
+Excellent :)
+
+How do you think measurements taken from 1000 servers with 100,000
+clients can be visualised?  We've used heat maps to visualise
+10s-100s of concurrent measurements (y) over time (x) but I wonder
+if that will scale.  Does vampire support heat maps?
+
+    Cheers,
+              Eric
+
+> -----Original Message-----
+> From: Michael Kluge [mailto:Michael.Kluge at tu-dresden.de]
+> Sent: 16 May 2010 10:30 AM
+> To: di.wang
+> Cc: Eric Barton; Andreas Dilger; Robert Read; Galen M. Shipman; lustre-devel
+> Subject: Re: [Lustre-devel] Lustre RPC visualization
+> 
+> Hi WangDi,
+> 
+> the first version works. Screenshot is attached. I have a couple of
+> counter realized: RPC's in flight and RPC's completed in total on the
+> client, RPC's enqueued, RPC's in processing and RPC'c completed in total
+> on the server. All these counter can be broken down by the type of RPC
+> (op code). The picture has not yet the lines that show each single RPC,
+> I still have to do counter like "avg. time to complete an RPC over the
+> last second" and there are some more TODO's. Like the timer
+> synchronization. (In the screenshot the first and the last counter show
+> total values while the one in the middle shows a rate.)
+> 
+> What I like to have is a complete set of traces from a small cluster
+> (<100 nodes) including the servers. Would that be possible?
+> 
+> Is one of you in Hamburg May, 31-June, 3 for ISC'2010? I'll be there and
+> like to talk about what would be useful for the next steps.
+> 
+> 
+> Regards, Michael
+> 
+> Am 03.05.2010 21:52, schrieb di.wang:
+> > Michael Kluge wrote:
+> >>>> One more question: RPC 1334380768266400 (in the log WangDi sent me)
+> >>>> has on the client side only a "Sending RPC" message, thus missing the
+> >>>> "Completed RPC". The server has all three (received,start work, done
+> >>>> work). Has this RPC vanished on the way back to the client? There is
+> >>>> no further indication what happend. The last timestamp in the client
+> >>>> log is:
+> >>>> 1272565368.228628
+> >>>> and the server says it finished the processing of the request at:
+> >>>> 1272565281.379471
+> >>>> So the client log has been recorded long enough to contain the
+> >>>> "Completed RPC" message for this RPC if it arrived ever ...
+> >>> Logically, yes. But in some cases, some debug logs might be abandoned
+> >>> for some reasons(actually, it happens not rarely), and probably you need
+> >>> maintain an average time from server "Handled RPC" to client "Completed
+> >>> RPC", then you just guess the client "Completed RPC" time in this case.
+> >>
+> >> Oh my gosh ;) I don't want to start speculations about the helpfulness
+> >> of incomplete debug logs. Anyway, what can get lost? Any kind of
+> >> message on the servers and clients? I think I'd like to know what
+> >> cases have to be handled while I try to track individual RPC's on
+> >> their way.
+> > Any records can get lost here. Unfortunately, there are not any messages
+> > indicate the missing happened. :(
+> > (Usually, I would check the time stamp in the log, i.e. no records for a
+> > "long" time, for example several seconds, but this is not the accurate
+> > way).
+> >
+> > I guess you can just ignore these uncompleted records in your first
+> > step? Let's see how these incomplete log will
+> > impact the profiling result, then we will decide how to deal with this?
+> >
+> > Thanks
+> > Wangdi
+> >>
+> >> Regards, Michael
+> >> _______________________________________________
+> >> Lustre-devel mailing list
+> >> Lustre-devel at lists.lustre.org
+> >> http://lists.lustre.org/mailman/listinfo/lustre-devel
+> >
+> >
+> 
+> 
+> --
+> Michael Kluge, M.Sc.
+> 
+> Technische Universit?t Dresden
+> Center for Information Services and
+> High Performance Computing (ZIH)
+> D-01062 Dresden
+> Germany
+> 
+> Contact:
+> Willersbau, Room WIL A 208
+> Phone:  (+49) 351 463-34217
+> Fax:    (+49) 351 463-37773
+> e-mail: michael.kluge at tu-dresden.de
+> WWW:    http://www.tu-dresden.de/zih
+
+
+
+From Michael.Kluge at tu-dresden.de  Sun May 16 02:29:43 2010
+From: Michael.Kluge at tu-dresden.de (Michael Kluge)
+Date: Sun, 16 May 2010 11:29:43 +0200
+Subject: [Lustre-devel] Lustre RPC visualization
+In-Reply-To: <4BDF2999.2000207@oracle.com>
+References: <000c01cae6ee$1d4693d0$57d3bb70$%barton@oracle.com>
+	<4BD8E021.7050302@oracle.com> <4BD90FB9.5030702@tu-dresden.de>
+	<4BD9CF75.8030204@oracle.com> <4BDE8C3C.2050505@tu-dresden.de>
+	<699F57EF-52E6-41D1-A04B-3C39D469D133@oracle.com>
+	<4BDF1199.2030007@tu-dresden.de> <4BDF1CC7.5020502@oracle.com>
+	<4BDF24BC.9050701@tu-dresden.de> <4BDF2999.2000207@oracle.com>
+Message-ID: <4BEFBB07.4030403@tu-dresden.de>
+
+Hi WangDi,
+
+the first version works. Screenshot is attached. I have a couple of 
+counter realized: RPC's in flight and RPC's completed in total on the 
+client, RPC's enqueued, RPC's in processing and RPC'c completed in total 
+on the server. All these counter can be broken down by the type of RPC 
+(op code). The picture has not yet the lines that show each single RPC, 
+I still have to do counter like "avg. time to complete an RPC over the 
+last second" and there are some more TODO's. Like the timer 
+synchronization. (In the screenshot the first and the last counter show 
+total values while the one in the middle shows a rate.)
+
+What I like to have is a complete set of traces from a small cluster 
+(<100 nodes) including the servers. Would that be possible?
+
+Is one of you in Hamburg May, 31-June, 3 for ISC'2010? I'll be there and 
+like to talk about what would be useful for the next steps.
+
+
+Regards, Michael
+
+Am 03.05.2010 21:52, schrieb di.wang:
+> Michael Kluge wrote:
+>>>> One more question: RPC 1334380768266400 (in the log WangDi sent me)
+>>>> has on the client side only a "Sending RPC" message, thus missing the
+>>>> "Completed RPC". The server has all three (received,start work, done
+>>>> work). Has this RPC vanished on the way back to the client? There is
+>>>> no further indication what happend. The last timestamp in the client
+>>>> log is:
+>>>> 1272565368.228628
+>>>> and the server says it finished the processing of the request at:
+>>>> 1272565281.379471
+>>>> So the client log has been recorded long enough to contain the
+>>>> "Completed RPC" message for this RPC if it arrived ever ...
+>>> Logically, yes. But in some cases, some debug logs might be abandoned
+>>> for some reasons(actually, it happens not rarely), and probably you need
+>>> maintain an average time from server "Handled RPC" to client "Completed
+>>> RPC", then you just guess the client "Completed RPC" time in this case.
+>>
+>> Oh my gosh ;) I don't want to start speculations about the helpfulness
+>> of incomplete debug logs. Anyway, what can get lost? Any kind of
+>> message on the servers and clients? I think I'd like to know what
+>> cases have to be handled while I try to track individual RPC's on
+>> their way.
+> Any records can get lost here. Unfortunately, there are not any messages
+> indicate the missing happened. :(
+> (Usually, I would check the time stamp in the log, i.e. no records for a
+> "long" time, for example several seconds, but this is not the accurate
+> way).
+>
+> I guess you can just ignore these uncompleted records in your first
+> step? Let's see how these incomplete log will
+> impact the profiling result, then we will decide how to deal with this?
+>
+> Thanks
+> Wangdi
+>>
+>> Regards, Michael
+>> _______________________________________________
+>> Lustre-devel mailing list
+>> Lustre-devel at lists.lustre.org
+>> http://lists.lustre.org/mailman/listinfo/lustre-devel
+>
+>
+
+
+-- 
+Michael Kluge, M.Sc.
+
+Technische Universit?t Dresden
+Center for Information Services and
+High Performance Computing (ZIH)
+D-01062 Dresden
+Germany
+
+Contact:
+Willersbau, Room WIL A 208
+Phone:  (+49) 351 463-34217
+Fax:    (+49) 351 463-37773
+e-mail: michael.kluge at tu-dresden.de
+WWW:    http://www.tu-dresden.de/zih
+-------------- next part --------------
+A non-text attachment was scrubbed...
+Name: Vampir - [Trace View - lustre_rpcs.otf].png
+Type: image/png
+Size: 97181 bytes
+Desc: not available
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20100516/f4cd3a83/attachment.png>
+
+From acuselton at lbl.gov  Sun May 16 20:24:55 2010
+From: acuselton at lbl.gov (Andrew Uselton)
+Date: Sun, 16 May 2010 20:24:55 -0700
+Subject: [Lustre-devel] Lustre RPC visualization
+In-Reply-To: <4BEFBB07.4030403@tu-dresden.de>
+References: <000c01cae6ee$1d4693d0$57d3bb70$%barton@oracle.com>
+	<4BD90FB9.5030702@tu-dresden.de> <4BD9CF75.8030204@oracle.com>
+	<4BDE8C3C.2050505@tu-dresden.de>
+	<699F57EF-52E6-41D1-A04B-3C39D469D133@oracle.com>
+	<4BDF1199.2030007@tu-dresden.de> <4BDF1CC7.5020502@oracle.com>
+	<4BDF24BC.9050701@tu-dresden.de> <4BDF2999.2000207@oracle.com>
+	<4BEFBB07.4030403@tu-dresden.de>
+Message-ID: <AANLkTim7d1u1gJXSwCWxAc7eE8N7iKnKgrGWfasK0nyL@mail.gmail.com>
+
+I think this work is very interesting.  Will anyone be at CUG 2010 next week
+to discuss?
+Cheers,
+Andrew
+
+
+2010/5/16 Michael Kluge <Michael.Kluge at tu-dresden.de>
+
+> Hi WangDi,
+>
+> the first version works. Screenshot is attached. I have a couple of counter
+> realized: RPC's in flight and RPC's completed in total on the client, RPC's
+> enqueued, RPC's in processing and RPC'c completed in total on the server.
+> All these counter can be broken down by the type of RPC (op code). The
+> picture has not yet the lines that show each single RPC, I still have to do
+> counter like "avg. time to complete an RPC over the last second" and there
+> are some more TODO's. Like the timer synchronization. (In the screenshot the
+> first and the last counter show total values while the one in the middle
+> shows a rate.)
+>
+> What I like to have is a complete set of traces from a small cluster (<100
+> nodes) including the servers. Would that be possible?
+>
+> Is one of you in Hamburg May, 31-June, 3 for ISC'2010? I'll be there and
+> like to talk about what would be useful for the next steps.
+>
+>
+>
+> Regards, Michael
+>
+> Am 03.05.2010 21:52, schrieb di.wang:
+>
+>> Michael Kluge wrote:
+>>
+>>  One more question: RPC 1334380768266400 (in the log WangDi sent me)
+>>>>> has on the client side only a "Sending RPC" message, thus missing the
+>>>>> "Completed RPC". The server has all three (received,start work, done
+>>>>> work). Has this RPC vanished on the way back to the client? There is
+>>>>> no further indication what happend. The last timestamp in the client
+>>>>> log is:
+>>>>> 1272565368.228628
+>>>>> and the server says it finished the processing of the request at:
+>>>>> 1272565281.379471
+>>>>> So the client log has been recorded long enough to contain the
+>>>>> "Completed RPC" message for this RPC if it arrived ever ...
+>>>>>
+>>>> Logically, yes. But in some cases, some debug logs might be abandoned
+>>>> for some reasons(actually, it happens not rarely), and probably you need
+>>>> maintain an average time from server "Handled RPC" to client "Completed
+>>>> RPC", then you just guess the client "Completed RPC" time in this case.
+>>>>
+>>>
+>>> Oh my gosh ;) I don't want to start speculations about the helpfulness
+>>> of incomplete debug logs. Anyway, what can get lost? Any kind of
+>>> message on the servers and clients? I think I'd like to know what
+>>> cases have to be handled while I try to track individual RPC's on
+>>> their way.
+>>>
+>> Any records can get lost here. Unfortunately, there are not any messages
+>> indicate the missing happened. :(
+>> (Usually, I would check the time stamp in the log, i.e. no records for a
+>> "long" time, for example several seconds, but this is not the accurate
+>> way).
+>>
+>> I guess you can just ignore these uncompleted records in your first
+>> step? Let's see how these incomplete log will
+>> impact the profiling result, then we will decide how to deal with this?
+>>
+>> Thanks
+>> Wangdi
+>>
+>>>
+>>> Regards, Michael
+>>> _______________________________________________
+>>> Lustre-devel mailing list
+>>> Lustre-devel at lists.lustre.org
+>>> http://lists.lustre.org/mailman/listinfo/lustre-devel
+>>>
+>>
+>>
+>>
+>
+> --
+> Michael Kluge, M.Sc.
+>
+> Technische Universit?t Dresden
+> Center for Information Services and
+> High Performance Computing (ZIH)
+> D-01062 Dresden
+> Germany
+>
+> Contact:
+> Willersbau, Room WIL A 208
+> Phone:  (+49) 351 463-34217
+> Fax:    (+49) 351 463-37773
+> e-mail: michael.kluge at tu-dresden.de
+> WWW:    http://www.tu-dresden.de/zih
+>
+> _______________________________________________
+> Lustre-devel mailing list
+> Lustre-devel at lists.lustre.org
+> http://lists.lustre.org/mailman/listinfo/lustre-devel
+>
+>
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20100516/b1d7074f/attachment.htm>
+
+From Michael.Kluge at tu-dresden.de  Sun May 16 21:52:01 2010
+From: Michael.Kluge at tu-dresden.de (Michael Kluge)
+Date: Mon, 17 May 2010 06:52:01 +0200
+Subject: [Lustre-devel] Lustre RPC visualization
+In-Reply-To: <009101caf4f9$67e1dd50$37a597f0$@barton@oracle.com>
+References: <000c01cae6ee$1d4693d0$57d3bb70$%barton@oracle.com>
+	<4BD8E021.7050302@oracle.com> <4BD90FB9.5030702@tu-dresden.de>
+	<4BD9CF75.8030204@oracle.com> <4BDE8C3C.2050505@tu-dresden.de>
+	<699F57EF-52E6-41D1-A04B-3C39D469D133@oracle.com>
+	<4BDF1199.2030007@tu-dresden.de> <4BDF1CC7.5020502@oracle.com>
+	<4BDF24BC.9050701@tu-dresden.de> <4BDF2999.2000207@oracle.com>
+	<4BEFBB07.4030403@tu-dresden.de>
+	<009101caf4f9$67e1dd50$37a597f0$@barton@oracle.com>
+Message-ID: <4BF0CB71.6030601@tu-dresden.de>
+
+Eric,
+
+Vampir does scale up to this point. Almost, if I remember well, but 
+thing might have changed recently). If it does not, well' make it ;) We 
+have visualized real trace files with up to 20.000 processes and 
+artificial trace files with many more. Heat maps can be emulated. Once 
+we have had something like a color-coded counter timeline that procduces 
+a heat map. Right now it can be done by on the timeline by placing 
+artificial enter/leave events for function called "5%", "10%", and so 
+on. I have done this already in the past, so it should not be too difficult.
+
+
+Michael
+
+Am 16.05.2010 15:12, schrieb Eric Barton:
+> Excellent :)
+>
+> How do you think measurements taken from 1000 servers with 100,000
+> clients can be visualised?  We've used heat maps to visualise
+> 10s-100s of concurrent measurements (y) over time (x) but I wonder
+> if that will scale.  Does vampire support heat maps?
+>
+>      Cheers,
+>                Eric
+>
+>> -----Original Message-----
+>> From: Michael Kluge [mailto:Michael.Kluge at tu-dresden.de]
+>> Sent: 16 May 2010 10:30 AM
+>> To: di.wang
+>> Cc: Eric Barton; Andreas Dilger; Robert Read; Galen M. Shipman; lustre-devel
+>> Subject: Re: [Lustre-devel] Lustre RPC visualization
+>>
+>> Hi WangDi,
+>>
+>> the first version works. Screenshot is attached. I have a couple of
+>> counter realized: RPC's in flight and RPC's completed in total on the
+>> client, RPC's enqueued, RPC's in processing and RPC'c completed in total
+>> on the server. All these counter can be broken down by the type of RPC
+>> (op code). The picture has not yet the lines that show each single RPC,
+>> I still have to do counter like "avg. time to complete an RPC over the
+>> last second" and there are some more TODO's. Like the timer
+>> synchronization. (In the screenshot the first and the last counter show
+>> total values while the one in the middle shows a rate.)
+>>
+>> What I like to have is a complete set of traces from a small cluster
+>> (<100 nodes) including the servers. Would that be possible?
+>>
+>> Is one of you in Hamburg May, 31-June, 3 for ISC'2010? I'll be there and
+>> like to talk about what would be useful for the next steps.
+>>
+>>
+>> Regards, Michael
+>>
+>> Am 03.05.2010 21:52, schrieb di.wang:
+>>> Michael Kluge wrote:
+>>>>>> One more question: RPC 1334380768266400 (in the log WangDi sent me)
+>>>>>> has on the client side only a "Sending RPC" message, thus missing the
+>>>>>> "Completed RPC". The server has all three (received,start work, done
+>>>>>> work). Has this RPC vanished on the way back to the client? There is
+>>>>>> no further indication what happend. The last timestamp in the client
+>>>>>> log is:
+>>>>>> 1272565368.228628
+>>>>>> and the server says it finished the processing of the request at:
+>>>>>> 1272565281.379471
+>>>>>> So the client log has been recorded long enough to contain the
+>>>>>> "Completed RPC" message for this RPC if it arrived ever ...
+>>>>> Logically, yes. But in some cases, some debug logs might be abandoned
+>>>>> for some reasons(actually, it happens not rarely), and probably you need
+>>>>> maintain an average time from server "Handled RPC" to client "Completed
+>>>>> RPC", then you just guess the client "Completed RPC" time in this case.
+>>>>
+>>>> Oh my gosh ;) I don't want to start speculations about the helpfulness
+>>>> of incomplete debug logs. Anyway, what can get lost? Any kind of
+>>>> message on the servers and clients? I think I'd like to know what
+>>>> cases have to be handled while I try to track individual RPC's on
+>>>> their way.
+>>> Any records can get lost here. Unfortunately, there are not any messages
+>>> indicate the missing happened. :(
+>>> (Usually, I would check the time stamp in the log, i.e. no records for a
+>>> "long" time, for example several seconds, but this is not the accurate
+>>> way).
+>>>
+>>> I guess you can just ignore these uncompleted records in your first
+>>> step? Let's see how these incomplete log will
+>>> impact the profiling result, then we will decide how to deal with this?
+>>>
+>>> Thanks
+>>> Wangdi
+>>>>
+>>>> Regards, Michael
+>>>> _______________________________________________
+>>>> Lustre-devel mailing list
+>>>> Lustre-devel at lists.lustre.org
+>>>> http://lists.lustre.org/mailman/listinfo/lustre-devel
+>>>
+>>>
+>>
+>>
+>> --
+>> Michael Kluge, M.Sc.
+>>
+>> Technische Universit?t Dresden
+>> Center for Information Services and
+>> High Performance Computing (ZIH)
+>> D-01062 Dresden
+>> Germany
+>>
+>> Contact:
+>> Willersbau, Room WIL A 208
+>> Phone:  (+49) 351 463-34217
+>> Fax:    (+49) 351 463-37773
+>> e-mail: michael.kluge at tu-dresden.de
+>> WWW:    http://www.tu-dresden.de/zih
+>
+>
+
+
+
+From Michael.Kluge at tu-dresden.de  Sun May 16 22:53:22 2010
+From: Michael.Kluge at tu-dresden.de (Michael Kluge)
+Date: Mon, 17 May 2010 07:53:22 +0200
+Subject: [Lustre-devel] Lustre RPC visualization
+In-Reply-To: <AANLkTim7d1u1gJXSwCWxAc7eE8N7iKnKgrGWfasK0nyL@mail.gmail.com>
+References: <000c01cae6ee$1d4693d0$57d3bb70$%barton@oracle.com>
+	<4BD90FB9.5030702@tu-dresden.de> <4BD9CF75.8030204@oracle.com>
+	<4BDE8C3C.2050505@tu-dresden.de>
+	<699F57EF-52E6-41D1-A04B-3C39D469D133@oracle.com>
+	<4BDF1199.2030007@tu-dresden.de> <4BDF1CC7.5020502@oracle.com>
+	<4BDF24BC.9050701@tu-dresden.de> <4BDF2999.2000207@oracle.com>
+	<4BEFBB07.4030403@tu-dresden.de>
+	<AANLkTim7d1u1gJXSwCWxAc7eE8N7iKnKgrGWfasK0nyL@mail.gmail.com>
+Message-ID: <1274075602.9095.86.camel@radar>
+
+Hi Andrew,
+
+unfortunately no. We don't own a Cray :( 
+
+
+Regards, Michael
+
+
+Am Sonntag, den 16.05.2010, 20:24 -0700 schrieb Andrew Uselton:
+> I think this work is very interesting.  Will anyone be at CUG 2010
+> next week to discuss? 
+> Cheers,
+> Andrew
+> 
+> 
+> 2010/5/16 Michael Kluge <Michael.Kluge at tu-dresden.de>
+>         Hi WangDi,
+>         
+>         the first version works. Screenshot is attached. I have a
+>         couple of counter realized: RPC's in flight and RPC's
+>         completed in total on the client, RPC's enqueued, RPC's in
+>         processing and RPC'c completed in total on the server. All
+>         these counter can be broken down by the type of RPC (op code).
+>         The picture has not yet the lines that show each single RPC, I
+>         still have to do counter like "avg. time to complete an RPC
+>         over the last second" and there are some more TODO's. Like the
+>         timer synchronization. (In the screenshot the first and the
+>         last counter show total values while the one in the middle
+>         shows a rate.)
+>         
+>         What I like to have is a complete set of traces from a small
+>         cluster (<100 nodes) including the servers. Would that be
+>         possible?
+>         
+>         Is one of you in Hamburg May, 31-June, 3 for ISC'2010? I'll be
+>         there and like to talk about what would be useful for the next
+>         steps. 
+>         
+>         
+>         
+>         Regards, Michael
+>         
+>         Am 03.05.2010 21:52, schrieb di.wang:
+>         
+>                 Michael Kluge wrote: 
+>                 
+>                 
+>                                         One more question: RPC
+>                                         1334380768266400 (in the log
+>                                         WangDi sent me)
+>                                         has on the client side only a
+>                                         "Sending RPC" message, thus
+>                                         missing the
+>                                         "Completed RPC". The server
+>                                         has all three (received,start
+>                                         work, done
+>                                         work). Has this RPC vanished
+>                                         on the way back to the client?
+>                                         There is
+>                                         no further indication what
+>                                         happend. The last timestamp in
+>                                         the client
+>                                         log is:
+>                                         1272565368.228628
+>                                         and the server says it
+>                                         finished the processing of the
+>                                         request at:
+>                                         1272565281.379471
+>                                         So the client log has been
+>                                         recorded long enough to
+>                                         contain the
+>                                         "Completed RPC" message for
+>                                         this RPC if it arrived
+>                                         ever ...
+>                                 Logically, yes. But in some cases,
+>                                 some debug logs might be abandoned
+>                                 for some reasons(actually, it happens
+>                                 not rarely), and probably you need
+>                                 maintain an average time from server
+>                                 "Handled RPC" to client "Completed
+>                                 RPC", then you just guess the client
+>                                 "Completed RPC" time in this case.
+>                         
+>                         Oh my gosh ;) I don't want to start
+>                         speculations about the helpfulness
+>                         of incomplete debug logs. Anyway, what can get
+>                         lost? Any kind of
+>                         message on the servers and clients? I think
+>                         I'd like to know what
+>                         cases have to be handled while I try to track
+>                         individual RPC's on
+>                         their way.
+>                 Any records can get lost here. Unfortunately, there
+>                 are not any messages
+>                 indicate the missing happened. :(
+>                 (Usually, I would check the time stamp in the log,
+>                 i.e. no records for a
+>                 "long" time, for example several seconds, but this is
+>                 not the accurate
+>                 way).
+>                 
+>                 I guess you can just ignore these uncompleted records
+>                 in your first
+>                 step? Let's see how these incomplete log will
+>                 impact the profiling result, then we will decide how
+>                 to deal with this?
+>                 
+>                 Thanks
+>                 Wangdi
+>                         
+>                         Regards, Michael
+>                         _______________________________________________
+>                         Lustre-devel mailing list
+>                         Lustre-devel at lists.lustre.org
+>                         http://lists.lustre.org/mailman/listinfo/lustre-devel
+>                 
+>                 
+>                 
+>         
+>         
+>         -- 
+>         Michael Kluge, M.Sc.
+>         
+>         Technische Universit?t Dresden
+>         Center for Information Services and
+>         High Performance Computing (ZIH)
+>         D-01062 Dresden
+>         Germany
+>         
+>         Contact:
+>         Willersbau, Room WIL A 208
+>         Phone:  (+49) 351 463-34217
+>         Fax:    (+49) 351 463-37773
+>         e-mail: michael.kluge at tu-dresden.de
+>         
+>         
+>         WWW:    http://www.tu-dresden.de/zih
+>         
+>         
+>         _______________________________________________
+>         Lustre-devel mailing list
+>         Lustre-devel at lists.lustre.org
+>         http://lists.lustre.org/mailman/listinfo/lustre-devel
+>         
+> 
+> 
+> _______________________________________________
+> Lustre-devel mailing list
+> Lustre-devel at lists.lustre.org
+> http://lists.lustre.org/mailman/listinfo/lustre-devel
+
+-- 
+
+Michael Kluge, M.Sc.
+
+Technische Universit?t Dresden
+Center for Information Services and
+High Performance Computing (ZIH)
+D-01062 Dresden
+Germany
+
+Contact:
+Willersbau, Room A 208
+Phone:  (+49) 351 463-34217
+Fax:    (+49) 351 463-37773
+e-mail: michael.kluge at tu-dresden.de
+WWW:    http://www.tu-dresden.de/zih
+-------------- next part --------------
+A non-text attachment was scrubbed...
+Name: smime.p7s
+Type: application/x-pkcs7-signature
+Size: 5997 bytes
+Desc: not available
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20100517/92de1f31/attachment.bin>
+
+From Michael.Kluge at tu-dresden.de  Sun May 16 22:59:01 2010
+From: Michael.Kluge at tu-dresden.de (Michael Kluge)
+Date: Mon, 17 May 2010 07:59:01 +0200
+Subject: [Lustre-devel] Lustre RPC visualization
+In-Reply-To: <97A62C66-9F72-444F-8635-C93BAA2C5BDD@ornl.gov>
+References: <000c01cae6ee$1d4693d0$57d3bb70$%barton@oracle.com>
+	<4BD8E021.7050302@oracle.com> <4BD90FB9.5030702@tu-dresden.de>
+	<4BD9CF75.8030204@oracle.com> <4BDE8C3C.2050505@tu-dresden.de>
+	<699F57EF-52E6-41D1-A04B-3C39D469D133@oracle.com>
+	<4BDF1199.2030007@tu-dresden.de> <4BDF1CC7.5020502@oracle.com>
+	<4BDF24BC.9050701@tu-dresden.de> <4BDF2999.2000207@oracle.com>
+	<4BEFBB07.4030403@tu-dresden.de>
+	<009101caf4f9$67e1dd50$37a597f0$%barton@oracle.com>
+	<97A62C66-9F72-444F-8635-C93BAA2C5BDD@ornl.gov>
+Message-ID: <1274075941.9095.92.camel@radar>
+
+Hi Galen,
+
+that's why we started this :) I guess I need some more input data to be
+able to play with the visualization. Vampir also supports markers that
+can point to specific (process,timestamp) combinations. If we know that
+some kind of condition happened while we collected the trace, it is
+probably possible to detect this in the trace converter and to put a
+mark into the trace file. That would help finding "interesting points"
+faster.
+
+
+Regards, Michael
+
+Am Sonntag, den 16.05.2010, 23:39 -0400 schrieb Shipman, Galen M.: 
+> I would be very interested in this, particularly at scale. We should look into collecting some large scale traces on Jaguar for experimentation of various visualization techniques.
+> 
+> Thanks,
+> 
+> Galen
+> 
+> 
+> On May 16, 2010, at 9:12 AM, Eric Barton wrote:
+> 
+> Excellent :)
+> 
+> How do you think measurements taken from 1000 servers with 100,000
+> clients can be visualised?  We've used heat maps to visualise
+> 10s-100s of concurrent measurements (y) over time (x) but I wonder
+> if that will scale.  Does vampire support heat maps?
+> 
+>    Cheers,
+>              Eric
+> 
+> -----Original Message-----
+> From: Michael Kluge [mailto:Michael.Kluge at tu-dresden.de]
+> Sent: 16 May 2010 10:30 AM
+> To: di.wang
+> Cc: Eric Barton; Andreas Dilger; Robert Read; Galen M. Shipman; lustre-devel
+> Subject: Re: [Lustre-devel] Lustre RPC visualization
+> 
+> Hi WangDi,
+> 
+> the first version works. Screenshot is attached. I have a couple of
+> counter realized: RPC's in flight and RPC's completed in total on the
+> client, RPC's enqueued, RPC's in processing and RPC'c completed in total
+> on the server. All these counter can be broken down by the type of RPC
+> (op code). The picture has not yet the lines that show each single RPC,
+> I still have to do counter like "avg. time to complete an RPC over the
+> last second" and there are some more TODO's. Like the timer
+> synchronization. (In the screenshot the first and the last counter show
+> total values while the one in the middle shows a rate.)
+> 
+> What I like to have is a complete set of traces from a small cluster
+> (<100 nodes) including the servers. Would that be possible?
+> 
+> Is one of you in Hamburg May, 31-June, 3 for ISC'2010? I'll be there and
+> like to talk about what would be useful for the next steps.
+> 
+> 
+> Regards, Michael
+> 
+> Am 03.05.2010 21:52, schrieb di.wang:
+> Michael Kluge wrote:
+> One more question: RPC 1334380768266400 (in the log WangDi sent me)
+> has on the client side only a "Sending RPC" message, thus missing the
+> "Completed RPC". The server has all three (received,start work, done
+> work). Has this RPC vanished on the way back to the client? There is
+> no further indication what happend. The last timestamp in the client
+> log is:
+> 1272565368.228628
+> and the server says it finished the processing of the request at:
+> 1272565281.379471
+> So the client log has been recorded long enough to contain the
+> "Completed RPC" message for this RPC if it arrived ever ...
+> Logically, yes. But in some cases, some debug logs might be abandoned
+> for some reasons(actually, it happens not rarely), and probably you need
+> maintain an average time from server "Handled RPC" to client "Completed
+> RPC", then you just guess the client "Completed RPC" time in this case.
+> 
+> Oh my gosh ;) I don't want to start speculations about the helpfulness
+> of incomplete debug logs. Anyway, what can get lost? Any kind of
+> message on the servers and clients? I think I'd like to know what
+> cases have to be handled while I try to track individual RPC's on
+> their way.
+> Any records can get lost here. Unfortunately, there are not any messages
+> indicate the missing happened. :(
+> (Usually, I would check the time stamp in the log, i.e. no records for a
+> "long" time, for example several seconds, but this is not the accurate
+> way).
+> 
+> I guess you can just ignore these uncompleted records in your first
+> step? Let's see how these incomplete log will
+> impact the profiling result, then we will decide how to deal with this?
+> 
+> Thanks
+> Wangdi
+> 
+> Regards, Michael
+> _______________________________________________
+> Lustre-devel mailing list
+> Lustre-devel at lists.lustre.org<mailto:Lustre-devel at lists.lustre.org>
+> http://lists.lustre.org/mailman/listinfo/lustre-devel
+> 
+> 
+> 
+> 
+> --
+> Michael Kluge, M.Sc.
+> 
+> Technische Universit?t Dresden
+> Center for Information Services and
+> High Performance Computing (ZIH)
+> D-01062 Dresden
+> Germany
+> 
+> Contact:
+> Willersbau, Room WIL A 208
+> Phone:  (+49) 351 463-34217
+> Fax:    (+49) 351 463-37773
+> e-mail: michael.kluge at tu-dresden.de<mailto:michael.kluge at tu-dresden.de>
+> WWW:    http://www.tu-dresden.de/zih
+> 
+> 
+> Galen M. Shipman
+> Group Leader - Technology Integration
+> National Center for Computational Sciences
+> Oak Ridge National Laboratory
+> Office: 865.576.2672
+> Cell:   865.307.1209
+> Email:  gshipman at ornl.gov<mailto:gshipman at ornl.gov>
+> 
+> 
+> 
+> 
+
+-- 
+
+Michael Kluge, M.Sc.
+
+Technische Universit?t Dresden
+Center for Information Services and
+High Performance Computing (ZIH)
+D-01062 Dresden
+Germany
+
+Contact:
+Willersbau, Room A 208
+Phone:  (+49) 351 463-34217
+Fax:    (+49) 351 463-37773
+e-mail: michael.kluge at tu-dresden.de
+WWW:    http://www.tu-dresden.de/zih
+-------------- next part --------------
+A non-text attachment was scrubbed...
+Name: smime.p7s
+Type: application/x-pkcs7-signature
+Size: 5997 bytes
+Desc: not available
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20100517/c15ea9a9/attachment.bin>
+
+From gshipman at ornl.gov  Sun May 16 20:39:37 2010
+From: gshipman at ornl.gov (Shipman, Galen M.)
+Date: Sun, 16 May 2010 23:39:37 -0400
+Subject: [Lustre-devel] Lustre RPC visualization
+In-Reply-To: <009101caf4f9$67e1dd50$37a597f0$%barton@oracle.com>
+References: <000c01cae6ee$1d4693d0$57d3bb70$%barton@oracle.com>
+	<4BD8E021.7050302@oracle.com> <4BD90FB9.5030702@tu-dresden.de>
+	<4BD9CF75.8030204@oracle.com> <4BDE8C3C.2050505@tu-dresden.de>
+	<699F57EF-52E6-41D1-A04B-3C39D469D133@oracle.com>
+	<4BDF1199.2030007@tu-dresden.de> <4BDF1CC7.5020502@oracle.com>
+	<4BDF24BC.9050701@tu-dresden.de> <4BDF2999.2000207@oracle.com>
+	<4BEFBB07.4030403@tu-dresden.de>
+	<009101caf4f9$67e1dd50$37a597f0$%barton@oracle.com>
+Message-ID: <97A62C66-9F72-444F-8635-C93BAA2C5BDD@ornl.gov>
+
+I would be very interested in this, particularly at scale. We should look into collecting some large scale traces on Jaguar for experimentation of various visualization techniques.
+
+Thanks,
+
+Galen
+
+
+On May 16, 2010, at 9:12 AM, Eric Barton wrote:
+
+Excellent :)
+
+How do you think measurements taken from 1000 servers with 100,000
+clients can be visualised?  We've used heat maps to visualise
+10s-100s of concurrent measurements (y) over time (x) but I wonder
+if that will scale.  Does vampire support heat maps?
+
+   Cheers,
+             Eric
+
+-----Original Message-----
+From: Michael Kluge [mailto:Michael.Kluge at tu-dresden.de]
+Sent: 16 May 2010 10:30 AM
+To: di.wang
+Cc: Eric Barton; Andreas Dilger; Robert Read; Galen M. Shipman; lustre-devel
+Subject: Re: [Lustre-devel] Lustre RPC visualization
+
+Hi WangDi,
+
+the first version works. Screenshot is attached. I have a couple of
+counter realized: RPC's in flight and RPC's completed in total on the
+client, RPC's enqueued, RPC's in processing and RPC'c completed in total
+on the server. All these counter can be broken down by the type of RPC
+(op code). The picture has not yet the lines that show each single RPC,
+I still have to do counter like "avg. time to complete an RPC over the
+last second" and there are some more TODO's. Like the timer
+synchronization. (In the screenshot the first and the last counter show
+total values while the one in the middle shows a rate.)
+
+What I like to have is a complete set of traces from a small cluster
+(<100 nodes) including the servers. Would that be possible?
+
+Is one of you in Hamburg May, 31-June, 3 for ISC'2010? I'll be there and
+like to talk about what would be useful for the next steps.
+
+
+Regards, Michael
+
+Am 03.05.2010 21:52, schrieb di.wang:
+Michael Kluge wrote:
+One more question: RPC 1334380768266400 (in the log WangDi sent me)
+has on the client side only a "Sending RPC" message, thus missing the
+"Completed RPC". The server has all three (received,start work, done
+work). Has this RPC vanished on the way back to the client? There is
+no further indication what happend. The last timestamp in the client
+log is:
+1272565368.228628
+and the server says it finished the processing of the request at:
+1272565281.379471
+So the client log has been recorded long enough to contain the
+"Completed RPC" message for this RPC if it arrived ever ...
+Logically, yes. But in some cases, some debug logs might be abandoned
+for some reasons(actually, it happens not rarely), and probably you need
+maintain an average time from server "Handled RPC" to client "Completed
+RPC", then you just guess the client "Completed RPC" time in this case.
+
+Oh my gosh ;) I don't want to start speculations about the helpfulness
+of incomplete debug logs. Anyway, what can get lost? Any kind of
+message on the servers and clients? I think I'd like to know what
+cases have to be handled while I try to track individual RPC's on
+their way.
+Any records can get lost here. Unfortunately, there are not any messages
+indicate the missing happened. :(
+(Usually, I would check the time stamp in the log, i.e. no records for a
+"long" time, for example several seconds, but this is not the accurate
+way).
+
+I guess you can just ignore these uncompleted records in your first
+step? Let's see how these incomplete log will
+impact the profiling result, then we will decide how to deal with this?
+
+Thanks
+Wangdi
+
+Regards, Michael
+_______________________________________________
+Lustre-devel mailing list
+Lustre-devel at lists.lustre.org<mailto:Lustre-devel at lists.lustre.org>
+http://lists.lustre.org/mailman/listinfo/lustre-devel
+
+
+
+
+--
+Michael Kluge, M.Sc.
+
+Technische Universit?t Dresden
+Center for Information Services and
+High Performance Computing (ZIH)
+D-01062 Dresden
+Germany
+
+Contact:
+Willersbau, Room WIL A 208
+Phone:  (+49) 351 463-34217
+Fax:    (+49) 351 463-37773
+e-mail: michael.kluge at tu-dresden.de<mailto:michael.kluge at tu-dresden.de>
+WWW:    http://www.tu-dresden.de/zih
+
+
+Galen M. Shipman
+Group Leader - Technology Integration
+National Center for Computational Sciences
+Oak Ridge National Laboratory
+Office: 865.576.2672
+Cell:   865.307.1209
+Email:  gshipman at ornl.gov<mailto:gshipman at ornl.gov>
+
+
+
+
+
+From zhangys04 at gmail.com  Wed May 19 18:59:27 2010
+From: zhangys04 at gmail.com (Tonney Kaiven Cheung)
+Date: Thu, 20 May 2010 09:59:27 +0800
+Subject: [Lustre-devel] problems about the lustre simulator
+Message-ID: <AANLkTimFYG1v-QxL1zaA1piWtuFsjFFpT1ayVFMedZCu@mail.gmail.com>
+
+Dear everyone!
+
+I have downloaded the lustre simulator from the website
+named bugzilla-lustre. But when I use it to do the simulation, if the total
+number of clients (or OSTs) is more than 256, the simulator' s progress will
+be killed by the OS. And the screen info shows that the simulator is killed
+before the client (or OST) creating operation has been finished. Would you
+please give me some advise about solving the problem?
+
+Thanks!
+Yuksam Cheung
+2010-05-20
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20100520/10197c73/attachment.htm>
+
+From erblichs at earthlink.net  Thu May 20 12:48:03 2010
+From: erblichs at earthlink.net (Mitchell Erblich)
+Date: Thu, 20 May 2010 12:48:03 -0700
+Subject: [Lustre-devel] problems about the lustre simulator
+In-Reply-To: <AANLkTimFYG1v-QxL1zaA1piWtuFsjFFpT1ayVFMedZCu@mail.gmail.com>
+References: <AANLkTimFYG1v-QxL1zaA1piWtuFsjFFpT1ayVFMedZCu@mail.gmail.com>
+Message-ID: <89D04788-FF25-49DF-B475-5EA990464FCC@earthlink.net>
+
+Yuksam Cheng,
+
+		Why do you need more than 256 clients?
+
+		Do you see any message is a log?
+
+		Mitchell Erblich
+		================
+
+On May 19, 2010, at 6:59 PM, Tonney Kaiven Cheung wrote:
+
+> Dear everyone!
+>  
+> I have downloaded the lustre simulator from the website named bugzilla-lustre. But when I use it to do the simulation, if the total number of clients (or OSTs) is more than 256, the simulator' s progress will be killed by the OS. And the screen info shows that the simulator is killed before the client (or OST) creating operation has been finished. Would you please give me some advise about solving the problem?
+>  
+> Thanks!
+> Yuksam Cheung
+> 2010-05-20
+> _______________________________________________
+> Lustre-devel mailing list
+> Lustre-devel at lists.lustre.org
+> http://lists.lustre.org/mailman/listinfo/lustre-devel
+
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20100520/3fc4b753/attachment.htm>
+
+From Michael.Kluge at tu-dresden.de  Tue May 25 05:03:15 2010
+From: Michael.Kluge at tu-dresden.de (Michael Kluge)
+Date: Tue, 25 May 2010 14:03:15 +0200
+Subject: [Lustre-devel] Lustre RPC visualization
+In-Reply-To: <4BEFBB07.4030403@tu-dresden.de>
+References: <000c01cae6ee$1d4693d0$57d3bb70$%barton@oracle.com>
+	<4BD8E021.7050302@oracle.com> <4BD90FB9.5030702@tu-dresden.de>
+	<4BD9CF75.8030204@oracle.com> <4BDE8C3C.2050505@tu-dresden.de>
+	<699F57EF-52E6-41D1-A04B-3C39D469D133@oracle.com>
+	<4BDF1199.2030007@tu-dresden.de> <4BDF1CC7.5020502@oracle.com>
+	<4BDF24BC.9050701@tu-dresden.de> <4BDF2999.2000207@oracle.com>
+	<4BEFBB07.4030403@tu-dresden.de>
+Message-ID: <1274788995.2261.110.camel@radar>
+
+Hi WangDi,
+
+so, for the moment I am done with what I promised. The work to be done
+is mainly debugging with more input data sets. Screenshot of Vampir
+showing the derived counter values for the RPC processing/queue times on
+the server and the client is attached. Units for the values are either
+microseconds or just a number.
+
+
+Regards, Michael
+
+Am Sonntag, den 16.05.2010, 11:29 +0200 schrieb Michael Kluge: 
+> Hi WangDi,
+> 
+> the first version works. Screenshot is attached. I have a couple of 
+> counter realized: RPC's in flight and RPC's completed in total on the 
+> client, RPC's enqueued, RPC's in processing and RPC'c completed in total 
+> on the server. All these counter can be broken down by the type of RPC 
+> (op code). The picture has not yet the lines that show each single RPC, 
+> I still have to do counter like "avg. time to complete an RPC over the 
+> last second" and there are some more TODO's. Like the timer 
+> synchronization. (In the screenshot the first and the last counter show 
+> total values while the one in the middle shows a rate.)
+> 
+> What I like to have is a complete set of traces from a small cluster 
+> (<100 nodes) including the servers. Would that be possible?
+> 
+> Is one of you in Hamburg May, 31-June, 3 for ISC'2010? I'll be there and 
+> like to talk about what would be useful for the next steps.
+> 
+> 
+> Regards, Michael
+> 
+> Am 03.05.2010 21:52, schrieb di.wang:
+> > Michael Kluge wrote:
+> >>>> One more question: RPC 1334380768266400 (in the log WangDi sent me)
+> >>>> has on the client side only a "Sending RPC" message, thus missing the
+> >>>> "Completed RPC". The server has all three (received,start work, done
+> >>>> work). Has this RPC vanished on the way back to the client? There is
+> >>>> no further indication what happend. The last timestamp in the client
+> >>>> log is:
+> >>>> 1272565368.228628
+> >>>> and the server says it finished the processing of the request at:
+> >>>> 1272565281.379471
+> >>>> So the client log has been recorded long enough to contain the
+> >>>> "Completed RPC" message for this RPC if it arrived ever ...
+> >>> Logically, yes. But in some cases, some debug logs might be abandoned
+> >>> for some reasons(actually, it happens not rarely), and probably you need
+> >>> maintain an average time from server "Handled RPC" to client "Completed
+> >>> RPC", then you just guess the client "Completed RPC" time in this case.
+> >>
+> >> Oh my gosh ;) I don't want to start speculations about the helpfulness
+> >> of incomplete debug logs. Anyway, what can get lost? Any kind of
+> >> message on the servers and clients? I think I'd like to know what
+> >> cases have to be handled while I try to track individual RPC's on
+> >> their way.
+> > Any records can get lost here. Unfortunately, there are not any messages
+> > indicate the missing happened. :(
+> > (Usually, I would check the time stamp in the log, i.e. no records for a
+> > "long" time, for example several seconds, but this is not the accurate
+> > way).
+> >
+> > I guess you can just ignore these uncompleted records in your first
+> > step? Let's see how these incomplete log will
+> > impact the profiling result, then we will decide how to deal with this?
+> >
+> > Thanks
+> > Wangdi
+> >>
+> >> Regards, Michael
+> >> _______________________________________________
+> >> Lustre-devel mailing list
+> >> Lustre-devel at lists.lustre.org
+> >> http://lists.lustre.org/mailman/listinfo/lustre-devel
+> >
+> >
+> 
+> 
+> _______________________________________________
+> Lustre-devel mailing list
+> Lustre-devel at lists.lustre.org
+> http://lists.lustre.org/mailman/listinfo/lustre-devel
+
+-- 
+
+Michael Kluge, M.Sc.
+
+Technische Universit?t Dresden
+Center for Information Services and
+High Performance Computing (ZIH)
+D-01062 Dresden
+Germany
+
+Contact:
+Willersbau, Room A 208
+Phone:  (+49) 351 463-34217
+Fax:    (+49) 351 463-37773
+e-mail: michael.kluge at tu-dresden.de
+WWW:    http://www.tu-dresden.de/zih
+-------------- next part --------------
+A non-text attachment was scrubbed...
+Name: lustre_rpc_trace.png
+Type: image/png
+Size: 146793 bytes
+Desc: not available
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20100525/66fe7ab6/attachment.png>
+-------------- next part --------------
+A non-text attachment was scrubbed...
+Name: smime.p7s
+Type: application/x-pkcs7-signature
+Size: 5997 bytes
+Desc: not available
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20100525/66fe7ab6/attachment.bin>
+
+From ankit1984.cool at gmail.com  Tue May 25 11:07:38 2010
+From: ankit1984.cool at gmail.com (ankit sharma)
+Date: Tue, 25 May 2010 23:37:38 +0530
+Subject: [Lustre-devel] LNET:where in the code dose the file obeject's
+	private data gets filled up.
+Message-ID: <AANLkTikhDg6RYGCmi0jmwCNerJtc5Y_7oqxkpaq7YhFV@mail.gmail.com>
+
+Hi all,
+        I am new to Lustre code. So i am sorry if my question is trivial or
+silly.
+
+My question:
+
+On line number 116 of the file lnet/lnet/router_proc.c
+variable ver_p is getting set from the proc file object's private data.
+
+Can any one tell me which part of the lustre code dose this file object
+private data
+gets initialized / set .
+
+conceptually in can imagine it should (correct me if I am worng) be set in
+open call of the file ( /proc/sys/lnet/routers )
+
+BUT I cant locate the Lustre code that dose that(sets the private data of
+file object).
+
+
+
+
+
+
+code snippet form lnet/lnet/router_proc.c
+
+int LL_PROC_PROTO(proc_lnet_routes)
+{
+        int        rc     = 0;
+        char      *tmpstr;
+        char      *s;
+        const int  tmpsiz = 256;
+        int        len;
+        int       *ver_p  = (unsigned int *)(&filp->private_data);
+
+        DECLARE_LL_PROC_PPOS_DECL;
+
+        LASSERT (!write);
+
+        if (*lenp == 0)
+                return 0;
+
+        LIBCFS_ALLOC(tmpstr, tmpsiz);
+        if (tmpstr == NULL)
+                return -ENOMEM;
+
+        s = tmpstr; /* points to current position in tmpstr[] */
+
+        if (*ppos == 0) {
+                s += snprintf(s, tmpstr + tmpsiz - s, "Routing %s\n",
+                              the_lnet.ln_routing ? "enabled" : "disabled");
+                LASSERT (tmpstr + tmpsiz - s > 0);
+
+                s += snprintf(s, tmpstr + tmpsiz - s, "%-8s %4s %7s %s\n",
+                              "net", "hops", "state", "router");
+                LASSERT (tmpstr + tmpsiz - s > 0);
+
+                LNET_LOCK();
+                *ver_p = (unsigned int)the_lnet.ln_remote_nets_version;
+                LNET_UNLOCK();
+
+} else {
+                struct list_head  *n;
+                struct list_head  *r;
+                lnet_route_t      *route = NULL;
+                lnet_remotenet_t  *rnet  = NULL;
+                int                skip  = *ppos - 1;
+
+                LNET_LOCK();
+
+                if (*ver_p != (unsigned int)the_lnet.ln_remote_nets_version)
+{
+                        LNET_UNLOCK();
+                        LIBCFS_FREE(tmpstr, tmpsiz);
+                        return -ESTALE;
+                }
+
+                n = the_lnet.ln_remote_nets.next;
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20100525/7af34465/attachment.htm>
+
+From andreas.dilger at oracle.com  Tue May 25 13:04:41 2010
+From: andreas.dilger at oracle.com (Andreas Dilger)
+Date: Tue, 25 May 2010 14:04:41 -0600
+Subject: [Lustre-devel] LNET:where in the code dose the file obeject's
+	private data gets filled up.
+In-Reply-To: <AANLkTikhDg6RYGCmi0jmwCNerJtc5Y_7oqxkpaq7YhFV@mail.gmail.com>
+References: <AANLkTikhDg6RYGCmi0jmwCNerJtc5Y_7oqxkpaq7YhFV@mail.gmail.com>
+Message-ID: <C574E2BA-6EF6-4D2B-B516-1F88F5F4DEDA@oracle.com>
+
+On 2010-05-25, at 12:07, ankit sharma wrote:
+> I am new to Lustre code. So i am sorry if my question is trivial or silly.
+> 
+> My question:
+> 
+> On line number 116 of the file lnet/lnet/router_proc.c
+> variable ver_p is getting set from the proc file object's private data.
+> 
+> Can any one tell me which part of the lustre code dose this file object private data gets initialized / set .
+> 
+> conceptually in can imagine it should (correct me if I am worng) be set in open call of the file ( /proc/sys/lnet/routers ) 
+> 
+> BUT I cant locate the Lustre code that dose that(sets the private data of file object).
+
+If this is related to porting Lustre to a newer kernel, please search bugzilla for the RHEL6 and/or SLES11 SP1 kernel patches, since it fixes up this bit of code already.
+
+Cheers, Andreas
+--
+Andreas Dilger
+Lustre Technical Lead
+Oracle Corporation Canada Inc.
+
+
+
+From Zhen.Liang at Sun.COM  Tue May 25 22:21:18 2010
+From: Zhen.Liang at Sun.COM (Liang Zhen)
+Date: Wed, 26 May 2010 13:21:18 +0800
+Subject: [Lustre-devel] LNET:where in the code dose the file obeject's
+ private data gets filled up.
+In-Reply-To: <AANLkTikhDg6RYGCmi0jmwCNerJtc5Y_7oqxkpaq7YhFV@mail.gmail.com>
+References: <AANLkTikhDg6RYGCmi0jmwCNerJtc5Y_7oqxkpaq7YhFV@mail.gmail.com>
+Message-ID: <4BFCAFCE.7060505@sun.com>
+
+ankit sharma wrote:
+> Hi all,
+>         I am new to Lustre code. So i am sorry if my question is 
+> trivial or silly.
+>
+> My question:
+>
+> On line number 116 of the file lnet/lnet/router_proc.c
+> variable ver_p is getting set from the proc file object's private data.
+>
+> Can any one tell me which part of the lustre code dose this file 
+> object private data
+> gets initialized / set .
+>
+> conceptually in can imagine it should (correct me if I am worng) be 
+> set in open call of the file ( /proc/sys/lnet/routers )
+>
+> BUT I cant locate the Lustre code that dose that(sets the private data 
+> of file object).
+>    
+>
+> code snippet form lnet/lnet/router_proc.c
+>
+> int LL_PROC_PROTO(proc_lnet_routes)
+> {
+>         int        rc     = 0;
+>         char      *tmpstr;
+>         char      *s;
+>         const int  tmpsiz = 256;
+>         int        len;
+>         int       *ver_p  = (unsigned int *)(&filp->private_data);
+>
+>         DECLARE_LL_PROC_PPOS_DECL;
+>
+>         LASSERT (!write);
+>
+>         if (*lenp == 0)
+>                 return 0;
+>
+>         LIBCFS_ALLOC(tmpstr, tmpsiz);
+>         if (tmpstr == NULL)
+>                 return -ENOMEM;
+>
+>         s = tmpstr; /* points to current position in tmpstr[] */
+>
+>         if (*ppos == 0) {
+>                 s += snprintf(s, tmpstr + tmpsiz - s, "Routing %s\n",
+>                               the_lnet.ln_routing ? "enabled" : 
+> "disabled");
+>                 LASSERT (tmpstr + tmpsiz - s > 0);
+>
+>                 s += snprintf(s, tmpstr + tmpsiz - s, "%-8s %4s %7s %s\n",
+>                               "net", "hops", "state", "router");
+>                 LASSERT (tmpstr + tmpsiz - s > 0);
+>
+>                 LNET_LOCK();
+>                 *ver_p = (unsigned int)the_lnet.ln_remote_nets_version;
+
+It's initialized at here, because we have "*ppos == 0" while starting, 
+so it's actually same as
+filp->private_data = (void *)the_lnet.ln_remote_nets_version;
+
+
+Regards
+Liang
+
+
+>                 LNET_UNLOCK();
+>
+> } else {
+>                 struct list_head  *n;
+>                 struct list_head  *r;
+>                 lnet_route_t      *route = NULL;
+>                 lnet_remotenet_t  *rnet  = NULL;
+>                 int                skip  = *ppos - 1;
+>
+>                 LNET_LOCK();
+>
+>                 if (*ver_p != (unsigned 
+> int)the_lnet.ln_remote_nets_version) {
+>                         LNET_UNLOCK();
+>                         LIBCFS_FREE(tmpstr, tmpsiz);
+>                         return -ESTALE;
+>                 }
+>
+>                 n = the_lnet.ln_remote_nets.next;
+>
+>
+>
+> ------------------------------------------------------------------------
+>
+> _______________________________________________
+> Lustre-devel mailing list
+> Lustre-devel at lists.lustre.org
+> http://lists.lustre.org/mailman/listinfo/lustre-devel
+>   
+
+
+
+From Michael.Kluge at tu-dresden.de  Fri May 28 07:54:33 2010
+From: Michael.Kluge at tu-dresden.de (Michael Kluge)
+Date: Fri, 28 May 2010 16:54:33 +0200
+Subject: [Lustre-devel] Lustre RPC visualization
+In-Reply-To: <4BFC7177.9000808@oracle.com>
+References: <000c01cae6ee$1d4693d0$57d3bb70$%barton@oracle.com>
+	<4BD8E021.7050302@oracle.com> <4BD90FB9.5030702@tu-dresden.de>
+	<4BD9CF75.8030204@oracle.com> <4BDE8C3C.2050505@tu-dresden.de>
+	<699F57EF-52E6-41D1-A04B-3C39D469D133@oracle.com>
+	<4BDF1199.2030007@tu-dresden.de> <4BDF1CC7.5020502@oracle.com>
+	<4BDF24BC.9050701@tu-dresden.de> <4BDF2999.2000207@oracle.com>
+	<4BEFBB07.4030403@tu-dresden.de> <1274788995.2261.110.camel@radar>
+	<4BFC7177.9000808@oracle.com>
+Message-ID: <1275058473.21591.14.camel@radar>
+
+Hi WangDi,
+
+> Looks great! Just query, as you said, "All these counter can be broken 
+> down by the type of RPC (op code)" , you actually implemented that, but 
+> not shown in the attached picture? 
+
+Yes.
+
+> And could you please also add "Server queued RPCs" over time ?
+
+Already done.
+
+One good news: The Feature that Vampir can show something like a heat
+map (Eric asked about this) comes back with the release at ISC. It is
+now called "performance radar". It can produce a heat map for a counter
+and does some other things as well. I could send a picture around, but
+need at first an bigger trace (more hosts generating traces in
+parallel).
+
+
+Regards, Michael
+
+> Thanks
+> WangDi
+> 
+> Michael Kluge wrote:
+> > Hi WangDi,
+> >
+> > so, for the moment I am done with what I promised. The work to be done
+> > is mainly debugging with more input data sets. Screenshot of Vampir
+> > showing the derived counter values for the RPC processing/queue times on
+> > the server and the client is attached. Units for the values are either
+> > microseconds or just a number.
+> >
+> >
+> > Regards, Michael
+> >
+> > Am Sonntag, den 16.05.2010, 11:29 +0200 schrieb Michael Kluge: 
+> >   
+> >> Hi WangDi,
+> >>
+> >> the first version works. Screenshot is attached. I have a couple of 
+> >> counter realized: RPC's in flight and RPC's completed in total on the 
+> >> client, RPC's enqueued, RPC's in processing and RPC'c completed in total 
+> >> on the server. All these counter can be broken down by the type of RPC 
+> >> (op code). The picture has not yet the lines that show each single RPC, 
+> >> I still have to do counter like "avg. time to complete an RPC over the 
+> >> last second" and there are some more TODO's. Like the timer 
+> >> synchronization. (In the screenshot the first and the last counter show 
+> >> total values while the one in the middle shows a rate.)
+> >>
+> >> What I like to have is a complete set of traces from a small cluster 
+> >> (<100 nodes) including the servers. Would that be possible?
+> >>
+> >> Is one of you in Hamburg May, 31-June, 3 for ISC'2010? I'll be there and 
+> >> like to talk about what would be useful for the next steps.
+> >>
+> >>
+> >> Regards, Michael
+> >>
+> >> Am 03.05.2010 21:52, schrieb di.wang:
+> >>     
+> >>> Michael Kluge wrote:
+> >>>       
+> >>>>>> One more question: RPC 1334380768266400 (in the log WangDi sent me)
+> >>>>>> has on the client side only a "Sending RPC" message, thus missing the
+> >>>>>> "Completed RPC". The server has all three (received,start work, done
+> >>>>>> work). Has this RPC vanished on the way back to the client? There is
+> >>>>>> no further indication what happend. The last timestamp in the client
+> >>>>>> log is:
+> >>>>>> 1272565368.228628
+> >>>>>> and the server says it finished the processing of the request at:
+> >>>>>> 1272565281.379471
+> >>>>>> So the client log has been recorded long enough to contain the
+> >>>>>> "Completed RPC" message for this RPC if it arrived ever ...
+> >>>>>>             
+> >>>>> Logically, yes. But in some cases, some debug logs might be abandoned
+> >>>>> for some reasons(actually, it happens not rarely), and probably you need
+> >>>>> maintain an average time from server "Handled RPC" to client "Completed
+> >>>>> RPC", then you just guess the client "Completed RPC" time in this case.
+> >>>>>           
+> >>>> Oh my gosh ;) I don't want to start speculations about the helpfulness
+> >>>> of incomplete debug logs. Anyway, what can get lost? Any kind of
+> >>>> message on the servers and clients? I think I'd like to know what
+> >>>> cases have to be handled while I try to track individual RPC's on
+> >>>> their way.
+> >>>>         
+> >>> Any records can get lost here. Unfortunately, there are not any messages
+> >>> indicate the missing happened. :(
+> >>> (Usually, I would check the time stamp in the log, i.e. no records for a
+> >>> "long" time, for example several seconds, but this is not the accurate
+> >>> way).
+> >>>
+> >>> I guess you can just ignore these uncompleted records in your first
+> >>> step? Let's see how these incomplete log will
+> >>> impact the profiling result, then we will decide how to deal with this?
+> >>>
+> >>> Thanks
+> >>> Wangdi
+> >>>       
+> >>>> Regards, Michael
+> >>>> _______________________________________________
+> >>>> Lustre-devel mailing list
+> >>>> Lustre-devel at lists.lustre.org
+> >>>> http://lists.lustre.org/mailman/listinfo/lustre-devel
+> >>>>         
+> >>>       
+> >> _______________________________________________
+> >> Lustre-devel mailing list
+> >> Lustre-devel at lists.lustre.org
+> >> http://lists.lustre.org/mailman/listinfo/lustre-devel
+> >>     
+> >
+> >   
+> >
+> > ------------------------------------------------------------------------
+> >
+> 
+> 
+
+-- 
+
+Michael Kluge, M.Sc.
+
+Technische Universit?t Dresden
+Center for Information Services and
+High Performance Computing (ZIH)
+D-01062 Dresden
+Germany
+
+Contact:
+Willersbau, Room A 208
+Phone:  (+49) 351 463-34217
+Fax:    (+49) 351 463-37773
+e-mail: michael.kluge at tu-dresden.de
+WWW:    http://www.tu-dresden.de/zih
+-------------- next part --------------
+A non-text attachment was scrubbed...
+Name: smime.p7s
+Type: application/x-pkcs7-signature
+Size: 5997 bytes
+Desc: not available
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20100528/3897d501/attachment.bin>
+
+From yuriy.umanets at clusterstor.com  Sat May 29 02:56:44 2010
+From: yuriy.umanets at clusterstor.com (Yuriy Umanets)
+Date: Sat, 29 May 2010 12:56:44 +0300
+Subject: [Lustre-devel] a bug in "lfs find" command (patch attached)
+Message-ID: <AANLkTilhS3lwnn0q-V0VdoDfj6j1x_gt0vWNurpDJihB@mail.gmail.com>
+
+hi Lustre people,
+
+One of our clients has found the bug in lfs find, which we have fixed. Patch
+is attached. Issue is that find_value_cmp() and how it gets params are
+buggy. Inversion made by inverting sign is completely wrong idea. Please see
+the patch for details.
+
+Examples:
+
+Let's create some files and try to find them:
+
+[root at victim tests]# touch /mnt/lustre/a
+[root at victim tests]# touch /mnt/lustre/b
+[root at victim tests]# echo 1 > /mnt/lustre/c
+[root at victim tests]# ls -la /mnt/lustre/
+total 12
+drwxr-xr-x  2 root root 4096 May 29 12:31 .
+drwxr-xr-x 11 root root 4096 May  4 22:50 ..
+-rw-r--r--  1 root root    0 May 29 12:31 a
+-rw-r--r--  1 root root    0 May 29 12:31 b
+-rw-r--r--  1 root root    2 May 29 12:31 c
+
+As you can see, there are 2 zero length files and one 2 bytes long file.
+
+Example of how it worked before fix:
+
+[root at victim tests]# ../utils/lfs find /mnt/lustre -s 0
+
+That is nothing found.
+
+[root at victim tests]# ../utils/lfs find /mnt/lustre -s 2
+
+Again nothing is found.
+
+[root at victim tests]# ../utils/lfs find /mnt/lustre ! -s 0
+
+Search for non zero length files also gives nothing.
+
+[root at victim tests]# ../utils/lfs find /mnt/lustre ! -s 1
+/mnt/lustre/a
+/mnt/lustre/b
+
+This finds two zero files but does not find one 2 bytes long file.
+
+After the fix:
+
+[root at victim tests]# ../utils/lfs find /mnt/lustre -s 0
+/mnt/lustre/a
+/mnt/lustre/b
+
+[root at victim tests]# ../utils/lfs find /mnt/lustre -s 2
+/mnt/lustre/c
+
+[root at victim tests]# ../utils/lfs find /mnt/lustre ! -s 0
+/mnt/lustre
+/mnt/lustre/c
+
+[root at victim tests]# ../utils/lfs find /mnt/lustre ! -s 1
+/mnt/lustre
+/mnt/lustre/a
+/mnt/lustre/b
+/mnt/lustre/c
+
+[root at victim tests]# ../utils/lfs find /mnt/lustre -s +1
+/mnt/lustre
+/mnt/lustre/c
+
+This found all with size 1 and more.
+
+[root at victim tests]# ../utils/lfs find /mnt/lustre -s -1
+/mnt/lustre/a
+/mnt/lustre/b
+
+This found all smaller than 1 byte long.
+
+[root at victim tests]# ../utils/lfs find /mnt/lustre -s -0
+/mnt/lustre/a
+/mnt/lustre/b
+
+This found all that 0 or smaller :)
+
+Should I create bug in bugzilla or posting it to lustre-devel@ is ok?
+
+Thanks.
+-- 
+umka
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20100529/4eefb2e7/attachment.htm>
+-------------- next part --------------
+A non-text attachment was scrubbed...
+Name: lfs-find-1.8.2.patch
+Type: application/octet-stream
+Size: 10073 bytes
+Desc: not available
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20100529/4eefb2e7/attachment.obj>
+
+From andreas.dilger at oracle.com  Sat May 29 09:22:49 2010
+From: andreas.dilger at oracle.com (Andreas Dilger)
+Date: Sat, 29 May 2010 10:22:49 -0600
+Subject: [Lustre-devel] a bug in "lfs find" command (patch attached)
+In-Reply-To: <AANLkTilhS3lwnn0q-V0VdoDfj6j1x_gt0vWNurpDJihB@mail.gmail.com>
+References: <AANLkTilhS3lwnn0q-V0VdoDfj6j1x_gt0vWNurpDJihB@mail.gmail.com>
+Message-ID: <58780E32-8CA1-404C-9A37-FC14CD4CB002@oracle.com>
+
+Yuriy, thanks for looking into this.  However, I think that the patch  
+is not quite correct (though I haven't tested it yet). The issue is  
+that the negation applies to each parameter individually, and not  
+globally as you have changed it to be.
+
+That means that tests like:
+
+lfs find -mtime +1 ! -size 4
+
+Will now negate both the mtime and the size checks.  It seems that the  
+correct thing to do is to store a per-test negation in the find params.
+
+It is probably best to submit patches directly via bugzilla so that  
+they don't get lost.
+
+Please also make sure that there is an appropriate test in sanity.sh  
+for the functionality being fixed.  There are already a number of lfs  
+find tests, so new tests should be pit together.
+
+Cheers, Andreas
+
+On 2010-05-29, at 3:56, Yuriy Umanets <yuriy.umanets at clusterstor.com>  
+wrote:
+
+> hi Lustre people,
+>
+> One of our clients has found the bug in lfs find, which we have  
+> fixed. Patch is attached. Issue is that find_value_cmp() and how it  
+> gets params are buggy. Inversion made by inverting sign is  
+> completely wrong idea. Please see the patch for details.
+>
+> Examples:
+>
+> Let's create some files and try to find them:
+>
+> [root at victim tests]# touch /mnt/lustre/a
+> [root at victim tests]# touch /mnt/lustre/b
+> [root at victim tests]# echo 1 > /mnt/lustre/c
+> [root at victim tests]# ls -la /mnt/lustre/
+> total 12
+> drwxr-xr-x  2 root root 4096 May 29 12:31 .
+> drwxr-xr-x 11 root root 4096 May  4 22:50 ..
+> -rw-r--r--  1 root root    0 May 29 12:31 a
+> -rw-r--r--  1 root root    0 May 29 12:31 b
+> -rw-r--r--  1 root root    2 May 29 12:31 c
+>
+> As you can see, there are 2 zero length files and one 2 bytes long  
+> file.
+>
+> Example of how it worked before fix:
+>
+> [root at victim tests]# ../utils/lfs find /mnt/lustre -s 0
+>
+> That is nothing found.
+>
+> [root at victim tests]# ../utils/lfs find /mnt/lustre -s 2
+>
+> Again nothing is found.
+>
+> [root at victim tests]# ../utils/lfs find /mnt/lustre ! -s 0
+>
+> Search for non zero length files also gives nothing.
+>
+> [root at victim tests]# ../utils/lfs find /mnt/lustre ! -s 1
+> /mnt/lustre/a
+> /mnt/lustre/b
+>
+> This finds two zero files but does not find one 2 bytes long file.
+>
+> After the fix:
+>
+> [root at victim tests]# ../utils/lfs find /mnt/lustre -s 0
+> /mnt/lustre/a
+> /mnt/lustre/b
+>
+> [root at victim tests]# ../utils/lfs find /mnt/lustre -s 2
+> /mnt/lustre/c
+>
+> [root at victim tests]# ../utils/lfs find /mnt/lustre ! -s 0
+> /mnt/lustre
+> /mnt/lustre/c
+>
+> [root at victim tests]# ../utils/lfs find /mnt/lustre ! -s 1
+> /mnt/lustre
+> /mnt/lustre/a
+> /mnt/lustre/b
+> /mnt/lustre/c
+>
+> [root at victim tests]# ../utils/lfs find /mnt/lustre -s +1
+> /mnt/lustre
+> /mnt/lustre/c
+>
+> This found all with size 1 and more.
+>
+> [root at victim tests]# ../utils/lfs find /mnt/lustre -s -1
+> /mnt/lustre/a
+> /mnt/lustre/b
+>
+> This found all smaller than 1 byte long.
+>
+> [root at victim tests]# ../utils/lfs find /mnt/lustre -s -0
+> /mnt/lustre/a
+> /mnt/lustre/b
+>
+> This found all that 0 or smaller :)
+>
+> Should I create bug in bugzilla or posting it to lustre-devel@ is ok?
+>
+> Thanks.
+> -- 
+> umka
+> <lfs-find-1.8.2.patch>
+> _______________________________________________
+> Lustre-devel mailing list
+> Lustre-devel at lists.lustre.org
+> http://lists.lustre.org/mailman/listinfo/lustre-devel
+
+
+From yuriy.umanets at clusterstor.com  Sat May 29 11:42:32 2010
+From: yuriy.umanets at clusterstor.com (Yuriy Umanets)
+Date: Sat, 29 May 2010 21:42:32 +0300
+Subject: [Lustre-devel] a bug in "lfs find" command (patch attached)
+In-Reply-To: <58780E32-8CA1-404C-9A37-FC14CD4CB002@oracle.com>
+References: <AANLkTilhS3lwnn0q-V0VdoDfj6j1x_gt0vWNurpDJihB@mail.gmail.com>
+	<58780E32-8CA1-404C-9A37-FC14CD4CB002@oracle.com>
+Message-ID: <AANLkTikOxHWT4gcwC24upvdWJlVBqq3iUFZnKOOCPWeT@mail.gmail.com>
+
+hi Andreas,
+
+On Sat, May 29, 2010 at 7:22 PM, Andreas Dilger
+<andreas.dilger at oracle.com>wrote:
+
+> Yuriy, thanks for looking into this.  However, I think that the patch is
+> not quite correct (though I haven't tested it yet). The issue is that the
+> negation applies to each parameter individually, and not globally as you
+> have changed it to be.
+>
+> That means that tests like:
+>
+> lfs find -mtime +1 ! -size 4
+>
+> Will now negate both the mtime and the size checks.  It seems that the
+> correct thing to do is to store a per-test negation in the find params.
+>
+
+Yes, you are right. Lets make a bug in your bugzilla and work on this patch
+there a bit.
+
+>
+> It is probably best to submit patches directly via bugzilla so that they
+> don't get lost.
+>
+ok
+
+>
+> Please also make sure that there is an appropriate test in sanity.sh for
+> the functionality being fixed.  There are already a number of lfs find
+> tests, so new tests should be pit together.
+>
+> ok, got it.
+
+> Cheers, Andreas
+>
+> Thanks!
+
+>
+> On 2010-05-29, at 3:56, Yuriy Umanets <yuriy.umanets at clusterstor.com>
+> wrote:
+>
+>  hi Lustre people,
+>>
+>> One of our clients has found the bug in lfs find, which we have fixed.
+>> Patch is attached. Issue is that find_value_cmp() and how it gets params are
+>> buggy. Inversion made by inverting sign is completely wrong idea. Please see
+>> the patch for details.
+>>
+>> Examples:
+>>
+>> Let's create some files and try to find them:
+>>
+>> [root at victim tests]# touch /mnt/lustre/a
+>> [root at victim tests]# touch /mnt/lustre/b
+>> [root at victim tests]# echo 1 > /mnt/lustre/c
+>> [root at victim tests]# ls -la /mnt/lustre/
+>> total 12
+>> drwxr-xr-x  2 root root 4096 May 29 12:31 .
+>> drwxr-xr-x 11 root root 4096 May  4 22:50 ..
+>> -rw-r--r--  1 root root    0 May 29 12:31 a
+>> -rw-r--r--  1 root root    0 May 29 12:31 b
+>> -rw-r--r--  1 root root    2 May 29 12:31 c
+>>
+>> As you can see, there are 2 zero length files and one 2 bytes long file.
+>>
+>> Example of how it worked before fix:
+>>
+>> [root at victim tests]# ../utils/lfs find /mnt/lustre -s 0
+>>
+>> That is nothing found.
+>>
+>> [root at victim tests]# ../utils/lfs find /mnt/lustre -s 2
+>>
+>> Again nothing is found.
+>>
+>> [root at victim tests]# ../utils/lfs find /mnt/lustre ! -s 0
+>>
+>> Search for non zero length files also gives nothing.
+>>
+>> [root at victim tests]# ../utils/lfs find /mnt/lustre ! -s 1
+>> /mnt/lustre/a
+>> /mnt/lustre/b
+>>
+>> This finds two zero files but does not find one 2 bytes long file.
+>>
+>> After the fix:
+>>
+>> [root at victim tests]# ../utils/lfs find /mnt/lustre -s 0
+>> /mnt/lustre/a
+>> /mnt/lustre/b
+>>
+>> [root at victim tests]# ../utils/lfs find /mnt/lustre -s 2
+>> /mnt/lustre/c
+>>
+>> [root at victim tests]# ../utils/lfs find /mnt/lustre ! -s 0
+>> /mnt/lustre
+>> /mnt/lustre/c
+>>
+>> [root at victim tests]# ../utils/lfs find /mnt/lustre ! -s 1
+>> /mnt/lustre
+>> /mnt/lustre/a
+>> /mnt/lustre/b
+>> /mnt/lustre/c
+>>
+>> [root at victim tests]# ../utils/lfs find /mnt/lustre -s +1
+>> /mnt/lustre
+>> /mnt/lustre/c
+>>
+>> This found all with size 1 and more.
+>>
+>> [root at victim tests]# ../utils/lfs find /mnt/lustre -s -1
+>> /mnt/lustre/a
+>> /mnt/lustre/b
+>>
+>> This found all smaller than 1 byte long.
+>>
+>> [root at victim tests]# ../utils/lfs find /mnt/lustre -s -0
+>> /mnt/lustre/a
+>> /mnt/lustre/b
+>>
+>> This found all that 0 or smaller :)
+>>
+>> Should I create bug in bugzilla or posting it to lustre-devel@ is ok?
+>>
+>> Thanks.
+>> --
+>> umka
+>> <lfs-find-1.8.2.patch>
+>> _______________________________________________
+>> Lustre-devel mailing list
+>> Lustre-devel at lists.lustre.org
+>> http://lists.lustre.org/mailman/listinfo/lustre-devel
+>>
+>
+
+
+-- 
+umka
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20100529/23ff00ae/attachment.htm>
+

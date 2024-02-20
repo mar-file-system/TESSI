@@ -1,0 +1,3434 @@
+From happe at nbi.dk  Tue Mar  3 07:12:16 2020
+From: happe at nbi.dk (Hans Henrik Happe)
+Date: Tue, 3 Mar 2020 16:12:16 +0100
+Subject: [lustre-discuss] Nodemap and setreuid/setregid
+In-Reply-To: <2128aea1-4599-0772-89b6-04c9707dad8b@nbi.dk>
+References: <603a182d-f26d-808f-0f28-5642594f3941@nbi.dk>
+ <7C9CA931-6DA1-42FE-B908-891E28BB5451@ddn.com>
+ <018785aa-c12e-8c5b-8b70-0cf86e368a31@nbi.dk>
+ <0E2242A7-24EF-4803-A66D-44A3FA12A7FC@ddn.com>
+ <00bbb994-ea66-4af8-7aa4-67ee40b51842@nbi.dk>
+ <2128aea1-4599-0772-89b6-04c9707dad8b@nbi.dk>
+Message-ID: <ae234deb-a9fa-9805-6749-d3e05c790b8f@nbi.dk>
+
+Hi,
+
+Did the test 2.12.4 with the same result. Also, I narrowed it down to
+SSK only. It also happens without nodemaps being activated.
+
+@Sebastian: I wonder if you did test this with SSK? I was very focused
+on nodemaps being the cause to start with.
+
+Cheers,
+Hans Henrik
+
+On 29.02.2020 23.44, Hans Henrik Happe wrote:
+> Hi,
+> 
+> Sorry for the delay. I had to spend some time nursing the glusterfs that
+> this lustre fs will replace :-)
+> 
+> Anyway, I've created a procedure to reproduce the issue. It's attached
+> together with the testing program.
+> 
+> Basically, its a simple single mgs,mdt,oss setup, with a nodemap, that
+> maps a client to a fileset. This works fine. However, when turning on
+> SSK for cli2mdt the issue appears.
+> 
+> This was for 2.12.3, I will move on to 2.12.4 just to check.
+> 
+> Cheers,
+> Hans Henrik
+> 
+> On 06.02.2020 23.08, Hans Henrik Happe wrote:
+>> Hi Sebastien,
+>>
+>> Thanks for looking into this.
+>>
+>> You are right that nodemap deactivation didn't affect the outcome. I
+>> must have made a mistake and cannot reproduce.
+>>
+>> The uid/gid are on the mds. I can do a sudo to the user and run the test
+>> program successfully.
+>>
+>> I forgot to mention that I use SSK in ski mode.
+>>
+>> I think I will start from scratch and see if I can reproduce and find
+>> out at what point it stops working.
+>>
+>> Cheers,
+>> Hans Henrik
+>>
+>> On 06.02.2020 18.19, Sebastien Buisson wrote:
+>>> Hi,
+>>>
+>>> I am not able to reproduce your issue. I compiled your C program, in all cases I am not getting Permission Denied.
+>>>
+>>> You say that it works when you deactivate the nodemap. But given that you have a fileset on your nodemap entry ? sif ?, when you deactivate it you might end up doing IOs in a different directory. So you might compare different things.
+>>> Also, does the uid/gid 20501 exist on server side?
+>>>
+>>> Cheers,
+>>> Sebastien.
+>>>
+>>>> Le 6 f?vr. 2020 ? 14:29, Hans Henrik Happe <happe at nbi.dk> a ?crit :
+>>>>
+>>>> Hi,
+>>>>
+>>>> Thanks for a very quick reply :-) Here are the map:
+>>>>
+>>>> # lctl get_param nodemap.sif.*
+>>>> nodemap.sif.admin_nodemap=1
+>>>> nodemap.sif.audit_mode=1
+>>>> nodemap.sif.deny_unknown=0
+>>>> nodemap.sif.exports=
+>>>> [
+>>>>  { nid: 172.25.10.51 at tcp, uuid: 56bb9b04-9bb5-d7b5-3f50-d62804690db1 },
+>>>> ]
+>>>> nodemap.sif.fileset=/sif
+>>>> nodemap.sif.id=2
+>>>> nodemap.sif.idmap=
+>>>> [
+>>>>  { idtype: uid, client_id: 501, fs_id: 20501 },
+>>>>  { idtype: gid, client_id: 501, fs_id: 20501 }
+>>>> ]
+>>>> nodemap.sif.map_mode=both
+>>>> nodemap.sif.ranges=
+>>>> [
+>>>>  { id: 11, start_nid: 172.25.1.28 at tcp, end_nid: 172.25.1.28 at tcp },
+>>>>  { id: 10, start_nid: 172.25.1.27 at tcp, end_nid: 172.25.1.27 at tcp },
+>>>>  { id: 9, start_nid: 172.25.10.51 at tcp, end_nid: 172.25.10.51 at tcp }
+>>>> ]
+>>>> nodemap.sif.sepol=
+>>>>
+>>>> nodemap.sif.squash_gid=20000
+>>>> nodemap.sif.squash_uid=20000
+>>>> nodemap.sif.trusted_nodemap=0
+>>>>
+>>>> Cheers,
+>>>> Hans Henrik
+>>>>
+>>>> On 06.02.2020 14.17, Sebastien Buisson wrote:
+>>>>> Hi,
+>>>>>
+>>>>> It might be due to a property on the nodemap you defined.
+>>>>> Could you please dump your nodemap definition?
+>>>>>
+>>>>> Thanks,
+>>>>> Sebastien.
+>>>>>
+>>>>>
+>>>>>> Le 6 f?vr. 2020 ? 14:14, Hans Henrik Happe <happe at nbi.dk>
+>>>>>>  a ?crit :
+>>>>>>
+>>>>>> Hi,
+>>>>>>
+>>>>>> Has anyone had success with gocryptfs 1.7.x on top of a Lustre nodemap?
+>>>>>>
+>>>>>> I've tested with Lustre 2.12.3.
+>>>>>>
+>>>>>> I found that gocryptfs 1.6 worked. However, with 1.7.x I got a lot of
+>>>>>> "Permission denied". I tried all permutations of trusted and admin on
+>>>>>> the nodemap.
+>>>>>>
+>>>>>> By stracing a bit, I've created a small peace of code provoking the issue:
+>>>>>>
+>>>>>> ---
+>>>>>>
+>>>>>> #include <unistd.h>
+>>>>>> #include <sys/types.h>
+>>>>>> #include <fcntl.h>
+>>>>>> #include <stdio.h>
+>>>>>>
+>>>>>> int main() {
+>>>>>>  int r;
+>>>>>>
+>>>>>>  setregid(-1, 501);
+>>>>>>  setreuid(-1, 501);
+>>>>>>
+>>>>>>  r = open("foo", O_CREAT, S_IRWXU);
+>>>>>>  if (r < 0) {
+>>>>>>    perror("open");
+>>>>>>  }
+>>>>>>  return 0;
+>>>>>> }
+>>>>>>
+>>>>>> ---
+>>>>>>
+>>>>>>
+>>>>>>
+>>>>>> When run as root in a directory owned by uid=501 and gid=501 in a
+>>>>>> nodemap based Lustre fs it returns:
+>>>>>>
+>>>>>> open: Permission denied
+>>>>>>
+>>>>>> Works when I deactivate nodemap (lctl nodemap_activate 0) or just use a
+>>>>>> plain local fs.
+>>>>>>
+>>>>>> I don't think this is intended behavior for nodemaps, but I might be wrong.
+>>>>>>
+>>>>>> Cheers,
+>>>>>> Hans Henrik
+>>>>>> _______________________________________________
+>>>>>> lustre-discuss mailing list
+>>>>>>
+>>>>>> lustre-discuss at lists.lustre.org
+>>>>>> http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org
+>>>> _______________________________________________
+>>>> lustre-discuss mailing list
+>>>> lustre-discuss at lists.lustre.org
+>>>> http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org
+>> _______________________________________________
+>> lustre-discuss mailing list
+>> lustre-discuss at lists.lustre.org
+>> http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org
+> 
+> 
+> _______________________________________________
+> lustre-discuss mailing list
+> lustre-discuss at lists.lustre.org
+> http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org
+> 
+
+From sbuisson at ddn.com  Tue Mar  3 07:30:28 2020
+From: sbuisson at ddn.com (Sebastien Buisson)
+Date: Tue, 3 Mar 2020 15:30:28 +0000
+Subject: [lustre-discuss] Nodemap and setreuid/setregid
+In-Reply-To: <ae234deb-a9fa-9805-6749-d3e05c790b8f@nbi.dk>
+References: <603a182d-f26d-808f-0f28-5642594f3941@nbi.dk>
+ <7C9CA931-6DA1-42FE-B908-891E28BB5451@ddn.com>
+ <018785aa-c12e-8c5b-8b70-0cf86e368a31@nbi.dk>
+ <0E2242A7-24EF-4803-A66D-44A3FA12A7FC@ddn.com>
+ <00bbb994-ea66-4af8-7aa4-67ee40b51842@nbi.dk>
+ <2128aea1-4599-0772-89b6-04c9707dad8b@nbi.dk>
+ <ae234deb-a9fa-9805-6749-d3e05c790b8f@nbi.dk>
+Message-ID: <5EECAA2E-6180-46B1-8A23-158BD0BAC46E@ddn.com>
+
+Hi,
+
+I was focused on nodemaps, so I did not try with SSK.
+
+Cheers,
+Sebastien.
+
+> Le 3 mars 2020 ? 16:12, Hans Henrik Happe <happe at nbi.dk> a ?crit :
+> 
+> Hi,
+> 
+> Did the test 2.12.4 with the same result. Also, I narrowed it down to
+> SSK only. It also happens without nodemaps being activated.
+> 
+> @Sebastian: I wonder if you did test this with SSK? I was very focused
+> on nodemaps being the cause to start with.
+> 
+> Cheers,
+> Hans Henrik
+> 
+> On 29.02.2020 23.44, Hans Henrik Happe wrote:
+>> Hi,
+>> 
+>> Sorry for the delay. I had to spend some time nursing the glusterfs that
+>> this lustre fs will replace :-)
+>> 
+>> Anyway, I've created a procedure to reproduce the issue. It's attached
+>> together with the testing program.
+>> 
+>> Basically, its a simple single mgs,mdt,oss setup, with a nodemap, that
+>> maps a client to a fileset. This works fine. However, when turning on
+>> SSK for cli2mdt the issue appears.
+>> 
+>> This was for 2.12.3, I will move on to 2.12.4 just to check.
+>> 
+>> Cheers,
+>> Hans Henrik
+>> 
+>> On 06.02.2020 23.08, Hans Henrik Happe wrote:
+>>> Hi Sebastien,
+>>> 
+>>> Thanks for looking into this.
+>>> 
+>>> You are right that nodemap deactivation didn't affect the outcome. I
+>>> must have made a mistake and cannot reproduce.
+>>> 
+>>> The uid/gid are on the mds. I can do a sudo to the user and run the test
+>>> program successfully.
+>>> 
+>>> I forgot to mention that I use SSK in ski mode.
+>>> 
+>>> I think I will start from scratch and see if I can reproduce and find
+>>> out at what point it stops working.
+>>> 
+>>> Cheers,
+>>> Hans Henrik
+>>> 
+>>> On 06.02.2020 18.19, Sebastien Buisson wrote:
+>>>> Hi,
+>>>> 
+>>>> I am not able to reproduce your issue. I compiled your C program, in all cases I am not getting Permission Denied.
+>>>> 
+>>>> You say that it works when you deactivate the nodemap. But given that you have a fileset on your nodemap entry ? sif ?, when you deactivate it you might end up doing IOs in a different directory. So you might compare different things.
+>>>> Also, does the uid/gid 20501 exist on server side?
+>>>> 
+>>>> Cheers,
+>>>> Sebastien.
+>>>> 
+>>>>> Le 6 f?vr. 2020 ? 14:29, Hans Henrik Happe <happe at nbi.dk> a ?crit :
+>>>>> 
+>>>>> Hi,
+>>>>> 
+>>>>> Thanks for a very quick reply :-) Here are the map:
+>>>>> 
+>>>>> # lctl get_param nodemap.sif.*
+>>>>> nodemap.sif.admin_nodemap=1
+>>>>> nodemap.sif.audit_mode=1
+>>>>> nodemap.sif.deny_unknown=0
+>>>>> nodemap.sif.exports=
+>>>>> [
+>>>>> { nid: 172.25.10.51 at tcp, uuid: 56bb9b04-9bb5-d7b5-3f50-d62804690db1 },
+>>>>> ]
+>>>>> nodemap.sif.fileset=/sif
+>>>>> nodemap.sif.id=2
+>>>>> nodemap.sif.idmap=
+>>>>> [
+>>>>> { idtype: uid, client_id: 501, fs_id: 20501 },
+>>>>> { idtype: gid, client_id: 501, fs_id: 20501 }
+>>>>> ]
+>>>>> nodemap.sif.map_mode=both
+>>>>> nodemap.sif.ranges=
+>>>>> [
+>>>>> { id: 11, start_nid: 172.25.1.28 at tcp, end_nid: 172.25.1.28 at tcp },
+>>>>> { id: 10, start_nid: 172.25.1.27 at tcp, end_nid: 172.25.1.27 at tcp },
+>>>>> { id: 9, start_nid: 172.25.10.51 at tcp, end_nid: 172.25.10.51 at tcp }
+>>>>> ]
+>>>>> nodemap.sif.sepol=
+>>>>> 
+>>>>> nodemap.sif.squash_gid=20000
+>>>>> nodemap.sif.squash_uid=20000
+>>>>> nodemap.sif.trusted_nodemap=0
+>>>>> 
+>>>>> Cheers,
+>>>>> Hans Henrik
+>>>>> 
+>>>>> On 06.02.2020 14.17, Sebastien Buisson wrote:
+>>>>>> Hi,
+>>>>>> 
+>>>>>> It might be due to a property on the nodemap you defined.
+>>>>>> Could you please dump your nodemap definition?
+>>>>>> 
+>>>>>> Thanks,
+>>>>>> Sebastien.
+>>>>>> 
+>>>>>> 
+>>>>>>> Le 6 f?vr. 2020 ? 14:14, Hans Henrik Happe <happe at nbi.dk>
+>>>>>>> a ?crit :
+>>>>>>> 
+>>>>>>> Hi,
+>>>>>>> 
+>>>>>>> Has anyone had success with gocryptfs 1.7.x on top of a Lustre nodemap?
+>>>>>>> 
+>>>>>>> I've tested with Lustre 2.12.3.
+>>>>>>> 
+>>>>>>> I found that gocryptfs 1.6 worked. However, with 1.7.x I got a lot of
+>>>>>>> "Permission denied". I tried all permutations of trusted and admin on
+>>>>>>> the nodemap.
+>>>>>>> 
+>>>>>>> By stracing a bit, I've created a small peace of code provoking the issue:
+>>>>>>> 
+>>>>>>> ---
+>>>>>>> 
+>>>>>>> #include <unistd.h>
+>>>>>>> #include <sys/types.h>
+>>>>>>> #include <fcntl.h>
+>>>>>>> #include <stdio.h>
+>>>>>>> 
+>>>>>>> int main() {
+>>>>>>> int r;
+>>>>>>> 
+>>>>>>> setregid(-1, 501);
+>>>>>>> setreuid(-1, 501);
+>>>>>>> 
+>>>>>>> r = open("foo", O_CREAT, S_IRWXU);
+>>>>>>> if (r < 0) {
+>>>>>>>   perror("open");
+>>>>>>> }
+>>>>>>> return 0;
+>>>>>>> }
+>>>>>>> 
+>>>>>>> ---
+>>>>>>> 
+>>>>>>> 
+>>>>>>> 
+>>>>>>> When run as root in a directory owned by uid=501 and gid=501 in a
+>>>>>>> nodemap based Lustre fs it returns:
+>>>>>>> 
+>>>>>>> open: Permission denied
+>>>>>>> 
+>>>>>>> Works when I deactivate nodemap (lctl nodemap_activate 0) or just use a
+>>>>>>> plain local fs.
+>>>>>>> 
+>>>>>>> I don't think this is intended behavior for nodemaps, but I might be wrong.
+>>>>>>> 
+>>>>>>> Cheers,
+>>>>>>> Hans Henrik
+>>>>>>> _______________________________________________
+>>>>>>> lustre-discuss mailing list
+>>>>>>> 
+>>>>>>> lustre-discuss at lists.lustre.org
+>>>>>>> http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org
+>>>>> _______________________________________________
+>>>>> lustre-discuss mailing list
+>>>>> lustre-discuss at lists.lustre.org
+>>>>> http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org
+>>> _______________________________________________
+>>> lustre-discuss mailing list
+>>> lustre-discuss at lists.lustre.org
+>>> http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org
+>> 
+>> 
+>> _______________________________________________
+>> lustre-discuss mailing list
+>> lustre-discuss at lists.lustre.org
+>> http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org
+>> 
+> _______________________________________________
+> lustre-discuss mailing list
+> lustre-discuss at lists.lustre.org
+> http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org
+
+
+From ahkumar at mail.smu.edu  Tue Mar  3 12:25:04 2020
+From: ahkumar at mail.smu.edu (Kumar, Amit)
+Date: Tue, 3 Mar 2020 20:25:04 +0000
+Subject: [lustre-discuss] unable to precreate -52/-116
+Message-ID: <d1bd979735eb4bef927c90f93faeb3b1@mail.smu.edu>
+
+Dear Lustre,
+
+Recently we had a degraded(Not failed) RAID and had to wait longer to get compatible disk, as we had received incompatible one and it took over a week to get the correct one back in place.
+
+During this wait I ended up disabling the OST first and then noticed continuous IO to the OST and thought of disabling object creation on it as well. Everything looked normal after that and once the disk was replaced I reenabled object creation and enabled OST. Since then I started seeing these messages on OST
+...(ofd_dev.c:1784:ofd_create_hdl()) scratch0-OST0029: unable to precreate: rc = -52
+And following messages on MDS
+...(osp_precreate.c:1282:osp_precreate_thread()) scratch0-OST0029-osc-MDT0000: cannot precreate objects: rc = -116
+...(osp_precreate.c:657:osp_precreate_send()) scratch0-OST0029-osc-MDT0000: precreate fid [0x100290000:0x101b39a:0x0] < local used fid [0x100290000:0x101b39a:0x0]: rc = -116
+
+These messages don't seem to stop. I am wondering what impact could these errors have in long run? I have noticed I am not able to create files on this particular OST using lfs setstripe, when I do so it gets me an object on another OST by default. Just want to make sure this is not causing any data loss for files the currently on them and new requests?
+We plan to upgrade to 2.12 in the summer downtime and assuming that has a fix based on LU-9442 & LU-11186.  Currently running servers on lustre 10.4.1 over ZFS-0.7.9-1
+
+Any help is greatly appreciated.
+
+Thank you,
+Amit
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20200303/07f74011/attachment-0001.html>
+
+From harenberg at physik.uni-wuppertal.de  Wed Mar  4 23:48:38 2020
+From: harenberg at physik.uni-wuppertal.de (Torsten Harenberg)
+Date: Thu, 5 Mar 2020 08:48:38 +0100
+Subject: [lustre-discuss] old Lustre 2.8.0 panic'ing continously
+Message-ID: <c988af66-8c30-4502-f87c-abb1923ca0ea@physik.uni-wuppertal.de>
+
+Dear all,
+
+I know it's dared to ask for help for such an old system.
+
+We still run a CentOS 6 based Lustre 2.8.0 system
+(kernel-2.6.32-573.12.1.el6_lustre.x86_64,
+lustre-2.8.0-2.6.32_573.12.1.el6_lustre.x86_64.x86_64).
+
+It's out of warrenty and about to be replaced. The approval process for
+the new grant took over a year and we're currently preparing an EU wide
+tender, all of that takes and took much more time than we expected.
+
+The problem is:
+
+one OSS server is always running into a kernel panic. It seems that this
+kernel panic is related to one of the OSS mount points. If we mount the
+LUNs of that server (all data is on a 3par SAN) to a different server,
+this one is panic'ing, too.
+
+We always run file system checks after such a panic but these show only
+minor issues that you would expect after a crashed machine like
+
+[QUOTA WARNING] Usage inconsistent for ID 2901:actual (757747712, 217)
+!= expected (664182784, 215)
+
+We would love to avoid an upgrade to CentOS 7 with these old machines,
+but these crashes happen really often meanwhile and yesterday it
+panic'ed after only 30mins.
+
+Now we're running out of ideas.
+
+If anyone has an idea how we could identify the source of the problem,
+we would really appreciate it.
+
+Kind regards
+
+  Torsten
+
+
+-- 
+Dr. Torsten Harenberg     harenberg at physik.uni-wuppertal.de
+Bergische Universitaet
+Fakult?t 4 - Physik       Tel.: +49 (0)202 439-3521
+Gaussstr. 20              Fax : +49 (0)202 439-2811
+42097 Wuppertal
+
+-------------- next part --------------
+A non-text attachment was scrubbed...
+Name: smime.p7s
+Type: application/pkcs7-signature
+Size: 5341 bytes
+Desc: S/MIME Cryptographic Signature
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20200305/f1f3d799/attachment.bin>
+
+From degremoa at amazon.com  Thu Mar  5 01:20:06 2020
+From: degremoa at amazon.com (Degremont, Aurelien)
+Date: Thu, 5 Mar 2020 09:20:06 +0000
+Subject: [lustre-discuss] old Lustre 2.8.0 panic'ing continously
+In-Reply-To: <c988af66-8c30-4502-f87c-abb1923ca0ea@physik.uni-wuppertal.de>
+References: <c988af66-8c30-4502-f87c-abb1923ca0ea@physik.uni-wuppertal.de>
+Message-ID: <F36D2038-30F1-4346-BB24-630743C28B18@amazon.com>
+
+Hello Torsten,
+
+- What is the exact error message when the panic happens? Could you copy/paste few log messages from this panic message?
+- Did you try searching for this pattern onto jira.whamcloud.com, to see if this is an already known bug.
+- It seems related to quota. Is disabling quota an option for you?
+- Lustre 2.10.8 supports CentOS 6 and was a LTS Lustre version, it got a lot more fixes and is very stable. It could be an easy upgrade path for you before getting your new system?
+
+Aur?lien
+
+?Le 05/03/2020 08:49, ? lustre-discuss au nom de Torsten Harenberg ? <lustre-discuss-bounces at lists.lustre.org au nom de harenberg at physik.uni-wuppertal.de> a ?crit :
+
+    CAUTION: This email originated from outside of the organization. Do not click links or open attachments unless you can confirm the sender and know the content is safe.
+    
+    
+    
+    Dear all,
+    
+    I know it's dared to ask for help for such an old system.
+    
+    We still run a CentOS 6 based Lustre 2.8.0 system
+    (kernel-2.6.32-573.12.1.el6_lustre.x86_64,
+    lustre-2.8.0-2.6.32_573.12.1.el6_lustre.x86_64.x86_64).
+    
+    It's out of warrenty and about to be replaced. The approval process for
+    the new grant took over a year and we're currently preparing an EU wide
+    tender, all of that takes and took much more time than we expected.
+    
+    The problem is:
+    
+    one OSS server is always running into a kernel panic. It seems that this
+    kernel panic is related to one of the OSS mount points. If we mount the
+    LUNs of that server (all data is on a 3par SAN) to a different server,
+    this one is panic'ing, too.
+    
+    We always run file system checks after such a panic but these show only
+    minor issues that you would expect after a crashed machine like
+    
+    [QUOTA WARNING] Usage inconsistent for ID 2901:actual (757747712, 217)
+    != expected (664182784, 215)
+    
+    We would love to avoid an upgrade to CentOS 7 with these old machines,
+    but these crashes happen really often meanwhile and yesterday it
+    panic'ed after only 30mins.
+    
+    Now we're running out of ideas.
+    
+    If anyone has an idea how we could identify the source of the problem,
+    we would really appreciate it.
+    
+    Kind regards
+    
+      Torsten
+    
+    
+    --
+    Dr. Torsten Harenberg     harenberg at physik.uni-wuppertal.de
+    Bergische Universitaet
+    Fakult?t 4 - Physik       Tel.: +49 (0)202 439-3521
+    Gaussstr. 20              Fax : +49 (0)202 439-2811
+    42097 Wuppertal
+    
+    
+
+
+From harenberg at physik.uni-wuppertal.de  Thu Mar  5 02:46:09 2020
+From: harenberg at physik.uni-wuppertal.de (Torsten Harenberg)
+Date: Thu, 5 Mar 2020 11:46:09 +0100
+Subject: [lustre-discuss] old Lustre 2.8.0 panic'ing continously
+In-Reply-To: <F36D2038-30F1-4346-BB24-630743C28B18@amazon.com>
+References: <c988af66-8c30-4502-f87c-abb1923ca0ea@physik.uni-wuppertal.de>
+ <F36D2038-30F1-4346-BB24-630743C28B18@amazon.com>
+Message-ID: <fa32daa0-5dc5-f9a0-a721-268eb764a659@physik.uni-wuppertal.de>
+
+Hi Aur?lien,
+
+thanks for your quick reply, really appreciate it.
+
+Am 05.03.20 um 10:20 schrieb Degremont, Aurelien:
+> - What is the exact error message when the panic happens? Could you copy/paste few log messages from this panic message?
+
+a running ssh shell only shows
+
+kernel panic - not synced.
+
+No trace, nothing. I will try to capture the console next time that happens.
+
+> - Did you try searching for this pattern onto jira.whamcloud.com, to see if this is an already known bug.
+
+yes.. though not deeply. Was difficult, as kdump is not installed on
+that one and I was a bit afraid to deeply touch the system as we bought
+it pre-installed and the kdump-tools are not installed and /var/crash is
+empty, so I fear kdump was not configured :-( So my only knowledge is
+that the kernel panics :-(
+
+> - It seems related to quota. Is disabling quota an option for you?
+
+not easily, the system is always full and enforcing group quotas was our
+way so far to keep the system from physically reach 100%. But of course
+we could talk to the users and ask them to behave nicely.
+
+> - Lustre 2.10.8 supports CentOS 6 and was a LTS Lustre version, it got a lot more fixes and is very stable. It could be an easy upgrade path for you before getting your new system?
+
+That would be great!!!!!! Where do you find the server RPMs for this
+version? I couldn't find them on whamcloud:
+
+https://downloads.whamcloud.com/public/lustre/lustre-2.10.8/
+
+only contains server RPMS for el7 as far as I can see.
+
+Thanks again
+
+ Torsten
+
+
+-- 
+Dr. Torsten Harenberg     harenberg at physik.uni-wuppertal.de
+Bergische Universitaet
+Fakult?t 4 - Physik       Tel.: +49 (0)202 439-3521
+Gaussstr. 20              Fax : +49 (0)202 439-2811
+42097 Wuppertal
+
+-------------- next part --------------
+A non-text attachment was scrubbed...
+Name: smime.p7s
+Type: application/pkcs7-signature
+Size: 5341 bytes
+Desc: S/MIME Cryptographic Signature
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20200305/409c25c2/attachment-0001.bin>
+
+From degremoa at amazon.com  Thu Mar  5 02:53:54 2020
+From: degremoa at amazon.com (Degremont, Aurelien)
+Date: Thu, 5 Mar 2020 10:53:54 +0000
+Subject: [lustre-discuss] old Lustre 2.8.0 panic'ing continously
+In-Reply-To: <fa32daa0-5dc5-f9a0-a721-268eb764a659@physik.uni-wuppertal.de>
+References: <c988af66-8c30-4502-f87c-abb1923ca0ea@physik.uni-wuppertal.de>
+ <F36D2038-30F1-4346-BB24-630743C28B18@amazon.com>
+ <fa32daa0-5dc5-f9a0-a721-268eb764a659@physik.uni-wuppertal.de>
+Message-ID: <060C4806-8775-4C5E-94D2-60AD543BF2E1@amazon.com>
+
+I understand you want to avoid deploying kdump, but you should focus on saving your console history somewhere. It will be difficult to help without the panic message.
+
+For 2.10, maybe I was a bit optimistic. I think you should be able to build the RPMs from sources, but pre-build packages are not available.
+
+
+Aur?lien
+
+?Le 05/03/2020 11:47, ? Torsten Harenberg ? <harenberg at physik.uni-wuppertal.de> a ?crit :
+
+    Hi Aur?lien,
+    
+    thanks for your quick reply, really appreciate it.
+    
+    Am 05.03.20 um 10:20 schrieb Degremont, Aurelien:
+    > - What is the exact error message when the panic happens? Could you copy/paste few log messages from this panic message?
+    
+    a running ssh shell only shows
+    
+    kernel panic - not synced.
+    
+    No trace, nothing. I will try to capture the console next time that happens.
+    
+    > - Did you try searching for this pattern onto jira.whamcloud.com, to see if this is an already known bug.
+    
+    yes.. though not deeply. Was difficult, as kdump is not installed on
+    that one and I was a bit afraid to deeply touch the system as we bought
+    it pre-installed and the kdump-tools are not installed and /var/crash is
+    empty, so I fear kdump was not configured :-( So my only knowledge is
+    that the kernel panics :-(
+    
+    > - It seems related to quota. Is disabling quota an option for you?
+    
+    not easily, the system is always full and enforcing group quotas was our
+    way so far to keep the system from physically reach 100%. But of course
+    we could talk to the users and ask them to behave nicely.
+    
+    > - Lustre 2.10.8 supports CentOS 6 and was a LTS Lustre version, it got a lot more fixes and is very stable. It could be an easy upgrade path for you before getting your new system?
+    
+    That would be great!!!!!! Where do you find the server RPMs for this
+    version? I couldn't find them on whamcloud:
+    
+    https://downloads.whamcloud.com/public/lustre/lustre-2.10.8/
+    
+    only contains server RPMS for el7 as far as I can see.
+    
+    Thanks again
+    
+     Torsten
+    
+    
+    -- 
+    Dr. Torsten Harenberg     harenberg at physik.uni-wuppertal.de
+    Bergische Universitaet
+    Fakult?t 4 - Physik       Tel.: +49 (0)202 439-3521
+    Gaussstr. 20              Fax : +49 (0)202 439-2811
+    42097 Wuppertal
+    
+    
+
+
+From rmohr at utk.edu  Thu Mar  5 08:11:34 2020
+From: rmohr at utk.edu (Mohr Jr, Richard Frank)
+Date: Thu, 5 Mar 2020 16:11:34 +0000
+Subject: [lustre-discuss] old Lustre 2.8.0 panic'ing continously
+In-Reply-To: <c988af66-8c30-4502-f87c-abb1923ca0ea@physik.uni-wuppertal.de>
+References: <c988af66-8c30-4502-f87c-abb1923ca0ea@physik.uni-wuppertal.de>
+Message-ID: <21124AF9-DE5E-4C31-901D-E961D872E64C@utk.edu>
+
+
+
+> On Mar 5, 2020, at 2:48 AM, Torsten Harenberg <harenberg at physik.uni-wuppertal.de> wrote:
+> 
+> [QUOTA WARNING] Usage inconsistent for ID 2901:actual (757747712, 217)
+> != expected (664182784, 215)
+
+I assume you are running ldiskfs as the backend?  If so, have you tried regenerating the quota info for the OST?  I believe the command is ?tune2fs -O ^quota <ost_block_device>? to clear quotas and then ?tune2fs -O quota <ost_block_device>? to reenable/regenerate them.  I don?t know if that would work, but it might be worth a shot.
+
+?
+Rick Mohr
+Senior HPC System Administrator
+National Institute for Computational Sciences
+University of Tennessee
+
+
+
+
+From mdidomenico4 at gmail.com  Fri Mar  6 06:16:55 2020
+From: mdidomenico4 at gmail.com (Michael Di Domenico)
+Date: Fri, 6 Mar 2020 09:16:55 -0500
+Subject: [lustre-discuss] lnet_peer_ni_add_to_recoveryq
+Message-ID: <CABOsP2O-MuustNw1e=USR81XjKa0OPRQhdTFMV-iV0mu148DYw@mail.gmail.com>
+
+i'm seeing this error show up on many of my nodes many times (usually
+in big spurts).  i suspect i'm having some network congestion issues,
+but i haven't narrowed it down yet.  but i'm unclear what the error
+actually signifies
+
+lneterror: 10164:0:(peer.c:3451:lnet_peer_ni_add_to_recoveryq_locked())
+lpni <address> added to recovery queue.  Health = 900
+
+From degremoa at amazon.com  Fri Mar  6 06:35:59 2020
+From: degremoa at amazon.com (Degremont, Aurelien)
+Date: Fri, 6 Mar 2020 14:35:59 +0000
+Subject: [lustre-discuss] lnet_peer_ni_add_to_recoveryq
+In-Reply-To: <CABOsP2O-MuustNw1e=USR81XjKa0OPRQhdTFMV-iV0mu148DYw@mail.gmail.com>
+References: <CABOsP2O-MuustNw1e=USR81XjKa0OPRQhdTFMV-iV0mu148DYw@mail.gmail.com>
+Message-ID: <1381EA62-9B04-4E08-B824-8387D5F12851@amazon.com>
+
+Did you see any actual error on your system?
+
+Because there is a patch that is just decreasing the verbosity level of such messages, which looks like could be ignored.
+https://jira.whamcloud.com/browse/LU-13071
+https://review.whamcloud.com/#/c/37718/
+
+
+Aur?lien
+
+?Le 06/03/2020 15:17, ? lustre-discuss au nom de Michael Di Domenico ? <lustre-discuss-bounces at lists.lustre.org au nom de mdidomenico4 at gmail.com> a ?crit :
+
+    CAUTION: This email originated from outside of the organization. Do not click links or open attachments unless you can confirm the sender and know the content is safe.
+    
+    
+    
+    i'm seeing this error show up on many of my nodes many times (usually
+    in big spurts).  i suspect i'm having some network congestion issues,
+    but i haven't narrowed it down yet.  but i'm unclear what the error
+    actually signifies
+    
+    lneterror: 10164:0:(peer.c:3451:lnet_peer_ni_add_to_recoveryq_locked())
+    lpni <address> added to recovery queue.  Health = 900
+    _______________________________________________
+    lustre-discuss mailing list
+    lustre-discuss at lists.lustre.org
+    http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org
+    
+
+
+From mdidomenico4 at gmail.com  Fri Mar  6 06:39:03 2020
+From: mdidomenico4 at gmail.com (Michael Di Domenico)
+Date: Fri, 6 Mar 2020 09:39:03 -0500
+Subject: [lustre-discuss] lnet_peer_ni_add_to_recoveryq
+In-Reply-To: <1381EA62-9B04-4E08-B824-8387D5F12851@amazon.com>
+References: <CABOsP2O-MuustNw1e=USR81XjKa0OPRQhdTFMV-iV0mu148DYw@mail.gmail.com>
+ <1381EA62-9B04-4E08-B824-8387D5F12851@amazon.com>
+Message-ID: <CABOsP2OYR4_eozr=78R5c-h=hCWozSKDTXvE2TM5GHNYaOEWyQ@mail.gmail.com>
+
+On Fri, Mar 6, 2020 at 9:36 AM Degremont, Aurelien <degremoa at amazon.com> wrote:
+>
+> Did you see any actual error on your system?
+>
+> Because there is a patch that is just decreasing the verbosity level of such messages, which looks like could be ignored.
+> https://jira.whamcloud.com/browse/LU-13071
+> https://review.whamcloud.com/#/c/37718/
+
+thanks.  it's not entirely clear just yet.  i'm trying to track down a
+"slow jobs" issue.  i see these messages everywhere, so it might be a
+non issue or a sign of something more pressing.
+
+From mdidomenico4 at gmail.com  Fri Mar  6 06:58:43 2020
+From: mdidomenico4 at gmail.com (Michael Di Domenico)
+Date: Fri, 6 Mar 2020 09:58:43 -0500
+Subject: [lustre-discuss] lnet_peer_ni_add_to_recoveryq
+In-Reply-To: <CABOsP2OYR4_eozr=78R5c-h=hCWozSKDTXvE2TM5GHNYaOEWyQ@mail.gmail.com>
+References: <CABOsP2O-MuustNw1e=USR81XjKa0OPRQhdTFMV-iV0mu148DYw@mail.gmail.com>
+ <1381EA62-9B04-4E08-B824-8387D5F12851@amazon.com>
+ <CABOsP2OYR4_eozr=78R5c-h=hCWozSKDTXvE2TM5GHNYaOEWyQ@mail.gmail.com>
+Message-ID: <CABOsP2OTc2Ge7xnncFmLYJ_JYzGhWrOXzPDURy8Z4jmw7qtawg@mail.gmail.com>
+
+along the aforementioned error i also see these at the same time
+
+lustreerror: 9675:0:(obd_config.c:1428:class_modify_config())
+<...>-clilov-<...>; failed to send uevent qos_threshold_rr=100
+
+On Fri, Mar 6, 2020 at 9:39 AM Michael Di Domenico
+<mdidomenico4 at gmail.com> wrote:
+>
+> On Fri, Mar 6, 2020 at 9:36 AM Degremont, Aurelien <degremoa at amazon.com> wrote:
+> >
+> > Did you see any actual error on your system?
+> >
+> > Because there is a patch that is just decreasing the verbosity level of such messages, which looks like could be ignored.
+> > https://jira.whamcloud.com/browse/LU-13071
+> > https://review.whamcloud.com/#/c/37718/
+>
+> thanks.  it's not entirely clear just yet.  i'm trying to track down a
+> "slow jobs" issue.  i see these messages everywhere, so it might be a
+> non issue or a sign of something more pressing.
+
+From hornc at cray.com  Fri Mar  6 12:10:59 2020
+From: hornc at cray.com (Chris Horn)
+Date: Fri, 6 Mar 2020 20:10:59 +0000
+Subject: [lustre-discuss] lnet_peer_ni_add_to_recoveryq
+In-Reply-To: <CABOsP2OTc2Ge7xnncFmLYJ_JYzGhWrOXzPDURy8Z4jmw7qtawg@mail.gmail.com>
+References: <CABOsP2O-MuustNw1e=USR81XjKa0OPRQhdTFMV-iV0mu148DYw@mail.gmail.com>
+ <1381EA62-9B04-4E08-B824-8387D5F12851@amazon.com>
+ <CABOsP2OYR4_eozr=78R5c-h=hCWozSKDTXvE2TM5GHNYaOEWyQ@mail.gmail.com>
+ <CABOsP2OTc2Ge7xnncFmLYJ_JYzGhWrOXzPDURy8Z4jmw7qtawg@mail.gmail.com>
+Message-ID: <9434CB17-FAFC-4E70-932C-706FE1B768E5@hpe.com>
+
+> lneterror: 10164:0:(peer.c:3451:lnet_peer_ni_add_to_recoveryq_locked())
+> lpni <address> added to recovery queue.  Health = 900
+
+The message means that the health value of a remote peer interface has been decremented, and as a result, the interface has been put into recovery mode. This mechanism is part of the LNet health feature.
+
+Health values are decremented when a PUT or GET fails. Usually there are other messages in the log that can tell you more about the specific failure. Depending on your network type you should probably see messages from socklnd or o2iblnd. Network congestion could certainly lead to message timeouts, which would in turn result in interfaces being placed into recovery mode.
+
+Chris Horn
+
+On 3/6/20, 8:59 AM, "lustre-discuss on behalf of Michael Di Domenico" <lustre-discuss-bounces at lists.lustre.org on behalf of mdidomenico4 at gmail.com> wrote:
+
+    along the aforementioned error i also see these at the same time
+    
+    lustreerror: 9675:0:(obd_config.c:1428:class_modify_config())
+    <...>-clilov-<...>; failed to send uevent qos_threshold_rr=100
+    
+    On Fri, Mar 6, 2020 at 9:39 AM Michael Di Domenico
+    <mdidomenico4 at gmail.com> wrote:
+    >
+    > On Fri, Mar 6, 2020 at 9:36 AM Degremont, Aurelien <degremoa at amazon.com> wrote:
+    > >
+    > > Did you see any actual error on your system?
+    > >
+    > > Because there is a patch that is just decreasing the verbosity level of such messages, which looks like could be ignored.
+    > > https://urldefense.proofpoint.com/v2/url?u=https-3A__jira.whamcloud.com_browse_LU-2D13071&d=DwICAg&c=C5b8zRQO1miGmBeVZ2LFWg&r=hIaFpo9yRyCwkkAs6y0c7W-QqT7uZMMSOkAIByhcA-I&m=ByOR33WN61jv0rEVZTtNhUgN313iSqbgrdfakY-TAjc&s=jp8DpDcylEQYlbd9-s3efysfDy2KdLvBrptsplqR1ks&e=
+    > > https://urldefense.proofpoint.com/v2/url?u=https-3A__review.whamcloud.com_-23_c_37718_&d=DwICAg&c=C5b8zRQO1miGmBeVZ2LFWg&r=hIaFpo9yRyCwkkAs6y0c7W-QqT7uZMMSOkAIByhcA-I&m=ByOR33WN61jv0rEVZTtNhUgN313iSqbgrdfakY-TAjc&s=8EUQ5wHRCuFFbd4PKxQCnTB_L9IgffvkzFw4_v6MEHg&e=
+    >
+    > thanks.  it's not entirely clear just yet.  i'm trying to track down a
+    > "slow jobs" issue.  i see these messages everywhere, so it might be a
+    > non issue or a sign of something more pressing.
+    _______________________________________________
+    lustre-discuss mailing list
+    lustre-discuss at lists.lustre.org
+    https://urldefense.proofpoint.com/v2/url?u=http-3A__lists.lustre.org_listinfo.cgi_lustre-2Ddiscuss-2Dlustre.org&d=DwICAg&c=C5b8zRQO1miGmBeVZ2LFWg&r=hIaFpo9yRyCwkkAs6y0c7W-QqT7uZMMSOkAIByhcA-I&m=ByOR33WN61jv0rEVZTtNhUgN313iSqbgrdfakY-TAjc&s=d36yZXUxMDJOjluQt2LUPivEkfLhScuCLIQT6Fl-Qhs&e=
+    
+
+
+
+
+
+From nathan.dauchy at noaa.gov  Sun Mar  8 00:56:06 2020
+From: nathan.dauchy at noaa.gov (nathan.dauchy at noaa.gov)
+Date: Sun, 08 Mar 2020 01:56:06 -0700
+Subject: [lustre-discuss] lnet_peer_ni_add_to_recoveryq
+In-Reply-To: <9434CB17-FAFC-4E70-932C-706FE1B768E5@hpe.com>
+Message-ID: <7769eb2e-be25-4215-8eaf-9507d129f2a3@email.android.com>
+
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20200308/00210770/attachment.html>
+
+From degremoa at amazon.com  Mon Mar  9 02:22:11 2020
+From: degremoa at amazon.com (Degremont, Aurelien)
+Date: Mon, 9 Mar 2020 09:22:11 +0000
+Subject: [lustre-discuss] lnet_peer_ni_add_to_recoveryq
+In-Reply-To: <9434CB17-FAFC-4E70-932C-706FE1B768E5@hpe.com>
+References: <CABOsP2O-MuustNw1e=USR81XjKa0OPRQhdTFMV-iV0mu148DYw@mail.gmail.com>
+ <1381EA62-9B04-4E08-B824-8387D5F12851@amazon.com>
+ <CABOsP2OYR4_eozr=78R5c-h=hCWozSKDTXvE2TM5GHNYaOEWyQ@mail.gmail.com>
+ <CABOsP2OTc2Ge7xnncFmLYJ_JYzGhWrOXzPDURy8Z4jmw7qtawg@mail.gmail.com>
+ <9434CB17-FAFC-4E70-932C-706FE1B768E5@hpe.com>
+Message-ID: <943A71C3-63C2-4F9A-B30D-0447069294BE@amazon.com>
+
+What's the impact of being in recovery mode with LNET health?
+
+
+?Le 06/03/2020 21:12, ? lustre-discuss au nom de Chris Horn ? <lustre-discuss-bounces at lists.lustre.org au nom de hornc at cray.com> a ?crit :    
+    
+    > lneterror: 10164:0:(peer.c:3451:lnet_peer_ni_add_to_recoveryq_locked())
+    > lpni <address> added to recovery queue.  Health = 900
+    
+    The message means that the health value of a remote peer interface has been decremented, and as a result, the interface has been put into recovery mode. This mechanism is part of the LNet health feature.
+    
+    Health values are decremented when a PUT or GET fails. Usually there are other messages in the log that can tell you more about the specific failure. Depending on your network type you should probably see messages from socklnd or o2iblnd. Network congestion could certainly lead to message timeouts, which would in turn result in interfaces being placed into recovery mode.
+    
+    Chris Horn
+    
+    On 3/6/20, 8:59 AM, "lustre-discuss on behalf of Michael Di Domenico" <lustre-discuss-bounces at lists.lustre.org on behalf of mdidomenico4 at gmail.com> wrote:
+    
+        along the aforementioned error i also see these at the same time
+    
+        lustreerror: 9675:0:(obd_config.c:1428:class_modify_config())
+        <...>-clilov-<...>; failed to send uevent qos_threshold_rr=100
+    
+        On Fri, Mar 6, 2020 at 9:39 AM Michael Di Domenico
+        <mdidomenico4 at gmail.com> wrote:
+        >
+        > On Fri, Mar 6, 2020 at 9:36 AM Degremont, Aurelien <degremoa at amazon.com> wrote:
+        > >
+        > > Did you see any actual error on your system?
+        > >
+        > > Because there is a patch that is just decreasing the verbosity level of such messages, which looks like could be ignored.
+        > > https://urldefense.proofpoint.com/v2/url?u=https-3A__jira.whamcloud.com_browse_LU-2D13071&d=DwICAg&c=C5b8zRQO1miGmBeVZ2LFWg&r=hIaFpo9yRyCwkkAs6y0c7W-QqT7uZMMSOkAIByhcA-I&m=ByOR33WN61jv0rEVZTtNhUgN313iSqbgrdfakY-TAjc&s=jp8DpDcylEQYlbd9-s3efysfDy2KdLvBrptsplqR1ks&e=
+        > > https://urldefense.proofpoint.com/v2/url?u=https-3A__review.whamcloud.com_-23_c_37718_&d=DwICAg&c=C5b8zRQO1miGmBeVZ2LFWg&r=hIaFpo9yRyCwkkAs6y0c7W-QqT7uZMMSOkAIByhcA-I&m=ByOR33WN61jv0rEVZTtNhUgN313iSqbgrdfakY-TAjc&s=8EUQ5wHRCuFFbd4PKxQCnTB_L9IgffvkzFw4_v6MEHg&e=
+        >
+        > thanks.  it's not entirely clear just yet.  i'm trying to track down a
+        > "slow jobs" issue.  i see these messages everywhere, so it might be a
+        > non issue or a sign of something more pressing.
+        _______________________________________________
+        lustre-discuss mailing list
+        lustre-discuss at lists.lustre.org
+        https://urldefense.proofpoint.com/v2/url?u=http-3A__lists.lustre.org_listinfo.cgi_lustre-2Ddiscuss-2Dlustre.org&d=DwICAg&c=C5b8zRQO1miGmBeVZ2LFWg&r=hIaFpo9yRyCwkkAs6y0c7W-QqT7uZMMSOkAIByhcA-I&m=ByOR33WN61jv0rEVZTtNhUgN313iSqbgrdfakY-TAjc&s=d36yZXUxMDJOjluQt2LUPivEkfLhScuCLIQT6Fl-Qhs&e=
+    
+    
+    
+    
+    
+    _______________________________________________
+    lustre-discuss mailing list
+    lustre-discuss at lists.lustre.org
+    http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org
+    
+
+
+From adilger at whamcloud.com  Mon Mar  9 05:32:50 2020
+From: adilger at whamcloud.com (Andreas Dilger)
+Date: Mon, 9 Mar 2020 12:32:50 +0000
+Subject: [lustre-discuss] old Lustre 2.8.0 panic'ing continously
+In-Reply-To: <21124AF9-DE5E-4C31-901D-E961D872E64C@utk.edu>
+References: <c988af66-8c30-4502-f87c-abb1923ca0ea@physik.uni-wuppertal.de>
+ <21124AF9-DE5E-4C31-901D-E961D872E64C@utk.edu>
+Message-ID: <26CA6718-9B9B-436D-8EEF-3C177415A951@whamcloud.com>
+
+
+
+On Mar 5, 2020, at 09:11, Mohr Jr, Richard Frank <rmohr at utk.edu<mailto:rmohr at utk.edu>> wrote:
+
+
+
+On Mar 5, 2020, at 2:48 AM, Torsten Harenberg <harenberg at physik.uni-wuppertal.de<mailto:harenberg at physik.uni-wuppertal.de>> wrote:
+
+[QUOTA WARNING] Usage inconsistent for ID 2901:actual (757747712, 217)
+!= expected (664182784, 215)
+
+I assume you are running ldiskfs as the backend?  If so, have you tried regenerating the quota info for the OST?  I believe the command is ?tune2fs -O ^quota <ost_block_device>? to clear quotas and then ?tune2fs -O quota <ost_block_device>? to reenable/regenerate them.  I don?t know if that would work, but it might be worth a shot.
+
+Just to clarify, the "tune2fs -O ^quota; tune2fs -O quota" trick is not really the best way to do this, even though this is widely circulated.
+
+It would be better to run a full e2fsck, since that not only rebuilds the quota tables, but also ensures that the values going into the quota tables are correct.  Since the time taken by "tune2fs -O quota" is almost the same as running e2fsck, it is better to do it the right way.
+
+Cheers, Andreas
+--
+Andreas Dilger
+Principal Lustre Architect
+Whamcloud
+
+
+
+
+
+
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20200309/312e95a2/attachment.html>
+
+From marco.grossi at ichec.ie  Mon Mar  9 09:23:13 2020
+From: marco.grossi at ichec.ie (Marco Grossi)
+Date: Mon, 9 Mar 2020 16:23:13 +0000
+Subject: [lustre-discuss] unable to precreate -52/-116
+In-Reply-To: <d1bd979735eb4bef927c90f93faeb3b1@mail.smu.edu>
+References: <d1bd979735eb4bef927c90f93faeb3b1@mail.smu.edu>
+Message-ID: <eff3a313-2851-a49c-f9ad-c1d493577ad8@ichec.ie>
+
+Hi Amit,
+
+We had a similar issue after a set_param of "max_create_count=0"
+
+In our case re-mounting the MDT (not the OST) fixed the issue.
+
+Hope it helps.
+
+Regards,
+Marco
+
+
+On 3/3/20 8:25 PM, Kumar, Amit wrote:
+> Dear Lustre,
+> 
+> ?
+> 
+> Recently we had a degraded(Not failed) RAID and had to wait longer to
+> get compatible disk, as we had received incompatible one and it took
+> over a week to get the correct one back in place.
+> 
+> ?
+> 
+> During this wait I ended up disabling the OST first and then noticed
+> continuous IO to the OST and thought of disabling object creation on it
+> as well. Everything looked normal after that and once the disk was
+> replaced I reenabled object creation and enabled OST. Since then I
+> started seeing these messages on OST
+> 
+> ?(ofd_dev.c:1784:ofd_create_hdl()) scratch0-OST0029: unable to
+> precreate: rc = -52
+> 
+> And following messages on MDS
+> 
+> ?(osp_precreate.c:1282:osp_precreate_thread())
+> scratch0-OST0029-osc-MDT0000: cannot precreate objects: rc = -116
+> 
+> ?(osp_precreate.c:657:osp_precreate_send())
+> scratch0-OST0029-osc-MDT0000: precreate fid [0x100290000:0x101b39a:0x0]
+> < local used fid [0x100290000:0x101b39a:0x0]: rc = -116
+> 
+> ?
+> 
+> These messages don?t seem to stop. I am wondering what impact could
+> these errors have in long run? I have noticed I am not able to create
+> files on this particular OST using lfs setstripe, when I do so it gets
+> me an object on another OST by default. Just want to make sure this is
+> not causing any data loss for files the currently on them and new requests?
+> 
+> We plan to upgrade to 2.12 in the summer downtime and assuming that has
+> a fix based on LU-9442 & LU-11186. ?Currently running servers on lustre
+> 10.4.1 over ZFS-0.7.9-1
+> 
+> ?
+> 
+> Any help is greatly appreciated.
+> 
+> ?
+> 
+> Thank you,
+> Amit
+> 
+> 
+> _______________________________________________
+> lustre-discuss mailing list
+> lustre-discuss at lists.lustre.org
+> http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org
+> 
+
+-- 
+Marco Grossi
+ICHEC Systems Team
+
+From hornc at cray.com  Mon Mar  9 09:59:28 2020
+From: hornc at cray.com (Chris Horn)
+Date: Mon, 9 Mar 2020 16:59:28 +0000
+Subject: [lustre-discuss] lnet_peer_ni_add_to_recoveryq
+In-Reply-To: <943A71C3-63C2-4F9A-B30D-0447069294BE@amazon.com>
+References: <CABOsP2O-MuustNw1e=USR81XjKa0OPRQhdTFMV-iV0mu148DYw@mail.gmail.com>
+ <1381EA62-9B04-4E08-B824-8387D5F12851@amazon.com>
+ <CABOsP2OYR4_eozr=78R5c-h=hCWozSKDTXvE2TM5GHNYaOEWyQ@mail.gmail.com>
+ <CABOsP2OTc2Ge7xnncFmLYJ_JYzGhWrOXzPDURy8Z4jmw7qtawg@mail.gmail.com>
+ <9434CB17-FAFC-4E70-932C-706FE1B768E5@hpe.com>
+ <943A71C3-63C2-4F9A-B30D-0447069294BE@amazon.com>
+Message-ID: <40131725-9C33-487F-B7EB-0773D2DEA93E@hpe.com>
+
+Network failures cause an interface's health value to decrement. Recovery mode is the mechanism that raises the health value back up. Interfaces are ping'd on a regular interval by the "lnet_monitor_thread". Successful pings increase the health value of the interface (remote or local). 
+
+When LNet is selecting the local and remote interfaces to use for a PUT or GET, it considers the health value of each interface. Healthier interfaces are preferred.
+
+Chris Horn
+
+?On 3/9/20, 4:22 AM, "Degremont, Aurelien" <degremoa at amazon.com> wrote:
+
+    What's the impact of being in recovery mode with LNET health?
+    
+    
+    Le 06/03/2020 21:12, ? lustre-discuss au nom de Chris Horn ? <lustre-discuss-bounces at lists.lustre.org au nom de hornc at cray.com> a ?crit :    
+        
+        > lneterror: 10164:0:(peer.c:3451:lnet_peer_ni_add_to_recoveryq_locked())
+        > lpni <address> added to recovery queue.  Health = 900
+        
+        The message means that the health value of a remote peer interface has been decremented, and as a result, the interface has been put into recovery mode. This mechanism is part of the LNet health feature.
+        
+        Health values are decremented when a PUT or GET fails. Usually there are other messages in the log that can tell you more about the specific failure. Depending on your network type you should probably see messages from socklnd or o2iblnd. Network congestion could certainly lead to message timeouts, which would in turn result in interfaces being placed into recovery mode.
+        
+        Chris Horn
+        
+        On 3/6/20, 8:59 AM, "lustre-discuss on behalf of Michael Di Domenico" <lustre-discuss-bounces at lists.lustre.org on behalf of mdidomenico4 at gmail.com> wrote:
+        
+            along the aforementioned error i also see these at the same time
+        
+            lustreerror: 9675:0:(obd_config.c:1428:class_modify_config())
+            <...>-clilov-<...>; failed to send uevent qos_threshold_rr=100
+        
+            On Fri, Mar 6, 2020 at 9:39 AM Michael Di Domenico
+            <mdidomenico4 at gmail.com> wrote:
+            >
+            > On Fri, Mar 6, 2020 at 9:36 AM Degremont, Aurelien <degremoa at amazon.com> wrote:
+            > >
+            > > Did you see any actual error on your system?
+            > >
+            > > Because there is a patch that is just decreasing the verbosity level of such messages, which looks like could be ignored.
+            > > https://urldefense.proofpoint.com/v2/url?u=https-3A__jira.whamcloud.com_browse_LU-2D13071&d=DwICAg&c=C5b8zRQO1miGmBeVZ2LFWg&r=hIaFpo9yRyCwkkAs6y0c7W-QqT7uZMMSOkAIByhcA-I&m=ByOR33WN61jv0rEVZTtNhUgN313iSqbgrdfakY-TAjc&s=jp8DpDcylEQYlbd9-s3efysfDy2KdLvBrptsplqR1ks&e=
+            > > https://urldefense.proofpoint.com/v2/url?u=https-3A__review.whamcloud.com_-23_c_37718_&d=DwICAg&c=C5b8zRQO1miGmBeVZ2LFWg&r=hIaFpo9yRyCwkkAs6y0c7W-QqT7uZMMSOkAIByhcA-I&m=ByOR33WN61jv0rEVZTtNhUgN313iSqbgrdfakY-TAjc&s=8EUQ5wHRCuFFbd4PKxQCnTB_L9IgffvkzFw4_v6MEHg&e=
+            >
+            > thanks.  it's not entirely clear just yet.  i'm trying to track down a
+            > "slow jobs" issue.  i see these messages everywhere, so it might be a
+            > non issue or a sign of something more pressing.
+            _______________________________________________
+            lustre-discuss mailing list
+            lustre-discuss at lists.lustre.org
+            https://urldefense.proofpoint.com/v2/url?u=http-3A__lists.lustre.org_listinfo.cgi_lustre-2Ddiscuss-2Dlustre.org&d=DwICAg&c=C5b8zRQO1miGmBeVZ2LFWg&r=hIaFpo9yRyCwkkAs6y0c7W-QqT7uZMMSOkAIByhcA-I&m=ByOR33WN61jv0rEVZTtNhUgN313iSqbgrdfakY-TAjc&s=d36yZXUxMDJOjluQt2LUPivEkfLhScuCLIQT6Fl-Qhs&e=
+        
+        
+        
+        
+        
+        _______________________________________________
+        lustre-discuss mailing list
+        lustre-discuss at lists.lustre.org
+        https://urldefense.proofpoint.com/v2/url?u=http-3A__lists.lustre.org_listinfo.cgi_lustre-2Ddiscuss-2Dlustre.org&d=DwIGaQ&c=C5b8zRQO1miGmBeVZ2LFWg&r=hIaFpo9yRyCwkkAs6y0c7W-QqT7uZMMSOkAIByhcA-I&m=MWzLz3rQZoSqu_bMB83a0EdO1KMglAndLsxrBlOT9fA&s=Y-NtxxGn4LIKwsK_QtBwjw13E0CYycKLLS9PNuiGvms&e= 
+        
+    
+    
+
+
+From ahkumar at mail.smu.edu  Mon Mar  9 10:23:12 2020
+From: ahkumar at mail.smu.edu (Kumar, Amit)
+Date: Mon, 9 Mar 2020 17:23:12 +0000
+Subject: [lustre-discuss] unable to precreate -52/-116
+In-Reply-To: <eff3a313-2851-a49c-f9ad-c1d493577ad8@ichec.ie>
+References: <d1bd979735eb4bef927c90f93faeb3b1@mail.smu.edu>
+ <eff3a313-2851-a49c-f9ad-c1d493577ad8@ichec.ie>
+Message-ID: <7b1cb7106110477b92e328bad58b6603@mail.smu.edu>
+
+Hi Marco,
+
+Thank you for the response on this issue.  
+
+We have an HA setup, I tried to fail over MDT to the secondary pair and then fail it back. This did not help. 
+I also tried restart of the MDS servers, that did not help.
+I have rebooted OSS servers as well, that did not help
+I also tried completely stopping MDS and unmounting MDS for a little while and that did not help either. 
+
+This error ritually comes back right after MDT is mounted. Additionally I am not able to manually create any files on that particular OST. Any other thoughts.  
+
+Thank you,
+Amit
+
+-----Original Message-----
+From: Marco Grossi <marco.grossi at ichec.ie> 
+Sent: Monday, March 9, 2020 11:23 AM
+To: Kumar, Amit <ahkumar at mail.smu.edu>
+Cc: lustre-discuss at lists.lustre.org
+Subject: Re: [lustre-discuss] unable to precreate -52/-116
+
+Hi Amit,
+
+We had a similar issue after a set_param of "max_create_count=0"
+
+In our case re-mounting the MDT (not the OST) fixed the issue.
+
+Hope it helps.
+
+Regards,
+Marco
+
+
+On 3/3/20 8:25 PM, Kumar, Amit wrote:
+> Dear Lustre,
+> 
+> ?
+> 
+> Recently we had a degraded(Not failed) RAID and had to wait longer to 
+> get compatible disk, as we had received incompatible one and it took 
+> over a week to get the correct one back in place.
+> 
+> ?
+> 
+> During this wait I ended up disabling the OST first and then noticed 
+> continuous IO to the OST and thought of disabling object creation on 
+> it as well. Everything looked normal after that and once the disk was 
+> replaced I reenabled object creation and enabled OST. Since then I 
+> started seeing these messages on OST
+> 
+> .(ofd_dev.c:1784:ofd_create_hdl()) scratch0-OST0029: unable to
+> precreate: rc = -52
+> 
+> And following messages on MDS
+> 
+> .(osp_precreate.c:1282:osp_precreate_thread())
+> scratch0-OST0029-osc-MDT0000: cannot precreate objects: rc = -116
+> 
+> .(osp_precreate.c:657:osp_precreate_send())
+> scratch0-OST0029-osc-MDT0000: precreate fid 
+> [0x100290000:0x101b39a:0x0] < local used fid 
+> [0x100290000:0x101b39a:0x0]: rc = -116
+> 
+> ?
+> 
+> These messages don't seem to stop. I am wondering what impact could 
+> these errors have in long run? I have noticed I am not able to create 
+> files on this particular OST using lfs setstripe, when I do so it gets 
+> me an object on another OST by default. Just want to make sure this is 
+> not causing any data loss for files the currently on them and new requests?
+> 
+> We plan to upgrade to 2.12 in the summer downtime and assuming that 
+> has a fix based on LU-9442 & LU-11186. ?Currently running servers on 
+> lustre
+> 10.4.1 over ZFS-0.7.9-1
+> 
+> ?
+> 
+> Any help is greatly appreciated.
+> 
+> ?
+> 
+> Thank you,
+> Amit
+> 
+> 
+> _______________________________________________
+> lustre-discuss mailing list
+> lustre-discuss at lists.lustre.org
+> http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org
+> 
+
+--
+Marco Grossi
+ICHEC Systems Team
+
+
+----IF CLASSIFICATION START----
+
+----IF CLASSIFICATION END----
+
+From hornc at cray.com  Mon Mar  9 11:26:50 2020
+From: hornc at cray.com (Chris Horn)
+Date: Mon, 9 Mar 2020 18:26:50 +0000
+Subject: [lustre-discuss] lnet_peer_ni_add_to_recoveryq
+In-Reply-To: <7769eb2e-be25-4215-8eaf-9507d129f2a3@email.android.com>
+References: <9434CB17-FAFC-4E70-932C-706FE1B768E5@hpe.com>
+ <7769eb2e-be25-4215-8eaf-9507d129f2a3@email.android.com>
+Message-ID: <9D831187-8242-4376-8A2A-103FAB0FCBB3@hpe.com>
+
+(Re-sending my response to the list)
+
+Yes, I believe that there are cases when problems on a remote node can be interpreted as local failures.
+
+
+From: "nathan.dauchy at noaa.gov" <nathan.dauchy at noaa.gov>
+Date: Sunday, March 8, 2020 at 3:56 AM
+To: Chris Horn <hornc at cray.com>, "lustre-discuss at lists.lustre.org" <lustre-discuss at lists.lustre.org>
+Cc: "nathan.dauchy at noaa.gov" <nathan.dauchy at noaa.gov>
+Subject: Re: [lustre-discuss] lnet_peer_ni_add_to_recoveryq
+Resent-From: <hornc at cray.com>
+Resent-Date: Sunday, March 8, 2020 at 4:56 AM
+
+Chris, all,
+
+We are also seeing similar messages primarily on our servers, but from lnet_handle_local_failure() instead. I don't find any issues with the local o2ib interfere, yet, but there _may_ be a correlation with a client hang. Could this also be caused on a server by remote network problems or a client dropping out, in spite of the "local" name?
+
+Thanks,
+Nathan
+
+
+On Mar 6, 2020 1:10 PM, Chris Horn <hornc at cray.com> wrote:
+
+> lneterror: 10164:0:(peer.c:3451:lnet_peer_ni_add_to_recoveryq_locked())
+> lpni <address> added to recovery queue.  Health = 900
+
+The message means that the health value of a remote peer interface has been decremented, and as a result, the interface has been put into recovery mode. This mechanism is part of the LNet health feature.
+
+Health values are decremented when a PUT or GET fails. Usually there are other messages in the log that can tell you more about the specific failure. Depending on your network type you should probably see messages from socklnd or o2iblnd. Network congestion could certainly lead to message timeouts, which would in turn result in interfaces being placed into recovery mode.
+
+Chris Horn
+
+On 3/6/20, 8:59 AM, "lustre-discuss on behalf of Michael Di Domenico" <lustre-discuss-bounces at lists.lustre.org on behalf of mdidomenico4 at gmail.com> wrote:
+
+    along the aforementioned error i also see these at the same time
+
+    lustreerror: 9675:0:(obd_config.c:1428:class_modify_config())
+    <...>-clilov-<...>; failed to send uevent qos_threshold_rr=100
+
+    On Fri, Mar 6, 2020 at 9:39 AM Michael Di Domenico
+    <mdidomenico4 at gmail.com> wrote:
+    >
+    > On Fri, Mar 6, 2020 at 9:36 AM Degremont, Aurelien <degremoa at amazon.com> wrote:
+    > >
+    > > Did you see any actual error on your system?
+    > >
+    > > Because there is a patch that is just decreasing the verbosity level of such messages, which looks like could be ignored.
+    > > https://urldefense.proofpoint.com/v2/url?u=https-3A__jira.whamcloud.com_browse_LU-2D13071&d=DwICAg&c=C5b8zRQO1miGmBeVZ2LFWg&r=hIaFpo9yRyCwkkAs6y0c7W-QqT7uZMMSOkAIByhcA-I&m=ByOR33WN61jv0rEVZTtNhUgN313iSqbgrdfakY-TAjc&s=jp8DpDcylEQYlbd9-s3efysfDy2KdLvBrptsplqR1ks&e=
+    > > https://urldefense.proofpoint.com/v2/url?u=https-3A__review.whamcloud.com_-23_c_37718_&d=DwICAg&c=C5b8zRQO1miGmBeVZ2LFWg&r=hIaFpo9yRyCwkkAs6y0c7W-QqT7uZMMSOkAIByhcA-I&m=ByOR33WN61jv0rEVZTtNhUgN313iSqbgrdfakY-TAjc&s=8EUQ5wHRCuFFbd4PKxQCnTB_L9IgffvkzFw4_v6MEHg&e=
+    >
+    > thanks.  it's not entirely clear just yet.  i'm trying to track down a
+    > "slow jobs" issue.  i see these messages everywhere, so it might be a
+    > non issue or a sign of something more pressing.
+    _______________________________________________
+    lustre-discuss mailing list
+    lustre-discuss at lists.lustre.org
+    https://urldefense.proofpoint.com/v2/url?u=http-3A__lists.lustre.org_listinfo.cgi_lustre-2Ddiscuss-2Dlustre.org&d=DwICAg&c=C5b8zRQO1miGmBeVZ2LFWg&r=hIaFpo9yRyCwkkAs6y0c7W-QqT7uZMMSOkAIByhcA-I&m=ByOR33WN61jv0rEVZTtNhUgN313iSqbgrdfakY-TAjc&s=d36yZXUxMDJOjluQt2LUPivEkfLhScuCLIQT6Fl-Qhs&e=
+
+
+
+
+
+_______________________________________________
+lustre-discuss mailing list
+lustre-discuss at lists.lustre.org
+http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org<https://urldefense.proofpoint.com/v2/url?u=http-3A__lists.lustre.org_listinfo.cgi_lustre-2Ddiscuss-2Dlustre.org&d=DwQGaQ&c=C5b8zRQO1miGmBeVZ2LFWg&r=hIaFpo9yRyCwkkAs6y0c7W-QqT7uZMMSOkAIByhcA-I&m=xjhlFKAxRoTIY1jLm_ZOO79SIHjnFFvd-sHl1eMEQQM&s=Wvg4NbAeA1O-DrqWqy5rrQ4OrwfrO7V220OCeVGeWdg&e=>
+
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20200309/17cabc26/attachment-0001.html>
+
+From harenberg at physik.uni-wuppertal.de  Tue Mar 10 00:18:23 2020
+From: harenberg at physik.uni-wuppertal.de (Torsten Harenberg)
+Date: Tue, 10 Mar 2020 08:18:23 +0100
+Subject: [lustre-discuss] old Lustre 2.8.0 panic'ing continously
+In-Reply-To: <26CA6718-9B9B-436D-8EEF-3C177415A951@whamcloud.com>
+References: <c988af66-8c30-4502-f87c-abb1923ca0ea@physik.uni-wuppertal.de>
+ <21124AF9-DE5E-4C31-901D-E961D872E64C@utk.edu>
+ <26CA6718-9B9B-436D-8EEF-3C177415A951@whamcloud.com>
+Message-ID: <95f040d5-ae8f-fe3c-7a3d-defe5dffb33f@physik.uni-wuppertal.de>
+
+Dear all,
+
+thanks for all of your replies.
+
+Am 09.03.20 um 13:32 schrieb Andreas Dilger:
+> It would be better to run a full e2fsck, since that not only rebuilds
+> the quota tables, but also ensures that the values going into the quota
+> tables are correct. ?Since the time taken by "tune2fs -O quota" is
+> almost the same as running e2fsck, it is better to do it the right way.
+
+We already ran e2fsck -f on all LUNs after every crash, so it seems that
+was all we could do, right?
+
+During the last days (since thursday), our Lustre instance was
+surprisingly stable. We lowered a bit the load by limiting the # of
+running jobs which might also helped to stablize the system.
+
+We enabled kdump, so if another crash is happening anytime soon, we hope
+to get at least a dump for a hint where the problem is.
+
+Thanks again
+
+  Torsten
+
+-- 
+Dr. Torsten Harenberg     harenberg at physik.uni-wuppertal.de
+Bergische Universitaet
+Fakult?t 4 - Physik       Tel.: +49 (0)202 439-3521
+Gaussstr. 20              Fax : +49 (0)202 439-2811
+42097 Wuppertal
+
+-------------- next part --------------
+A non-text attachment was scrubbed...
+Name: smime.p7s
+Type: application/pkcs7-signature
+Size: 5341 bytes
+Desc: S/MIME Cryptographic Signature
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20200310/3b001655/attachment.bin>
+
+From happe at nbi.dk  Tue Mar 10 01:38:23 2020
+From: happe at nbi.dk (Hans Henrik Happe)
+Date: Tue, 10 Mar 2020 09:38:23 +0100
+Subject: [lustre-discuss] Nodemap and setreuid/setregid
+In-Reply-To: <5EECAA2E-6180-46B1-8A23-158BD0BAC46E@ddn.com>
+References: <603a182d-f26d-808f-0f28-5642594f3941@nbi.dk>
+ <7C9CA931-6DA1-42FE-B908-891E28BB5451@ddn.com>
+ <018785aa-c12e-8c5b-8b70-0cf86e368a31@nbi.dk>
+ <0E2242A7-24EF-4803-A66D-44A3FA12A7FC@ddn.com>
+ <00bbb994-ea66-4af8-7aa4-67ee40b51842@nbi.dk>
+ <2128aea1-4599-0772-89b6-04c9707dad8b@nbi.dk>
+ <ae234deb-a9fa-9805-6749-d3e05c790b8f@nbi.dk>
+ <5EECAA2E-6180-46B1-8A23-158BD0BAC46E@ddn.com>
+Message-ID: <3a2969e7-772a-a7e2-09d5-128696fb1ea3@nbi.dk>
+
+Hi,
+
+That explains it. I will file a bug report.
+
+Cheers,
+Hans Henrik
+
+On 03.03.2020 16.30, Sebastien Buisson wrote:
+> Hi,
+>
+> I was focused on nodemaps, so I did not try with SSK.
+>
+> Cheers,
+> Sebastien.
+>
+>> Le 3 mars 2020 ? 16:12, Hans Henrik Happe <happe at nbi.dk> a ?crit :
+>>
+>> Hi,
+>>
+>> Did the test 2.12.4 with the same result. Also, I narrowed it down to
+>> SSK only. It also happens without nodemaps being activated.
+>>
+>> @Sebastian: I wonder if you did test this with SSK? I was very focused
+>> on nodemaps being the cause to start with.
+>>
+>> Cheers,
+>> Hans Henrik
+>>
+>> On 29.02.2020 23.44, Hans Henrik Happe wrote:
+>>> Hi,
+>>>
+>>> Sorry for the delay. I had to spend some time nursing the glusterfs that
+>>> this lustre fs will replace :-)
+>>>
+>>> Anyway, I've created a procedure to reproduce the issue. It's attached
+>>> together with the testing program.
+>>>
+>>> Basically, its a simple single mgs,mdt,oss setup, with a nodemap, that
+>>> maps a client to a fileset. This works fine. However, when turning on
+>>> SSK for cli2mdt the issue appears.
+>>>
+>>> This was for 2.12.3, I will move on to 2.12.4 just to check.
+>>>
+>>> Cheers,
+>>> Hans Henrik
+>>>
+>>> On 06.02.2020 23.08, Hans Henrik Happe wrote:
+>>>> Hi Sebastien,
+>>>>
+>>>> Thanks for looking into this.
+>>>>
+>>>> You are right that nodemap deactivation didn't affect the outcome. I
+>>>> must have made a mistake and cannot reproduce.
+>>>>
+>>>> The uid/gid are on the mds. I can do a sudo to the user and run the test
+>>>> program successfully.
+>>>>
+>>>> I forgot to mention that I use SSK in ski mode.
+>>>>
+>>>> I think I will start from scratch and see if I can reproduce and find
+>>>> out at what point it stops working.
+>>>>
+>>>> Cheers,
+>>>> Hans Henrik
+>>>>
+>>>> On 06.02.2020 18.19, Sebastien Buisson wrote:
+>>>>> Hi,
+>>>>>
+>>>>> I am not able to reproduce your issue. I compiled your C program, in all cases I am not getting Permission Denied.
+>>>>>
+>>>>> You say that it works when you deactivate the nodemap. But given that you have a fileset on your nodemap entry ? sif ?, when you deactivate it you might end up doing IOs in a different directory. So you might compare different things.
+>>>>> Also, does the uid/gid 20501 exist on server side?
+>>>>>
+>>>>> Cheers,
+>>>>> Sebastien.
+>>>>>
+>>>>>> Le 6 f?vr. 2020 ? 14:29, Hans Henrik Happe <happe at nbi.dk> a ?crit :
+>>>>>>
+>>>>>> Hi,
+>>>>>>
+>>>>>> Thanks for a very quick reply :-) Here are the map:
+>>>>>>
+>>>>>> # lctl get_param nodemap.sif.*
+>>>>>> nodemap.sif.admin_nodemap=1
+>>>>>> nodemap.sif.audit_mode=1
+>>>>>> nodemap.sif.deny_unknown=0
+>>>>>> nodemap.sif.exports=
+>>>>>> [
+>>>>>> { nid: 172.25.10.51 at tcp, uuid: 56bb9b04-9bb5-d7b5-3f50-d62804690db1 },
+>>>>>> ]
+>>>>>> nodemap.sif.fileset=/sif
+>>>>>> nodemap.sif.id=2
+>>>>>> nodemap.sif.idmap=
+>>>>>> [
+>>>>>> { idtype: uid, client_id: 501, fs_id: 20501 },
+>>>>>> { idtype: gid, client_id: 501, fs_id: 20501 }
+>>>>>> ]
+>>>>>> nodemap.sif.map_mode=both
+>>>>>> nodemap.sif.ranges=
+>>>>>> [
+>>>>>> { id: 11, start_nid: 172.25.1.28 at tcp, end_nid: 172.25.1.28 at tcp },
+>>>>>> { id: 10, start_nid: 172.25.1.27 at tcp, end_nid: 172.25.1.27 at tcp },
+>>>>>> { id: 9, start_nid: 172.25.10.51 at tcp, end_nid: 172.25.10.51 at tcp }
+>>>>>> ]
+>>>>>> nodemap.sif.sepol=
+>>>>>>
+>>>>>> nodemap.sif.squash_gid=20000
+>>>>>> nodemap.sif.squash_uid=20000
+>>>>>> nodemap.sif.trusted_nodemap=0
+>>>>>>
+>>>>>> Cheers,
+>>>>>> Hans Henrik
+>>>>>>
+>>>>>> On 06.02.2020 14.17, Sebastien Buisson wrote:
+>>>>>>> Hi,
+>>>>>>>
+>>>>>>> It might be due to a property on the nodemap you defined.
+>>>>>>> Could you please dump your nodemap definition?
+>>>>>>>
+>>>>>>> Thanks,
+>>>>>>> Sebastien.
+>>>>>>>
+>>>>>>>
+>>>>>>>> Le 6 f?vr. 2020 ? 14:14, Hans Henrik Happe <happe at nbi.dk>
+>>>>>>>> a ?crit :
+>>>>>>>>
+>>>>>>>> Hi,
+>>>>>>>>
+>>>>>>>> Has anyone had success with gocryptfs 1.7.x on top of a Lustre nodemap?
+>>>>>>>>
+>>>>>>>> I've tested with Lustre 2.12.3.
+>>>>>>>>
+>>>>>>>> I found that gocryptfs 1.6 worked. However, with 1.7.x I got a lot of
+>>>>>>>> "Permission denied". I tried all permutations of trusted and admin on
+>>>>>>>> the nodemap.
+>>>>>>>>
+>>>>>>>> By stracing a bit, I've created a small peace of code provoking the issue:
+>>>>>>>>
+>>>>>>>> ---
+>>>>>>>>
+>>>>>>>> #include <unistd.h>
+>>>>>>>> #include <sys/types.h>
+>>>>>>>> #include <fcntl.h>
+>>>>>>>> #include <stdio.h>
+>>>>>>>>
+>>>>>>>> int main() {
+>>>>>>>> int r;
+>>>>>>>>
+>>>>>>>> setregid(-1, 501);
+>>>>>>>> setreuid(-1, 501);
+>>>>>>>>
+>>>>>>>> r = open("foo", O_CREAT, S_IRWXU);
+>>>>>>>> if (r < 0) {
+>>>>>>>>   perror("open");
+>>>>>>>> }
+>>>>>>>> return 0;
+>>>>>>>> }
+>>>>>>>>
+>>>>>>>> ---
+>>>>>>>>
+>>>>>>>>
+>>>>>>>>
+>>>>>>>> When run as root in a directory owned by uid=501 and gid=501 in a
+>>>>>>>> nodemap based Lustre fs it returns:
+>>>>>>>>
+>>>>>>>> open: Permission denied
+>>>>>>>>
+>>>>>>>> Works when I deactivate nodemap (lctl nodemap_activate 0) or just use a
+>>>>>>>> plain local fs.
+>>>>>>>>
+>>>>>>>> I don't think this is intended behavior for nodemaps, but I might be wrong.
+>>>>>>>>
+>>>>>>>> Cheers,
+>>>>>>>> Hans Henrik
+>>>>>>>> _______________________________________________
+>>>>>>>> lustre-discuss mailing list
+>>>>>>>>
+>>>>>>>> lustre-discuss at lists.lustre.org
+>>>>>>>> http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org
+>>>>>> _______________________________________________
+>>>>>> lustre-discuss mailing list
+>>>>>> lustre-discuss at lists.lustre.org
+>>>>>> http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org
+>>>> _______________________________________________
+>>>> lustre-discuss mailing list
+>>>> lustre-discuss at lists.lustre.org
+>>>> http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org
+>>>
+>>> _______________________________________________
+>>> lustre-discuss mailing list
+>>> lustre-discuss at lists.lustre.org
+>>> http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org
+>>>
+>> _______________________________________________
+>> lustre-discuss mailing list
+>> lustre-discuss at lists.lustre.org
+>> http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org
+
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20200310/f5af156b/attachment-0001.html>
+
+From marco.grossi at ichec.ie  Tue Mar 10 04:22:14 2020
+From: marco.grossi at ichec.ie (Marco Grossi)
+Date: Tue, 10 Mar 2020 11:22:14 +0000
+Subject: [lustre-discuss] unable to precreate -52/-116
+In-Reply-To: <7b1cb7106110477b92e328bad58b6603@mail.smu.edu>
+References: <d1bd979735eb4bef927c90f93faeb3b1@mail.smu.edu>
+ <eff3a313-2851-a49c-f9ad-c1d493577ad8@ichec.ie>
+ <7b1cb7106110477b92e328bad58b6603@mail.smu.edu>
+Message-ID: <d1294b8e-18a9-8e1c-4ad7-fb9578a01a14@ichec.ie>
+
+Hi Amit,
+
+Sounds definitely different from my case.
+
+The only JIRA issue logging a "precreate fid < local used fid" is:
+https://jira.whamcloud.com/browse/LU-11536
+
+What puzzle me is the "rc = -52" on the "ofd_create_hdl"; if I mapped it
+correctly, is a -EBADE error, i.e. "invalid exchange".
+
+Can you provide:
+- HA node list and location of MGS, MDT and OST between nodes
+
+As well as the output of:
+- lfs df
+- lfs df -i
+- lctl get_param osp.*scratch0-OST0029*.prealloc*
+- lctl get_param obdfilter.*scratch0-OST0029*.last_id
+
+Regards,
+Marco
+
+
+On 3/9/20 5:23 PM, Kumar, Amit wrote:
+> Hi Marco,
+> 
+> Thank you for the response on this issue.  
+> 
+> We have an HA setup, I tried to fail over MDT to the secondary pair and then fail it back. This did not help. 
+> I also tried restart of the MDS servers, that did not help.
+> I have rebooted OSS servers as well, that did not help
+> I also tried completely stopping MDS and unmounting MDS for a little while and that did not help either. 
+> 
+> This error ritually comes back right after MDT is mounted. Additionally I am not able to manually create any files on that particular OST. Any other thoughts.  
+> 
+> Thank you,
+> Amit
+> 
+> -----Original Message-----
+> From: Marco Grossi <marco.grossi at ichec.ie> 
+> Sent: Monday, March 9, 2020 11:23 AM
+> To: Kumar, Amit <ahkumar at mail.smu.edu>
+> Cc: lustre-discuss at lists.lustre.org
+> Subject: Re: [lustre-discuss] unable to precreate -52/-116
+> 
+> Hi Amit,
+> 
+> We had a similar issue after a set_param of "max_create_count=0"
+> 
+> In our case re-mounting the MDT (not the OST) fixed the issue.
+> 
+> Hope it helps.
+> 
+> Regards,
+> Marco
+> 
+> 
+> On 3/3/20 8:25 PM, Kumar, Amit wrote:
+>> Dear Lustre,
+>>
+>> ?
+>>
+>> Recently we had a degraded(Not failed) RAID and had to wait longer to 
+>> get compatible disk, as we had received incompatible one and it took 
+>> over a week to get the correct one back in place.
+>>
+>> ?
+>>
+>> During this wait I ended up disabling the OST first and then noticed 
+>> continuous IO to the OST and thought of disabling object creation on 
+>> it as well. Everything looked normal after that and once the disk was 
+>> replaced I reenabled object creation and enabled OST. Since then I 
+>> started seeing these messages on OST
+>>
+>> .(ofd_dev.c:1784:ofd_create_hdl()) scratch0-OST0029: unable to
+>> precreate: rc = -52
+>>
+>> And following messages on MDS
+>>
+>> .(osp_precreate.c:1282:osp_precreate_thread())
+>> scratch0-OST0029-osc-MDT0000: cannot precreate objects: rc = -116
+>>
+>> .(osp_precreate.c:657:osp_precreate_send())
+>> scratch0-OST0029-osc-MDT0000: precreate fid 
+>> [0x100290000:0x101b39a:0x0] < local used fid 
+>> [0x100290000:0x101b39a:0x0]: rc = -116
+>>
+>> ?
+>>
+>> These messages don't seem to stop. I am wondering what impact could 
+>> these errors have in long run? I have noticed I am not able to create 
+>> files on this particular OST using lfs setstripe, when I do so it gets 
+>> me an object on another OST by default. Just want to make sure this is 
+>> not causing any data loss for files the currently on them and new requests?
+>>
+>> We plan to upgrade to 2.12 in the summer downtime and assuming that 
+>> has a fix based on LU-9442 & LU-11186. ?Currently running servers on 
+>> lustre
+>> 10.4.1 over ZFS-0.7.9-1
+>>
+>> ?
+>>
+>> Any help is greatly appreciated.
+>>
+>> ?
+>>
+>> Thank you,
+>> Amit
+>>
+>>
+>> _______________________________________________
+>> lustre-discuss mailing list
+>> lustre-discuss at lists.lustre.org
+>> http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org
+>>
+> 
+> --
+> Marco Grossi
+> ICHEC Systems Team
+> 
+> 
+> ----IF CLASSIFICATION START----
+> 
+> ----IF CLASSIFICATION END----
+> 
+
+-- 
+Marco Grossi
+ICHEC Systems Team
+
+From steveb at stackhpc.com  Thu Mar 12 04:37:27 2020
+From: steveb at stackhpc.com (Steve Brasier)
+Date: Thu, 12 Mar 2020 11:37:27 +0000
+Subject: [lustre-discuss] user/group squashing
+Message-ID: <CA+zeHV765R_zN6Htc80eFO0TMTwH=c19vortL5aSZ+-z_1xvEA@mail.gmail.com>
+
+The manual says
+<http://doc.lustre.org/lustre_manual.xhtml#section_rh2_d4w_gk> that:
+
+"(Required) Use the same user IDs (UID) and group IDs (GID) on all clients.
+If use of supplemental groups is required, see Section 41.1, ?User/Group
+Upcall? for information about supplementary user and group cache upcall
+(identity_upcall)."
+
+but is that actually true if using user/group squashing? I'd have imagined
+that if I have a nodemap with `squash_gid/uid=4000` then any client user
+would be able to access the filesystem as long as (and only requiring)
+uid/gid 4000 exists on the server (and has the right permissions in the
+filesystem obviously).
+
+Reason I'm asking is that I can't get squashing to work how I'd expect so
+wondering if my mental model of what Lustre is doing is wrong. I note the
+docs about identity upcalls but it seems that only relates to getting the
+supplementary groups for client users, so with squashing that shouldn't be
+relevant either?
+
+thanks for any clarifications
+Steve Brasier
+
+http://stackhpc.com/
+Please note I work Tuesday to Friday.
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20200312/5f9aa117/attachment.html>
+
+From harenberg at physik.uni-wuppertal.de  Thu Mar 12 07:18:32 2020
+From: harenberg at physik.uni-wuppertal.de (Torsten Harenberg)
+Date: Thu, 12 Mar 2020 15:18:32 +0100
+Subject: [lustre-discuss] old Lustre 2.8.0 panic'ing continously
+In-Reply-To: <95f040d5-ae8f-fe3c-7a3d-defe5dffb33f@physik.uni-wuppertal.de>
+References: <c988af66-8c30-4502-f87c-abb1923ca0ea@physik.uni-wuppertal.de>
+ <21124AF9-DE5E-4C31-901D-E961D872E64C@utk.edu>
+ <26CA6718-9B9B-436D-8EEF-3C177415A951@whamcloud.com>
+ <95f040d5-ae8f-fe3c-7a3d-defe5dffb33f@physik.uni-wuppertal.de>
+Message-ID: <7a272690-987f-b65e-d008-c3738715eb22@physik.uni-wuppertal.de>
+
+Dear all,
+
+Am 10.03.20 um 08:18 schrieb Torsten Harenberg:
+> During the last days (since thursday), our Lustre instance was
+> surprisingly stable. We lowered a bit the load by limiting the # of
+> running jobs which might also helped to stablize the system.
+> 
+> We enabled kdump, so if another crash is happening anytime soon, we hope
+> to get at least a dump for a hint where the problem is.
+
+now it crashed again. But we got a backtrace and a dump.
+
+the backtrace is:
+
+<4>general protection fault: 0000 [#1] SMP
+<4>last sysfs file:
+/sys/devices/pci0000:00/0000:00:01.0/0000:04:00.1/host4/rport-4:0-1/target4:0:1/4:0:1:14/state
+<4>CPU 13
+<4>Modules linked in: osp(U) ofd(U) lfsck(U) ost(U) mgc(U)
+osd_ldiskfs(U) ldiskfs(U) lquota(U) lustre(U) lov(U) mdc(U) fid(U)
+lmv(U) fld(U) ksocklnd(U) ptlrpc(U) obdclass(U) lnet(U) sha512_generic
+crc32c_intel libcfs(U) autofs4 bonding ipt_REJECT nf_conntrack_ipv4
+nf_defrag_ipv4 iptable_filter ip_tables ip6t_REJECT nf_conntrack_ipv6
+nf_defrag_ipv6 xt_state nf_conntrack ip6table_filter ip6_tables ipv6
+iTCO_wdt iTCO_vendor_support hpilo hpwdt serio_raw lpc_ich mfd_core
+ioatdma dca ses enclosure sg bnx2x ptp pps_core libcrc32c mdio
+power_meter acpi_ipmi ipmi_si ipmi_msghandler shpchp ext4 jbd2 mbcache
+dm_round_robin sd_mod crc_t10dif qla2xxx scsi_transport_fc scsi_tgt
+pata_acpi ata_generic ata_piix dm_multipath dm_mirror dm_region_hash
+dm_log dm_mod hpsa [last unloaded: scsi_wait_scan]
+<4>
+<4>Pid: 18657, comm: ll_ost_io02_077 Not tainted
+2.6.32-573.12.1.el6_lustre.x86_64 #1 HP ProLiant DL360p Gen8
+<4>RIP: 0010:[<ffffffffa0bc9ee3>]  [<ffffffffa0bc9ee3>]
+ldiskfs_ext_insert_extent+0xb3/0x10c0 [ldiskfs]
+<4>RSP: 0018:ffff8806fa8136c0  EFLAGS: 00010246
+<4>RAX: 0000000000000000 RBX: 0000000000000002 RCX: dead000000200200
+<4>RDX: ffff8806fa813800 RSI: ffff88196f62a2c0 RDI: ffff880106fc3901
+<4>RBP: ffff8806fa813790 R08: 0000000000000000 R09: ffff8807ff69f3c0
+<4>R10: 0000000000000009 R11: 0000000000000002 R12: ffff88196f62a240
+<4>R13: 0000000000000000 R14: 0000000000000002 R15: ffff88196f62a2c0
+<4>FS:  0000000000000000(0000) GS:ffff88009a5a0000(0000)
+knlGS:0000000000000000
+<4>CS:  0010 DS: 0018 ES: 0018 CR0: 000000008005003b
+<4>CR2: 0000000000426820 CR3: 0000000001a8d000 CR4: 00000000000407e0
+<4>DR0: 0000000000000000 DR1: 0000000000000000 DR2: 0000000000000000
+<4>DR3: 0000000000000000 DR6: 00000000ffff0ff0 DR7: 0000000000000400
+<4>Process ll_ost_io02_077 (pid: 18657, threadinfo ffff8806fa810000,
+task ffff8806faffaab0)
+<4>Stack:
+<4> ffff8806fa8136f0 ffffffff811beb8b 0000000000000002 dead000000200200
+<4><d> ffff881f80925c00 ffff880106fc39b0 ffff8806fa813790 ffffffffa0be3dd1
+<4><d> ffff88196f62a240 ffff880106fc39b0 ffff8806fa8137e8 00000000fa8137d4
+<4>Call Trace:
+<4> [<ffffffff811beb8b>] ? __mark_inode_dirty+0x3b/0x160
+<4> [<ffffffffa0be3dd1>] ? ldiskfs_mb_new_blocks+0x241/0x640 [ldiskfs]
+<4> [<ffffffffa0c6c169>] ldiskfs_ext_new_extent_cb+0x5d9/0x6d0 [osd_ldiskfs]
+<4> [<ffffffff8129e348>] ? call_rwsem_wake+0x18/0x30
+<4> [<ffffffffa0bc9c62>] ldiskfs_ext_walk_space+0x142/0x310 [ldiskfs]
+<4> [<ffffffffa0c6bb90>] ? ldiskfs_ext_new_extent_cb+0x0/0x6d0 [osd_ldiskfs]
+<4> [<ffffffffa0c6bafd>] osd_ldiskfs_map_nblocks+0x7d/0x110 [osd_ldiskfs]
+<4> [<ffffffffa0c6c4d8>] osd_ldiskfs_map_inode_pages+0x278/0x2e0
+[osd_ldiskfs]
+<4> [<ffffffffa0bfc0d8>] ? __ldiskfs_journal_stop+0x68/0xa0 [ldiskfs]
+<4> [<ffffffffa0c6edcb>] osd_write_commit+0x39b/0x9a0 [osd_ldiskfs]
+<4> [<ffffffffa0de1c34>] ofd_commitrw_write+0x664/0xfa0 [ofd]
+<4> [<ffffffffa0de2b2f>] ofd_commitrw+0x5bf/0xb10 [ofd]
+<4> [<ffffffffa04bc791>] ? lprocfs_counter_add+0x151/0x1c0 [obdclass]
+<4> [<ffffffffa0756d74>] obd_commitrw+0x114/0x380 [ptlrpc]
+<4> [<ffffffffa07603f0>] tgt_brw_write+0xc70/0x1540 [ptlrpc]
+<4> [<ffffffff8105e646>] ? enqueue_task+0x66/0x80
+<4> [<ffffffff8105a81d>] ? check_preempt_curr+0x6d/0x90
+<4> [<ffffffff8106711e>] ? try_to_wake_up+0x24e/0x3e0
+<4> [<ffffffffa06feb70>] ? lustre_swab_niobuf_remote+0x0/0x30 [ptlrpc]
+<4> [<ffffffffa06b6140>] ? target_bulk_timeout+0x0/0xc0 [ptlrpc]
+<4> [<ffffffffa075ec2c>] tgt_request_handle+0x8ec/0x1440 [ptlrpc]
+<4> [<ffffffffa070bc61>] ptlrpc_main+0xd21/0x1800 [ptlrpc]
+<4> [<ffffffff8106eab0>] ? pick_next_task_fair+0xd0/0x130
+<4> [<ffffffff81538f46>] ? schedule+0x176/0x3a0
+<4> [<ffffffffa070af40>] ? ptlrpc_main+0x0/0x1800 [ptlrpc]
+<4> [<ffffffff810a0fce>] kthread+0x9e/0xc0
+<4> [<ffffffff8100c28a>] child_rip+0xa/0x20
+<4> [<ffffffff810a0f30>] ? kthread+0x0/0xc0
+<4> [<ffffffff8100c280>] ? child_rip+0x0/0x20
+<4>Code: 48 85 c9 0f 84 05 10 00 00 4d 85 ff 74 0a f6 45 8c 08 0f 84 33
+07 00 00 45 31 ed 4c 89 e8 66 2e 0f 1f 84 00 00 00 00 00 49 63 de <44>
+0f b7 49 02 48 8d 14 dd 00 00 00 00 49 89 df 49 c1 e7 06 49
+<1>RIP  [<ffffffffa0bc9ee3>] ldiskfs_ext_insert_extent+0xb3/0x10c0 [ldiskfs]
+<4> RSP <ffff8806fa8136c0>
+[root at lustre3 127.0.0.1-2020-03-11-19:14:18]#
+
+
+I still have to read (I am not experienced with kernel debugging) how to
+attach the vmcore to a gdb.
+
+But if you already have a guess reading the trace I would be very happy
+to take any advice.
+
+By the way: we mounted the OST now exactly the other way round than
+usual and now the other machine crashed, so it seems that it has
+something to do with the content on the LUNs rather than it's a server
+hardware problem.
+
+Thanks again
+
+  Torsten
+
+
+-- 
+Dr. Torsten Harenberg     harenberg at physik.uni-wuppertal.de
+Bergische Universitaet
+Fakult?t 4 - Physik       Tel.: +49 (0)202 439-3521
+Gaussstr. 20              Fax : +49 (0)202 439-2811
+42097 Wuppertal
+
+-------------- next part --------------
+A non-text attachment was scrubbed...
+Name: smime.p7s
+Type: application/pkcs7-signature
+Size: 5341 bytes
+Desc: S/MIME Cryptographic Signature
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20200312/449e2854/attachment.bin>
+
+From adilger at whamcloud.com  Fri Mar 13 02:47:23 2020
+From: adilger at whamcloud.com (Andreas Dilger)
+Date: Fri, 13 Mar 2020 09:47:23 +0000
+Subject: [lustre-discuss] old Lustre 2.8.0 panic'ing continously
+In-Reply-To: <c988af66-8c30-4502-f87c-abb1923ca0ea@physik.uni-wuppertal.de>
+References: <c988af66-8c30-4502-f87c-abb1923ca0ea@physik.uni-wuppertal.de>
+Message-ID: <6C6EF4C6-F1F6-4125-AA32-EC4567CE2B5C@whamcloud.com>
+
+One thing to check if you are not seeing any benefit from running e2fsck, is to
+make sure you are using the latest e2fsprogs-1.45.2.wc1.
+
+You could also try upgrading the server to Lustre 2.10.8.
+
+Based on the kernel version, it looks like RHEL6.7, which should still work with 2.10
+(the previous LTS branch), but has a lot more fixes than 2.8.0.
+
+Cheers, Andreas
+
+On Mar 5, 2020, at 00:48, Torsten Harenberg <harenberg at physik.uni-wuppertal.de<mailto:harenberg at physik.uni-wuppertal.de>> wrote:
+
+Dear all,
+
+I know it's dared to ask for help for such an old system.
+
+We still run a CentOS 6 based Lustre 2.8.0 system
+(kernel-2.6.32-573.12.1.el6_lustre.x86_64,
+lustre-2.8.0-2.6.32_573.12.1.el6_lustre.x86_64.x86_64).
+
+It's out of warrenty and about to be replaced. The approval process for
+the new grant took over a year and we're currently preparing an EU wide
+tender, all of that takes and took much more time than we expected.
+
+The problem is:
+
+one OSS server is always running into a kernel panic. It seems that this
+kernel panic is related to one of the OSS mount points. If we mount the
+LUNs of that server (all data is on a 3par SAN) to a different server,
+this one is panic'ing, too.
+
+We always run file system checks after such a panic but these show only
+minor issues that you would expect after a crashed machine like
+
+[QUOTA WARNING] Usage inconsistent for ID 2901:actual (757747712, 217)
+!= expected (664182784, 215)
+
+We would love to avoid an upgrade to CentOS 7 with these old machines,
+but these crashes happen really often meanwhile and yesterday it
+panic'ed after only 30mins.
+
+Now we're running out of ideas.
+
+If anyone has an idea how we could identify the source of the problem,
+we would really appreciate it.
+
+Kind regards
+
+ Torsten
+
+
+--
+Dr. Torsten Harenberg     harenberg at physik.uni-wuppertal.de<mailto:harenberg at physik.uni-wuppertal.de>
+Bergische Universitaet
+Fakult?t 4 - Physik       Tel.: +49 (0)202 439-3521
+Gaussstr. 20              Fax : +49 (0)202 439-2811
+42097 Wuppertal
+
+_______________________________________________
+lustre-discuss mailing list
+lustre-discuss at lists.lustre.org<mailto:lustre-discuss at lists.lustre.org>
+http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org
+
+Cheers, Andreas
+--
+Andreas Dilger
+Principal Lustre Architect
+Whamcloud
+
+
+
+
+
+
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20200313/b517de81/attachment.html>
+
+From lana.deere at gmail.com  Thu Mar 19 11:06:19 2020
+From: lana.deere at gmail.com (Lana Deere)
+Date: Thu, 19 Mar 2020 14:06:19 -0400
+Subject: [lustre-discuss] "no space on device"
+Message-ID: <CA+4x=b9PCZ-9ECBxrRPaEyind_6XrbZnkZeE5EKik9GrdE1PkQ@mail.gmail.com>
+
+I have a Lustre 2.12 setup running on CentOS 7.  It has been working fine
+for some months but last night one of my users tried to untar a large file,
+which (among other things) created a single directory containing several
+million subdirectories.  At that point the untar failed, reporting "no
+space on device".  All attempts to create a file on this Lustre system now
+produce the same error message, but "df" and "df -i" indicate there is
+plenty of space and inodes left.  I checked the mount point on the metadata
+node and it appears to have plenty of space left too.
+
+I can list directories and view files on this filesystem.  I can delete
+files or directories on it.  But even after removing a few files and a
+directory I cannot create a new file.
+
+If anyone can offer some help here it would be appreciated.
+
+.. Lana (lana.deere at gmail.com)
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20200319/142995d2/attachment.html>
+
+From degremoa at amazon.com  Thu Mar 19 11:12:50 2020
+From: degremoa at amazon.com (Degremont, Aurelien)
+Date: Thu, 19 Mar 2020 18:12:50 +0000
+Subject: [lustre-discuss] "no space on device"
+In-Reply-To: <CA+4x=b9PCZ-9ECBxrRPaEyind_6XrbZnkZeE5EKik9GrdE1PkQ@mail.gmail.com>
+References: <CA+4x=b9PCZ-9ECBxrRPaEyind_6XrbZnkZeE5EKik9GrdE1PkQ@mail.gmail.com>
+Message-ID: <4BAF665B-5149-4B6E-BD42-61558173EDD2@amazon.com>
+
+Hi Lana,
+
+Lustre dispatches the data across several servers, MDTs and OSTs. It is likely that one of this OST is full.
+To see the usage per sub-component, you should check:
+
+lfs df -h
+lfs df -ih
+
+See if this reports one OSTs or MDT is full.
+
+Aur?lien
+
+De : lustre-discuss <lustre-discuss-bounces at lists.lustre.org> au nom de Lana Deere <lana.deere at gmail.com>
+Date : jeudi 19 mars 2020 ? 19:08
+? : "lustre-discuss at lists.lustre.org" <lustre-discuss at lists.lustre.org>
+Objet : [EXTERNAL] [lustre-discuss] "no space on device"
+
+
+CAUTION: This email originated from outside of the organization. Do not click links or open attachments unless you can confirm the sender and know the content is safe.
+
+
+I have a Lustre 2.12 setup running on CentOS 7.  It has been working fine for some months but last night one of my users tried to untar a large file, which (among other things) created a single directory containing several million subdirectories.  At that point the untar failed, reporting "no space on device".  All attempts to create a file on this Lustre system now produce the same error message, but "df" and "df -i" indicate there is plenty of space and inodes left.  I checked the mount point on the metadata node and it appears to have plenty of space left too.
+
+I can list directories and view files on this filesystem.  I can delete files or directories on it.  But even after removing a few files and a directory I cannot create a new file.
+
+If anyone can offer some help here it would be appreciated.
+
+.. Lana (lana.deere at gmail.com<mailto:lana.deere at gmail.com>)
+
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20200319/a6c8fdcd/attachment.html>
+
+From lana.deere at gmail.com  Thu Mar 19 11:56:15 2020
+From: lana.deere at gmail.com (Lana Deere)
+Date: Thu, 19 Mar 2020 14:56:15 -0400
+Subject: [lustre-discuss] "no space on device"
+In-Reply-To: <4BAF665B-5149-4B6E-BD42-61558173EDD2@amazon.com>
+References: <CA+4x=b9PCZ-9ECBxrRPaEyind_6XrbZnkZeE5EKik9GrdE1PkQ@mail.gmail.com>
+ <4BAF665B-5149-4B6E-BD42-61558173EDD2@amazon.com>
+Message-ID: <CA+4x=b92qF7nM3DpeaQrp10A=Kc2YAbUi9wyk_4K9qJ8BFDKYA@mail.gmail.com>
+
+The MDT shows 6% of storage in use and 9% of inodes in use.  The OST,
+however, shows 46% of storage and 100% of inodes in use (12 free).  (There
+is only one OST on this particular file system.)   I suppose if a lot of
+files are deleted, the system will recover, but then I'm not sure why I
+couldn't create any files after deleting a few.
+
+Is there any way to increase the number of inodes on the OST without losing
+the data currently on the filesystem?
+
+.. Lana (lana.deere at gmail.com)
+
+
+
+
+On Thu, Mar 19, 2020 at 2:13 PM Degremont, Aurelien <degremoa at amazon.com>
+wrote:
+
+> Hi Lana,
+>
+>
+>
+> Lustre dispatches the data across several servers, MDTs and OSTs. It is
+> likely that one of this OST is full.
+>
+> To see the usage per sub-component, you should check:
+>
+>
+>
+> lfs df -h
+>
+> lfs df -ih
+>
+>
+>
+> See if this reports one OSTs or MDT is full.
+>
+>
+>
+> Aur?lien
+>
+>
+>
+> *De : *lustre-discuss <lustre-discuss-bounces at lists.lustre.org> au nom de
+> Lana Deere <lana.deere at gmail.com>
+> *Date : *jeudi 19 mars 2020 ? 19:08
+> *? : *"lustre-discuss at lists.lustre.org" <lustre-discuss at lists.lustre.org>
+> *Objet : *[EXTERNAL] [lustre-discuss] "no space on device"
+>
+>
+>
+> *CAUTION*: This email originated from outside of the organization. Do not
+> click links or open attachments unless you can confirm the sender and know
+> the content is safe.
+>
+>
+>
+> I have a Lustre 2.12 setup running on CentOS 7.  It has been working fine
+> for some months but last night one of my users tried to untar a large file,
+> which (among other things) created a single directory containing several
+> million subdirectories.  At that point the untar failed, reporting "no
+> space on device".  All attempts to create a file on this Lustre system now
+> produce the same error message, but "df" and "df -i" indicate there is
+> plenty of space and inodes left.  I checked the mount point on the metadata
+> node and it appears to have plenty of space left too.
+>
+>
+>
+> I can list directories and view files on this filesystem.  I can delete
+> files or directories on it.  But even after removing a few files and a
+> directory I cannot create a new file.
+>
+>
+>
+> If anyone can offer some help here it would be appreciated.
+>
+>
+> .. Lana (lana.deere at gmail.com)
+>
+>
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20200319/045fe948/attachment-0001.html>
+
+From prod.feng at gmail.com  Thu Mar 19 12:31:38 2020
+From: prod.feng at gmail.com (Feng Zhang)
+Date: Thu, 19 Mar 2020 15:31:38 -0400
+Subject: [lustre-discuss] "no space on device"
+In-Reply-To: <CA+4x=b92qF7nM3DpeaQrp10A=Kc2YAbUi9wyk_4K9qJ8BFDKYA@mail.gmail.com>
+References: <CA+4x=b9PCZ-9ECBxrRPaEyind_6XrbZnkZeE5EKik9GrdE1PkQ@mail.gmail.com>
+ <4BAF665B-5149-4B6E-BD42-61558173EDD2@amazon.com>
+ <CA+4x=b92qF7nM3DpeaQrp10A=Kc2YAbUi9wyk_4K9qJ8BFDKYA@mail.gmail.com>
+Message-ID: <CA+hhoHnUncs1mavOu9JEmdtU2hngnjD6ydPYnG70iLi5B5QZfg@mail.gmail.com>
+
+you may need to delete more files, and wait for a while for MDS gets
+updated.
+Best,
+
+Feng
+
+
+On Thu, Mar 19, 2020 at 2:56 PM Lana Deere <lana.deere at gmail.com> wrote:
+
+> The MDT shows 6% of storage in use and 9% of inodes in use.  The OST,
+> however, shows 46% of storage and 100% of inodes in use (12 free).  (There
+> is only one OST on this particular file system.)   I suppose if a lot of
+> files are deleted, the system will recover, but then I'm not sure why I
+> couldn't create any files after deleting a few.
+>
+> Is there any way to increase the number of inodes on the OST without
+> losing the data currently on the filesystem?
+>
+> .. Lana (lana.deere at gmail.com)
+>
+>
+>
+>
+> On Thu, Mar 19, 2020 at 2:13 PM Degremont, Aurelien <degremoa at amazon.com>
+> wrote:
+>
+>> Hi Lana,
+>>
+>>
+>>
+>> Lustre dispatches the data across several servers, MDTs and OSTs. It is
+>> likely that one of this OST is full.
+>>
+>> To see the usage per sub-component, you should check:
+>>
+>>
+>>
+>> lfs df -h
+>>
+>> lfs df -ih
+>>
+>>
+>>
+>> See if this reports one OSTs or MDT is full.
+>>
+>>
+>>
+>> Aur?lien
+>>
+>>
+>>
+>> *De : *lustre-discuss <lustre-discuss-bounces at lists.lustre.org> au nom
+>> de Lana Deere <lana.deere at gmail.com>
+>> *Date : *jeudi 19 mars 2020 ? 19:08
+>> *? : *"lustre-discuss at lists.lustre.org" <lustre-discuss at lists.lustre.org>
+>> *Objet : *[EXTERNAL] [lustre-discuss] "no space on device"
+>>
+>>
+>>
+>> *CAUTION*: This email originated from outside of the organization. Do
+>> not click links or open attachments unless you can confirm the sender and
+>> know the content is safe.
+>>
+>>
+>>
+>> I have a Lustre 2.12 setup running on CentOS 7.  It has been working fine
+>> for some months but last night one of my users tried to untar a large file,
+>> which (among other things) created a single directory containing several
+>> million subdirectories.  At that point the untar failed, reporting "no
+>> space on device".  All attempts to create a file on this Lustre system now
+>> produce the same error message, but "df" and "df -i" indicate there is
+>> plenty of space and inodes left.  I checked the mount point on the metadata
+>> node and it appears to have plenty of space left too.
+>>
+>>
+>>
+>> I can list directories and view files on this filesystem.  I can delete
+>> files or directories on it.  But even after removing a few files and a
+>> directory I cannot create a new file.
+>>
+>>
+>>
+>> If anyone can offer some help here it would be appreciated.
+>>
+>>
+>> .. Lana (lana.deere at gmail.com)
+>>
+>> _______________________________________________
+> lustre-discuss mailing list
+> lustre-discuss at lists.lustre.org
+> http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org
+>
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20200319/21ca7cb4/attachment.html>
+
+From adilger at whamcloud.com  Thu Mar 19 20:24:14 2020
+From: adilger at whamcloud.com (Andreas Dilger)
+Date: Fri, 20 Mar 2020 03:24:14 +0000
+Subject: [lustre-discuss] "no space on device"
+In-Reply-To: <CA+4x=b92qF7nM3DpeaQrp10A=Kc2YAbUi9wyk_4K9qJ8BFDKYA@mail.gmail.com>
+References: <CA+4x=b9PCZ-9ECBxrRPaEyind_6XrbZnkZeE5EKik9GrdE1PkQ@mail.gmail.com>
+ <4BAF665B-5149-4B6E-BD42-61558173EDD2@amazon.com>
+ <CA+4x=b92qF7nM3DpeaQrp10A=Kc2YAbUi9wyk_4K9qJ8BFDKYA@mail.gmail.com>
+Message-ID: <7FBD10E5-A902-42CC-B3D4-F61CCC1ABD89@whamcloud.com>
+
+On Mar 19, 2020, at 12:56, Lana Deere <lana.deere at gmail.com<mailto:lana.deere at gmail.com>> wrote:
+
+The MDT shows 6% of storage in use and 9% of inodes in use.  The OST, however, shows 46% of storage and 100% of inodes in use (12 free).  (There is only one OST on this particular file system.)   I suppose if a lot of files are deleted, the system will recover, but then I'm not sure why I couldn't create any files after deleting a few.
+
+Is there any way to increase the number of inodes on the OST without losing the data currently on the filesystem?
+
+That depends on the storage that the OST is on.  You can use "resize2fs" on the OST if the underlying stoage is LVM or similar that can be resized.  Increasing the OST size adds inodes proportional to the added capacity.
+
+The more common option for adding capacity to Lustre is to add another OST.  Based on your earlier comments, you should probably double the inodes per unit space (reduce the bytes per inode ratio like "mkfs.lustre --mkfsoptions='-i 131072' ..." or similar) compared to the first OST.  You can work out the average bytes per inode on the OST based on the (used OST capacity / used inodes).
+
+Cheers, Andreas
+
+
+.. Lana (lana.deere at gmail.com<mailto:lana.deere at gmail.com>)
+
+
+
+
+On Thu, Mar 19, 2020 at 2:13 PM Degremont, Aurelien <degremoa at amazon.com<mailto:degremoa at amazon.com>> wrote:
+Hi Lana,
+
+Lustre dispatches the data across several servers, MDTs and OSTs. It is likely that one of this OST is full.
+To see the usage per sub-component, you should check:
+
+lfs df -h
+lfs df -ih
+
+See if this reports one OSTs or MDT is full.
+
+Aur?lien
+
+De : lustre-discuss <lustre-discuss-bounces at lists.lustre.org<mailto:lustre-discuss-bounces at lists.lustre.org>> au nom de Lana Deere <lana.deere at gmail.com<mailto:lana.deere at gmail.com>>
+Date : jeudi 19 mars 2020 ? 19:08
+? : "lustre-discuss at lists.lustre.org<mailto:lustre-discuss at lists.lustre.org>" <lustre-discuss at lists.lustre.org<mailto:lustre-discuss at lists.lustre.org>>
+Objet : [EXTERNAL] [lustre-discuss] "no space on device"
+I have a Lustre 2.12 setup running on CentOS 7.  It has been working fine for some months but last night one of my users tried to untar a large file, which (among other things) created a single directory containing several million subdirectories.  At that point the untar failed, reporting "no space on device".  All attempts to create a file on this Lustre system now produce the same error message, but "df" and "df -i" indicate there is plenty of space and inodes left.  I checked the mount point on the metadata node and it appears to have plenty of space left too.
+
+I can list directories and view files on this filesystem.  I can delete files or directories on it.  But even after removing a few files and a directory I cannot create a new file.
+
+If anyone can offer some help here it would be appreciated.
+
+.. Lana (lana.deere at gmail.com<mailto:lana.deere at gmail.com>)
+
+_______________________________________________
+lustre-discuss mailing list
+lustre-discuss at lists.lustre.org<mailto:lustre-discuss at lists.lustre.org>
+http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org
+
+Cheers, Andreas
+--
+Andreas Dilger
+Principal Lustre Architect
+Whamcloud
+
+
+
+
+
+
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20200320/c0759967/attachment.html>
+
+From lana.deere at gmail.com  Fri Mar 20 06:01:47 2020
+From: lana.deere at gmail.com (Lana Deere)
+Date: Fri, 20 Mar 2020 09:01:47 -0400
+Subject: [lustre-discuss] "no space on device"
+In-Reply-To: <7FBD10E5-A902-42CC-B3D4-F61CCC1ABD89@whamcloud.com>
+References: <CA+4x=b9PCZ-9ECBxrRPaEyind_6XrbZnkZeE5EKik9GrdE1PkQ@mail.gmail.com>
+ <4BAF665B-5149-4B6E-BD42-61558173EDD2@amazon.com>
+ <CA+4x=b92qF7nM3DpeaQrp10A=Kc2YAbUi9wyk_4K9qJ8BFDKYA@mail.gmail.com>
+ <7FBD10E5-A902-42CC-B3D4-F61CCC1ABD89@whamcloud.com>
+Message-ID: <CA+4x=b-XOmBycj2nDiMOQsCEND1s6Q9zfyBH=A7SU6mm6Tv=yA@mail.gmail.com>
+
+OK.  Thanks to everyone who answered.
+
+.. Lana (lana.deere at gmail.com)
+
+
+
+
+On Thu, Mar 19, 2020 at 11:24 PM Andreas Dilger <adilger at whamcloud.com>
+wrote:
+
+> On Mar 19, 2020, at 12:56, Lana Deere <lana.deere at gmail.com> wrote:
+>
+>
+> The MDT shows 6% of storage in use and 9% of inodes in use.  The OST,
+> however, shows 46% of storage and 100% of inodes in use (12 free).  (There
+> is only one OST on this particular file system.)   I suppose if a lot of
+> files are deleted, the system will recover, but then I'm not sure why I
+> couldn't create any files after deleting a few.
+>
+> Is there any way to increase the number of inodes on the OST without
+> losing the data currently on the filesystem?
+>
+>
+> That depends on the storage that the OST is on.  You can use "resize2fs"
+> on the OST if the underlying stoage is LVM or similar that can be resized.
+> Increasing the OST size adds inodes proportional to the added capacity.
+>
+> The more common option for adding capacity to Lustre is to add another
+> OST.  Based on your earlier comments, you should probably double the inodes
+> per unit space (reduce the bytes per inode ratio like "mkfs.lustre
+> --mkfsoptions='-i 131072' ..." or similar) compared to the first OST.  You
+> can work out the average bytes per inode on the OST based on the (used OST
+> capacity / used inodes).
+>
+> Cheers, Andreas
+>
+>
+>
+> .. Lana (lana.deere at gmail.com)
+>
+>
+>
+>
+> On Thu, Mar 19, 2020 at 2:13 PM Degremont, Aurelien <degremoa at amazon.com>
+> wrote:
+>
+>> Hi Lana,
+>>
+>>
+>>
+>> Lustre dispatches the data across several servers, MDTs and OSTs. It is
+>> likely that one of this OST is full.
+>>
+>> To see the usage per sub-component, you should check:
+>>
+>>
+>>
+>> lfs df -h
+>>
+>> lfs df -ih
+>>
+>>
+>>
+>> See if this reports one OSTs or MDT is full.
+>>
+>>
+>>
+>> Aur?lien
+>>
+>>
+>>
+>> *De : *lustre-discuss <lustre-discuss-bounces at lists.lustre.org> au nom
+>> de Lana Deere <lana.deere at gmail.com>
+>> *Date : *jeudi 19 mars 2020 ? 19:08
+>> *? : *"lustre-discuss at lists.lustre.org" <lustre-discuss at lists.lustre.org>
+>> *Objet : *[EXTERNAL] [lustre-discuss] "no space on device"
+>>
+>> I have a Lustre 2.12 setup running on CentOS 7.  It has been working fine
+>> for some months but last night one of my users tried to untar a large file,
+>> which (among other things) created a single directory containing several
+>> million subdirectories.  At that point the untar failed, reporting "no
+>> space on device".  All attempts to create a file on this Lustre system now
+>> produce the same error message, but "df" and "df -i" indicate there is
+>> plenty of space and inodes left.  I checked the mount point on the metadata
+>> node and it appears to have plenty of space left too.
+>>
+>>
+>>
+>> I can list directories and view files on this filesystem.  I can delete
+>> files or directories on it.  But even after removing a few files and a
+>> directory I cannot create a new file.
+>>
+>>
+>>
+>> If anyone can offer some help here it would be appreciated.
+>>
+>>
+>> .. Lana (lana.deere at gmail.com)
+>>
+>> _______________________________________________
+> lustre-discuss mailing list
+> lustre-discuss at lists.lustre.org
+> http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org
+>
+>
+> Cheers, Andreas
+> --
+> Andreas Dilger
+> Principal Lustre Architect
+> Whamcloud
+>
+>
+>
+>
+>
+>
+>
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20200320/d7b93c9b/attachment-0001.html>
+
+From keith.mannthey at intel.com  Fri Mar 20 12:02:37 2020
+From: keith.mannthey at intel.com (Mannthey, Keith)
+Date: Fri, 20 Mar 2020 19:02:37 +0000
+Subject: [lustre-discuss] DNE2 settings are not propagated?
+Message-ID: <MW3PR11MB45218A0790B2F3CDCEA3086096F50@MW3PR11MB4521.namprd11.prod.outlook.com>
+
+I am doing some work with Lustre 2.13 (Downloaded from Whamcloud) and DNE 2 there are 6 MDTs. 
+
+
+"
+[root at colts52-clx01 for-test]# lfs getdirstripe TEST
+lmv_stripe_count: 6 lmv_stripe_offset: 1 lmv_hash_type: fnv_1a_64
+mdtidx           FID[seq:oid:ver]
+     1           [0x2c0000400:0x5:0x0]
+     5           [0x300000403:0x5:0x0]
+     3           [0x340000403:0x5:0x0]
+     0           [0x200000403:0x5:0x0]
+     4           [0x240000402:0x5:0x0]
+     2           [0x280000401:0x5:0x0]
+[root at colts52-clx01 for-test]# mkdir TEST/now
+[root at colts52-clx01 for-test]# lfs getdirstripe TEST/now/
+lmv_stripe_count: 0 lmv_stripe_offset: 2 lmv_hash_type: none
+ "
+
+Directory stripping settings are not being propagated.  Is this expected?  
+
+
+Thanks,
+ Keith 
+ 
+
+From adilger at whamcloud.com  Fri Mar 20 12:32:16 2020
+From: adilger at whamcloud.com (Andreas Dilger)
+Date: Fri, 20 Mar 2020 19:32:16 +0000
+Subject: [lustre-discuss] DNE2 settings are not propagated?
+In-Reply-To: <MW3PR11MB45218A0790B2F3CDCEA3086096F50@MW3PR11MB4521.namprd11.prod.outlook.com>
+References: <MW3PR11MB45218A0790B2F3CDCEA3086096F50@MW3PR11MB4521.namprd11.prod.outlook.com>
+Message-ID: <DC5DABA8-8744-40AC-906C-EAFC1BE357D0@whamcloud.com>
+
+On Mar 20, 2020, at 13:02, Mannthey, Keith <keith.mannthey at intel.com<mailto:keith.mannthey at intel.com>> wrote:
+
+I am doing some work with Lustre 2.13 (Downloaded from Whamcloud) and DNE 2 there are 6 MDTs.
+
+
+"
+[root at colts52-clx01 for-test]# lfs getdirstripe TEST
+lmv_stripe_count: 6 lmv_stripe_offset: 1 lmv_hash_type: fnv_1a_64
+mdtidx           FID[seq:oid:ver]
+    1           [0x2c0000400:0x5:0x0]
+    5           [0x300000403:0x5:0x0]
+    3           [0x340000403:0x5:0x0]
+    0           [0x200000403:0x5:0x0]
+    4           [0x240000402:0x5:0x0]
+    2           [0x280000401:0x5:0x0]
+[root at colts52-clx01 for-test]# mkdir TEST/now
+[root at colts52-clx01 for-test]# lfs getdirstripe TEST/now/
+lmv_stripe_count: 0 lmv_stripe_offset: 2 lmv_hash_type: none
+"
+
+Directory stripping settings are not being propagated.  Is this expected?
+
+Yes, this working as designed.  It isn't necessarily good for all directories to be striped, as that adds overhead without necessary improving performance.
+
+The current recommendation is that DNE should be used for e.g. a top-level directory to distribute files and subdirectories across MDTs, or in the case of large directories with millions of files.
+
+Cheers, Andreas
+--
+Andreas Dilger
+Principal Lustre Architect
+Whamcloud
+
+
+
+
+
+
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20200320/1a2f695b/attachment.html>
+
+From cory.spitz at hpe.com  Fri Mar 20 12:56:40 2020
+From: cory.spitz at hpe.com (Spitz, Cory James)
+Date: Fri, 20 Mar 2020 19:56:40 +0000
+Subject: [lustre-discuss] DNE2 settings are not propagated?
+In-Reply-To: <DC5DABA8-8744-40AC-906C-EAFC1BE357D0@whamcloud.com>
+References: <MW3PR11MB45218A0790B2F3CDCEA3086096F50@MW3PR11MB4521.namprd11.prod.outlook.com>
+ <DC5DABA8-8744-40AC-906C-EAFC1BE357D0@whamcloud.com>
+Message-ID: <491260CD-44BC-406B-B9CF-48678A5DB884@hpe.com>
+
+As Andreas says, it isn?t really recommended, but you can get sub-directories to inherit the striping by using the -D, --default option to `lfs mkdir` or `lfs setdirstripe`.   From the man page:
+
+       -D, --default
+              Set  the  default striping pattern of subdirectories. Newly cre-
+              ated sub-directories will use the new default striping  pattern,
+              but  existing  sub-directories  will not be affected.  The newly
+              created sub-directories will also inherit the specified  default
+              striping  pattern.  Only  default  stripe count is supported for
+              now.
+
+              Note that striping all directories across all MDTs by default is
+              not  recommended  at  this  time, as the clients will have to do
+              more RPCs to create and access each directory,  hurting  perfor-
+              mance rather than improving it.  Default striped directories are
+              preferred for cases where large subdirectories will  be  created
+              (e.g. file-per-process job output directories).
+
+-Cory
+
+
+On 3/20/20, 2:33 PM, "lustre-discuss on behalf of Andreas Dilger" <lustre-discuss-bounces at lists.lustre.org<mailto:lustre-discuss-bounces at lists.lustre.org> on behalf of adilger at whamcloud.com<mailto:adilger at whamcloud.com>> wrote:
+
+On Mar 20, 2020, at 13:02, Mannthey, Keith <keith.mannthey at intel.com<mailto:keith.mannthey at intel.com>> wrote:
+
+I am doing some work with Lustre 2.13 (Downloaded from Whamcloud) and DNE 2 there are 6 MDTs.
+
+
+"
+[root at colts52-clx01 for-test]# lfs getdirstripe TEST
+lmv_stripe_count: 6 lmv_stripe_offset: 1 lmv_hash_type: fnv_1a_64
+mdtidx           FID[seq:oid:ver]
+    1           [0x2c0000400:0x5:0x0]
+    5           [0x300000403:0x5:0x0]
+    3           [0x340000403:0x5:0x0]
+    0           [0x200000403:0x5:0x0]
+    4           [0x240000402:0x5:0x0]
+    2           [0x280000401:0x5:0x0]
+[root at colts52-clx01 for-test]# mkdir TEST/now
+[root at colts52-clx01 for-test]# lfs getdirstripe TEST/now/
+lmv_stripe_count: 0 lmv_stripe_offset: 2 lmv_hash_type: none
+"
+
+Directory stripping settings are not being propagated.  Is this expected?
+
+Yes, this working as designed.  It isn't necessarily good for all directories to be striped, as that adds overhead without necessary improving performance.
+
+The current recommendation is that DNE should be used for e.g. a top-level directory to distribute files and subdirectories across MDTs, or in the case of large directories with millions of files.
+
+Cheers, Andreas
+--
+Andreas Dilger
+Principal Lustre Architect
+Whamcloud
+
+
+
+
+
+
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20200320/c4a4ef40/attachment-0001.html>
+
+From keith.mannthey at intel.com  Fri Mar 20 13:57:43 2020
+From: keith.mannthey at intel.com (Mannthey, Keith)
+Date: Fri, 20 Mar 2020 20:57:43 +0000
+Subject: [lustre-discuss] DNE2 settings are not propagated?
+In-Reply-To: <491260CD-44BC-406B-B9CF-48678A5DB884@hpe.com>
+References: <MW3PR11MB45218A0790B2F3CDCEA3086096F50@MW3PR11MB4521.namprd11.prod.outlook.com>
+ <DC5DABA8-8744-40AC-906C-EAFC1BE357D0@whamcloud.com>
+ <491260CD-44BC-406B-B9CF-48678A5DB884@hpe.com>
+Message-ID: <MW3PR11MB4521809693669EC87996265096F50@MW3PR11MB4521.namprd11.prod.outlook.com>
+
+Thanks Andreas and Cory very helpful.   -D will help for what I am using it for.
+
+Thanks!
+  Keith
+
+From: Spitz, Cory James <cory.spitz at hpe.com>
+Sent: Friday, March 20, 2020 12:57 PM
+To: Andreas Dilger <adilger at whamcloud.com>; Mannthey, Keith <keith.mannthey at intel.com>
+Cc: lustre-discuss at lists.lustre.org; Koutoupis, Petros <petros.koutoupis at hpe.com>
+Subject: Re: [lustre-discuss] DNE2 settings are not propagated?
+
+As Andreas says, it isn?t really recommended, but you can get sub-directories to inherit the striping by using the -D, --default option to `lfs mkdir` or `lfs setdirstripe`.   From the man page:
+
+       -D, --default
+              Set  the  default striping pattern of subdirectories. Newly cre-
+              ated sub-directories will use the new default striping  pattern,
+              but  existing  sub-directories  will not be affected.  The newly
+              created sub-directories will also inherit the specified  default
+              striping  pattern.  Only  default  stripe count is supported for
+              now.
+
+              Note that striping all directories across all MDTs by default is
+              not  recommended  at  this  time, as the clients will have to do
+              more RPCs to create and access each directory,  hurting  perfor-
+              mance rather than improving it.  Default striped directories are
+              preferred for cases where large subdirectories will  be  created
+              (e.g. file-per-process job output directories).
+
+-Cory
+
+
+On 3/20/20, 2:33 PM, "lustre-discuss on behalf of Andreas Dilger" <lustre-discuss-bounces at lists.lustre.org<mailto:lustre-discuss-bounces at lists.lustre.org> on behalf of adilger at whamcloud.com<mailto:adilger at whamcloud.com>> wrote:
+
+On Mar 20, 2020, at 13:02, Mannthey, Keith <keith.mannthey at intel.com<mailto:keith.mannthey at intel.com>> wrote:
+
+I am doing some work with Lustre 2.13 (Downloaded from Whamcloud) and DNE 2 there are 6 MDTs.
+
+
+"
+[root at colts52-clx01 for-test]# lfs getdirstripe TEST
+lmv_stripe_count: 6 lmv_stripe_offset: 1 lmv_hash_type: fnv_1a_64
+mdtidx           FID[seq:oid:ver]
+    1           [0x2c0000400:0x5:0x0]
+    5           [0x300000403:0x5:0x0]
+    3           [0x340000403:0x5:0x0]
+    0           [0x200000403:0x5:0x0]
+    4           [0x240000402:0x5:0x0]
+    2           [0x280000401:0x5:0x0]
+[root at colts52-clx01 for-test]# mkdir TEST/now
+[root at colts52-clx01 for-test]# lfs getdirstripe TEST/now/
+lmv_stripe_count: 0 lmv_stripe_offset: 2 lmv_hash_type: none
+"
+
+Directory stripping settings are not being propagated.  Is this expected?
+
+Yes, this working as designed.  It isn't necessarily good for all directories to be striped, as that adds overhead without necessary improving performance.
+
+The current recommendation is that DNE should be used for e.g. a top-level directory to distribute files and subdirectories across MDTs, or in the case of large directories with millions of files.
+
+Cheers, Andreas
+--
+Andreas Dilger
+Principal Lustre Architect
+Whamcloud
+
+
+
+
+
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20200320/ba2d860c/attachment.html>
+
+From grover.hwang at gmail.com  Wed Mar 25 09:05:20 2020
+From: grover.hwang at gmail.com (Gong-Do Hwang)
+Date: Thu, 26 Mar 2020 00:05:20 +0800
+Subject: [lustre-discuss] OST recovery
+Message-ID: <CAFF9WUvFhR2OeCv-NPR5+mxS+BhPV-UBSP40mmQQ-=fOzfghBQ@mail.gmail.com>
+
+Dear Lustre,
+
+Months ago when I tried to add a new disk to my new Lustre FS, I
+accidentally target the mkfs.lustre to a then mounted OST partition of
+another Lustre FS. Weird enough the command passed through, and without
+paying attention to it, I umount the partition months later and couldn't
+mount it back, then I realized the mkfs.lustre command was legit.
+
+But my old lustre FS worked well through these months, so I guess the data
+in that OST is still there. But now the permanent CONFIG/mountdata is the
+new one, and I can still see my old config in the previous value.
+
+My question is is there any way I can write back the old CONFIG/mountdata
+and still keep all my files in that OST?
+
+I am using Luster 2.13.0 for my mgs/mdt/ost
+
+Thanks for your help and I really appreciate it!
+
+Grover
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20200326/710325f8/attachment.html>
+
+From pankajd at cdac.in  Thu Mar 26 23:51:42 2020
+From: pankajd at cdac.in (Pankaj Dorlikar)
+Date: Fri, 27 Mar 2020 12:21:42 +0530 (IST)
+Subject: [lustre-discuss] issue on lustre client 2.1.1 (Cent OS 6.2) with
+ Lustre Server 2.10.7 (CentOS 7.6.16)
+Message-ID: <1904448078.2634.1585291902792@webmail1.cdac.in>
+
+Hi,
+
+We have lustre clients installed with CentOS 6.2 (Kernel : 2.6.32-220) with lustre client version : 2.1.1 and lustre based filesystem has been mounted on it. Lustre server is installed with CenOS 7.6 ( kernel : 3.10.0.-957) with lustre server version : 2.10.7). The lustre based filesystem gets mounted on the clients without any issues and read write also happens. However, random;y some I/O requests stucks like this (may be out of memerory) and then cpu load keeps increasing and many processes stuck.
+
+###########################################################################################################################
+ LustreError: 6382:0:(client.c:1060:ptlrpc_import_delay_req()) @@@ IMP_INVALID  req at ffff8807611c4000 x1657240365560063/t0(0) o-1->home-OST0001_UUID at 172.31.3.163@o2ib:28/4 lens 296/352 e 0 to 0 dl 0 ref 1 fl Rpc:/ffffffff/ffffffff rc 0/-1
+Mar 16 13:34:50 ycn161 kernel: LustreError: 6382:0:(client.c:1060:ptlrpc_import_delay_req()) @@@ IMP_INVALID  req at ffff880afe79ac00 x1657240365560079/t0(0) o-1->home-OST0001_UUID at 172.31.3.163@o2ib:28/4 lens 296/352 e 0 to 0 dl 0 ref 1 fl Rpc:/ffffffff/ffffffff rc 0/-1
+Mar 16 13:34:50 ycn161 kernel: LustreError: 6382:0:(client.c:1060:ptlrpc_import_delay_req()) Skipped 4 previous similar messages
+Mar 16 13:34:50 ycn161 kernel: pw.x invoked oom-killer: gfp_mask=0x0, order=0, oom_adj=0, oom_score_adj=0
+Mar 16 13:34:50 ycn161 kernel: pw.x cpuset=/ mems_allowed=0-1
+Mar 16 13:34:50 ycn161 kernel: Pid: 113644, comm: pw.x Tainted: GF          ----------------   2.6.32-220.el6.x86_64 #1
+Mar 16 13:34:50 ycn161 kernel: Call Trace:
+Mar 16 13:34:50 ycn161 kernel: [<ffffffff810c2cb1>] ? cpuset_print_task_mems_allowed+0x91/0xb0
+Mar 16 13:34:50 ycn161 kernel: [<ffffffff81113a30>] ? dump_header+0x90/0x1b0
+Mar 16 13:34:50 ycn161 kernel: [<ffffffff8120d97c>] ? security_real_capable_noaudit+0x3c/0x70
+Mar 16 13:34:50 ycn161 kernel: [<ffffffff81113eba>] ? oom_kill_process+0x8a/0x2c0
+Mar 16 13:34:50 ycn161 kernel: [<ffffffff81113dae>] ? select_bad_process+0x9e/0x120
+Mar 16 13:34:50 ycn161 kernel: [<ffffffff81114310>] ? out_of_memory+0x220/0x3c0
+Mar 16 13:34:50 ycn161 kernel: [<ffffffff81047187>] ? pte_alloc_one+0x37/0x50
+Mar 16 13:34:50 ycn161 kernel: [<ffffffff81114575>] ? pagefault_out_of_memory+0xc5/0x110
+Mar 16 13:34:50 ycn161 kernel: [<ffffffff8104277e>] ? mm_fault_error+0x4e/0x100
+Mar 16 13:34:50 ycn161 kernel: [<ffffffff81042d36>] ? __do_page_fault+0x336/0x480
+Mar 16 13:34:50 ycn161 kernel: [<ffffffff8100bc0e>] ? apic_timer_interrupt+0xe/0x20
+Mar 16 13:34:50 ycn161 kernel: [<ffffffff814f246e>] ? do_page_fault+0x3e/0xa0
+Mar 16 13:34:50 ycn161 kernel: [<ffffffff814ef825>] ? page_fault+0x25/0x30
+Mar 16 13:34:50 ycn161 kernel: Mem-Info:
+Mar 16 13:34:50 ycn161 kernel: Node 0 DMA per-cpu:
+Mar 16 13:34:50 ycn161 kernel: CPU    0: hi:    0, btch:   1 usd:   0
+#######################################################################################################################
+
+------------------------------------------------------------------------------------------------------------
+[ C-DAC is on Social-Media too. Kindly follow us at:
+Facebook: https://www.facebook.com/CDACINDIA & Twitter: @cdacindia ]
+
+This e-mail is for the sole use of the intended recipient(s) and may
+contain confidential and privileged information. If you are not the
+intended recipient, please contact the sender by reply e-mail and destroy
+all copies and the original message. Any unauthorized review, use,
+disclosure, dissemination, forwarding, printing or copying of this email
+is strictly prohibited and appropriate legal action will be taken.
+------------------------------------------------------------------------------------------------------------
+
+
+From valeriehayot at gmail.com  Sun Mar 29 07:12:14 2020
+From: valeriehayot at gmail.com (Valerie Hayot)
+Date: Sun, 29 Mar 2020 10:12:14 -0400
+Subject: [lustre-discuss] Lustre server build on CentOS 8
+Message-ID: <97220FC9-316C-4B27-9345-EB7D3F0027E2@gmail.com>
+
+Hi,
+
+I have a few CentOS 8 servers that I?d like to use as Lustre servers, preferably without having to downgrade to CentOS 7. Is it known if the el7 packages of the latest release (2.12.4) are expected to work reasonable well on CentOS 8?
+
+
+Thank you,
+
+Valerie
+
+
+From pjones at whamcloud.com  Sun Mar 29 07:47:27 2020
+From: pjones at whamcloud.com (Peter Jones)
+Date: Sun, 29 Mar 2020 14:47:27 +0000
+Subject: [lustre-discuss] Lustre server build on CentOS 8
+In-Reply-To: <97220FC9-316C-4B27-9345-EB7D3F0027E2@gmail.com>
+References: <97220FC9-316C-4B27-9345-EB7D3F0027E2@gmail.com>
+Message-ID: <A798D99C-3DD7-4AC7-81F5-3DFB406683D3@ddn.com>
+
+Valerie
+
+The first Lustre release to officially support CentOS 8.x servers is set to be the upcoming Lustre 2.14 release and so you are into slightly unchartered terrirory. The simplest way forward may depend upon what you are trying to do - if you are looking to run some tests then using the master branch should work, but if you want to run into production then you would have to port the Centos 8.x patch series from master to the 2.12.x branch (either building from source or downloading packages from Jenkins) if you want to run ldiskfs. Lustre on ZFS could be simpler but you would need to use ZFS 0.8.x rather than the current default version of 0.7.13 used for 2.12.4.
+
+Peter
+
+
+?On 2020-03-29, 7:12 AM, "lustre-discuss on behalf of Valerie Hayot" <lustre-discuss-bounces at lists.lustre.org on behalf of valeriehayot at gmail.com> wrote:
+
+    Hi,
+    
+    I have a few CentOS 8 servers that I?d like to use as Lustre servers, preferably without having to downgrade to CentOS 7. Is it known if the el7 packages of the latest release (2.12.4) are expected to work reasonable well on CentOS 8?
+    
+    
+    Thank you,
+    
+    Valerie
+    
+    _______________________________________________
+    lustre-discuss mailing list
+    lustre-discuss at lists.lustre.org
+    http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org
+    
+
+
+From adilger at whamcloud.com  Sun Mar 29 16:14:24 2020
+From: adilger at whamcloud.com (Andreas Dilger)
+Date: Sun, 29 Mar 2020 23:14:24 +0000
+Subject: [lustre-discuss] OST recovery
+In-Reply-To: <CAFF9WUvFhR2OeCv-NPR5+mxS+BhPV-UBSP40mmQQ-=fOzfghBQ@mail.gmail.com>
+References: <CAFF9WUvFhR2OeCv-NPR5+mxS+BhPV-UBSP40mmQQ-=fOzfghBQ@mail.gmail.com>
+Message-ID: <635F4D71-2768-40F8-8B6B-771EA8B9DDDD@whamcloud.com>
+
+It would be useful if you provided the actual error messages, so we can see where the problem is.
+
+What command did you run on the OST?
+
+Does the OST still show that it has data in it (e.g. "df" or "dumpe2fs -h" shows lots of used blocks)?
+
+On Mar 25, 2020, at 10:05, Gong-Do Hwang <grover.hwang at gmail.com<mailto:grover.hwang at gmail.com>> wrote:
+
+Dear Lustre,
+
+Months ago when I tried to add a new disk to my new Lustre FS, I accidentally target the mkfs.lustre to a then mounted OST partition of another Lustre FS. Weird enough the command passed through, and without paying attention to it, I umount the partition months later and couldn't mount it back, then I realized the mkfs.lustre command was legit.
+
+But my old lustre FS worked well through these months, so I guess the data in that OST is still there. But now the permanent CONFIG/mountdata is the new one, and I can still see my old config in the previous value.
+
+My question is is there any way I can write back the old CONFIG/mountdata and still keep all my files in that OST?
+
+I am using Luster 2.13.0 for my mgs/mdt/ost
+
+Thanks for your help and I really appreciate it!
+
+Grover
+_______________________________________________
+lustre-discuss mailing list
+lustre-discuss at lists.lustre.org<mailto:lustre-discuss at lists.lustre.org>
+http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org
+
+Cheers, Andreas
+--
+Andreas Dilger
+Principal Lustre Architect
+Whamcloud
+
+
+
+
+
+
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20200329/42364508/attachment.html>
+
+From simon.guilbault at calculquebec.ca  Mon Mar 30 10:43:16 2020
+From: simon.guilbault at calculquebec.ca (Simon Guilbault)
+Date: Mon, 30 Mar 2020 13:43:16 -0400
+Subject: [lustre-discuss] Shrinking grant with 2.12 clients
+Message-ID: <CAFC6vJj1s0zFZUWDjJMy29vE9+MNdKZ+AY2ZCvty_5bUHsJyWw@mail.gmail.com>
+
+Hi,
+
+We seem to be hitting a performance issue with Lustre clients 2.12.2 and
+2.12.3. Over time, the grant size of the OSC is shrinking and getting under
+1MB and does not grow back. This lowers the performance of this client to a
+few MB/s, even in the kB/s for some OST. This does not seem to happen on
+2.10.8 clients since they don?t have the ?grant_shrink? flag. The servers
+are running 2.12.3 with ZFS 0.7.9.
+
+Here is what we can see as performance per OST with a simple dd test, the
+worst OST is #5 with 222 kB/s. A client with 2.10 on the same OST is
+reaching > 800MB/s.
+
+for i in {0..37}; do lfs setstripe --ost $i --stripe-count 1 ost$i ; done
+
+for i in {0..37}; do dd if=/dev/zero of=ost$i bs=1M count=100; done
+
+104857600 bytes (105 MB) copied, 0.142473 s, 736 MB/s
+
+104857600 bytes (105 MB) copied, 9.22021 s, 11.4 MB/s
+
+104857600 bytes (105 MB) copied, 0.0905684 s, 1.2 GB/s
+
+104857600 bytes (105 MB) copied, 6.36873 s, 16.5 MB/s
+
+104857600 bytes (105 MB) copied, 0.0929602 s, 1.1 GB/s
+
+104857600 bytes (105 MB) copied, 471.699 s, 222 kB/s
+
+104857600 bytes (105 MB) copied, 0.177067 s, 592 MB/s
+
+[...]
+
+
+As an example, this slow client have a grant_size of 0.8MB after being up
+for a while:
+
+lctl get_param osc.lustre04-OST0005*.cur_grant_bytes
+
+osc.lustre04-OST0005-osc-ffff98128d818000.cur_grant_bytes=883028
+
+In the debug logs, I can see a request sent as sync IO since the grant size
+is now too small to contain the 1.7MB request
+
+00000008:00000020:10.0:1585145743.107840:0:116122:0:(osc_cache.c:1590:osc_enter_cache())
+lustre04-OST0005-osc-ffff98128d818000: grant { dirty: 0/512000 dirty_pages:
+448/24562964 dropped: 0 avail: 883028, dirty_grant: 0, reserved: 0, flight:
+0 } lru {in list: 146368, left: 64, waiters: 0 }need:1703936
+
+00000008:00000020:10.0:1585145743.107842:0:116122:0:(osc_cache.c:1539:osc_enter_cache_try())
+lustre04-OST0005-osc-ffff98128d818000: grant { dirty: 0/512000 dirty_pages:
+448/24562964 dropped: 0 avail: 883028, dirty_grant: 0, reserved: 0, flight:
+0 } lru {in list: 146368, left: 64, waiters: 0 }need:1703936
+
+00000008:00000020:10.0:1585145743.107843:0:116122:0:(osc_cache.c:1666:osc_enter_cache())
+lustre04-OST0005-osc-ffff98128d818000: grant { dirty: 0/512000 dirty_pages:
+448/24562964 dropped: 0 avail: 883028, dirty_grant: 0, reserved: 0, flight:
+0 } lru {in list: 146368, left: 64, waiters: 0 }no grant space, fall back
+to sync i/o
+
+There is currently 30GB granted on a OST with about 22TB free.
+
+[root at lustre04-oss1 ~]# lctl get_param
+obdfilter/lustre04-OST0005/tot_granted
+
+obdfilter.lustre04-OST0005.tot_granted=30257446912
+
+Somehow, the client does not receive a bigger grant, so it seems to stay
+forever under 1MB.
+
+00000008:00000020:4.0:1585145743.107950:0:22701:0:(osc_request.c:705:osc_announce_cached())
+dirty: 0 undirty: 2080374783 dropped 0 grant: 883028
+
+00000008:00000020:14.0:1585145743.236923:0:22702:0:(osc_request.c:727:osc_update_grant())
+got 0 extra grant
+
+Is this a known issue ? I could not find a similar ticket in JIRA, but I do
+see some references to disabling grant_shrink in LU-12651 and LU-12759.
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20200330/fcda2c7d/attachment-0001.html>
+
+From guru.novice at gmail.com  Mon Mar 30 19:56:33 2020
+From: guru.novice at gmail.com (=?UTF-8?B?6IKW5q2j5Yia?=)
+Date: Tue, 31 Mar 2020 10:56:33 +0800
+Subject: [lustre-discuss] confused about mdt space
+Message-ID: <CAA1m_bn_yMwyiQPk=YRQtu+_9gQE3iswCPvaoX1Yt2y=u94s_g@mail.gmail.com>
+
+Hello, I have some question about metadata space.
+
+1) I have ten 960GB SAS SSDs for mdt,after done raid10,we have 4.7TB space free.
+
+after formated as mdt,we only have 2.6TB space free; so where the
+2.1TB space go ?
+
+2) for the 2.6TB space, what's it used for?
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20200331/6294340e/attachment.html>
+
+From rmohr at utk.edu  Tue Mar 31 06:57:48 2020
+From: rmohr at utk.edu (Mohr Jr, Richard Frank)
+Date: Tue, 31 Mar 2020 13:57:48 +0000
+Subject: [lustre-discuss] confused about mdt space
+In-Reply-To: <CAA1m_bn_yMwyiQPk=YRQtu+_9gQE3iswCPvaoX1Yt2y=u94s_g@mail.gmail.com>
+References: <CAA1m_bn_yMwyiQPk=YRQtu+_9gQE3iswCPvaoX1Yt2y=u94s_g@mail.gmail.com>
+Message-ID: <FD2F3A06-5601-4EBE-B969-697873B5F009@utk.edu>
+
+
+
+> On Mar 30, 2020, at 10:56 PM, ??? <guru.novice at gmail.com> wrote:
+> 
+> Hello, I have some question about metadata space.
+> 1) I have ten 960GB SAS SSDs for mdt,after done raid10,we have 4.7TB space free.
+> after formated as mdt,we only have 2.6TB space free; so where the 2.1TB space go ?
+> 2) for the 2.6TB space, what's it used for?
+
+That space is used by inodes.  I believe the recent lustre versions use a 1KB inode size by default and the default format options create 1 inodes for every 2.5 KB of MDT space.  So about 40% of your disk space will be consumed by inodes.
+
+?
+Rick Mohr
+Senior HPC System Administrator
+Joint Institute for Computational Sciences
+University of Tennessee
+
+
+
+
+
+From adilger at whamcloud.com  Tue Mar 31 09:54:16 2020
+From: adilger at whamcloud.com (Andreas Dilger)
+Date: Tue, 31 Mar 2020 16:54:16 +0000
+Subject: [lustre-discuss] CFP: First International CHAOSS International
+ Workshop
+Message-ID: <BD0DD9E2-EB7B-4F4A-A573-667BBEF0A56B@whamcloud.com>
+
+# First International Workshop on Challenges and Opportunities of HPC Storage Systems (CHAOSS)
+
+The workshop is aimed at researchers, developers of scientific applications, engineers and everyone interested in the evolution of HPC storage systems. As the developments of computing power, storage and network technologies continue to diverge, the performance gap between them widens. This trend, combined with the growing data volumes, results in I/O and storage bottlenecks that become increasingly serious especially for large-scale HPC storage systems. The hierarchy of different storage technologies to ease this situation leads to a complex environment which will become even more challenging for future exascale systems.
+
+This workshop is a venue for papers exploring topics related to data organization and management along with the impacts of multi-tier memory and storage for optimizing application throughput. It will take place at the Euro-Par 2020 conference in Warsaw, Poland on either August 24 or 25, 2020. More information is available at: https://wr.informatik.uni-hamburg.de/events/2020/chaoss
+
+## Important Dates
+
+Paper Submission:        May 8, 2020
+Notification to Authors: June 30, 2020
+Registration:            July 10, 2020
+Camera-Ready Deadline
+(Informal Proceedings):  July 10, 2020
+Workshop Dates:          August 24 or 25, 2020
+Camera-Ready Deadline:   September 11, 2020
+
+## Submission Guidelines
+
+Papers should not exceed 12 pages (including title, text, figures, appendices and references). Papers of less than 10 pages will be considered as short papers that can be presented at the conference but will not be published in the proceedings.
+
+Papers must be formatted according to Springer's LNCS guidelines available at https://www.springer.com/gp/computer-science/lncs/conference-proceedings-guidelines. Accepted papers will be published in a separate LNCS workshop volume after the conference. One author of each accepted paper is required to register for the workshop and present the paper.
+
+Submissions will be submitted and managed via EasyChair at: https://easychair.org/conferences/?conf=europar2020workshop
+
+## Topics of Interest
+
+Submissions may be more hands-on than research papers and we therefore explicitly encourage submissions in the early stages of research. Topics of interest include, but are not limited to:
+
+- Kernel and user space file/storage systems
+- Parallel and distributed file/storage systems
+- Data management approaches for heterogeneous storage systems
+- Management of self-describing data formats
+- Metadata management
+- Approaches using query and database interfaces
+- Hybrid solutions using file systems and databases
+- Optimized indexing techniques
+- Data organizations to support online workflows
+- Domain-specific data management solutions
+- Related experiences from users: what worked, what didn't?
+
+## Program Committee
+
+- Gabriel Antoniu (INRIA)
+- Konstantinos Chasapis (DDN)
+- Andreas Dilger (Whamcloud/DDN)
+- Kira Duwe (UHH)
+- Wolfgang Frings (JSC)
+- Elsa Gonsiororowski (LLNL)
+- Anthony Kougkas (IIT)
+- Michael Kuhn (UHH)
+- Margaret Lawson (UIUC SNL)
+- Jay Lofstead (SNL)
+- Johann Lombardi (Intel)
+- Jakob L?ttgau (DKRZ)
+- Anna Queralt (BSC)
+- Yue Zhu (FSU)
+
+Cheers, Andreas
+--
+Andreas Dilger
+Principal Lustre Architect
+Whamcloud
+
+
+
+
+
+
+
+From strosahl at jlab.org  Tue Mar 31 11:36:32 2020
+From: strosahl at jlab.org (Kurt Strosahl)
+Date: Tue, 31 Mar 2020 18:36:32 +0000
+Subject: [lustre-discuss] Files hanging on lustre clients
+Message-ID: <DM6PR09MB335521AE9B56987279C47BD1A7C80@DM6PR09MB3355.namprd09.prod.outlook.com>
+
+Hello,
+
+   I'm tracking a very vexing issue.  Somehow users are creating files that cause attempts to examine or manipulate the files to hang.  They can't be removed, they can't be examined, even an ls command will hang.
+
+an strace on an ls command run against some of these files produced the following:
+
+getxattr("/volatile/halld/home/haoli/RunPeriod-2017-01/analysis/ver36_Mar27/log/030408/stdout.030408_124.out", "system.posix_acl_default", NULL, 0) = -1 ENODATA (No data available)
+
+lstat("/volatile/halld/home/haoli/RunPeriod-2017-01/analysis/ver36_Mar27/log/030408/stderr.030408_118.err", {st_mode=S_IFREG|0644, st_size=16979, ...}) = 0
+
+getxattr("/volatile/halld/home/haoli/RunPeriod-2017-01/analysis/ver36_Mar27/log/030408/stderr.030408_118.err", "system.posix_acl_access", NULL, 0) = -1 ENODATA (No data available)
+
+getxattr("/volatile/halld/home/haoli/RunPeriod-2017-01/analysis/ver36_Mar27/log/030408/stderr.030408_118.err", "system.posix_acl_default", NULL, 0) = -1 ENODATA (No data available)
+
+lstat("/volatile/halld/home/haoli/RunPeriod-2017-01/analysis/ver36_Mar27/log/030408/stdout.030408_000.out",
+
+On one client that was being used to debug this problem I see the following (running CentOS 6.5 and luster 2.5.42)
+Lustre: 2753:0:(client.c:1920:ptlrpc_expire_one_request()) @@@ Request sent has timed out for slow reply: [sent 1585677903/real 1585677903]  req at ffff880238fdd000 x1657754295856608/t0(0) o101->lustre19-OST0028-osc-ffff88105fecd000 at 172.17.0.99@o2ib:28/4 lens 328/400 e 1 to 1 dl 1585678504 ref 1 fl Rpc:X/0/ffffffff rc 0/-1
+Lustre: lustre19-OST0028-osc-ffff88105fecd000: Connection to lustre19-OST0028 (at 172.17.0.99 at o2ib) was lost; in progress operations using this service will wait for recovery to complete
+Lustre: lustre19-OST0028-osc-ffff88105fecd000: Connection restored to lustre19-OST0028 (at 172.17.0.99 at o2ib)
+Lustre: 2733:0:(client.c:304:ptlrpc_at_adj_net_latency()) Reported service time 465 > total measured time 96
+LustreError: 2733:0:(layout.c:2005:__req_capsule_get()) @@@ Wrong buffer for field `dlm_rep' (1 of 1) in format `LDLM_ENQUEUE_LVB': 0 vs. 112 (server)
+  req at ffff8802149c5800 x1657754295862208/t0(0) o101->lustre19-OST0028-osc-ffff88105fecd000 at 172.17.0.99@o2ib:28/4 lens 328/192 e 0 to 0 dl 1585679147 ref 1 fl Interpret:R/2/0 rc 0/0
+LustreError: 2733:0:(layout.c:2005:__req_capsule_get()) Skipped 1 previous similar message
+
+On newer systems (RHEL 7.7 running 2.10.8-1)  the problem also occurs and I see the following in dmesg
+[5437818.727792] Lustre: lustre19-OST0028-osc-ffff886229244000: Connection restored to 172.17.0.99 at o2ib (at 172.17.0.99 at o2ib)
+[5438419.769959] Lustre: 2747:0:(client.c:2116:ptlrpc_expire_one_request()) @@@ Request sent has timed out for slow reply: [sent 1585678345/real 1585678345]  req at ffff884834ec0600 x1657002677904272/t0(0) o101->lustre19-OST0028-osc-ffff886229244000 at 172.17.0.99@o2ib:28/4 lens 344/400 e 24 to 1 dl 1585678946 ref 1 fl Rpc:X/2/ffffffff rc -11/-1
+[5438419.769973] Lustre: lustre19-OST0028-osc-ffff886229244000: Connection to lustre19-OST0028 (at 172.17.0.99 at o2ib) was lost; in progress operations using this service will wait for recovery to complete
+[5438419.770435] Lustre: lustre19-OST0028-osc-ffff886229244000: Connection restored to 172.17.0.99 at o2ib (at 172.17.0.99 at o2ib)
+
+df and lfs df commands on these systems aren't hanging.
+
+on the OSS we are running: lustre 2.12.1-1 and CentOS 7.6) I'm seeing the following:
+[Mar31 14:26] LNet: Service thread pid 309349 was inactive for 1121.43s. The thread might be hung, or it might only be slow and will resume later. Dumping the stack trace for debugging purposes:
+[  +0.000007] Pid: 309349, comm: ll_ost00_088 3.10.0-957.10.1.el7_lustre.x86_64 #1 SMP Tue Apr 30 22:18:15 UTC 2019
+[  +0.000002] Call Trace:
+[  +0.000014]  [<ffffffffc130d560>] ptlrpc_set_wait+0x500/0x8d0 [ptlrpc]
+[  +0.000074]  [<ffffffffc12cafe5>] ldlm_run_ast_work+0xd5/0x3a0 [ptlrpc]
+[  +0.000039]  [<ffffffffc12ec54b>] ldlm_glimpse_locks+0x3b/0x100 [ptlrpc]
+[  +0.000045]  [<ffffffffc16a63fb>] ofd_intent_policy+0x69b/0x920 [ofd]
+[  +0.000015]  [<ffffffffc12cbd26>] ldlm_lock_enqueue+0x366/0xa60 [ptlrpc]
+[  +0.000038]  [<ffffffffc12f4587>] ldlm_handle_enqueue0+0xa47/0x15a0 [ptlrpc]
+[  +0.000046]  [<ffffffffc137c502>] tgt_enqueue+0x62/0x210 [ptlrpc]
+[  +0.000072]  [<ffffffffc1380e5a>] tgt_request_handle+0xaea/0x1580 [ptlrpc]
+[  +0.000065]  [<ffffffffc132680b>] ptlrpc_server_handle_request+0x24b/0xab0 [ptlrpc]
+[  +0.000056]  [<ffffffffc132a13c>] ptlrpc_main+0xafc/0x1fc0 [ptlrpc]
+[  +0.000054]  [<ffffffff8dac1c71>] kthread+0xd1/0xe0
+[  +0.000007]  [<ffffffff8e175c1d>] ret_from_fork_nospec_begin+0x7/0x21
+[  +0.000009]  [<ffffffffffffffff>] 0xffffffffffffffff
+[  +0.000036] LustreError: dumping log to /tmp/lustre-log.1585679216.309349
+
+Thank you,
+
+Kurt J. Strosahl
+System Administrator: Lustre, HPC
+Scientific Computing Group, Thomas Jefferson National Accelerator Facility
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20200331/c4a09f14/attachment-0001.html>
+
+From rmohr at utk.edu  Tue Mar 31 12:41:56 2020
+From: rmohr at utk.edu (Mohr Jr, Richard Frank)
+Date: Tue, 31 Mar 2020 19:41:56 +0000
+Subject: [lustre-discuss] Files hanging on lustre clients
+In-Reply-To: <DM6PR09MB335521AE9B56987279C47BD1A7C80@DM6PR09MB3355.namprd09.prod.outlook.com>
+References: <DM6PR09MB335521AE9B56987279C47BD1A7C80@DM6PR09MB3355.namprd09.prod.outlook.com>
+Message-ID: <49260075-8C85-4159-B430-C0B48CC69637@utk.edu>
+
+
+
+> On Mar 31, 2020, at 2:36 PM, Kurt Strosahl <strosahl at jlab.org> wrote:
+> 
+> an strace on an ls command run against some of these files produced the following:
+> getxattr("/volatile/halld/home/haoli/RunPeriod-2017-01/analysis/ver36_Mar27/log/030408/stdout.030408_124.out", "system.posix_acl_default", NULL, 0) = -1 ENODATA (No data available)
+> lstat("/volatile/halld/home/haoli/RunPeriod-2017-01/analysis/ver36_Mar27/log/030408/stderr.030408_118.err", {st_mode=S_IFREG|0644, st_size=16979, ...}) = 0
+> getxattr("/volatile/halld/home/haoli/RunPeriod-2017-01/analysis/ver36_Mar27/log/030408/stderr.030408_118.err", "system.posix_acl_access", NULL, 0) = -1 ENODATA (No data available)
+> getxattr("/volatile/halld/home/haoli/RunPeriod-2017-01/analysis/ver36_Mar27/log/030408/stderr.030408_118.err", "system.posix_acl_default", NULL, 0) = -1 ENODATA (No data available)
+> lstat("/volatile/halld/home/haoli/RunPeriod-2017-01/analysis/ver36_Mar27/log/030408/stdout.030408_000.out",
+
+<snip>
+
+> Lustre: lustre19-OST0028-osc-ffff88105fecd000: Connection to lustre19-OST0028 (at 172.17.0.99 at o2ib) was lost; in progress operations using this service will wait for recovery to complete
+> Lustre: lustre19-OST0028-osc-ffff88105fecd000: Connection restored to lustre19-OST0028 (at 172.17.0.99 at o2ib)
+
+Of the files listed in the strace above that gave errors, are all those files striped across OST0028?
+
+?
+Rick Mohr
+Senior HPC System Administrator
+Joint Institute for Computational Sciences
+University of Tennessee
+
+
+
+
+
+From strosahl at jlab.org  Tue Mar 31 12:43:52 2020
+From: strosahl at jlab.org (Kurt Strosahl)
+Date: Tue, 31 Mar 2020 19:43:52 +0000
+Subject: [lustre-discuss] Files hanging on lustre clients
+In-Reply-To: <49260075-8C85-4159-B430-C0B48CC69637@utk.edu>
+References: <DM6PR09MB335521AE9B56987279C47BD1A7C80@DM6PR09MB3355.namprd09.prod.outlook.com>,
+ <49260075-8C85-4159-B430-C0B48CC69637@utk.edu>
+Message-ID: <DM6PR09MB3355A7A25F01A0A1C23BCA41A7C80@DM6PR09MB3355.namprd09.prod.outlook.com>
+
+I can't tell, any commands I run against the files in question hang indefinitely.  It seems very suspicious though.
+
+________________________________
+From: Mohr Jr, Richard Frank <rmohr at utk.edu>
+Sent: Tuesday, March 31, 2020 3:41 PM
+To: Kurt Strosahl <strosahl at jlab.org>
+Cc: lustre-discuss at lists.lustre.org <lustre-discuss at lists.lustre.org>; sciadm at jlab.org <sciadm at jlab.org>
+Subject: [EXTERNAL] Re: [lustre-discuss] Files hanging on lustre clients
+
+
+
+> On Mar 31, 2020, at 2:36 PM, Kurt Strosahl <strosahl at jlab.org> wrote:
+>
+> an strace on an ls command run against some of these files produced the following:
+> getxattr("/volatile/halld/home/haoli/RunPeriod-2017-01/analysis/ver36_Mar27/log/030408/stdout.030408_124.out", "system.posix_acl_default", NULL, 0) = -1 ENODATA (No data available)
+> lstat("/volatile/halld/home/haoli/RunPeriod-2017-01/analysis/ver36_Mar27/log/030408/stderr.030408_118.err", {st_mode=S_IFREG|0644, st_size=16979, ...}) = 0
+> getxattr("/volatile/halld/home/haoli/RunPeriod-2017-01/analysis/ver36_Mar27/log/030408/stderr.030408_118.err", "system.posix_acl_access", NULL, 0) = -1 ENODATA (No data available)
+> getxattr("/volatile/halld/home/haoli/RunPeriod-2017-01/analysis/ver36_Mar27/log/030408/stderr.030408_118.err", "system.posix_acl_default", NULL, 0) = -1 ENODATA (No data available)
+> lstat("/volatile/halld/home/haoli/RunPeriod-2017-01/analysis/ver36_Mar27/log/030408/stdout.030408_000.out",
+
+<snip>
+
+> Lustre: lustre19-OST0028-osc-ffff88105fecd000: Connection to lustre19-OST0028 (at 172.17.0.99 at o2ib) was lost; in progress operations using this service will wait for recovery to complete
+> Lustre: lustre19-OST0028-osc-ffff88105fecd000: Connection restored to lustre19-OST0028 (at 172.17.0.99 at o2ib)
+
+Of the files listed in the strace above that gave errors, are all those files striped across OST0028?
+
+?
+Rick Mohr
+Senior HPC System Administrator
+Joint Institute for Computational Sciences
+University of Tennessee
+
+
+
+
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20200331/d3e68123/attachment.html>
+
+From rmohr at utk.edu  Tue Mar 31 12:52:17 2020
+From: rmohr at utk.edu (Mohr Jr, Richard Frank)
+Date: Tue, 31 Mar 2020 19:52:17 +0000
+Subject: [lustre-discuss] Files hanging on lustre clients
+In-Reply-To: <DM6PR09MB3355A7A25F01A0A1C23BCA41A7C80@DM6PR09MB3355.namprd09.prod.outlook.com>
+References: <DM6PR09MB335521AE9B56987279C47BD1A7C80@DM6PR09MB3355.namprd09.prod.outlook.com>
+ <49260075-8C85-4159-B430-C0B48CC69637@utk.edu>
+ <DM6PR09MB3355A7A25F01A0A1C23BCA41A7C80@DM6PR09MB3355.namprd09.prod.outlook.com>
+Message-ID: <290C7236-02CF-46B4-A18D-612AC2D8A455@utk.edu>
+
+
+
+> On Mar 31, 2020, at 3:43 PM, Kurt Strosahl <strosahl at jlab.org> wrote:
+> 
+> I can't tell, any commands I run against the files in question hang indefinitely.  It seems very suspicious though.
+
+The fact that the  same OST appeared in error messages on two different clients made me think the problem might be with the OST.
+
+Would you be able to deactivate that OST so no new files get created on it?  Then you could see if the problem goes away for newly created files.
+
+?
+Rick Mohr
+Senior HPC System Administrator
+Joint Institute for Computational Sciences
+University of Tennessee
+
+
+
+
+
+From adilger at whamcloud.com  Tue Mar 31 18:10:33 2020
+From: adilger at whamcloud.com (Andreas Dilger)
+Date: Wed, 1 Apr 2020 01:10:33 +0000
+Subject: [lustre-discuss] OST recovery
+In-Reply-To: <24B81EAD-6730-4C7C-89AB-F180EFA9DAE4@whamcloud.com>
+References: <CAFF9WUvFhR2OeCv-NPR5+mxS+BhPV-UBSP40mmQQ-=fOzfghBQ@mail.gmail.com>
+ <635F4D71-2768-40F8-8B6B-771EA8B9DDDD@whamcloud.com>
+ <CAFF9WUsHmsYyHq91eg0di9u875NztmNJS55A4RJF09QXJfN2VQ@mail.gmail.com>
+ <24B81EAD-6730-4C7C-89AB-F180EFA9DAE4@whamcloud.com>
+Message-ID: <53C46868-A359-4F6C-97DA-7F072E3EB9B0@whamcloud.com>
+
+
+On Mar 29, 2020, at 20:04, Gong-Do Hwang <grover.hwang at gmail.com<mailto:grover.hwang at gmail.com>> wrote:
+
+Thanks Andreas,
+
+I ran  "mkfs.lustre --ost --reformat --fsname lfs_home --index 6 --mgsnode 10.10.0.10 at o2ib --servicenode 10.10.0.13 at o2ib  --failnode 10.10.0.14 at o2ib  /dev/mapper/mpathx", and at that time /dev/mapper/mpathx was mounted and served as an OST under FS lfs. And the FS lfs ran well until I umount the /dev/mapper/mpathx in order to restart the mgt/mgs.
+
+The issue here is that the "--reformat" option will override the checks if a filesystem already exists on the device.  That should not normally be used.
+
+
+ And after I re-mounted the ost I got the msg "mount.lustre FATAL: failed to write local files: Invalid argument
+mount.lustre: mount /dev/mapper/mpathx at /lfs/ost8 failed: Invalid argument"  and the tunefs.luster --dryrun /dev/mapper/mapthx output is "tunefs.lustre --dryrun /dev/mapper/mpathx
+checking for existing Lustre data: found
+Reading CONFIGS/mountdata
+
+   Read previous values:
+Target:     lfs-OST0008
+
+This shows that the device was previously part of the "lfs" filesystem at index 8.  While it is possible to change the filesystem name, the OST index should never change, so there is no tool for this.
+
+Two things need to be done.  You can rewrite the filesystem label with "e2label /dev/mapper/mpathx lfs-OST0008".  Then you need to rebuild the "CONFIGS/mountdata" file.
+
+The easiest way to generate a new mountdata file would be to run "mkfs.lustre" with the same options as the original OST on a temporary device (e.g. loopback device) but add in the "--replace" option so that the OST doesn't try to add itself to the filesystem as a new OST.  Then mount the temporary and original OSTs as type ldiskfs and copy the file CONFIGS/mountdata from temp to original OST to replace the broken one (probably a good idea to make a backup first).
+
+Hopefully with these two changes you can mount your OST again.
+
+Cheers, Andreas
+
+Index:      6
+Lustre FS:  lfs_home
+Mount type: ldiskfs
+Flags:      0x1042
+              (OST update no_primnode )
+Persistent mount opts: ,errors=remount-ro
+Parameters: mgsnode=10.10.0.10 at o2ib  failover.node=10.10.0.13 at o2ib:10.10.0.14 at o2ib
+
+
+   Permanent disk data:
+Target:     lfs_home-OST0006
+Index:      6
+Lustre FS:  lfs_home
+Mount type: ldiskfs
+Flags:      0x1042
+              (OST update no_primnode )
+Persistent mount opts: ,errors=remount-ro
+Parameters: mgsnode=10.10.0.10 at o2ib  failover.node=10.10.0.13 at o2ib:10.10.0.14 at o2ib"
+
+I guess I actually have run the mkfs command twice so the Lustre FS in the previous value became lfs_home(originally is lfs).
+
+I tried to mount the partition use backup superblocks and all of them are empty. But from the dumpe2fs info,
+"Inode count:              41943040
+Block count:              10737418240
+Reserved block count:     536870912
+Free blocks:              1459812475
+Free inodes:              39708575"
+seems there is still data on it.
+
+The backup superblocks are for the underlying ext4/ldiskfs filesystem, so are not really related to this problem.
+
+
+So my problem is, if the data on the partition is still intact, is there any way I can rebuild the file index? And is there anyway I can rewrite the CONFIGS/mountdata back to its original values?
+Sorry for the lengthy messages and really appreciate your help!
+
+Best Regards,
+
+Grover
+
+On Mon, Mar 30, 2020 at 7:14 AM Andreas Dilger <adilger at whamcloud.com<mailto:adilger at whamcloud.com>> wrote:
+It would be useful if you provided the actual error messages, so we can see where the problem is.
+
+What command did you run on the OST?
+
+Does the OST still show that it has data in it (e.g. "df" or "dumpe2fs -h" shows lots of used blocks)?
+
+On Mar 25, 2020, at 10:05, Gong-Do Hwang <grover.hwang at gmail.com<mailto:grover.hwang at gmail.com>> wrote:
+
+Dear Lustre,
+
+Months ago when I tried to add a new disk to my new Lustre FS, I accidentally target the mkfs.lustre to a then mounted OST partition of another Lustre FS. Weird enough the command passed through, and without paying attention to it, I umount the partition months later and couldn't mount it back, then I realized the mkfs.lustre command was legit.
+
+But my old lustre FS worked well through these months, so I guess the data in that OST is still there. But now the permanent CONFIG/mountdata is the new one, and I can still see my old config in the previous value.
+
+My question is is there any way I can write back the old CONFIG/mountdata and still keep all my files in that OST?
+
+I am using Luster 2.13.0 for my mgs/mdt/ost
+
+Thanks for your help and I really appreciate it!
+
+Grover
+
+Cheers, Andreas
+--
+Andreas Dilger
+Principal Lustre Architect
+Whamcloud
+
+
+
+
+
+
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20200401/883e02b1/attachment.html>
+
+From guru.novice at gmail.com  Tue Mar 31 22:00:45 2020
+From: guru.novice at gmail.com (=?UTF-8?B?6IKW5q2j5Yia?=)
+Date: Wed, 1 Apr 2020 13:00:45 +0800
+Subject: [lustre-discuss] confused about mdt space
+In-Reply-To: <FD2F3A06-5601-4EBE-B969-697873B5F009@utk.edu>
+References: <CAA1m_bn_yMwyiQPk=YRQtu+_9gQE3iswCPvaoX1Yt2y=u94s_g@mail.gmail.com>
+ <FD2F3A06-5601-4EBE-B969-697873B5F009@utk.edu>
+Message-ID: <CAA1m_bnbg0wJ+aL2xSv=F-0ea9q0oryu1vfdsgEa1FFdff4QiQ@mail.gmail.com>
+
+Thanks a lot.
+I have two more questions:
+1) Assume I consider the mdt space use the method described in lustre
+manual, by calculation, the metadata space is 400GB.
+After format(default option), about 160GB(40% of 400GB) preallocated for
+inodes, so the avalaible inodes number is less than estimated, right ?
+2) mds need additional space for other use, like log,acls,xattrs?how to
+estimate these space ?
+
+Thanks!
+
+Mohr Jr, Richard Frank <rmohr at utk.edu> ?2020?3?31??? ??9:57???
+
+>
+>
+> > On Mar 30, 2020, at 10:56 PM, ??? <guru.novice at gmail.com> wrote:
+> >
+> > Hello, I have some question about metadata space.
+> > 1) I have ten 960GB SAS SSDs for mdt,after done raid10,we have 4.7TB
+> space free.
+> > after formated as mdt,we only have 2.6TB space free; so where the 2.1TB
+> space go ?
+> > 2) for the 2.6TB space, what's it used for?
+>
+> That space is used by inodes.  I believe the recent lustre versions use a
+> 1KB inode size by default and the default format options create 1 inodes
+> for every 2.5 KB of MDT space.  So about 40% of your disk space will be
+> consumed by inodes.
+>
+> ?
+> Rick Mohr
+> Senior HPC System Administrator
+> Joint Institute for Computational Sciences
+> University of Tennessee
+>
+>
+>
+>
+>
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20200401/83d74c6c/attachment-0001.html>
+

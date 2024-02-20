@@ -1,0 +1,1002 @@
+From morrone2 at llnl.gov  Thu Oct  1 19:14:29 2009
+From: morrone2 at llnl.gov (Christopher J. Morrone)
+Date: Thu, 01 Oct 2009 19:14:29 -0700
+Subject: [Lustre-devel] Lustre version number and rpm "Release"
+Message-ID: <4AC56205.5060403@llnl.gov>
+
+I am in the process of creating our LLNL branch of Lustre which is based
+on b1_8.  Our build system for our branch of 1.6.6 was an additional top
+level directory of make files, scripts, and our own custom lustre.spec
+file.  As part of moving to 1.8, I want to try to get rid of that upper
+layer and make the upstream 1.8 code our top level directory.
+
+In bug 16424 there was discussion about setting custom version strings.
+ The recommended method seems to be to set the LUSTRE_VERS string.  I
+gave this a try, but it doesn't appear to be of much use to us as it stands.
+
+As far as I can tell, setting LUSTRE_VERS will change the "Build
+Version:" string that you see on the console upon loading the lustre
+modules, and not much else.
+
+Mainly here at LLNL we just want to append our own local version number
+extension to Lustre's version number.  If the upstream version is
+"1.8.1.50", we want our local build to have the version
+"1.8.1.50-3chaos".  LUSTRE_VERS mostly covers this part.
+
+But we also want to prefix the rpm Release string with the same number.
+
+In other words, when we build rpms we get:
+
+$ rpm -qpi lustre-1.8.1.50-2.6.18_70chaos_200910011803.x86_64.rpm
+Name        : lustre                       Relocations: (not relocatable)
+Version     : 1.8.1.50                          Vendor: (none)
+Release     : 2.6.18_70chaos_200910011803   Build Date: Thu Oct  1
+18:11:30 2009
+
+And instead we want this:
+
+$ rpm -qpi lustre-1.8.1.50-3chaos_2.6.18_70chaos_200910011803.x86_64.rpm
+Name        : lustre                       Relocations: (not relocatable)
+Version     : 1.8.1.50                          Vendor: (none)
+Release     : 3chaos_2.6.18_70chaos_200910011803   Build Date: Thu Oct
+1 18:11:30 2009
+
+Is there current a method for doing that?
+
+Chris
+
+
+From Brian.Murrell at Sun.COM  Fri Oct  2 06:55:00 2009
+From: Brian.Murrell at Sun.COM (Brian J. Murrell)
+Date: Fri, 02 Oct 2009 09:55:00 -0400
+Subject: [Lustre-devel] Lustre version number and rpm "Release"
+In-Reply-To: <4AC56205.5060403@llnl.gov>
+References: <4AC56205.5060403@llnl.gov>
+Message-ID: <1254491700.26203.251.camel@pc.interlinx.bc.ca>
+
+On Thu, 2009-10-01 at 19:14 -0700, Christopher J. Morrone wrote:
+> As far as I can tell, setting LUSTRE_VERS will change the "Build
+> Version:" string that you see on the console upon loading the lustre
+> modules, and not much else.
+
+Right.
+
+> Mainly here at LLNL we just want to append our own local version number
+> extension to Lustre's version number.  If the upstream version is
+> "1.8.1.50", we want our local build to have the version
+> "1.8.1.50-3chaos".  LUSTRE_VERS mostly covers this part.
+
+For the version embedded in the lustre modules (only) yes?
+
+> But we also want to prefix the rpm Release string with the same number.
+> 
+> In other words, when we build rpms we get:
+> 
+> $ rpm -qpi lustre-1.8.1.50-2.6.18_70chaos_200910011803.x86_64.rpm
+> Name        : lustre                       Relocations: (not relocatable)
+> Version     : 1.8.1.50                          Vendor: (none)
+> Release     : 2.6.18_70chaos_200910011803   Build Date: Thu Oct  1
+
+Then presumably the kernel you built against is 2.6.18_70chaos.  Is that
+correct?
+
+> And instead we want this:
+> 
+> $ rpm -qpi lustre-1.8.1.50-3chaos_2.6.18_70chaos_200910011803.x86_64.rpm
+> Name        : lustre                       Relocations: (not relocatable)
+> Version     : 1.8.1.50                          Vendor: (none)
+> Release     : 3chaos_2.6.18_70chaos_200910011803   Build Date: Thu Oct
+> 1 18:11:30 2009
+> 
+> Is there current a method for doing that?
+
+Well, backtracking to see how we get to the value for Release that's in
+the lustre.spec, we start with lustre.spec.in:
+
+%{!?release: %define release @RELEASE@}
+...
+Release: %{release}
+
+and @RELEASE@ is a subst'd variable from configure which is generated
+with:
+
+RELEASE="`echo ${LINUXRELEASE} | tr '-' '_'`_`date +%Y%m%d%H%M`"
+
+and $LINUXRELEASE is determined by grabbing the value of the UTS_RELEASE
+macro from either of utsrelease.h or version.h in
+$LINUX_TREE/include/linux/.
+
+That's how the *default* value is determined.  However!  Notice that in
+the lustre.spec, we use:
+
+%{!?release: %define release @RELEASE@}
+
+That means you can define Release for your rpm build on the command line
+with:
+
+$ rpmbuild --define 'release whatever_you_want' ... lustre.spec
+
+I made this change a while ago as a first step toward getting rid of the
+lustre.spec.in and passing all external values via rpmbuild macros to
+facilitate just this sort of thing.  I have not gotten back to getting
+more of that task complete, unfortunately.  But it's complete enough
+currently for you to do what you want.
+
+Cheers,
+b.
+
+-------------- next part --------------
+A non-text attachment was scrubbed...
+Name: not available
+Type: application/pgp-signature
+Size: 197 bytes
+Desc: This is a digitally signed message part
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20091002/52c3900e/attachment.pgp>
+
+From Nicolas.Williams at sun.com  Fri Oct  2 15:06:12 2009
+From: Nicolas.Williams at sun.com (Nicolas Williams)
+Date: Fri, 2 Oct 2009 17:06:12 -0500
+Subject: [Lustre-devel] Needed: insight on obd_set_info_async()
+Message-ID: <20091002220611.GU887@Sun.COM>
+
+I'm trying to find out which uses of obd_set_info_async() involve values
+that come from a PTLRPC message buffer, and which ones don't.  It would
+help to know what obd_set_info_async() is for...  It seems it's a
+glorified ioctl()...
+
+I'm tempted to augment it to always take a struct ptlrpc_request *req
+argument, so that req == NULL || val == NULL, and when req != NULL the
+value will be obtained using req_capsule_*_get().  Between that and
+enhancements to req_capsule_extend() and what not we might be able to
+ensure that 'val' is always swabbed by capsule code.
+
+But if the uses of obd_set_info_async() are very clearly distinguishable
+it might be better to introduce a variant that takes a struct
+ptlrpc_request *req _instead_ of val/vallen.
+
+Comments?
+
+Nico
+-- 
+
+
+From morrone2 at llnl.gov  Fri Oct  2 17:36:11 2009
+From: morrone2 at llnl.gov (Christopher J. Morrone)
+Date: Fri, 02 Oct 2009 17:36:11 -0700
+Subject: [Lustre-devel] Lustre version number and rpm "Release"
+In-Reply-To: <1254491700.26203.251.camel@pc.interlinx.bc.ca>
+References: <4AC56205.5060403@llnl.gov>
+	<1254491700.26203.251.camel@pc.interlinx.bc.ca>
+Message-ID: <4AC69C7B.2020201@llnl.gov>
+
+Brian J. Murrell wrote:
+
+>> $ rpm -qpi lustre-1.8.1.50-2.6.18_70chaos_200910011803.x86_64.rpm
+>> Name        : lustre                       Relocations: (not relocatable)
+>> Version     : 1.8.1.50                          Vendor: (none)
+>> Release     : 2.6.18_70chaos_200910011803   Build Date: Thu Oct  1
+> 
+> Then presumably the kernel you built against is 2.6.18_70chaos.  Is that
+> correct?
+
+That is correct.
+
+> %{!?release: %define release @RELEASE@}
+> 
+> That means you can define Release for your rpm build on the command line
+> with:
+> 
+> $ rpmbuild --define 'release whatever_you_want' ... lustre.spec
+
+Well, that is true, except that we just want to prefix the release, not
+replace it.  If we replace it with our own definition, we have to repeat
+the kernel detection, and timestamp part.  So really, we'll want an
+additional "release_prefix" rpm variable.
+
+There is an additional wrinkle that I didn't mention.  Our automated
+build system is designed to take source rpms and build the binary rpms
+from that.  If we just set "release" at source rpm build time, I don't
+think that it will be remember later when the binary rpms are built.
+
+Part of the reason that our build farm works that way is that we would
+like other users of our linux distribution to be able to easily rebuild
+lustre (and any other kernel modules) from the source rpm.
+
+In the end though, it looks like the most reasonable way to handle this
+is to have our own spec file for the chaos linux distribution.
+
+Chris
+
+
+
+From adilger at sun.com  Sun Oct  4 00:34:27 2009
+From: adilger at sun.com (Andreas Dilger)
+Date: Sun, 04 Oct 2009 01:34:27 -0600
+Subject: [Lustre-devel] Needed: insight on obd_set_info_async()
+In-Reply-To: <20091002220611.GU887@Sun.COM>
+References: <20091002220611.GU887@Sun.COM>
+Message-ID: <20091004073427.GN3789@webber.adilger.int>
+
+On Oct 02, 2009  17:06 -0500, Nicolas Williams wrote:
+> I'm trying to find out which uses of obd_set_info_async() involve values
+> that come from a PTLRPC message buffer, and which ones don't.  It would
+> help to know what obd_set_info_async() is for...  It seems it's a
+> glorified ioctl()...
+
+Sort of, yes, though I would characterize it more like a "get/set system
+xattr".  It can get/set key,value pairs on a local or remote node.  The
+"async" part means that the caller is the one in charge of handling waiting
+for completion of the operation.  This is important when doing an operation
+that may involve many OSTs, since we want the RPCs to happen in parallel
+instead of in series.
+
+> I'm tempted to augment it to always take a struct ptlrpc_request *req
+> argument, so that req == NULL || val == NULL, and when req != NULL the
+> value will be obtained using req_capsule_*_get().  Between that and
+> enhancements to req_capsule_extend() and what not we might be able to
+> ensure that 'val' is always swabbed by capsule code.
+
+I can't comment on the HEAD capsule code, maybe someone else can...
+
+> But if the uses of obd_set_info_async() are very clearly distinguishable
+> it might be better to introduce a variant that takes a struct
+> ptlrpc_request *req _instead_ of val/vallen.
+
+Cheers, Andreas
+--
+Andreas Dilger
+Sr. Staff Engineer, Lustre Group
+Sun Microsystems of Canada, Inc.
+
+
+
+From eeb at sun.com  Mon Oct  5 04:09:52 2009
+From: eeb at sun.com (Eric Barton)
+Date: Mon, 05 Oct 2009 12:09:52 +0100
+Subject: [Lustre-devel] using LST for performance testing
+In-Reply-To: <4AC23B21.2030207@cray.com>
+References: <4ABBD78E.50506@cray.com> <20090928173554.GA4911@sun.com>
+	<4AC23B21.2030207@cray.com>
+Message-ID: <048601ca45ac$5cc33970$1649ac50$@com>
+
+What is it we really want to measure here?  Steady-state
+throughput or elapsed time to run a specific test (i.e.
+including ramp-up/ramp-down).
+
+The intention behind the current stats command was to measure
+steady-state throughput - i.e.once the test batch(es?) have
+been started, a number of stat snapshots are taken until
+throughput settles.  That also probably allows tests to be
+run more quickly since they can be stopped immediately the
+steady state has been observed.
+
+Is that too hard to do with the current command set?
+
+
+    Cheers,
+              Eric
+
+
+
+
+
+From Brian.Murrell at Sun.COM  Mon Oct  5 06:44:51 2009
+From: Brian.Murrell at Sun.COM (Brian J. Murrell)
+Date: Mon, 05 Oct 2009 09:44:51 -0400
+Subject: [Lustre-devel] Lustre version number and rpm "Release"
+In-Reply-To: <4AC69C7B.2020201@llnl.gov>
+References: <4AC56205.5060403@llnl.gov>
+	<1254491700.26203.251.camel@pc.interlinx.bc.ca>
+	<4AC69C7B.2020201@llnl.gov>
+Message-ID: <1254750291.22120.12.camel@pc.interlinx.bc.ca>
+
+On Fri, 2009-10-02 at 17:36 -0700, Christopher J. Morrone wrote:
+> 
+> Well, that is true, except that we just want to prefix the release, not
+> replace it.  If we replace it with our own definition, we have to repeat
+> the kernel detection, and timestamp part.
+
+Yes, that's true.
+
+> So really, we'll want an
+> additional "release_prefix" rpm variable.
+
+That would be a trivial patch.  Feel free to open a bug and submit it.
+I can't see any reason why we'd not land that.
+
+> There is an additional wrinkle that I didn't mention.  Our automated
+> build system is designed to take source rpms and build the binary rpms
+> from that.  If we just set "release" at source rpm build time, I don't
+> think that it will be remember later when the binary rpms are built.
+
+Yes, I think you are correct about that.
+
+FWIW, (I think[1]) I'd like us (Sun) to get out of the business of
+putting anything meaningful in the Release tag and leave that for
+distributors to use.  I'm not sure if or how that might help you though.
+
+b.
+
+[1] I've not really investigated the possibility yet, so it's really
+just a seed of an idea.
+-------------- next part --------------
+A non-text attachment was scrubbed...
+Name: not available
+Type: application/pgp-signature
+Size: 197 bytes
+Desc: This is a digitally signed message part
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20091005/a8039ca2/attachment.pgp>
+
+From nic at cray.com  Mon Oct  5 07:02:58 2009
+From: nic at cray.com (Nic Henke)
+Date: Mon, 05 Oct 2009 09:02:58 -0500
+Subject: [Lustre-devel] using LST for performance testing
+In-Reply-To: <048601ca45ac$5cc33970$1649ac50$@com>
+References: <4ABBD78E.50506@cray.com> <20090928173554.GA4911@sun.com>
+	<4AC23B21.2030207@cray.com> <048601ca45ac$5cc33970$1649ac50$@com>
+Message-ID: <4AC9FC92.5050602@cray.com>
+
+Eric Barton wrote:
+> What is it we really want to measure here?  Steady-state
+> throughput or elapsed time to run a specific test (i.e.
+> including ramp-up/ramp-down).
+>   
+Both :-)
+
+The end-to-end performance is more interesting to me right now. The 
+timing data is more accurate and we can run shorter tests that with 'lst 
+stat' to get an idea of burst performance.  Having both methods is 
+desirable to me.
+
+> The intention behind the current stats command was to measure
+> steady-state throughput - i.e.once the test batch(es?) have
+> been started, a number of stat snapshots are taken until
+> throughput settles.  That also probably allows tests to be
+> run more quickly since they can be stopped immediately the
+> steady state has been observed.
+>
+> Is that too hard to do with the current command set?
+>   
+It could be made cleaner and output the data to .csv, etc - but one can 
+get a rough idea of steady state performance. The data will be more 
+accurate once the timestamps for the data are sent over the wire instead 
+of computed locally on the lst console node.
+
+Nic
+
+
+
+From adilger at sun.com  Mon Oct  5 10:15:32 2009
+From: adilger at sun.com (Andreas Dilger)
+Date: Mon, 05 Oct 2009 11:15:32 -0600
+Subject: [Lustre-devel] Needed: insight on obd_set_info_async()
+In-Reply-To: <20091004171118.GV887@Sun.COM>
+References: <20091002220611.GU887@Sun.COM>
+	<20091004073427.GN3789@webber.adilger.int>
+	<20091004171118.GV887@Sun.COM>
+Message-ID: <20091005171532.GV3789@webber.adilger.int>
+
+On Oct 04, 2009  12:11 -0500, Nicolas Williams wrote:
+> On Sun, Oct 04, 2009 at 01:34:27AM -0600, Andreas Dilger wrote:
+> > On Oct 02, 2009  17:06 -0500, Nicolas Williams wrote:
+> > > I'm trying to find out which uses of obd_set_info_async() involve values
+> > > that come from a PTLRPC message buffer, and which ones don't.  It would
+> > > help to know what obd_set_info_async() is for...  It seems it's a
+> > > glorified ioctl()...
+> > 
+> > Sort of, yes, though I would characterize it more like a "get/set system
+> > xattr".  It can get/set key,value pairs on a local or remote node.  The
+> > "async" part means that the caller is the one in charge of handling waiting
+> > for completion of the operation.  This is important when doing an operation
+> > that may involve many OSTs, since we want the RPCs to happen in parallel
+> > instead of in series.
+> 
+> But does it always go over the wire?  Is it always executed with a 'val'
+> that came off the wire?
+
+No, getinfo/setinfo also operate locally in many places.  The caller isn't
+supposed to know at what lower layer the request will be processed.
+
+In that regard, the early design goal of the Lustre stack was that it
+has a single API throughout the stack and is transparent whether the
+operations are happening on a local or remote node, but I wasn't at all
+involved in the 2.0 development and that goal has fallen by the wayside.
+
+> > > I'm tempted to augment it to always take a struct ptlrpc_request *req
+> > > argument, so that req == NULL || val == NULL, and when req != NULL the
+> > > value will be obtained using req_capsule_*_get().  Between that and
+> > > enhancements to req_capsule_extend() and what not we might be able to
+> > > ensure that 'val' is always swabbed by capsule code.
+> > 
+> > I can't comment on the HEAD capsule code, maybe someone else can...
+> 
+> That's OK, I can take care of the capsule conversion for this function.
+> But I need to understand it and the contexts when it's called a bit
+> better.
+> 
+> Nico
+> -- 
+
+Cheers, Andreas
+--
+Andreas Dilger
+Sr. Staff Engineer, Lustre Group
+Sun Microsystems of Canada, Inc.
+
+
+
+From Nicolas.Williams at sun.com  Sun Oct  4 10:11:18 2009
+From: Nicolas.Williams at sun.com (Nicolas Williams)
+Date: Sun, 4 Oct 2009 12:11:18 -0500
+Subject: [Lustre-devel] Needed: insight on obd_set_info_async()
+In-Reply-To: <20091004073427.GN3789@webber.adilger.int>
+References: <20091002220611.GU887@Sun.COM>
+	<20091004073427.GN3789@webber.adilger.int>
+Message-ID: <20091004171118.GV887@Sun.COM>
+
+On Sun, Oct 04, 2009 at 01:34:27AM -0600, Andreas Dilger wrote:
+> On Oct 02, 2009  17:06 -0500, Nicolas Williams wrote:
+> > I'm trying to find out which uses of obd_set_info_async() involve values
+> > that come from a PTLRPC message buffer, and which ones don't.  It would
+> > help to know what obd_set_info_async() is for...  It seems it's a
+> > glorified ioctl()...
+> 
+> Sort of, yes, though I would characterize it more like a "get/set system
+> xattr".  It can get/set key,value pairs on a local or remote node.  The
+> "async" part means that the caller is the one in charge of handling waiting
+> for completion of the operation.  This is important when doing an operation
+> that may involve many OSTs, since we want the RPCs to happen in parallel
+> instead of in series.
+
+But does it always go over the wire?  Is it always executed with a 'val'
+that came off the wire?
+
+> > I'm tempted to augment it to always take a struct ptlrpc_request *req
+> > argument, so that req == NULL || val == NULL, and when req != NULL the
+> > value will be obtained using req_capsule_*_get().  Between that and
+> > enhancements to req_capsule_extend() and what not we might be able to
+> > ensure that 'val' is always swabbed by capsule code.
+> 
+> I can't comment on the HEAD capsule code, maybe someone else can...
+
+That's OK, I can take care of the capsule conversion for this function.
+But I need to understand it and the contexts when it's called a bit
+better.
+
+Nico
+-- 
+
+
+From Nicolas.Williams at sun.com  Mon Oct  5 12:00:54 2009
+From: Nicolas.Williams at sun.com (Nicolas Williams)
+Date: Mon, 5 Oct 2009 14:00:54 -0500
+Subject: [Lustre-devel] Needed: insight on obd_set_info_async()
+In-Reply-To: <20091005171532.GV3789@webber.adilger.int>
+References: <20091002220611.GU887@Sun.COM>
+	<20091004073427.GN3789@webber.adilger.int>
+	<20091004171118.GV887@Sun.COM>
+	<20091005171532.GV3789@webber.adilger.int>
+Message-ID: <20091005190053.GD887@Sun.COM>
+
+On Mon, Oct 05, 2009 at 11:15:32AM -0600, Andreas Dilger wrote:
+> On Oct 04, 2009  12:11 -0500, Nicolas Williams wrote:
+> > But does it always go over the wire?  Is it always executed with a 'val'
+> > that came off the wire?
+> 
+> No, getinfo/setinfo also operate locally in many places.  The caller isn't
+> supposed to know at what lower layer the request will be processed.
+> 
+> In that regard, the early design goal of the Lustre stack was that it
+> has a single API throughout the stack and is transparent whether the
+> operations are happening on a local or remote node, but I wasn't at all
+> involved in the 2.0 development and that goal has fallen by the wayside.
+
+Thanks.  This helps.  Also, it seems, from what I can tell, that 'val'
+is expected to be in local byte order, which also helps.
+
+I've figured out what to do.  There's only a handful of PTLRPCs that
+devolve into calls to obd_set_info_async() with 'val's taken from an RPC
+buffer, and at each of those places there's a call to ptlrpc_req_need_swab()
+and swabbing code.  Each such RPC handler will change the req's format
+to one that properly models the 'val', so that it gets swabbed properly
+(this was my original plan, but I wasn't sure if obd_set_info_async()
+might be doing additional swabbing below, and now it's clear that it
+does not).
+
+I'll make sure to check every call to KEY_IS() as well.
+
+Nico
+-- 
+
+
+From He.Huang at Sun.COM  Thu Oct  8 12:36:43 2009
+From: He.Huang at Sun.COM (Isaac Huang)
+Date: Thu, 08 Oct 2009 15:36:43 -0400
+Subject: [Lustre-devel] using LST for performance testing
+In-Reply-To: <1254245568.5827.5.camel@lap75545.ornl.gov>
+References: <4ABBD78E.50506@cray.com> <20090928173554.GA4911@sun.com>
+	<4AC23B21.2030207@cray.com> <1254245568.5827.5.camel@lap75545.ornl.gov>
+Message-ID: <20091008193643.GW4767@sun.com>
+
+On Tue, Sep 29, 2009 at 01:32:48PM -0400, David Dillow wrote:
+> On Tue, 2009-09-29 at 11:51 -0500, Nic Henke wrote:
+> > I'm wondering if we couldn't add a new 'batch_stat' command. The idea is 
+> > that the client code will fill in the start/stop times for each test and 
+> > then after the test is done, 'batch_stat' would collect this data. The 
+> > collection would still be passive and a new command should minimize the 
+> > protocol changes. The per-test data would allow us to get accurate perf 
+> > numbers and also provide some data into how parallel the tests were, if 
+> > there are any unfairness issues, etc.
+> 
+> Along these lines, it would be nice if we could specify a run time for
+> each test rather than an amount of data to be transferred -- it makes it
+> easier to get aggregate bandwidth numbers, and often shows imbalances
+> nicely -- the node getting starved is the one that transfers less data.
+
+This would be a very useful feature. We're working on to add LST tests
+to our automatic tests, where we met a problem that we could never
+tell how long the test would run by looking at '--loop' and
+'--concurrency'.
+
+The LST already implemented a timer mechanism which is good at second
+resolution, which should suffice for controlling test run time.
+
+Isaac
+
+
+From He.Huang at Sun.COM  Thu Oct  8 12:42:25 2009
+From: He.Huang at Sun.COM (Isaac Huang)
+Date: Thu, 08 Oct 2009 15:42:25 -0400
+Subject: [Lustre-devel] using LST for performance testing
+In-Reply-To: <4AC23B21.2030207@cray.com>
+References: <4ABBD78E.50506@cray.com> <20090928173554.GA4911@sun.com>
+	<4AC23B21.2030207@cray.com>
+Message-ID: <20091008194225.GX4767@sun.com>
+
+On Tue, Sep 29, 2009 at 11:51:45AM -0500, Nic Henke wrote:
+>   ......
+> > The test servers concurrently posts one passive buffer for each
+> > request, so for each test request there's one LNetMDAttach and one
+> > unlink operation and both operations need to grab the one big
+> > LNET_LOCK therefore it could be possible that the server CPU becomes a
+> > bottleneck before the network could be saturated. The solution is to,
+> > instead of one request per buffer, post one big buffer that could
+> > accommodate multiple requests to amortize the per buffer processing
+> > costs.
+> >   
+> If we added timestamps to the data, the processing time & buffer sizing 
+> would be less of an issue - it wouldn't factor into the accuracy of the 
+> numbers are are gathering.
+
+Probably not. The timestamps affect only the stat gathering RPCs which
+should be far out numbered by the test RPCs (loop x concurrency x
+test_client_count, for each test server).
+
+Isaac
+
+
+From Maxim.Patlasov at Sun.COM  Wed Oct 14 08:22:36 2009
+From: Maxim.Patlasov at Sun.COM (Maxim V. Patlasov)
+Date: Wed, 14 Oct 2009 19:22:36 +0400
+Subject: [Lustre-devel] lustre-to-LNET API: big non-aligned bulk transfers
+Message-ID: <4AD5ECBC.20003@sun.com>
+
+Hi lustre-devel,
+
+I'd like to gather some opinions about the following question:
+
+Is it allowed or possible for lustre to submit relatively big bulk 
+transfer request (e.g. >512K) to LNET layer when offset in the very 
+first page to fetch bulk data from (on sender side) is not equal to the 
+offset in the very first page to store data (on receiver side)? In the 
+other words - should LNET support such transfers?
+
+Thanks in advance,
+Maxim
+
+
+From eeb at sun.com  Wed Oct 14 10:22:50 2009
+From: eeb at sun.com (Eric Barton)
+Date: Wed, 14 Oct 2009 10:22:50 -0700
+Subject: [Lustre-devel] lustre-to-LNET API: big non-aligned bulk
+	transfers
+In-Reply-To: <4AD5ECBC.20003@sun.com>
+References: <4AD5ECBC.20003@sun.com>
+Message-ID: <088e01ca4cf2$f5f9dcf0$e1ed96d0$@com>
+
+Maxim,
+
+It should support such transfers, but you have to be careful about
+the number of fragments this can introduce.  This issue has already
+been observed in routers, which buffer LNET message payloads at
+the same page offset, irrespective of the sender's page offset (of
+which it has no knowledge).  For example, this can force the o2iblnd,
+if configured to pre-map all memory, to need double the number of RDMA
+fragments and therefore fail the transfer.  Chat with Liang - he knows
+all about this...
+
+    Cheers,
+              Eric
+
+> -----Original Message-----
+> From: lustre-devel-bounces at lists.lustre.org [mailto:lustre-devel-bounces at lists.lustre.org] On Behalf Of Maxim V.
+> Patlasov
+> Sent: 14 October 2009 8:23 AM
+> To: lustre-devel at lists.lustre.org
+> Subject: [Lustre-devel] lustre-to-LNET API: big non-aligned bulk transfers
+> 
+> Hi lustre-devel,
+> 
+> I'd like to gather some opinions about the following question:
+> 
+> Is it allowed or possible for lustre to submit relatively big bulk
+> transfer request (e.g. >512K) to LNET layer when offset in the very
+> first page to fetch bulk data from (on sender side) is not equal to the
+> offset in the very first page to store data (on receiver side)? In the
+> other words - should LNET support such transfers?
+> 
+> Thanks in advance,
+> Maxim
+> _______________________________________________
+> Lustre-devel mailing list
+> Lustre-devel at lists.lustre.org
+> http://lists.lustre.org/mailman/listinfo/lustre-devel
+
+
+
+From settlemyerbw at ornl.gov  Thu Oct 15 11:52:02 2009
+From: settlemyerbw at ornl.gov (Bradley W. Settlemyer)
+Date: Thu, 15 Oct 2009 14:52:02 -0400
+Subject: [Lustre-devel] max_dirty_mb and fsync
+Message-ID: <4AD76F52.4040706@ornl.gov>
+
+Hello
+
+   What is the difference between setting the max_dirty_mb setting in 
+/proc to 4 and making sure that all of my applications fsync every 4MBs 
+of data that are transmitted?
+
+   I would guess that one difference is the 32MB is a filesystem-wide 
+setting rather than a per file setting -- so the sync occurs regardless 
+of the number of files receiving data.  But are there any other 
+differences with regards to the interaction with the file system.
+
+   More to the point perhaps, does an fsync have additional side effects 
+beyond those that occur for the max_dirty_mb threshhold being exceeded?
+
+Cheers,
+Brad
+
+
+
+From settlemyerbw at ornl.gov  Fri Oct 16 08:37:16 2009
+From: settlemyerbw at ornl.gov (Bradley W. Settlemyer)
+Date: Fri, 16 Oct 2009 11:37:16 -0400
+Subject: [Lustre-devel] max_dirty_mb and fsync
+In-Reply-To: <4AD76F52.4040706@ornl.gov>
+References: <4AD76F52.4040706@ornl.gov>
+Message-ID: <4AD8932C.9070602@ornl.gov>
+
+Obviously, when I write 32MB in the second paragraph I mean 4MB.  Sorry 
+for the error.
+
+Cheers
+Brad
+
+
+On 10/15/2009 02:52 PM, Bradley W. Settlemyer wrote:
+> Hello
+>
+>     What is the difference between setting the max_dirty_mb setting in
+> /proc to 4 and making sure that all of my applications fsync every 4MBs
+> of data that are transmitted?
+>
+>     I would guess that one difference is the 32MB is a filesystem-wide
+> setting rather than a per file setting -- so the sync occurs regardless
+> of the number of files receiving data.  But are there any other
+> differences with regards to the interaction with the file system.
+>
+>     More to the point perhaps, does an fsync have additional side effects
+> beyond those that occur for the max_dirty_mb threshhold being exceeded?
+>
+> Cheers,
+> Brad
+>
+> _______________________________________________
+> Lustre-devel mailing list
+> Lustre-devel at lists.lustre.org
+> http://lists.lustre.org/mailman/listinfo/lustre-devel
+>
+
+
+From Maxim.Patlasov at Sun.COM  Fri Oct 16 09:49:35 2009
+From: Maxim.Patlasov at Sun.COM (Maxim V. Patlasov)
+Date: Fri, 16 Oct 2009 20:49:35 +0400
+Subject: [Lustre-devel] lustre-to-LNET API: big non-aligned bulk
+	transfers
+In-Reply-To: <088e01ca4cf2$f5f9dcf0$e1ed96d0$@com>
+References: <4AD5ECBC.20003@sun.com> <088e01ca4cf2$f5f9dcf0$e1ed96d0$@com>
+Message-ID: <4AD8A41F.10403@sun.com>
+
+Eric,
+
+To make things 100% clear - did you answer positively ('It should...') 
+because there are some lustre use-cases for such transfers or just 
+because it would be natural for LNET to support both aligned and 
+not-aligned big bulk transfers?
+
+Thanks in advance,
+Maxim
+
+On 10/14/2009 09:22 PM, Eric Barton wrote:
+> Maxim,
+>
+> It should support such transfers, but you have to be careful about
+> the number of fragments this can introduce.  This issue has already
+> been observed in routers, which buffer LNET message payloads at
+> the same page offset, irrespective of the sender's page offset (of
+> which it has no knowledge).  For example, this can force the o2iblnd,
+> if configured to pre-map all memory, to need double the number of RDMA
+> fragments and therefore fail the transfer.  Chat with Liang - he knows
+> all about this...
+>
+>      Cheers,
+>                Eric
+>
+>    
+>> -----Original Message-----
+>> From: lustre-devel-bounces at lists.lustre.org [mailto:lustre-devel-bounces at lists.lustre.org] On Behalf Of Maxim V.
+>> Patlasov
+>> Sent: 14 October 2009 8:23 AM
+>> To: lustre-devel at lists.lustre.org
+>> Subject: [Lustre-devel] lustre-to-LNET API: big non-aligned bulk transfers
+>>
+>> Hi lustre-devel,
+>>
+>> I'd like to gather some opinions about the following question:
+>>
+>> Is it allowed or possible for lustre to submit relatively big bulk
+>> transfer request (e.g.>512K) to LNET layer when offset in the very
+>> first page to fetch bulk data from (on sender side) is not equal to the
+>> offset in the very first page to store data (on receiver side)? In the
+>> other words - should LNET support such transfers?
+>>
+>> Thanks in advance,
+>> Maxim
+>> _______________________________________________
+>> Lustre-devel mailing list
+>> Lustre-devel at lists.lustre.org
+>> http://lists.lustre.org/mailman/listinfo/lustre-devel
+>>      
+>
+>    
+
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20091016/8219f0ff/attachment.htm>
+
+From julian at arsc.edu  Fri Oct 16 11:01:50 2009
+From: julian at arsc.edu (jan julian)
+Date: Fri, 16 Oct 2009 10:01:50 -0800
+Subject: [Lustre-devel] lustre-to-LNET API: big non-aligned bulk
+	transfers
+In-Reply-To: <4AD8A41F.10403@sun.com>
+References: <4AD5ECBC.20003@sun.com> <088e01ca4cf2$f5f9dcf0$e1ed96d0$@com>
+	<4AD8A41F.10403@sun.com>
+Message-ID: <A1F15B48-3FC1-4616-958B-61F079E40CAF@arsc.edu>
+
+Just so your aware, the21057  bugzilla's assignment yesterday was as  
+follows.  Who can I get to move this forward so that I can
+exchange messages with someone.
+
+People
+Reporter:	pravin shelar <pravin.shelar at sun.com>
+Assigned To:	pravin shelar <pravin.shelar at sun.com>
+Add CC:	
+CC:	
+Remove selected CCs
+On Oct 16, 2009, at 8:49 AM, Maxim V. Patlasov wrote:
+
+> Eric,
+>
+> To make things 100% clear - did you answer positively ('It  
+> should...') because there are some lustre use-cases for such  
+> transfers or just because it would be natural for LNET to support  
+> both aligned and not-aligned big bulk transfers?
+>
+> Thanks in advance,
+> Maxim
+>
+> On 10/14/2009 09:22 PM, Eric Barton wrote:
+>>
+>> Maxim,
+>>
+>> It should support such transfers, but you have to be careful about
+>> the number of fragments this can introduce.  This issue has already
+>> been observed in routers, which buffer LNET message payloads at
+>> the same page offset, irrespective of the sender's page offset (of
+>> which it has no knowledge).  For example, this can force the o2iblnd,
+>> if configured to pre-map all memory, to need double the number of  
+>> RDMA
+>> fragments and therefore fail the transfer.  Chat with Liang - he  
+>> knows
+>> all about this...
+>>
+>>     Cheers,
+>>               Eric
+>>
+>>
+>>> -----Original Message-----
+>>> From: lustre-devel-bounces at lists.lustre.org [mailto:lustre-devel-bounces at lists.lustre.org 
+>>> ] On Behalf Of Maxim V.
+>>> Patlasov
+>>> Sent: 14 October 2009 8:23 AM
+>>> To: lustre-devel at lists.lustre.org
+>>> Subject: [Lustre-devel] lustre-to-LNET API: big non-aligned bulk  
+>>> transfers
+>>>
+>>> Hi lustre-devel,
+>>>
+>>> I'd like to gather some opinions about the following question:
+>>>
+>>> Is it allowed or possible for lustre to submit relatively big bulk
+>>> transfer request (e.g. >512K) to LNET layer when offset in the very
+>>> first page to fetch bulk data from (on sender side) is not equal  
+>>> to the
+>>> offset in the very first page to store data (on receiver side)? In  
+>>> the
+>>> other words - should LNET support such transfers?
+>>>
+>>> Thanks in advance,
+>>> Maxim
+>>> _______________________________________________
+>>> Lustre-devel mailing list
+>>> Lustre-devel at lists.lustre.org
+>>> http://lists.lustre.org/mailman/listinfo/lustre-devel
+>>>
+>>
+>>
+>
+> _______________________________________________
+> Lustre-devel mailing list
+> Lustre-devel at lists.lustre.org
+> http://lists.lustre.org/mailman/listinfo/lustre-devel
+
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20091016/2b6f7e97/attachment.htm>
+
+From adilger at sun.com  Sat Oct 17 10:53:12 2009
+From: adilger at sun.com (Andreas Dilger)
+Date: Sat, 17 Oct 2009 11:53:12 -0600
+Subject: [Lustre-devel] max_dirty_mb and fsync
+In-Reply-To: <4AD76F52.4040706@ornl.gov>
+References: <4AD76F52.4040706@ornl.gov>
+Message-ID: <F0F8DECF-1BD9-4B47-A183-23B6697D79F8@sun.com>
+
+On 15-Oct-09, at 12:52, Bradley W. Settlemyer wrote:
+>  What is the difference between setting the max_dirty_mb setting in
+> /proc to 4 and making sure that all of my applications fsync every  
+> 4MBs
+> of data that are transmitted?
+>
+>  I would guess that one difference is the 32MB is a filesystem-wide
+> setting rather than a per file setting -- so the sync occurs  
+> regardless
+> of the number of files receiving data.  But are there any other
+> differences with regards to the interaction with the file system.
+>
+>  More to the point perhaps, does an fsync have additional side effects
+> beyond those that occur for the max_dirty_mb threshhold being  
+> exceeded?
+
+
+One important distinction between max_dirty_mb (which is a Lustre  
+mechanism
+to avoid too much file cache memory pressure on the client node causing
+application data to be paged out of memory) and an fsync() is  
+max_dirty_mb
+only pushes out file data to the OSTs on an as-needed basis, while  
+fsync()
+flushes ALL of the data, and also guarantees that you can ACCESS that  
+data
+after it was written to the OSTs/disks.
+
+Whether on Lustre or a local filesystem, just because the blocks are  
+on disk,
+it doesn't mean that the metadata (either Lustre on the MDS, or ext3/ 
+xfs/etc)
+to access that data (whether for the pathname traversal, or the inode  
+itself)
+is also safe on disk.  This is one of the issues being discussed a lot  
+on
+linux-fsdevel regarding the semantics of O_DIRECT, which guarantees  
+that the
+DATA is on disk but it doesn't mean that the just-created inode or the  
+mapping
+for just-allocated blocks have made it to the disk at all.
+
+That behaviour is fine for a database, which will generally always  
+preallocate
+the file on disk, so the only thing changing is the file data, but it  
+may be
+a surprise to other users of O_DIRECT.
+
+That said, Lustre WILL of course write all of this data to disk as  
+soon as
+practical, without forcing everything to a standstill while the  
+fsync() is
+completed.
+
+Cheers, Andreas
+--
+Andreas Dilger
+Sr. Staff Engineer, Lustre Group
+Sun Microsystems of Canada, Inc.
+
+
+
+From xose.vazquez at gmail.com  Sat Oct 24 06:03:28 2009
+From: xose.vazquez at gmail.com (Xose Vazquez Perez)
+Date: Sat, 24 Oct 2009 15:03:28 +0200
+Subject: [Lustre-devel] lustre in upstream
+Message-ID: <4AE2FB20.80509@gmail.com>
+
+hi,
+
+May I ask you when clusterfs is going to be merged in kernel.org code  ?
+Six years since 1.0 release, and it still is out.
+
+any plan out there ?
+
+-thanks-
+
+-- 
+?All? muevan feroz guerra, ciegos reyes por un palmo m?s de tierra;
+que yo aqu? tengo por m?o cuanto abarca el mar brav?o, a quien nadie
+impuso leyes. Y no hay playa, sea cualquiera, ni bandera de esplendor,
+que no sienta mi derecho y d? pecho a mi valor.?
+
+
+From Brian.Murrell at Sun.COM  Tue Oct 27 08:43:01 2009
+From: Brian.Murrell at Sun.COM (Brian J. Murrell)
+Date: Tue, 27 Oct 2009 11:43:01 -0400
+Subject: [Lustre-devel] lustre in upstream
+In-Reply-To: <4AE2FB20.80509@gmail.com>
+References: <4AE2FB20.80509@gmail.com>
+Message-ID: <1256658181.16338.27.camel@pc.interlinx.bc.ca>
+
+[ I've dropped the fsdevel list as I likely don't have permission to
+post there -- I am not subscribed. ]
+
+On Sat, 2009-10-24 at 15:03 +0200, Xose Vazquez Perez wrote:
+> hi,
+
+Hi,
+
+> May I ask you when clusterfs
+
+The name of the product is Lustre, not clusterfs.
+
+> is going to be merged in kernel.org code  ?
+
+Probably only likely once we no longer require kernel patches for the
+servers.  Maybe never.  AFAIU, we have tried in the past and met so much
+residence that it was consuming too much developer time and impacting
+our ongoing development.
+
+> Six years since 1.0 release, and it still is out.
+
+Yup.  I am sure there is a lot of history on LKML that you could read up
+on.
+
+b.
+
+-------------- next part --------------
+A non-text attachment was scrubbed...
+Name: not available
+Type: application/pgp-signature
+Size: 197 bytes
+Desc: This is a digitally signed message part
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20091027/ee0e8a51/attachment.pgp>
+

@@ -1,0 +1,1612 @@
+From sean.brisbane at physics.ox.ac.uk  Fri Jan 22 01:33:41 2016
+From: sean.brisbane at physics.ox.ac.uk (Sean Brisbane)
+Date: Fri, 22 Jan 2016 09:33:41 +0000
+Subject: [lustre-discuss] Inactivated ost still showing up on the mds
+In-Reply-To: <1738038527.303303.1453399746694.JavaMail.zimbra@jlab.org>
+References: <56A11A4B.6080406@gmail.com>,
+	<1738038527.303303.1453399746694.JavaMail.zimbra@jlab.org>
+Message-ID: <C6A70F0B3785A04BA88C056A0B39627C21D51DC5@EXCHNG15.physics.ox.ac.uk>
+
+Dear Kurt,
+
+Im not sure if this is exactly what you were trying to do, but when I decommission an OST I also deactivate the OST on the client, which means that nothing on the OST will be accessible but the filesystem will carry on happily.  
+
+ lctl set_param osc.lustresystem-OST00NN-osc*.active=0
+
+Thanks,
+Sean
+________________________________________
+From: lustre-discuss [lustre-discuss-bounces at lists.lustre.org] on behalf of Kurt Strosahl [strosahl at jlab.org]
+Sent: 21 January 2016 18:09
+To: Chris Hunter
+Cc: lustre-discuss at lists.lustre.org
+Subject: Re: [lustre-discuss] Inactivated ost still showing up on the mds
+
+Good Afternoon Chris,
+
+   I have already run the active=0 command on the mds, is there another step?  From my testing under 2.5.3 the clients will hang indefinitely without using the lazystatfs=1.
+
+   Our major issue at present is that when the OST died it had a fair amount of data on in (closing in on 2M files lost), and it seems like the client gets into a bad state when calls re made repeatedly to files that are lost (but still have their ost index information).  As the crawl has unlinked files the number of errors has dropped, as have client crashes.
+
+w/r,
+Kurt
+
+----- Original Message -----
+From: "Chris Hunter" <chuntera at gmail.com>
+To: lustre-discuss at lists.lustre.org
+Cc: "Kurt Strosahl" <strosahl at jlab.org>
+Sent: Thursday, January 21, 2016 12:50:03 PM
+Subject: [lustre-discuss] Inactivated ost still showing up on the mds
+
+Hi Kurt,
+For reference when an underlying OST object is missing, this is the
+error message generated on our MDS (lustre 2.5):
+> Lustre: 12752:0:(mdd_object.c:1983:mdd_dir_page_build()) build page failed: -5!
+
+I suspect until you update the MGS info the MDS will still connect to
+the deactive OST.
+
+My experience is sometimes the recipe to deactivate an OST works
+flawlessly sometimes other times the clients hang on "df" command and
+timeout on file access. I guess the order which you run the commands
+(ie. client vs server) is important.
+
+regards,
+chris hunter
+
+> From: Kurt Strosahl <strosahl at jlab.org>
+> To: lustre-discuss at lists.lustre.org
+> Subject: [lustre-discuss] Inactivated ost still showing up on the mds
+>
+> All,
+>
+>    Continuing the issues that I reported yesterday...  I found that by unlinking lost files that I was able to stop the below error from occurring, this gives me hope that systems will stop crashing once all the lost files are scrubbed.
+>
+> LustreError: 7676:0:(sec.c:379:import_sec_validate_get()) import ffff880623098800 (NEW) with no sec
+> LustreError: 7971:0:(sec.c:379:import_sec_validate_get()) import ffff880623098800 (NEW) with no sec
+>
+>    I do note that the inactivated ost doesn't seem to ever REALLY go away.  After I removed an ost from my test system I noticed that the mds still showed it...
+>
+> On a client hooked up to the test system...
+> client: lfs df
+> UUID                   1K-blocks        Used   Available Use% Mounted on
+> testL-MDT0000_UUID    1819458432       10112  1819446272   0% /testlustre[MDT:0]
+> testL-OST0000_UUID   57914433152       12672 57914418432   0% /testlustre[OST:0]
+> testL-OST0001_UUID   57914433408       12672 57914418688   0% /testlustre[OST:1]
+> testL-OST0002_UUID   57914433408       12672 57914418688   0% /testlustre[OST:2]
+> OST0003             : inactive device
+> testL-OST0004_UUID   57914436992      144896 57914290048   0% /testlustre[OST:4
+>
+> on the mds it still shows as up when I do lctl dl:
+> mds: lctl dl | grep OST0003
+>  22 UP osp testL-OST0003-osc-MDT0000 testL-MDT0000-mdtlov_UUID 5
+>
+> So I stopped the test system, ran lctl dl again (getting no results), and restarted it.  Once the system was back up I still saw OST3 marked as UP with lctl dl:
+> mds: lctl dl | grep OST0003
+>  11 UP osp testL-OST0003-osc-MDT0000 testL-MDT0000-mdtlov_UUID 5
+>
+> Why does the mds still think that this OST is up?
+>
+_______________________________________________
+lustre-discuss mailing list
+lustre-discuss at lists.lustre.org
+http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org
+
+From strosahl at jlab.org  Fri Jan 22 05:39:18 2016
+From: strosahl at jlab.org (Kurt Strosahl)
+Date: Fri, 22 Jan 2016 08:39:18 -0500 (EST)
+Subject: [lustre-discuss] Inactivated ost still showing up on the mds
+In-Reply-To: <861144909.434519.1453469868268.JavaMail.zimbra@jlab.org>
+References: <56A11A4B.6080406@gmail.com>
+	<1738038527.303303.1453399746694.JavaMail.zimbra@jlab.org>
+	<C6A70F0B3785A04BA88C056A0B39627C21D51DC5@EXCHNG15.physics.ox.ac.uk>
+Message-ID: <613884280.434897.1453469958335.JavaMail.zimbra@jlab.org>
+
+Good Morning,
+
+   The real issue here is that the OST was decomissioned because the zpool on which it resided died, which left about 30TB of data (and possibly several million files) to be scrubbed.
+
+   The steps I took were as follows... I set active=0 on the mds, and then set lazystatfs=1 on the mds and the clients so that df commands wouldn't hang.
+
+   I don't see in the documentation where you have to set the ost to active=0 on every client, did I miss that?  Also that is a marked change from 1.8, where deactivating an OST just required active=0 on the mds.
+
+w/r,
+Kurt
+
+----- Original Message -----
+From: "Sean Brisbane" <sean.brisbane at physics.ox.ac.uk>
+To: "Kurt Strosahl" <strosahl at jlab.org>, "Chris Hunter" <chuntera at gmail.com>
+Cc: lustre-discuss at lists.lustre.org
+Sent: Friday, January 22, 2016 4:33:41 AM
+Subject: RE: Inactivated ost still showing up on the mds
+
+Dear Kurt,
+
+Im not sure if this is exactly what you were trying to do, but when I decommission an OST I also deactivate the OST on the client, which means that nothing on the OST will be accessible but the filesystem will carry on happily.  
+
+ lctl set_param osc.lustresystem-OST00NN-osc*.active=0
+
+Thanks,
+Sean
+________________________________________
+From: lustre-discuss [lustre-discuss-bounces at lists.lustre.org] on behalf of Kurt Strosahl [strosahl at jlab.org]
+Sent: 21 January 2016 18:09
+To: Chris Hunter
+Cc: lustre-discuss at lists.lustre.org
+Subject: Re: [lustre-discuss] Inactivated ost still showing up on the mds
+
+Good Afternoon Chris,
+
+   I have already run the active=0 command on the mds, is there another step?  From my testing under 2.5.3 the clients will hang indefinitely without using the lazystatfs=1.
+
+   Our major issue at present is that when the OST died it had a fair amount of data on in (closing in on 2M files lost), and it seems like the client gets into a bad state when calls re made repeatedly to files that are lost (but still have their ost index information).  As the crawl has unlinked files the number of errors has dropped, as have client crashes.
+
+w/r,
+Kurt
+
+----- Original Message -----
+From: "Chris Hunter" <chuntera at gmail.com>
+To: lustre-discuss at lists.lustre.org
+Cc: "Kurt Strosahl" <strosahl at jlab.org>
+Sent: Thursday, January 21, 2016 12:50:03 PM
+Subject: [lustre-discuss] Inactivated ost still showing up on the mds
+
+Hi Kurt,
+For reference when an underlying OST object is missing, this is the
+error message generated on our MDS (lustre 2.5):
+> Lustre: 12752:0:(mdd_object.c:1983:mdd_dir_page_build()) build page failed: -5!
+
+I suspect until you update the MGS info the MDS will still connect to
+the deactive OST.
+
+My experience is sometimes the recipe to deactivate an OST works
+flawlessly sometimes other times the clients hang on "df" command and
+timeout on file access. I guess the order which you run the commands
+(ie. client vs server) is important.
+
+regards,
+chris hunter
+
+> From: Kurt Strosahl <strosahl at jlab.org>
+> To: lustre-discuss at lists.lustre.org
+> Subject: [lustre-discuss] Inactivated ost still showing up on the mds
+>
+> All,
+>
+>    Continuing the issues that I reported yesterday...  I found that by unlinking lost files that I was able to stop the below error from occurring, this gives me hope that systems will stop crashing once all the lost files are scrubbed.
+>
+> LustreError: 7676:0:(sec.c:379:import_sec_validate_get()) import ffff880623098800 (NEW) with no sec
+> LustreError: 7971:0:(sec.c:379:import_sec_validate_get()) import ffff880623098800 (NEW) with no sec
+>
+>    I do note that the inactivated ost doesn't seem to ever REALLY go away.  After I removed an ost from my test system I noticed that the mds still showed it...
+>
+> On a client hooked up to the test system...
+> client: lfs df
+> UUID                   1K-blocks        Used   Available Use% Mounted on
+> testL-MDT0000_UUID    1819458432       10112  1819446272   0% /testlustre[MDT:0]
+> testL-OST0000_UUID   57914433152       12672 57914418432   0% /testlustre[OST:0]
+> testL-OST0001_UUID   57914433408       12672 57914418688   0% /testlustre[OST:1]
+> testL-OST0002_UUID   57914433408       12672 57914418688   0% /testlustre[OST:2]
+> OST0003             : inactive device
+> testL-OST0004_UUID   57914436992      144896 57914290048   0% /testlustre[OST:4
+>
+> on the mds it still shows as up when I do lctl dl:
+> mds: lctl dl | grep OST0003
+>  22 UP osp testL-OST0003-osc-MDT0000 testL-MDT0000-mdtlov_UUID 5
+>
+> So I stopped the test system, ran lctl dl again (getting no results), and restarted it.  Once the system was back up I still saw OST3 marked as UP with lctl dl:
+> mds: lctl dl | grep OST0003
+>  11 UP osp testL-OST0003-osc-MDT0000 testL-MDT0000-mdtlov_UUID 5
+>
+> Why does the mds still think that this OST is up?
+>
+_______________________________________________
+lustre-discuss mailing list
+lustre-discuss at lists.lustre.org
+http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org
+
+From strosahl at jlab.org  Fri Jan 22 05:56:09 2016
+From: strosahl at jlab.org (Kurt Strosahl)
+Date: Fri, 22 Jan 2016 08:56:09 -0500 (EST)
+Subject: [lustre-discuss] Inactivated ost still showing up on the mds
+In-Reply-To: <725162661.438661.1453470962974.JavaMail.zimbra@jlab.org>
+References: <56A11A4B.6080406@gmail.com>
+	<1738038527.303303.1453399746694.JavaMail.zimbra@jlab.org>
+	<C6A70F0B3785A04BA88C056A0B39627C21D51DC5@EXCHNG15.physics.ox.ac.uk>
+	<613884280.434897.1453469958335.JavaMail.zimbra@jlab.org>
+Message-ID: <1300249696.438663.1453470969324.JavaMail.zimbra@jlab.org>
+
+A followup...
+
+I just checked on one of the client nodes, and it shows active=0 even without having set it by hand.
+
+lctl get_param osc.lustre-OST0004-osc*.active
+osc.lustre-OST0004-osc-ffff880872638400.active=0
+
+So I set it on the client...
+lctl set_param osc.lustre2-OST0004-osc*.active=0
+osc.lustre2-OST0004-osc-ffff880872638400.active=0
+
+and it still shows as UP when I use lctl
+lctl dl | grep OST0004
+  8 UP osc lustre2-OST0004-osc-
+
+So why does lustre 2 require the extra legwork for removing an OST?  It might not be a common occurrence but it is something that will happen over the lifetime of a file system (due to system retirement or hardware failure).
+
+w/r,
+Kurt
+
+
+----- Original Message -----
+From: "Kurt Strosahl" <strosahl at jlab.org>
+To: "Sean Brisbane" <sean.brisbane at physics.ox.ac.uk>
+Cc: "Chris Hunter" <chuntera at gmail.com>, lustre-discuss at lists.lustre.org
+Sent: Friday, January 22, 2016 8:39:18 AM
+Subject: Re: Inactivated ost still showing up on the mds
+
+Good Morning,
+
+   The real issue here is that the OST was decomissioned because the zpool on which it resided died, which left about 30TB of data (and possibly several million files) to be scrubbed.
+
+   The steps I took were as follows... I set active=0 on the mds, and then set lazystatfs=1 on the mds and the clients so that df commands wouldn't hang.
+
+   I don't see in the documentation where you have to set the ost to active=0 on every client, did I miss that?  Also that is a marked change from 1.8, where deactivating an OST just required active=0 on the mds.
+
+w/r,
+Kurt
+
+----- Original Message -----
+From: "Sean Brisbane" <sean.brisbane at physics.ox.ac.uk>
+To: "Kurt Strosahl" <strosahl at jlab.org>, "Chris Hunter" <chuntera at gmail.com>
+Cc: lustre-discuss at lists.lustre.org
+Sent: Friday, January 22, 2016 4:33:41 AM
+Subject: RE: Inactivated ost still showing up on the mds
+
+Dear Kurt,
+
+Im not sure if this is exactly what you were trying to do, but when I decommission an OST I also deactivate the OST on the client, which means that nothing on the OST will be accessible but the filesystem will carry on happily.  
+
+ lctl set_param osc.lustresystem-OST00NN-osc*.active=0
+
+Thanks,
+Sean
+________________________________________
+From: lustre-discuss [lustre-discuss-bounces at lists.lustre.org] on behalf of Kurt Strosahl [strosahl at jlab.org]
+Sent: 21 January 2016 18:09
+To: Chris Hunter
+Cc: lustre-discuss at lists.lustre.org
+Subject: Re: [lustre-discuss] Inactivated ost still showing up on the mds
+
+Good Afternoon Chris,
+
+   I have already run the active=0 command on the mds, is there another step?  From my testing under 2.5.3 the clients will hang indefinitely without using the lazystatfs=1.
+
+   Our major issue at present is that when the OST died it had a fair amount of data on in (closing in on 2M files lost), and it seems like the client gets into a bad state when calls re made repeatedly to files that are lost (but still have their ost index information).  As the crawl has unlinked files the number of errors has dropped, as have client crashes.
+
+w/r,
+Kurt
+
+----- Original Message -----
+From: "Chris Hunter" <chuntera at gmail.com>
+To: lustre-discuss at lists.lustre.org
+Cc: "Kurt Strosahl" <strosahl at jlab.org>
+Sent: Thursday, January 21, 2016 12:50:03 PM
+Subject: [lustre-discuss] Inactivated ost still showing up on the mds
+
+Hi Kurt,
+For reference when an underlying OST object is missing, this is the
+error message generated on our MDS (lustre 2.5):
+> Lustre: 12752:0:(mdd_object.c:1983:mdd_dir_page_build()) build page failed: -5!
+
+I suspect until you update the MGS info the MDS will still connect to
+the deactive OST.
+
+My experience is sometimes the recipe to deactivate an OST works
+flawlessly sometimes other times the clients hang on "df" command and
+timeout on file access. I guess the order which you run the commands
+(ie. client vs server) is important.
+
+regards,
+chris hunter
+
+> From: Kurt Strosahl <strosahl at jlab.org>
+> To: lustre-discuss at lists.lustre.org
+> Subject: [lustre-discuss] Inactivated ost still showing up on the mds
+>
+> All,
+>
+>    Continuing the issues that I reported yesterday...  I found that by unlinking lost files that I was able to stop the below error from occurring, this gives me hope that systems will stop crashing once all the lost files are scrubbed.
+>
+> LustreError: 7676:0:(sec.c:379:import_sec_validate_get()) import ffff880623098800 (NEW) with no sec
+> LustreError: 7971:0:(sec.c:379:import_sec_validate_get()) import ffff880623098800 (NEW) with no sec
+>
+>    I do note that the inactivated ost doesn't seem to ever REALLY go away.  After I removed an ost from my test system I noticed that the mds still showed it...
+>
+> On a client hooked up to the test system...
+> client: lfs df
+> UUID                   1K-blocks        Used   Available Use% Mounted on
+> testL-MDT0000_UUID    1819458432       10112  1819446272   0% /testlustre[MDT:0]
+> testL-OST0000_UUID   57914433152       12672 57914418432   0% /testlustre[OST:0]
+> testL-OST0001_UUID   57914433408       12672 57914418688   0% /testlustre[OST:1]
+> testL-OST0002_UUID   57914433408       12672 57914418688   0% /testlustre[OST:2]
+> OST0003             : inactive device
+> testL-OST0004_UUID   57914436992      144896 57914290048   0% /testlustre[OST:4
+>
+> on the mds it still shows as up when I do lctl dl:
+> mds: lctl dl | grep OST0003
+>  22 UP osp testL-OST0003-osc-MDT0000 testL-MDT0000-mdtlov_UUID 5
+>
+> So I stopped the test system, ran lctl dl again (getting no results), and restarted it.  Once the system was back up I still saw OST3 marked as UP with lctl dl:
+> mds: lctl dl | grep OST0003
+>  11 UP osp testL-OST0003-osc-MDT0000 testL-MDT0000-mdtlov_UUID 5
+>
+> Why does the mds still think that this OST is up?
+>
+_______________________________________________
+lustre-discuss mailing list
+lustre-discuss at lists.lustre.org
+http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org
+
+From sean.brisbane at physics.ox.ac.uk  Fri Jan 22 06:23:09 2016
+From: sean.brisbane at physics.ox.ac.uk (Sean Brisbane)
+Date: Fri, 22 Jan 2016 14:23:09 +0000
+Subject: [lustre-discuss] Inactivated ost still showing up on the mds
+In-Reply-To: <1300249696.438663.1453470969324.JavaMail.zimbra@jlab.org>
+References: <56A11A4B.6080406@gmail.com>
+	<1738038527.303303.1453399746694.JavaMail.zimbra@jlab.org>
+	<C6A70F0B3785A04BA88C056A0B39627C21D51DC5@EXCHNG15.physics.ox.ac.uk>
+	<613884280.434897.1453469958335.JavaMail.zimbra@jlab.org>
+	<1300249696.438663.1453470969324.JavaMail.zimbra@jlab.org>
+Message-ID: <C6A70F0B3785A04BA88C056A0B39627C21D52FBD@EXCHNG15.physics.ox.ac.uk>
+
+Hi Kurt,
+
+That?s not what I see at all, interesting, all my deactivated OST.  I'm running 2.5.3, but with ldiskfs, a separate host for MDS vs MDT and I'm not using lasystafs.  I'm not saying those those things are or arn't related, but they are differences.
+
+Its working for you now though? I'm certainly happy with my workaround for the purposes of decommissioning old working hardware and which are different to yours.  Its worth bearing yours in mind if we  lose an OST.  Are you cleaning up the links using a lustre client with the OST active or by deleting the files directly from the mds' zfs filesystem?
+
+Thanks,
+Sean
+
+-----Original Message-----
+From: Kurt Strosahl [mailto:strosahl at jlab.org] 
+Sent: 22 January 2016 13:56
+To: Sean Brisbane
+Cc: Chris Hunter; lustre-discuss at lists.lustre.org
+Subject: Re: Inactivated ost still showing up on the mds
+
+A followup...
+
+I just checked on one of the client nodes, and it shows active=0 even without having set it by hand.
+
+lctl get_param osc.lustre-OST0004-osc*.active
+osc.lustre-OST0004-osc-ffff880872638400.active=0
+
+So I set it on the client...
+lctl set_param osc.lustre2-OST0004-osc*.active=0
+osc.lustre2-OST0004-osc-ffff880872638400.active=0
+
+and it still shows as UP when I use lctl lctl dl | grep OST0004
+  8 UP osc lustre2-OST0004-osc-
+
+So why does lustre 2 require the extra legwork for removing an OST?  It might not be a common occurrence but it is something that will happen over the lifetime of a file system (due to system retirement or hardware failure).
+
+w/r,
+Kurt
+
+
+----- Original Message -----
+From: "Kurt Strosahl" <strosahl at jlab.org>
+To: "Sean Brisbane" <sean.brisbane at physics.ox.ac.uk>
+Cc: "Chris Hunter" <chuntera at gmail.com>, lustre-discuss at lists.lustre.org
+Sent: Friday, January 22, 2016 8:39:18 AM
+Subject: Re: Inactivated ost still showing up on the mds
+
+Good Morning,
+
+   The real issue here is that the OST was decomissioned because the zpool on which it resided died, which left about 30TB of data (and possibly several million files) to be scrubbed.
+
+   The steps I took were as follows... I set active=0 on the mds, and then set lazystatfs=1 on the mds and the clients so that df commands wouldn't hang.
+
+   I don't see in the documentation where you have to set the ost to active=0 on every client, did I miss that?  Also that is a marked change from 1.8, where deactivating an OST just required active=0 on the mds.
+
+w/r,
+Kurt
+
+----- Original Message -----
+From: "Sean Brisbane" <sean.brisbane at physics.ox.ac.uk>
+To: "Kurt Strosahl" <strosahl at jlab.org>, "Chris Hunter" <chuntera at gmail.com>
+Cc: lustre-discuss at lists.lustre.org
+Sent: Friday, January 22, 2016 4:33:41 AM
+Subject: RE: Inactivated ost still showing up on the mds
+
+Dear Kurt,
+
+Im not sure if this is exactly what you were trying to do, but when I decommission an OST I also deactivate the OST on the client, which means that nothing on the OST will be accessible but the filesystem will carry on happily.  
+
+ lctl set_param osc.lustresystem-OST00NN-osc*.active=0
+
+Thanks,
+Sean
+________________________________________
+From: lustre-discuss [lustre-discuss-bounces at lists.lustre.org] on behalf of Kurt Strosahl [strosahl at jlab.org]
+Sent: 21 January 2016 18:09
+To: Chris Hunter
+Cc: lustre-discuss at lists.lustre.org
+Subject: Re: [lustre-discuss] Inactivated ost still showing up on the mds
+
+Good Afternoon Chris,
+
+   I have already run the active=0 command on the mds, is there another step?  From my testing under 2.5.3 the clients will hang indefinitely without using the lazystatfs=1.
+
+   Our major issue at present is that when the OST died it had a fair amount of data on in (closing in on 2M files lost), and it seems like the client gets into a bad state when calls re made repeatedly to files that are lost (but still have their ost index information).  As the crawl has unlinked files the number of errors has dropped, as have client crashes.
+
+w/r,
+Kurt
+
+----- Original Message -----
+From: "Chris Hunter" <chuntera at gmail.com>
+To: lustre-discuss at lists.lustre.org
+Cc: "Kurt Strosahl" <strosahl at jlab.org>
+Sent: Thursday, January 21, 2016 12:50:03 PM
+Subject: [lustre-discuss] Inactivated ost still showing up on the mds
+
+Hi Kurt,
+For reference when an underlying OST object is missing, this is the error message generated on our MDS (lustre 2.5):
+> Lustre: 12752:0:(mdd_object.c:1983:mdd_dir_page_build()) build page failed: -5!
+
+I suspect until you update the MGS info the MDS will still connect to the deactive OST.
+
+My experience is sometimes the recipe to deactivate an OST works flawlessly sometimes other times the clients hang on "df" command and timeout on file access. I guess the order which you run the commands (ie. client vs server) is important.
+
+regards,
+chris hunter
+
+> From: Kurt Strosahl <strosahl at jlab.org>
+> To: lustre-discuss at lists.lustre.org
+> Subject: [lustre-discuss] Inactivated ost still showing up on the mds
+>
+> All,
+>
+>    Continuing the issues that I reported yesterday...  I found that by unlinking lost files that I was able to stop the below error from occurring, this gives me hope that systems will stop crashing once all the lost files are scrubbed.
+>
+> LustreError: 7676:0:(sec.c:379:import_sec_validate_get()) import 
+> ffff880623098800 (NEW) with no sec
+> LustreError: 7971:0:(sec.c:379:import_sec_validate_get()) import 
+> ffff880623098800 (NEW) with no sec
+>
+>    I do note that the inactivated ost doesn't seem to ever REALLY go away.  After I removed an ost from my test system I noticed that the mds still showed it...
+>
+> On a client hooked up to the test system...
+> client: lfs df
+> UUID                   1K-blocks        Used   Available Use% Mounted on
+> testL-MDT0000_UUID    1819458432       10112  1819446272   0% /testlustre[MDT:0]
+> testL-OST0000_UUID   57914433152       12672 57914418432   0% /testlustre[OST:0]
+> testL-OST0001_UUID   57914433408       12672 57914418688   0% /testlustre[OST:1]
+> testL-OST0002_UUID   57914433408       12672 57914418688   0% /testlustre[OST:2]
+> OST0003             : inactive device
+> testL-OST0004_UUID   57914436992      144896 57914290048   0% /testlustre[OST:4
+>
+> on the mds it still shows as up when I do lctl dl:
+> mds: lctl dl | grep OST0003
+>  22 UP osp testL-OST0003-osc-MDT0000 testL-MDT0000-mdtlov_UUID 5
+>
+> So I stopped the test system, ran lctl dl again (getting no results), and restarted it.  Once the system was back up I still saw OST3 marked as UP with lctl dl:
+> mds: lctl dl | grep OST0003
+>  11 UP osp testL-OST0003-osc-MDT0000 testL-MDT0000-mdtlov_UUID 5
+>
+> Why does the mds still think that this OST is up?
+>
+_______________________________________________
+lustre-discuss mailing list
+lustre-discuss at lists.lustre.org
+http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org
+
+From cap at nsc.liu.se  Tue Jan 26 07:16:33 2016
+From: cap at nsc.liu.se (Peter =?UTF-8?B?S2plbGxzdHLDtm0=?=)
+Date: Tue, 26 Jan 2016 16:16:33 +0100
+Subject: [lustre-discuss] zfs and luster 2.5.3.90
+In-Reply-To: <CALTa_r1r25wDHJJZvKXBBsixB=m__nJXNc2qw2SheC-rFNjtPw@mail.gmail.com>
+References: <D2BE31F1.128827%andreas.dilger@intel.com>
+	<CALTa_r1r25wDHJJZvKXBBsixB=m__nJXNc2qw2SheC-rFNjtPw@mail.gmail.com>
+Message-ID: <20160126161633.6a2a3bd5@yaydoe>
+
+On Fri, 15 Jan 2016 15:28:46 +0000
+Frederick Lefebvre <frederick.lefebvre at calculquebec.ca> wrote:
+
+FWIW, we at NSC run three sets of lustre+zfs in production currently:
+
+2.5.3-5chaos + 0.6.4.1-1 + 2.6.32-504.16.2
+2.5.3-something + 0.6.3-1.2 + 2.6.32-504.8.1.el6.nsc1
+2.4.2-llnl13chaos + 0.6.3-1 + 2.6.32-431.20.3
+
+> If you think you need a more recent version of ZFS, we have run Lustre
+> 2.5.3 with ZFS up to 0.6.5.3 by building Lustre with patches from the
+> following jiras:
+...
+
+If running 0.6.5.3 you might want to be aware that master has been
+stepped back to 0.6.4:
+
+Author: Jinshan Xiong <jinshan.xiong at intel.com>  2015-12-23 22:14:31
+Committer: Oleg Drokin <oleg.drokin at intel.com>  2016-01-05 19:57:08
+Parent: eb6cd4804d65dda1b6ea4a1289cc01647d03a47a (LU-7223 tests: print
+more information when mmp.sh failed) Child:
+08fcdbb95cd7ab3fc1246f03c3ef27c0b8a0d218 (LU-7084 obd: correct some OBD
+allocator macro defines) Branches: remotes/origin/iu-sk,
+remotes/origin/master Follows: 2.7.64, v2_7_64, v2_7_64_0 Precedes:
+2.7.65, v2_7_65, v2_7_65_0
+
+    LU-7404 zfs: reset ZFS baseline to 0.6.4.2
+    
+    ZFS 0.6.5.2 is known to introduce I/O problems with the following
+    stack backtrace:
+    
+    Call Trace:
+     [] ? vdev_mirror_child_done+0x0/0x30 [zfs]
+     [] io_schedule+0x73/0xc0
+     [] cv_wait_common+0xaf/0x130 [spl]
+     [] ? autoremove_wake_function+0x0/0x40
+...
+
+/Peter K
+
+From aik at fnal.gov  Tue Jan 26 10:23:20 2016
+From: aik at fnal.gov (Alexander I Kulyavtsev)
+Date: Tue, 26 Jan 2016 18:23:20 +0000
+Subject: [lustre-discuss] Inactivated ost still showing up on the mds
+In-Reply-To: <613884280.434897.1453469958335.JavaMail.zimbra@jlab.org>
+References: <56A11A4B.6080406@gmail.com>
+	<1738038527.303303.1453399746694.JavaMail.zimbra@jlab.org>
+	<C6A70F0B3785A04BA88C056A0B39627C21D51DC5@EXCHNG15.physics.ox.ac.uk>
+	<613884280.434897.1453469958335.JavaMail.zimbra@jlab.org>
+Message-ID: <6156EB82-1D24-402A-8C28-B6E0E74D864B@fnal.gov>
+
+Hi Kurt,
+probably too late if you unlinked the files:
+Did you do zfs snapshot on MDT and damaged OST before removing files?
+I so, it may be possible to mount ost zfs as a regualr zfs and pull out objects corresponding to files.
+mdt zfs snapshot to get fids.
+Alex.
+
+On Jan 22, 2016, at 7:39 AM, Kurt Strosahl <strosahl at jlab.org> wrote:
+
+> Good Morning,
+> 
+>   The real issue here is that the OST was decomissioned because the zpool on which it resided died, which left about 30TB of data (and possibly several million files) to be scrubbed.
+> 
+>   The steps I took were as follows... I set active=0 on the mds, and then set lazystatfs=1 on the mds and the clients so that df commands wouldn't hang.
+> 
+>   I don't see in the documentation where you have to set the ost to active=0 on every client, did I miss that?  Also that is a marked change from 1.8, where deactivating an OST just required active=0 on the mds.
+> 
+> w/r,
+> Kurt
+> 
+> ----- Original Message -----
+> From: "Sean Brisbane" <sean.brisbane at physics.ox.ac.uk>
+> To: "Kurt Strosahl" <strosahl at jlab.org>, "Chris Hunter" <chuntera at gmail.com>
+> Cc: lustre-discuss at lists.lustre.org
+> Sent: Friday, January 22, 2016 4:33:41 AM
+> Subject: RE: Inactivated ost still showing up on the mds
+> 
+> Dear Kurt,
+> 
+> Im not sure if this is exactly what you were trying to do, but when I decommission an OST I also deactivate the OST on the client, which means that nothing on the OST will be accessible but the filesystem will carry on happily.  
+> 
+> lctl set_param osc.lustresystem-OST00NN-osc*.active=0
+> 
+> Thanks,
+> Sean
+> ________________________________________
+> From: lustre-discuss [lustre-discuss-bounces at lists.lustre.org] on behalf of Kurt Strosahl [strosahl at jlab.org]
+> Sent: 21 January 2016 18:09
+> To: Chris Hunter
+> Cc: lustre-discuss at lists.lustre.org
+> Subject: Re: [lustre-discuss] Inactivated ost still showing up on the mds
+> 
+> Good Afternoon Chris,
+> 
+>   I have already run the active=0 command on the mds, is there another step?  From my testing under 2.5.3 the clients will hang indefinitely without using the lazystatfs=1.
+> 
+>   Our major issue at present is that when the OST died it had a fair amount of data on in (closing in on 2M files lost), and it seems like the client gets into a bad state when calls re made repeatedly to files that are lost (but still have their ost index information).  As the crawl has unlinked files the number of errors has dropped, as have client crashes.
+> 
+> w/r,
+> Kurt
+> 
+> ----- Original Message -----
+> From: "Chris Hunter" <chuntera at gmail.com>
+> To: lustre-discuss at lists.lustre.org
+> Cc: "Kurt Strosahl" <strosahl at jlab.org>
+> Sent: Thursday, January 21, 2016 12:50:03 PM
+> Subject: [lustre-discuss] Inactivated ost still showing up on the mds
+> 
+> Hi Kurt,
+> For reference when an underlying OST object is missing, this is the
+> error message generated on our MDS (lustre 2.5):
+>> Lustre: 12752:0:(mdd_object.c:1983:mdd_dir_page_build()) build page failed: -5!
+> 
+> I suspect until you update the MGS info the MDS will still connect to
+> the deactive OST.
+> 
+> My experience is sometimes the recipe to deactivate an OST works
+> flawlessly sometimes other times the clients hang on "df" command and
+> timeout on file access. I guess the order which you run the commands
+> (ie. client vs server) is important.
+> 
+> regards,
+> chris hunter
+> 
+>> From: Kurt Strosahl <strosahl at jlab.org>
+>> To: lustre-discuss at lists.lustre.org
+>> Subject: [lustre-discuss] Inactivated ost still showing up on the mds
+>> 
+>> All,
+>> 
+>>   Continuing the issues that I reported yesterday...  I found that by unlinking lost files that I was able to stop the below error from occurring, this gives me hope that systems will stop crashing once all the lost files are scrubbed.
+>> 
+>> LustreError: 7676:0:(sec.c:379:import_sec_validate_get()) import ffff880623098800 (NEW) with no sec
+>> LustreError: 7971:0:(sec.c:379:import_sec_validate_get()) import ffff880623098800 (NEW) with no sec
+>> 
+>>   I do note that the inactivated ost doesn't seem to ever REALLY go away.  After I removed an ost from my test system I noticed that the mds still showed it...
+>> 
+>> On a client hooked up to the test system...
+>> client: lfs df
+>> UUID                   1K-blocks        Used   Available Use% Mounted on
+>> testL-MDT0000_UUID    1819458432       10112  1819446272   0% /testlustre[MDT:0]
+>> testL-OST0000_UUID   57914433152       12672 57914418432   0% /testlustre[OST:0]
+>> testL-OST0001_UUID   57914433408       12672 57914418688   0% /testlustre[OST:1]
+>> testL-OST0002_UUID   57914433408       12672 57914418688   0% /testlustre[OST:2]
+>> OST0003             : inactive device
+>> testL-OST0004_UUID   57914436992      144896 57914290048   0% /testlustre[OST:4
+>> 
+>> on the mds it still shows as up when I do lctl dl:
+>> mds: lctl dl | grep OST0003
+>> 22 UP osp testL-OST0003-osc-MDT0000 testL-MDT0000-mdtlov_UUID 5
+>> 
+>> So I stopped the test system, ran lctl dl again (getting no results), and restarted it.  Once the system was back up I still saw OST3 marked as UP with lctl dl:
+>> mds: lctl dl | grep OST0003
+>> 11 UP osp testL-OST0003-osc-MDT0000 testL-MDT0000-mdtlov_UUID 5
+>> 
+>> Why does the mds still think that this OST is up?
+>> 
+> _______________________________________________
+> lustre-discuss mailing list
+> lustre-discuss at lists.lustre.org
+> http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org
+> _______________________________________________
+> lustre-discuss mailing list
+> lustre-discuss at lists.lustre.org
+> http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org
+
+
+From strosahl at jlab.org  Tue Jan 26 10:31:42 2016
+From: strosahl at jlab.org (Kurt Strosahl)
+Date: Tue, 26 Jan 2016 13:31:42 -0500 (EST)
+Subject: [lustre-discuss] Inactivated ost still showing up on the mds
+In-Reply-To: <6156EB82-1D24-402A-8C28-B6E0E74D864B@fnal.gov>
+References: <56A11A4B.6080406@gmail.com>
+	<1738038527.303303.1453399746694.JavaMail.zimbra@jlab.org>
+	<C6A70F0B3785A04BA88C056A0B39627C21D51DC5@EXCHNG15.physics.ox.ac.uk>
+	<613884280.434897.1453469958335.JavaMail.zimbra@jlab.org>
+	<6156EB82-1D24-402A-8C28-B6E0E74D864B@fnal.gov>
+Message-ID: <912058757.961991.1453833102309.JavaMail.zimbra@jlab.org>
+
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20160126/b53e335d/attachment.htm>
+
+From paciucci at gmail.com  Tue Jan 26 11:23:12 2016
+From: paciucci at gmail.com (PGabriele)
+Date: Tue, 26 Jan 2016 19:23:12 +0000
+Subject: [lustre-discuss] When is getattr() called
+In-Reply-To: <1D5DCCB7C9001340A0A1AAAC50B8567140E3C2DE@wybcvl-s-53404.europe.shell.com>
+References: <1D5DCCB7C9001340A0A1AAAC50B8567140E3C097@wybcvl-s-53404.europe.shell.com>
+	<DB0C8A206669AC40B1C4E52A8584A6F614D5C57B@CFWEX01.americas.cray.com>
+	<1D5DCCB7C9001340A0A1AAAC50B8567140E3C2DE@wybcvl-s-53404.europe.shell.com>
+Message-ID: <CADd4w=j1YrpgkCPcn4N+khiixgv+Wf5KRbygYqs11qjHKo5L+w@mail.gmail.com>
+
+Hi
+it is depend on the application. The extreme example is dd.
+A command like: dd if=/dev/zero of=test3 bs=1M count=10
+is generating only 1 open and 1 close
+
+[root at st30-mds2 lustre]# cat ./mdt/Lustre01-MDT0000/md_stats
+
+snapshot_time             1453835751.924029 secs.usecs
+
+open                      1 samples [reqs]
+
+close                     1 samples [reqs]
+
+
+but if you have set a layout in advance using las setstripe you get:
+
+# lfs setstripe -c -1 test4
+
+# dd if=/dev/zero of=test4 bs=1M count=10
+
+[root at st30-mds2 lustre]# cat ./mdt/Lustre01-MDT0000/md_stats
+
+snapshot_time             1453835949.562825 secs.usecs
+
+open                      3 samples [reqs]
+
+close                     3 samples [reqs]
+
+setattr                   1 samples [reqs]
+
+getxattr                  1 samples [reqs]
+
+2 opens and 2 close and 1 getxattr for the las command
+1 open and 1 close for the dd
+1 setattr for the special layout
+
+.... so let's strace your app and see why there are so many getattr....
+modern version of lustre can get advantage of local matter cache... take a
+look at:
+lctl get_param llite.*.xattr_cache
+
+
+
+
+On 21 January 2016 at 05:05, <Prakrati.Agrawal at shell.com> wrote:
+
+> Hi,
+>
+>
+>
+> The thing I want an understanding of is, if my file is say striped across
+> OSTs, number of getattr() calls will be equivalent to the number of OSTs if
+> I am opening a single file.
+>
+> I observed that there is 1 open and close op in the ganglia monitoring
+> page on MDT but getattr calls are 10 for the same time. I am unable to
+> understand the reason for this.
+>
+>
+>
+> Thanks and Regards,
+>
+> Prakrati
+>
+>
+>
+> *From:* Patrick Farrell [mailto:paf at cray.com]
+> *Sent:* Wednesday, January 20, 2016 9:26 AM
+> *To:* Agrawal, Prakrati PTIN-PTT/ICOE; lustre-discuss at lists.lustre.org
+> *Subject:* RE: When is getattr() called
+>
+>
+>
+> Getattr is returning file attributes, so it's going to be called as part
+> of any browsing (ls, depending on options) or scanning (find, du, or
+> perhaps RobinHood) of the file system.  Also, many libraries will do
+> getattr calls before doing an open, as part of sanity checking a file.
+>
+>
+>
+> - Patrick
+> ------------------------------
+>
+> *From:* lustre-discuss [lustre-discuss-bounces at lists.lustre.org] on
+> behalf of Prakrati.Agrawal at shell.com [Prakrati.Agrawal at shell.com]
+> *Sent:* Tuesday, January 19, 2016 9:49 PM
+> *To:* lustre-discuss at lists.lustre.org
+> *Subject:* [lustre-discuss] When is getattr() called
+>
+> Hi,
+>
+>
+>
+> I was looking at the MDT parameters on Ganglia and there is a graph which
+> shows getattr calls and that is very high as compared to open and close
+> calls. Under what scenarios, is getattr called.
+>
+>
+>
+> Thanks and Regards,
+>
+> Prakrati
+>
+> _______________________________________________
+> lustre-discuss mailing list
+> lustre-discuss at lists.lustre.org
+> http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org
+>
+>
+
+
+-- 
+www: http://paciucci.blogspot.com
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20160126/b8ffa9ae/attachment-0001.htm>
+
+From jeevan.patnaik at wipro.com  Wed Jan 27 01:36:35 2016
+From: jeevan.patnaik at wipro.com (jeevan.patnaik at wipro.com)
+Date: Wed, 27 Jan 2016 09:36:35 +0000
+Subject: [lustre-discuss] How to configure OST and OSS on separate nodes
+Message-ID: <HK2PR03MB158680FA64ABBA96A8FAA44D93D90@HK2PR03MB1586.apcprd03.prod.outlook.com>
+
+Hi,
+
+I need a quick understanding of OST and OSS node confirmation.
+
+
+1.      Can OST and OSS be on different nodes (servers).
+
+
+
+2.      Lustre Manual says that :
+
+
+" Running the OSS and a client on the same machine can cause issues with low memory and memory pressure. If the client consumes all the memory and then tries to write data to the filesystem, the OSS will need to allocate pages to receive data from the client but will not be able to perform this operation due to low memory. This can cause the client to hang."
+
+
+I have understood this point.
+
+But my question is: Can I use OST on client and OSS on separate server (if it is possible to run OST and OSS on separate servers)
+
+
+
+The reason for this is we have tens of servers with internal hard disk of 4T each which we want to use it for OSTs, but all these servers are also should be clients (they are the grid execution hosts).
+
+So, I am thinking of having separate OSSs and use the servers itself as OSTs. Also, do we need to install lustre kernel in all those OSTs? Because, all these servers are running with kernel 2.6.32-573.12.1.el6.x86_64, which the standard lustre packages won't be supporting. So, we need to roll back to 32-504_lustre kernel and again we need to work on setting yum repos, installing packages, resolving dependencies required for our tools..it's really a lot of work.
+
+
+
+So, I am hoping its better to use storage/ OST on raw servers, where it is not required to install any tool related packages and I want to know all the possible options and then decide.
+
+
+
+3.      If it is possible to have OST and OSS on separate nodes, please let me know how to configure. A brief example would be much helping. I am really not able to find time to read the complete manual.
+
+
+[WNC_Logo]--
+Thanks and Regards,
+Jeevan Patnaik B | Project Engineer
+Nokia IT - HEE Platform | WIPRO Technologies - Hyderabad
+Mob: +91-9000607181 | Off: +91-4030970347.
+
+The information contained in this electronic message and any attachments to this message are intended for the exclusive use of the addressee(s) and may contain proprietary, confidential or privileged information. If you are not the intended recipient, you should not disseminate, distribute or copy this e-mail. Please notify the sender immediately and destroy all copies of this message and any attachments. WARNING: Computer viruses can be transmitted via email. The recipient should check this email and any attachments for the presence of viruses. The company accepts no liability for any damage caused by any virus transmitted by this email. www.wipro.com
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20160127/00846489/attachment-0001.htm>
+-------------- next part --------------
+A non-text attachment was scrubbed...
+Name: image001.png
+Type: image/png
+Size: 25459 bytes
+Desc: image001.png
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20160127/00846489/attachment-0001.png>
+-------------- next part --------------
+A non-text attachment was scrubbed...
+Name: image002.jpg
+Type: image/jpeg
+Size: 1911 bytes
+Desc: image002.jpg
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20160127/00846489/attachment-0001.jpg>
+
+From Oliver.Mangold at EMEA.NEC.COM  Wed Jan 27 01:54:43 2016
+From: Oliver.Mangold at EMEA.NEC.COM (Oliver Mangold)
+Date: Wed, 27 Jan 2016 09:54:43 +0000
+Subject: [lustre-discuss] How to configure OST and OSS on separate nodes
+In-Reply-To: <HK2PR03MB158680FA64ABBA96A8FAA44D93D90@HK2PR03MB1586.apcprd03.prod.outlook.com>
+References: <HK2PR03MB158680FA64ABBA96A8FAA44D93D90@HK2PR03MB1586.apcprd03.prod.outlook.com>
+Message-ID: <56A893E2.9050508@emea.nec.com>
+
+On 27.01.2016 10:36, jeevan.patnaik at wipro.com<mailto:jeevan.patnaik at wipro.com> wrote:
+But my question is: Can I use OST on client and OSS on separate server (if it is possible to run OST and OSS on separate servers)
+
+
+
+I don't understand what you mean. OSS is just a name for the machine which runs one or multiple OSTs. So by definition OSTs always run on OSSes.
+
+The reason for this is we have tens of servers with internal hard disk of 4T each which we want to use it for OSTs, but all these servers are also should be clients (they are the grid execution hosts).
+
+Sounds like a bad idea to me to do that. Beside the mentioned memory pressure problems, you also don't have a failover configuration for the OSTs, which is strongly recommended. Otherwise one downed server will stall all or most of your active jobs.
+
+So, I am thinking of having separate OSSs and use the servers itself as OSTs. Also, do we need to install lustre kernel in all those OSTs? Because, all these servers are running with kernel 2.6.32-573.12.1.el6.x86_64, which the standard lustre packages won?t be supporting. So, we need to roll back to 32-504_lustre kernel and again we need to work on setting yum repos, installing packages, resolving dependencies required for our tools..it?s really a lot of work.
+
+
+
+The last I know is, you need a patched kernel when using ldiskfs as the backing filesystem, but you can use a patchless kernel with ZFS.
+
+
+
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20160127/cc18e915/attachment.htm>
+
+From jeevan.patnaik at wipro.com  Wed Jan 27 02:00:39 2016
+From: jeevan.patnaik at wipro.com (jeevan.patnaik at wipro.com)
+Date: Wed, 27 Jan 2016 10:00:39 +0000
+Subject: [lustre-discuss] How to configure OST and OSS on separate nodes
+In-Reply-To: <56A893E2.9050508@emea.nec.com>
+References: <HK2PR03MB158680FA64ABBA96A8FAA44D93D90@HK2PR03MB1586.apcprd03.prod.outlook.com>
+	<56A893E2.9050508@emea.nec.com>
+Message-ID: <HK2PR03MB15861931D542DBC7D2201DF393D90@HK2PR03MB1586.apcprd03.prod.outlook.com>
+
+Hi,
+
+Now, it cleared my confusion. So, we really should go for having storage as separate, we will fix with this option.
+
+And besides, I have completely ignored ZFS till now. Can I go for ZFS instead of ldiskfs? What's the main difference I can find?
+
+--
+Regards,
+Jeevan.
+
+From: lustre-discuss [mailto:lustre-discuss-bounces at lists.lustre.org] On Behalf Of Oliver Mangold
+Sent: Wednesday, January 27, 2016 3:25 PM
+To: lustre-discuss at lists.lustre.org
+Subject: Re: [lustre-discuss] How to configure OST and OSS on separate nodes
+
+On 27.01.2016 10:36, jeevan.patnaik at wipro.com<mailto:jeevan.patnaik at wipro.com> wrote:
+But my question is: Can I use OST on client and OSS on separate server (if it is possible to run OST and OSS on separate servers)
+
+
+I don't understand what you mean. OSS is just a name for the machine which runs one or multiple OSTs. So by definition OSTs always run on OSSes.
+
+
+The reason for this is we have tens of servers with internal hard disk of 4T each which we want to use it for OSTs, but all these servers are also should be clients (they are the grid execution hosts).
+Sounds like a bad idea to me to do that. Beside the mentioned memory pressure problems, you also don't have a failover configuration for the OSTs, which is strongly recommended. Otherwise one downed server will stall all or most of your active jobs.
+
+
+So, I am thinking of having separate OSSs and use the servers itself as OSTs. Also, do we need to install lustre kernel in all those OSTs? Because, all these servers are running with kernel 2.6.32-573.12.1.el6.x86_64, which the standard lustre packages won't be supporting. So, we need to roll back to 32-504_lustre kernel and again we need to work on setting yum repos, installing packages, resolving dependencies required for our tools..it's really a lot of work.
+
+
+The last I know is, you need a patched kernel when using ldiskfs as the backing filesystem, but you can use a patchless kernel with ZFS.
+
+
+
+
+The information contained in this electronic message and any attachments to this message are intended for the exclusive use of the addressee(s) and may contain proprietary, confidential or privileged information. If you are not the intended recipient, you should not disseminate, distribute or copy this e-mail. Please notify the sender immediately and destroy all copies of this message and any attachments. WARNING: Computer viruses can be transmitted via email. The recipient should check this email and any attachments for the presence of viruses. The company accepts no liability for any damage caused by any virus transmitted by this email. www.wipro.com
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20160127/e278de32/attachment.htm>
+
+From stearman2 at llnl.gov  Wed Jan 27 08:46:50 2016
+From: stearman2 at llnl.gov (Stearman, Marc)
+Date: Wed, 27 Jan 2016 16:46:50 +0000
+Subject: [lustre-discuss] How to configure OST and OSS on separate nodes
+In-Reply-To: <HK2PR03MB15861931D542DBC7D2201DF393D90@HK2PR03MB1586.apcprd03.prod.outlook.com>
+References: <HK2PR03MB158680FA64ABBA96A8FAA44D93D90@HK2PR03MB1586.apcprd03.prod.outlook.com>
+	<56A893E2.9050508@emea.nec.com>
+	<HK2PR03MB15861931D542DBC7D2201DF393D90@HK2PR03MB1586.apcprd03.prod.outlook.com>
+Message-ID: <DDE35927-5B9F-4B08-BD34-351828C5DD5D@llnl.gov>
+
+Yes, you can run ZFS instead of ldiskfs.  A number of sites, LLNL and SDSC included, have moved over to ZFS only Lustre file systems.  There have been a number of presentations given at the Lustre User Group (LUG) about the advantages of ZFS.  Please look here http://opensfs.org/resources/presentations/ and look at the past few years of talks with ZFS in the title.
+
+I will be giving a tutorial on how to Install and Configure a ZFS file system at the Lustre Ecosystem Workshop in March, but that may be a bit too late depending on your needs.
+
+-Marc
+
+----
+D. Marc Stearman
+Lustre Operations Lead
+stearman2 at llnl.gov
+Office:  925-423-9670
+Mobile:  925-216-7516
+
+
+
+
+> On Jan 27, 2016, at 2:00 AM, jeevan.patnaik at wipro.com wrote:
+> 
+> Hi,
+>  
+> Now, it cleared my confusion. So, we really should go for having storage as separate, we will fix with this option.
+>  
+> And besides, I have completely ignored ZFS till now. Can I go for ZFS instead of ldiskfs? What?s the main difference I can find?
+>  
+> --
+> Regards,
+> Jeevan.
+>  
+> From: lustre-discuss [mailto:lustre-discuss-bounces at lists.lustre.org] On Behalf Of Oliver Mangold
+> Sent: Wednesday, January 27, 2016 3:25 PM
+> To: lustre-discuss at lists.lustre.org
+> Subject: Re: [lustre-discuss] How to configure OST and OSS on separate nodes
+>  
+> On 27.01.2016 10:36, jeevan.patnaik at wipro.com wrote:
+> But my question is: Can I use OST on client and OSS on separate server (if it is possible to run OST and OSS on separate servers)
+>  
+> I don't understand what you mean. OSS is just a name for the machine which runs one or multiple OSTs. So by definition OSTs always run on OSSes.
+> 
+> The reason for this is we have tens of servers with internal hard disk of 4T each which we want to use it for OSTs, but all these servers are also should be clients (they are the grid execution hosts).
+> Sounds like a bad idea to me to do that. Beside the mentioned memory pressure problems, you also don't have a failover configuration for the OSTs, which is strongly recommended. Otherwise one downed server will stall all or most of your active jobs.
+> 
+> So, I am thinking of having separate OSSs and use the servers itself as OSTs. Also, do we need to install lustre kernel in all those OSTs? Because, all these servers are running with kernel 2.6.32-573.12.1.el6.x86_64, which the standard lustre packages won?t be supporting. So, we need to roll back to 32-504_lustre kernel and again we need to work on setting yum repos, installing packages, resolving dependencies required for our tools..it?s really a lot of work.
+>  
+> The last I know is, you need a patched kernel when using ldiskfs as the backing filesystem, but you can use a patchless kernel with ZFS.
+> 
+>  
+> The information contained in this electronic message and any attachments to this message are intended for the exclusive use of the addressee(s) and may contain proprietary, confidential or privileged information. If you are not the intended recipient, you should not disseminate, distribute or copy this e-mail. Please notify the sender immediately and destroy all copies of this message and any attachments. WARNING: Computer viruses can be transmitted via email. The recipient should check this email and any attachments for the presence of viruses. The company accepts no liability for any damage caused by any virus transmitted by this email. www.wipro.com_______________________________________________
+> lustre-discuss mailing list
+> lustre-discuss at lists.lustre.org
+> http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org
+
+
+From aik at fnal.gov  Wed Jan 27 13:29:24 2016
+From: aik at fnal.gov (Alexander I Kulyavtsev)
+Date: Wed, 27 Jan 2016 21:29:24 +0000
+Subject: [lustre-discuss] lustre 1.8.9 client with LLNL server 2.5.3  LBUG
+Message-ID: <F7C2835B-0461-4F94-951A-4A4E610DCF17@fnal.gov>
+
+Does anyone have experience running lustre 1.8.9 client with LLNL server 2.5.3 (zfs)?
+
+I was almost instantly getting LBUG related to IGIF FID assertion after the mount:
+
+dsg0515 kernel: LustreError: 30899:0:(mdc_fid.c:334:fid_le_to_cpu()) ASSERTION(fid_is_igif(dst) || fid_ver(dst) == 0) failed: [0x293e750000006ada:0x70f8b3:0xa721a500]
+(full stack dump at the end of email).
+
+This happened only when I tried to mount two lustre file systems (the old 1.8.9 servers and new 2.5.3 servers) on the same client 1.8.9 during the tests last summer. The new 2.5.3 system was freshly formatted and few data written from 2.5.3 client.
+I would like to try llnl 2.5.3 server with 1.8.9 client again.
+
+Apparently I'm missing something obvious.
+I realize it is not supported or "tested" configuration, but we successfully running the similar configuration with last intel's GA release 2.5.3 server for more than half year with HPC clusters doing IO on both lustres and few nodes doing 'cp' between old and new lustres, checksumming and stats.
+
+We still need to have double mount (1.8 and 2.5) for another month till we finish migration. We will need to run 1.8.9 clients for six months more. I'm trying to reassess if I can use 2.5.3 llnl lustre on reinstalled servers in this configuration.
+
+lustre 1.8.9 (or 2.5.3) client with LLNL server 2.5.3 only - runs fine.
+lustre 1.8.9 client mounting both 1.8 servers and intel's 2.5.3 servers - runs fine.
+lustre 1.8.9 client mounting both 1.8 servers and llnl 2.5.3 servers - crash after mount or few operations.
+I was able to make it to last longer by mounting in certain order and doing "ls" to few existing files, but it crashes some time later during IO.
+
+The reported FIDs looks real, but also
+[0xdead000000100100 :0x200200 :0xdead0000]
+[0x5a5a5a5a5a5a5a5a :0x5a5a5a5a :0x5a5a5a5a]
+
+which corresponds to
+CONFIG_ILLEGAL_POINTER_VALUE
+# define LI_POISON ((int)0x5a5a5a5a)    or like
+
+I tried to compare branches 2.5.3-llnl and whamcloud branch 2_5 tag 2.5.3, and also tag 2.5.3.90 .
+I did not find commit messages related to IGIF FID in commits which differ, though I guess there can be code change not related to commit message in the patch I missed.
+
+I would appreciate any hints were to look to make it work and what is the difference causing this LBUG.
+
+Thank in advance, Alex.
+
+
+Jun  1 15:01:10 dsg0515 kernel: LustreError: 4541:0:(mdc_fid.c:334:fid_le_to_cpu()) ASSERTION(fid_is_igif(dst) || fid_ver(dst) == 0) failed: [0x600000005:0x7:0xffffffff]
+
+Jun  1 15:01:10 dsg0515 kernel: LustreError: 4541:0:(mdc_fid.c:334:fid_le_to_cpu()) LBUG
+
+Jun  1 15:01:10 dsg0515 kernel: Pid: 4541, comm: ls
+
+Jun  1 15:01:10 dsg0515 kernel:
+
+Jun  1 15:01:10 dsg0515 kernel: Call Trace:
+
+Jun  1 15:01:10 dsg0515 kernel:  [<ffffffff810df1c4>] ? generic_permission+0x24/0xc0
+
+Jun  1 15:01:10 dsg0515 kernel:  [<ffffffffa0eb3847>] libcfs_debug_dumpstack+0x57/0x80 [libcfs]
+
+Jun  1 15:01:10 dsg0515 kernel:  [<ffffffffa0eb3de6>] lbug_with_loc+0x76/0xe0 [libcfs]
+
+Jun  1 15:01:10 dsg0515 kernel:  [<ffffffffa1135ee5>] fid_le_to_cpu+0xa5/0xb0 [mdc]
+
+Jun  1 15:01:10 dsg0515 kernel:  [<ffffffffa11a3c45>] ll_readdir+0x935/0xb00 [lustre]
+
+Jun  1 15:01:10 dsg0515 kernel:  [<ffffffff810d5b47>] ? nameidata_to_filp+0x57/0x70
+
+Jun  1 15:01:10 dsg0515 kernel:  [<ffffffff810af1d9>] ? __inc_zone_state+0x9/0x70
+
+Jun  1 15:01:10 dsg0515 kernel:  [<ffffffff810a3099>] ? __lru_cache_add+0x9/0x70
+
+Jun  1 15:01:10 dsg0515 kernel:  [<ffffffff810a3119>] ? lru_cache_add_lru+0x19/0x40
+
+Jun  1 15:01:10 dsg0515 kernel:  [<ffffffff810e5710>] ? filldir+0x0/0xf0
+
+Jun  1 15:01:10 dsg0515 kernel:  [<ffffffff810e5710>] ? filldir+0x0/0xf0
+
+Jun  1 15:01:10 dsg0515 kernel:  [<ffffffff810e58ac>] vfs_readdir+0xac/0xd0
+
+Jun  1 15:01:10 dsg0515 kernel:  [<ffffffff810e5b66>] sys_getdents+0x86/0xe0
+
+Jun  1 15:01:10 dsg0515 kernel:  [<ffffffff81420def>] ? page_fault+0x1f/0x30
+
+Jun  1 15:01:10 dsg0515 kernel:  [<ffffffff8100b2fb>] system_call_fastpath+0x16/0x1b
+
+Jun  1 15:01:10 dsg0515 kernel:
+
+Jun  1 15:01:10 dsg0515 kernel: LustreError: dumping log to /tmp/lustre-log.1433188870.4541
+
+
+
+
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20160127/1171198c/attachment.htm>
+
+From strosahl at jlab.org  Thu Jan 28 13:15:41 2016
+From: strosahl at jlab.org (Kurt Strosahl)
+Date: Thu, 28 Jan 2016 16:15:41 -0500 (EST)
+Subject: [lustre-discuss] Large directory Feature in lustre 2.5.3
+Message-ID: <189341774.1403835.1454015741354.JavaMail.zimbra@jlab.org>
+
+Hello,
+
+   Recently this message appeard in the metadata system on our lustre 2.5.3 file system.  Is there a way to enable this feature in 2.5.3?
+
+Jan 28 10:53:56 scmds14a kernel: LDISKFS-fs warning (device dm-1): ldiskfs_dx_add_entry: Directory (ino: 111675137) index full, reach max htree level :2
+Jan 28 10:53:56 scmds14a kernel: LDISKFS-fs warning (device dm-1): ldiskfs_dx_add_entry: Large directory feature isnot enabled on this filesystem
+
+w/r,
+Kurt J. Strosahl
+System Administrator
+Scientific Computing Group, Thomas Jefferson National Accelerator Facility
+
+From paf at cray.com  Thu Jan 28 18:45:26 2016
+From: paf at cray.com (Patrick Farrell)
+Date: Fri, 29 Jan 2016 02:45:26 +0000
+Subject: [lustre-discuss] How to configure OST and OSS on separate nodes
+In-Reply-To: <DDE35927-5B9F-4B08-BD34-351828C5DD5D@llnl.gov>
+References: <HK2PR03MB158680FA64ABBA96A8FAA44D93D90@HK2PR03MB1586.apcprd03.prod.outlook.com>
+	<56A893E2.9050508@emea.nec.com>
+	<HK2PR03MB15861931D542DBC7D2201DF393D90@HK2PR03MB1586.apcprd03.prod.outlook.com>,
+	<DDE35927-5B9F-4B08-BD34-351828C5DD5D@llnl.gov>
+Message-ID: <DB0C8A206669AC40B1C4E52A8584A6F614D65BE1@CFWEX01.americas.cray.com>
+
+One difference: I believe metadata performance is still notably lower with a ZFS based MDT.  I know the gap is closing with changes LLNL and Intel have made, but last I heard it was still significant.  Someone else may be able to give current numbers.
+
+Of course, you can do an ldiskfs MDT and ZFS OSTs.  And since the MDT is much smaller than OSTs, one of the central advantages of ZFS - it allows use of an efficient software RAID, so you can use cheaper hardware options - is less relevant there.  (Because the disk hardware is a smaller % of the cost of a good MDS/MDT.)
+
+- Patrick
+________________________________________
+From: lustre-discuss [lustre-discuss-bounces at lists.lustre.org] on behalf of Stearman, Marc [stearman2 at llnl.gov]
+Sent: Wednesday, January 27, 2016 10:46 AM
+To: jeevan.patnaik at wipro.com
+Cc: Lustre discussion
+Subject: Re: [lustre-discuss] How to configure OST and OSS on separate nodes
+
+Yes, you can run ZFS instead of ldiskfs.  A number of sites, LLNL and SDSC included, have moved over to ZFS only Lustre file systems.  There have been a number of presentations given at the Lustre User Group (LUG) about the advantages of ZFS.  Please look here http://opensfs.org/resources/presentations/ and look at the past few years of talks with ZFS in the title.
+
+I will be giving a tutorial on how to Install and Configure a ZFS file system at the Lustre Ecosystem Workshop in March, but that may be a bit too late depending on your needs.
+
+-Marc
+
+----
+D. Marc Stearman
+Lustre Operations Lead
+stearman2 at llnl.gov
+Office:  925-423-9670
+Mobile:  925-216-7516
+
+
+
+
+> On Jan 27, 2016, at 2:00 AM, jeevan.patnaik at wipro.com wrote:
+>
+> Hi,
+>
+> Now, it cleared my confusion. So, we really should go for having storage as separate, we will fix with this option.
+>
+> And besides, I have completely ignored ZFS till now. Can I go for ZFS instead of ldiskfs? What?s the main difference I can find?
+>
+> --
+> Regards,
+> Jeevan.
+>
+> From: lustre-discuss [mailto:lustre-discuss-bounces at lists.lustre.org] On Behalf Of Oliver Mangold
+> Sent: Wednesday, January 27, 2016 3:25 PM
+> To: lustre-discuss at lists.lustre.org
+> Subject: Re: [lustre-discuss] How to configure OST and OSS on separate nodes
+>
+> On 27.01.2016 10:36, jeevan.patnaik at wipro.com wrote:
+> But my question is: Can I use OST on client and OSS on separate server (if it is possible to run OST and OSS on separate servers)
+>
+> I don't understand what you mean. OSS is just a name for the machine which runs one or multiple OSTs. So by definition OSTs always run on OSSes.
+>
+> The reason for this is we have tens of servers with internal hard disk of 4T each which we want to use it for OSTs, but all these servers are also should be clients (they are the grid execution hosts).
+> Sounds like a bad idea to me to do that. Beside the mentioned memory pressure problems, you also don't have a failover configuration for the OSTs, which is strongly recommended. Otherwise one downed server will stall all or most of your active jobs.
+>
+> So, I am thinking of having separate OSSs and use the servers itself as OSTs. Also, do we need to install lustre kernel in all those OSTs? Because, all these servers are running with kernel 2.6.32-573.12.1.el6.x86_64, which the standard lustre packages won?t be supporting. So, we need to roll back to 32-504_lustre kernel and again we need to work on setting yum repos, installing packages, resolving dependencies required for our tools..it?s really a lot of work.
+>
+> The last I know is, you need a patched kernel when using ldiskfs as the backing filesystem, but you can use a patchless kernel with ZFS.
+>
+>
+> The information contained in this electronic message and any attachments to this message are intended for the exclusive use of the addressee(s) and may contain proprietary, confidential or privileged information. If you are not the intended recipient, you should not disseminate, distribute or copy this e-mail. Please notify the sender immediately and destroy all copies of this message and any attachments. WARNING: Computer viruses can be transmitted via email. The recipient should check this email and any attachments for the presence of viruses. The company accepts no liability for any damage caused by any virus transmitted by this email. www.wipro.com_______________________________________________
+> lustre-discuss mailing list
+> lustre-discuss at lists.lustre.org
+> http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org
+
+_______________________________________________
+lustre-discuss mailing list
+lustre-discuss at lists.lustre.org
+http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org
+
+From 10000 at candesoft.com  Fri Jan 29 04:59:17 2016
+From: 10000 at candesoft.com (=?ISO-8859-1?B?MTAwMDA=?=)
+Date: Fri, 29 Jan 2016 20:59:17 +0800
+Subject: [lustre-discuss] Hi,
+	does anyone successfully install Lustre on CentOS 7.2
+Message-ID: <tencent_5A5C33E92600D52B791C6821@qq.com>
+
+Hi
+    I just fed up with a mess about installing Lustre on CentOS 7.2. I do the instructions on the lustre manual. I meet several questions below.
+    Since no official rpms for CentOS 7.2, I use git to get the newest code of lustre and patch the kernel source with it. And I modify the 'EXTRAVERSION' at kernel Makefile using '-327.el7_lustre.x86_64' which is the same form as the manual presented (Page 264). The compile of this patching kernel is success and I get rpms and source rpms at folder RPM and SRPM. I also try to install it as the step presented in Page 266 (30.3.3). Also nothing goes wrong since I get "Kernel 3.10.0-327.el7_lustre.x86_64 on an x86_64" after I reboot the system. I also install the src rpm and kernel-header of this patching kernel. Then I start build Lustre rpms with this kernel source and following the manual. I also successfully get the rpms of Lustre 2.7.65. However, when I start install these rpms, there are something wrong.
+    1. Pretty weired. when I start install lustre-modules (file name is 'lustre-modules-2.7.65-3.10.0_327.el7_lustre.x86_64_gbebf1e3.x86_64.rpm'.) I get an message from rpm below:
+
+
+    error: Failed dependencies:
+        kernel = 3.10.0-327.el7_lustre is needed by lustre-modules-2.7.65-3.10.0_327.el7_lustre.x86_64_gbebf1e3.x86_64
+
+
+    I have just install the modify kernel and reboot. This message make me none sense. To check whether I am running the right kernel. I use the command uname -an. Then I get:
+
+        Linux localhost.localdomain 3.10.0-327.el7_lustre.x86_64 #1 SMP Fri Jan 29 00:46:35 CST 2016 x86_64 x86_64 x86_64 GNU/Linux
+
+
+    It is exactly running the modified kernel.
+    2. I am not giving up, since the rpm has the --nodeps arguments to force install a package without considering the dependencies. I do that, install the module and the other rpms, then run the test just as it metion on manual at Page 268 (30.4.3). it seems nothing wrong while compiling without o2ib (after disabled SELinux). But I also want to build a version with RDMA. So I download the MLNX_OFED and install it. I first try the one from openfabrics.org, but it's latest stable version seems not support CentOS 7.2 even I modify the install.pl, nor the daily one, they cannot compile successful due to some old function calles, such thing should be correct by patches while there might something wrong it not work. I success install the MLNX_OFED with the latest version, and configure it to lustre. The compilation goes well, no erros I meet, and I get rpms. However, when I try to install this version rpms, except the same question post at point 1, I also get so many warning about 'Unknown symbol XXXX' while using rpm with --nodeps. And of course, I cannot pass the test that Page 268 presents. I get such message:
+     modprobe: ERROR: could not insert 'lnet': Unknown symbol in module, or unknown parameter (see dmesg)
+     So I use dmesg to check what happened. And I get:
+
+
+     [11845.723992] lnet: Unknown symbol backport_dependency_symbol (err 0)
+     [12156.420003] lnet: Unknown symbol backport_dependency_symbol (err 0)
+     [13453.646004] lnet: Unknown symbol backport_dependency_symbol (err 0)
+     [13497.507032] lnet: Unknown symbol backport_dependency_symbol (err 0)
+     [19757.412097] lnet: Unknown symbol backport_dependency_symbol (err 0)
+     [25199.019004] lnet: Unknown symbol backport_dependency_symbol (err 0)
+
+
+     I do not having the RDMA devices since the machine is on VirtualBox. However, is it possible that such questions happens just because I do not have the RDMA devices? I have successfully install the MLNX_OFED, the RDMA driver I think.
+     Any one have ideas about such two questions?
+     Sorry for the English grammar mistake if it happens, I am not a native speaker.
+
+
+Yingdi Guo
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20160129/08f4466f/attachment.htm>
+
+From thcrowe at iu.edu  Fri Jan 29 05:59:37 2016
+From: thcrowe at iu.edu (Crowe, Tom)
+Date: Fri, 29 Jan 2016 13:59:37 +0000
+Subject: [lustre-discuss] Large directory Feature in lustre 2.5.3
+Message-ID: <D2D0D63E.3CC84%thcrowe@iu.edu>
+
+Greetings Kurt,
+
+I believe the issue you are running into is too many files in a single
+directory. We had a similar issue a little while back.
+We ended up mounting the OST as ldiskfs, and used debugfs to search for
+the inode. An example is below.
+
+# debugfs -R ?ncheck 111675137? /dev/dm-1
+
+This should give you the path to the directory that contains ?too many
+files?. 
+
+I am not sure what the "Large directory option" is. I suspect there is a
+ldiskfs/ext3/4 feature that can be enabled to allow ?more? files in a
+single directory. Perhaps dir_index?
+Our initial concern was to locate the directory with all the files. The
+search with debugfs did the trick for us.
+ 
+We did not attempt to change any mount options, but rather ?educated? the
+particular user that millions of files in a single directory was not a
+good workflow.
+
+Thanks,
+Tom Crowe
+
+
+
+On 1/28/16, 4:15 PM, "lustre-discuss on behalf of Kurt Strosahl"
+<lustre-discuss-bounces at lists.lustre.org on behalf of strosahl at jlab.org>
+wrote:
+
+>Hello,
+>
+>   Recently this message appeard in the metadata system on our lustre
+>2.5.3 file system.  Is there a way to enable this feature in 2.5.3?
+>
+>Jan 28 10:53:56 scmds14a kernel: LDISKFS-fs warning (device dm-1):
+>ldiskfs_dx_add_entry: Directory (ino: 111675137) index full, reach max
+>htree level :2
+>Jan 28 10:53:56 scmds14a kernel: LDISKFS-fs warning (device dm-1):
+>ldiskfs_dx_add_entry: Large directory feature isnot enabled on this
+>filesystem
+>
+>w/r,
+>Kurt J. Strosahl
+>System Administrator
+>Scientific Computing Group, Thomas Jefferson National Accelerator Facility
+>_______________________________________________
+>lustre-discuss mailing list
+>lustre-discuss at lists.lustre.org
+>http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org
+
+
+From happe at nbi.ku.dk  Fri Jan 29 08:52:26 2016
+From: happe at nbi.ku.dk (Hans Henrik Happe)
+Date: Fri, 29 Jan 2016 17:52:26 +0100
+Subject: [lustre-discuss] ZFS inode accounting
+Message-ID: <56AB98CA.20605@nbi.ku.dk>
+
+Hi,
+
+I've been testing 2.7.64 on ZFS and discovered that inode accounting 
+showed very high counts:
+
+lfs quota -g others /lustre/hpc
+Disk quotas for group others (gid 8000):
+      Filesystem  kbytes   quota   limit   grace   files   quota   limit 
+   grace
+     /lustre/hpc      41  1073741824 1073741824       - 
+18446744073709536075       0       0       -
+
+That looks like a 64-bit uint counter that are going below zero. It 
+keeps counting down when I run mdtest with 2 or more processes. With one 
+process it's the same before and after. Guess it must be a race.
+
+The syslog on MDT shows this message:
+
+LustreError: 8563:0:(osd_object.c:1485:osd_object_create()) hpc-MDT0000: 
+failed to add [0x200001b73:0x1cae8:0x0] to accounting ZAP for grp 8000 (-2)
+
+
+After reading LU-2435 and LU-5638 I guess there are still some issues 
+that needs to be sorted out?
+
+Is there a way to make Lustre recheck the quota?
+
+Cheers,
+Hans Henrik
+-------------- next part --------------
+A non-text attachment was scrubbed...
+Name: happe.vcf
+Type: text/x-vcard
+Size: 226 bytes
+Desc: not available
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20160129/61e655f3/attachment-0001.vcf>
+
+From richard.henwood at intel.com  Fri Jan 29 09:58:12 2016
+From: richard.henwood at intel.com (Henwood, Richard)
+Date: Fri, 29 Jan 2016 17:58:12 +0000
+Subject: [lustre-discuss] Hi,
+ does anyone successfully install Lustre on CentOS 7.2
+In-Reply-To: <tencent_5A5C33E92600D52B791C6821@qq.com>
+References: <tencent_5A5C33E92600D52B791C6821@qq.com>
+Message-ID: <1454090291.3950.19.camel@intel.com>
+
+On Fri, 2016-01-29 at 20:59 +0800, 10000 wrote:
+> Hi
+> ? ? I just fed up with a mess about installing Lustre on CentOS 7.2.
+> I do the instructions on the lustre manual. I meet several questions
+> below.
+> ? ? Since no official rpms for CentOS 7.2,?
+
+Hi Yingdi Guo;
+
+The current git Master is automatically built and made available as
+RPMs from:
+https://build.hpdd.intel.com/job/lustre-master/
+
+The RPMs for EL7 components are for CentOS 7.2.
+
+To help focus your your problem, can you explain why these RPMs are
+unsuitable for your use?
+
+
+Also: The build instructions in the manual are for CentOS 6 and are
+considered to be of limited use:?http://review.whamcloud.com/#/c/9259/
+It would be valuable to the community to write build instructions for
+CentOS 7 and this content would do well on wiki.lustre.org I would
+imagine.
+
+best regards,
+Richard
+--?
+Richard.Henwood at intel.com
+Intel High Performance Data Division
+
+
+From rmohr at utk.edu  Fri Jan 29 12:54:15 2016
+From: rmohr at utk.edu (Mohr Jr, Richard Frank (Rick Mohr))
+Date: Fri, 29 Jan 2016 20:54:15 +0000
+Subject: [lustre-discuss] Large directory Feature in lustre 2.5.3
+In-Reply-To: <189341774.1403835.1454015741354.JavaMail.zimbra@jlab.org>
+References: <189341774.1403835.1454015741354.JavaMail.zimbra@jlab.org>
+Message-ID: <75DC2DE1-CAEA-436E-A850-246DAB9AFE75@utk.edu>
+
+
+> On Jan 28, 2016, at 4:15 PM, Kurt Strosahl <strosahl at jlab.org> wrote:
+> 
+> Hello,
+> 
+>   Recently this message appeard in the metadata system on our lustre 2.5.3 file system.  Is there a way to enable this feature in 2.5.3?
+> 
+> Jan 28 10:53:56 scmds14a kernel: LDISKFS-fs warning (device dm-1): ldiskfs_dx_add_entry: Directory (ino: 111675137) index full, reach max htree level :2
+> Jan 28 10:53:56 scmds14a kernel: LDISKFS-fs warning (device dm-1): ldiskfs_dx_add_entry: Large directory feature isnot enabled on this filesystem
+> 
+
+It looks like this might be ongoing work:
+
+https://jira.hpdd.intel.com/browse/LU-896
+
+--
+Rick Mohr
+Senior HPC System Administrator
+National Institute for Computational Sciences
+http://www.nics.tennessee.edu
+
+
+From dobsonunit at gmail.com  Fri Jan 29 20:31:20 2016
+From: dobsonunit at gmail.com (Ms. Megan Larko)
+Date: Fri, 29 Jan 2016 23:31:20 -0500
+Subject: [lustre-discuss] patchless Lustre client on ZFS
+Message-ID: <CAPAniMZtqDhiHKjiJ7Hj5XRi0n_2rmspm0iG_sXTfhbnkHjcyA@mail.gmail.com>
+
+Greetings,
+
+I have been reading that if the Lustre 2.6 server is built on ZFS then a
+patchless client may be used.  So am I understanding correctly that a
+Lustre 2.6 server on ZFS may have a client successfully mount without the
+lustre-client and lustre-client-module packages installed?
+
+TIA for the clarification.
+Cheers,
+megan
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20160129/3271a853/attachment.htm>
+
+From chuntera at gmail.com  Fri Jan 29 21:14:00 2016
+From: chuntera at gmail.com (Chris Hunter)
+Date: Sat, 30 Jan 2016 00:14:00 -0500
+Subject: [lustre-discuss] Large directory Feature in lustre 2.5.3
+Message-ID: <56AC4698.5030100@gmail.com>
+
+Hi Kurt, this seems to be your month for lustre adventures :/
+
+Best I can tell this message means you have a directory with ~16M 
+entries. That is a hard limit in older versions of ext3-based lustre 
+(http://ext2.sourceforge.net/2005-ols/paper-html/node3.html)
+
+According to LU-1365 (https://jira.hpdd.intel.com/browse/LU-1365). If 
+you have a MDT formatted under an older version of lustre (specifically 
+used old version mkfs.lustre) you get this message because at the time 
+of the LU ticket, the e2fs userspace tools (ie. fsck) could not handle 
+LARGEDIR feature.
+
+I think you can ignore this warning if you are willing to live with the 
+directory 16M entry limit. I would _guess_ this is fixed in newer 
+version of e2fsprogs. However there may not be a way to add LARGEDIR 
+feature without re-formatting the MDT volume.
+
+regards,
+chris hunter
+
+> Date: Thu, 28 Jan 2016 16:15:41 -0500 (EST)
+> From: Kurt Strosahl<strosahl at jlab.org>
+> To:lustre-discuss at lists.lustre.org
+> Subject: [lustre-discuss] Large directory Feature in lustre 2.5.3
+> Message-ID:<189341774.1403835.1454015741354.JavaMail.zimbra at jlab.org>
+> Content-Type: text/plain; charset=utf-8
+>
+> Hello,
+>
+>     Recently this message appeard in the metadata system on our lustre 2.5.3 file system.  Is there a way to enable this feature in 2.5.3?
+>
+> Jan 28 10:53:56 scmds14a kernel: LDISKFS-fs warning (device dm-1): ldiskfs_dx_add_entry: Directory (ino: 111675137) index full, reach max htree level :2
+> Jan 28 10:53:56 scmds14a kernel: LDISKFS-fs warning (device dm-1): ldiskfs_dx_add_entry: Large directory feature isnot enabled on this filesystem
+>
+> w/r,
+> Kurt J. Strosahl
+> System Administrator
+> Scientific Computing Group, Thomas Jefferson National Accelerator Facility
+
+From 10000 at candesoft.com  Fri Jan 29 22:33:02 2016
+From: 10000 at candesoft.com (=?ISO-8859-1?B?MTAwMDA=?=)
+Date: Sat, 30 Jan 2016 14:33:02 +0800
+Subject: [lustre-discuss] Cannot successfully run llmount.sh on both built
+	rpms and miss lnetctl command
+Message-ID: <tencent_68AD07D36E6FD5961A8B1ABA@qq.com>
+
+Hi
+    First, thanks Richard for giving me the url of daily(almost) built rpms, I didn't find that before I start build Lustre 2.7 for CentOS 7.2 myself.
+    But there are also two questions:
+    1. When I running llmount.sh on /usr/lib64/lustre/test, I get 'disable quota as required'. I was using the minimal iso of CentOS 7.2 when install it. And I also search about disabling quota on Google, however there is no command name 'quotaoff' nor 'quotaon' on my system, and I also check the /etc/fstab. The content in this file shows below:
+       
+         [root at node1 tests]# cat /etc/fstab 
+         #
+         # /etc/fstab
+         # Created by anaconda on Fri Jan 29 11:13:28 2016
+         #
+         # Accessible filesystems, by reference, are maintained under '/dev/disk'
+         # See man pages fstab(5), findfs(8), mount(8) and/or blkid(8) for more info
+         #
+         /dev/mapper/centos-root /                       xfs     defaults        0 0
+         UUID=2b98eb25-62f7-4db1-bde4-32db7528e065 /boot                   xfs     defaults        0 0
+         /dev/mapper/centos-home /home                   xfs     defaults        0 0
+         /dev/mapper/centos-swap swap                    swap    defaults        0 0
+ 
+     There seems no quota on my fstab. 
+     Both rpms that I built and download from https://build.hpdd.intel.com/job/lustre-master/ meet this question after installations. 
+
+    2. Both rpms that I built and downlaoded from git master seems not contain the command lnetctl. I run 'lnetctl' simply get 'bash: lnetctl: command not found' while running 'lctl' is ok.
+    Since the real servers I use may have more than one Net Interface and I need configure LNET while the manual tells using 'lnetctl' to do so. 
+
+    Does anyone have ideas?
+
+best regards,
+Yingdi Guo
+
+From paf at cray.com  Sat Jan 30 06:19:13 2016
+From: paf at cray.com (Patrick Farrell)
+Date: Sat, 30 Jan 2016 14:19:13 +0000
+Subject: [lustre-discuss] patchless Lustre client on ZFS
+In-Reply-To: <CAPAniMZtqDhiHKjiJ7Hj5XRi0n_2rmspm0iG_sXTfhbnkHjcyA@mail.gmail.com>
+References: <CAPAniMZtqDhiHKjiJ7Hj5XRi0n_2rmspm0iG_sXTfhbnkHjcyA@mail.gmail.com>
+Message-ID: <DB0C8A206669AC40B1C4E52A8584A6F614D65DF4@CFWEX01.americas.cray.com>
+
+No, patchless refers to not needing a patched version of the kernel itself.  You'll still need the Lustre client bits you noted installed (and they will need to be built for your particular kernel version). Also, the ability to use patchless clients doesn't depend on ZFS vs ldiskfs on your servers, it will work either way.
+
+- Patrick
+________________________________________
+From: lustre-discuss [lustre-discuss-bounces at lists.lustre.org] on behalf of Ms. Megan Larko [dobsonunit at gmail.com]
+Sent: Friday, January 29, 2016 10:31 PM
+To: Lustre User Discussion Mailing List
+Subject: [lustre-discuss] patchless Lustre client on ZFS
+
+Greetings,
+
+I have been reading that if the Lustre 2.6 server is built on ZFS then a patchless client may be used.  So am I understanding correctly that a Lustre 2.6 server on ZFS may have a client successfully mount without the lustre-client and lustre-client-module packages installed?
+
+TIA for the clarification.
+Cheers,
+megan
+
+From dobsonunit at gmail.com  Sat Jan 30 11:00:28 2016
+From: dobsonunit at gmail.com (Ms. Megan Larko)
+Date: Sat, 30 Jan 2016 14:00:28 -0500
+Subject: [lustre-discuss] patchless Lustre client on ZFS
+In-Reply-To: <DB0C8A206669AC40B1C4E52A8584A6F614D65DF4@CFWEX01.americas.cray.com>
+References: <CAPAniMZtqDhiHKjiJ7Hj5XRi0n_2rmspm0iG_sXTfhbnkHjcyA@mail.gmail.com>
+	<DB0C8A206669AC40B1C4E52A8584A6F614D65DF4@CFWEX01.americas.cray.com>
+Message-ID: <CAPAniMZ2_OZLoDWE0cevK28DFns3HacpAB5hB8C364B+cU7=uw@mail.gmail.com>
+
+Thank you, Patrick,
+
+I appreciate the clarification.  I wasn't sure what "patchess" really meant
+in this context.
+
+Cheers,
+megan
+
+On Sat, Jan 30, 2016 at 9:19 AM, Patrick Farrell <paf at cray.com> wrote:
+
+> No, patchless refers to not needing a patched version of the kernel
+> itself.  You'll still need the Lustre client bits you noted installed (and
+> they will need to be built for your particular kernel version). Also, the
+> ability to use patchless clients doesn't depend on ZFS vs ldiskfs on your
+> servers, it will work either way.
+>
+> - Patrick
+> ________________________________________
+> From: lustre-discuss [lustre-discuss-bounces at lists.lustre.org] on behalf
+> of Ms. Megan Larko [dobsonunit at gmail.com]
+> Sent: Friday, January 29, 2016 10:31 PM
+> To: Lustre User Discussion Mailing List
+> Subject: [lustre-discuss] patchless Lustre client on ZFS
+>
+> Greetings,
+>
+> I have been reading that if the Lustre 2.6 server is built on ZFS then a
+> patchless client may be used.  So am I understanding correctly that a
+> Lustre 2.6 server on ZFS may have a client successfully mount without the
+> lustre-client and lustre-client-module packages installed?
+>
+> TIA for the clarification.
+> Cheers,
+> megan
+>
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20160130/ebc6b9d2/attachment.htm>
+

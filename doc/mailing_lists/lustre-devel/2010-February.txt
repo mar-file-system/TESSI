@@ -1,0 +1,2410 @@
+From Vitaly.Fertman at Sun.COM  Tue Feb  2 10:22:04 2010
+From: Vitaly.Fertman at Sun.COM (Vitaly Fertman)
+Date: Tue, 02 Feb 2010 21:22:04 +0300
+Subject: [Lustre-devel] SOM discussion, write-up
+Message-ID: <1C2080C0-9CF8-41B3-BAB2-F430DCE9BF7F@Sun.COM>
+
+Hi All,
+
+some results from our last talks with Eric and bzzz about SOM which
+intend to resolve the recovery issues describied in the thread "SOM
+safety" and previously in "SOM recovery of opened files", and some
+simplifications.
+
+(I) SOM recovery issues, blocking IO on OST
+
+1. Problem description.
+
+As a reminder, there are the following problems:
+
+- client eviction from MDS, client is not aware about this
+   eviction and is continuing with its IO;
+
+- MDS failover may also include a client eviction, but in this
+   case MDS even does not know the list of files involved;
+
+- RPC could be in-flight long enough after client figured out
+   it is evicted from MDS and we must ensure SOM cache on MDS
+   does not get invalid if we apply this IO (it mostly concerns
+   lockless IO, as locked IO is controled on OST through extent
+   locks);
+
+due to the last issue the right way seems to move the whole handling
+to OST side, and OST needs to block new IO for files closed on MDS.
+
+"new" means that IO cached under extent locks is allowed, but lockless
+IO and extent lock enqueue are not;
+
+2. Solution
+
+"SOM safety" thread describes some solutions for this issue.
+the simplest way from the described seems to be "timeouts".
+
+2.1. eviction from MDS;
+
+- SOM cache is invalidated on-disk for files opened by this client;
+
+- SOM cache is not rebuilt for these files for SOM_RECOVERY_TIMEOUT:
+   (a) which is long enough to ensure the client knows it is evicted;
+   (b) and long enough to ensure the last RPC sent from client, before
+   it has got known it is evicted from MDS, would either complete or
+   would be blocked by OST according to the "Implementation" section;
+
+- client blocks new IO to previously opened files, once it understands
+   it is evicted, even after re-connection; application gets EIO and has
+   to re-open files by itself;
+
+   note: alternatively (or probably for a future optimisation) client
+   re-opens files by itself after re-connection silently for the
+   application, if it will be considered as not acceptable to force
+   application to do it by itself;
+
+2.2. MDS failover;
+
+MDS waits for SOM_RECOVERY_TIMEOUT after the bootup before starting
+to rebuild SOM cache globally. Reasons are the same as for client  
+eviction, globally because MDS does not have a list of files involved.
+
+3. Implementation
+
+The problem with timeout solution is that some RPC can come to OST
+much later and OST must be able to ignore it.
+
+3.1. Skip too old RPC;
+
+Make the time synchronised between nodes, once OST gets too old RPC
+it just ignores it -- client will re-send it anyway.
+
+Resend must be controlled -- lockless RPC and lock exqueue for not
+re-opened files must have the time of the original request to become
+"too old" for OST.
+
+3.2. Skip RPC by its deadline;
+
+Eric suggests not to synchronize time between all the nodes,
+but get the server time in RPC replies and calculate the client
+"idea" about the server time. It does not have to be accurate but
+the largest possible. Every time sending RPC to this server client
+puts the deadline time to this RPC, client's "idea" about the server
+time + rpc timeout. The server skips all the RPC beyond the deadline.
+
+Resend must be controlled as well.
+
+3.3. Another way is to rely on our current timeout mechanism:
+
+- if client has no reply from a server within obd_timeout,
+   it reconnects;
+
+- if server has no RPC from a client, it evicts this client;
+   client will have to re-connect;
+
+- if server gets RPC from previous connection, RPC is ignored;
+   client will re-send it anyway;
+
+- after reconnection client resends RPC;
+   it must be blocked by client if it has been evicted from MDS and
+   the file is not re-opened;
+
+3.4. Timeout agreement.
+
+Due to misconfigurations or errors, nodes may have different timeout
+settings, but for SOM purposes it is enough to use the largest possible
+timeout.
+
+Although it does not protect us from malicious clients.
+
+(II) SOM revalidation.
+
+SOM cache cannot be rebuilt at once by the client which modifies the
+file, due to asynchronous commits on OST, i_blocks are known later
+then WRITE RPC reply is sent, so client does not know i_blocks by
+DONE_WRITING time.
+
+One of the solutions here is to separate SOM invalidation and SOM
+revalidation mechanisms and to revalidate when data are already
+committed and SOM cache is actually needed -- a client gets MDS &
+OST attributes and is able to send them to MDS:
+
+- SOM cache is not rebuilt for OST_COMMIT_TIMEOUT after IOEpoch close
+   time, which is long enough to let OST to commit written data;
+
+- MDS notifies the client SOM cache could be rebuilt in reply to
+   md_getattr (once OST_COMMIT_TIMEOUT passed); MDS generates new IOEp#
+   for this rebuilt packing it to the reply to the client as well;
+
+   Note: it seems enough to send the last generated IOEp#.
+
+- MDS does not have in-core inode state while waiting for SOM
+   revalidation so if it will be interrupted (client eviction or
+   a such) there is no problem;
+
+   Note: we still need to mark inode as "SOM rebuild in progress" to
+   not ask many clients in parallel to rebuild it, but it does not mean
+   we need to pin inode in memory.
+
+- client gather attributes from OST and OST checks
+   (a) if it has no extent locks and
+   (b) if all the changes to this object are committed;
+   OST notifies the client in reply the object state is stable;
+
+- client sends md_setattr with OST attributes if all the file objects
+   are stable; otherwise, SOM revalidation is interrupted, client does
+   not have to send anything;
+
+- MDS applies attributes if no NEW IOEpoch has been opened on this
+   file, it checks it by the IOEp# client sents in md_setattr;
+
+- Client eviction
+   SOM cache is not revalidated for SOM_RECOVERY_TIMEOUT as was shown
+   above, however by that time data may be still cached on the client,
+   thus to let clients to flush and commit, MDS waits for
+	SOM_TIMEOUT = max(SOM_RECOVERY_TIMEOUT, CLIENT_FLUSH_TIMEOUT)
+                       + OST_COMMIT_TIMEOUT
+   for involved files.
+
+- MDS failover, similar to client eviction, but globally;
+
+(III) DONE_WRITING RPC.
+
+As we do not want to revalidate the SOM cache immediately after the
+file modification, there is a thought IOEpoch may close on file close,
+not waiting for the cached data flush to OST, and therefore there is
+no need in DW RPC.
+
+1. Let's compare.
+1.1. How DW is used, addressing "SOM revalidation" section thoughts:
+
+- DW informs MDS IOEpoch is closed on the client and MDS can start
+   cache revalidation immediately (once IOEp is closed on all the
+   clients for the file);
+
+- client still gathers llog cookies and send them in DW RPC
+   (not attributes due to the problem described in "SOM revalidation"
+   section); MDS invalidates SOM cache if it gets a llog cookie;
+   once committed, llog cancel is sent to OST;
+
+   Note: as SOM revalidation happens much later than file modification,
+   we cannot keep llog records on OST for so long anymore, remember
+   that it is not only a disk usage but an in-core state of OST inode.
+   So we send it immediately on DW;
+
+- client eviction: no llog cookies, resulting in a temporary llog
+   record leakage, which is resolved on next file modification;
+
+- MDS failover: all the llogs are read and handled by MDS, llog
+   cancels are sent to OST and canceled there; llog leackage is
+   eliminated as well;
+
+Disadvantages:
+
+- it is not possible to save on amount of RPC by sending attributes
+   in DW due to i_blocks problem, so there will be a separate SOM
+   revalidation anyway; DW only point the time we can start SOM
+   revalidation, but immediate revalidation requires extra activity,
+   either MDS does it by itself or asks a client to do it;
+   besides that DW is 1 extra rpc per file as well;
+
+- temporary llog record leackage may become a problem resulting
+   in OOM, because each record has inode in-core state;
+
+1.2. How it will work without DW, with new IOEpoch notion:
+
+- MDS invalidates SOM cache on-disk on close RPC;
+
+   Note: it could be invalidated on open, but close is better as
+   it lets us to make a useful optimisation to not invalidate SOM
+   cache if file has not been modified.
+
+- IO from previous IOEpoch can come to OST but only under extent lock,
+   therefore OST has a control over such IO;
+
+- MDS does not start SOM revalidation after the file is closed for
+   CLIENT_FLUSH_TIMEOUT + OST_COMMIT_TIMEOUT, it lets clients to flush
+   their data to OST and OST to commit it; if not flushed & committed
+   by that time, OST will detect it and SOM will not be revalidated;
+   however, there is no overhead as client sends glimpse to OST anyway;
+
+   This timeout may also include our expectation if this file will be
+   modified anyhow soon and do not revalidate if we think so, e.g. if
+   file has not been modified within 1h it will not be modified soon
+   and we can revalidate the cache.
+
+- OST-driven SOM-cache invalidation;
+   LLOG records on OST cannot wait for SOM revalidation as shown above,
+   but there is no DW, so client does not send llog cookies to MDS
+   anymore. A possible solution is to send llog records directly from
+   OST to MDS:
+   - new IO creates a llog record on OST;
+   - once committed, OST sends llog record to MDS;
+   - MDS invalidates SOM cache on file specified by llog record;
+   - once committed, MDS sends llog cancel back to OST;
+   - OST cancel llog record and stored IOEp to inode EA;
+   - OST gets IO from the same or smaller IOEp, no llog record is
+     created as EA states SOM cache is already invalidated on MDS
+     for such IOEp;
+
+   Note: llog records are always batched to save on amount of RPC;
+
+- Client eviction after close
+   the file is closed but dirty cache may still exists, no new IO may
+   happen, and OST has a full control over cached IO through extent
+   locks, thus there is no need to wait for SOM_RECOVERY_TIMEOUT here.
+   MDS is waiting for CLIENT_FLUSH_TIMEOUT + OST_COMMIT_TIMEOUT to let
+   client to flush&commit and it is enough;
+
+- MDS failover after close
+   MDS completely relied on MDS-OST synchronisation here, ignoring DW
+   replays anyway, so it is left the same -- client eviction timeouts
+   but globally;
+
+Advantages:
+
+- client needs to send glimpse to OST anyway, so the only overhead
+   is the final md_setattr, it can be batched to save on amount of RPC;
+
+- OST sends llog records to MDS by itself, so there is no llog
+   leackage anymore;
+
+- a possible optimisation: this approach lets us to inform OST on
+   glimpse that file is not opened on MDS and MDS thinks it will not
+   be modified soon. Therefore, there is no need in dirty cache on
+   clients anymore and we can initiate lock cancel for these files.
+
+2. Implementation.
+
+To detect it is time to revalidate SOM cache on MDS, it is probably
+enough to store timestamp of close on disk in EA along with other SOM
+attributes and therefore we do not need to have in-core state, we just
+check this timestamp on each getattr.
+
+(IV) IOEpoch number.
+
+Another question is if we need a separate IOEpoch# generator or
+we could re-use VBR number or transaction id.
+
+1. Requirements:
+
+- IOEpoch# is increased for new IOEpochs;
+
+- SOM invalidation can be applied with larger IOEpoch#;
+   it must be re-invalidated again for the last generated #,
+   otherwise a later revalidation with smaller IOEpoch# would be
+   applied; invalidation IOEpoch# is stored on disk as well;
+
+- SOM revalidation can be applied to invalidated cache only and with
+   not smaller IOEpoch#;
+
+- IOEpoch# does not need to be re-generated on replay for now;
+
+- MDS needs to understand which IOEpoch# it can generate after reboot
+   for new opens; MDS must be able to understand it with some absent OST
+   or client nodes; we support currently a separate "IOEpoch window"
+   mechanism for this;
+
+Let's consider we are going to use transno for this:
+
+- MDS gives clients the current transno as IOEpoch# on open RPCs and
+   increments transno correspondingly;
+
+- once file is closed by all the clients, SOM cache is invalidated
+   on disk for this file for the opened IOEpoch#;
+
+- transno is already made safe agast node failures, it cannot become
+   smaller so MDS will be able to generate new ones;
+
+- MDS gives clients the current transno on md_getattr RPC if it thinks
+   it is time for SOM cache revalidation;
+
+- MDS stores attributes for the given by client IOEpoch# if file is not
+   already invalidated with a larger IOEp#;
+
+--
+Vitaly
+
+
+From kwestneat at ddn.com  Tue Feb  2 10:51:40 2010
+From: kwestneat at ddn.com (Kit Westneat)
+Date: Tue, 2 Feb 2010 13:51:40 -0500
+Subject: [Lustre-devel] e2fsprogs and git
+Message-ID: <4B68743C.8020000@ddn.com>
+
+Hi Lustre group,
+
+I was wondering if the Sun modified e2fsprogs source was under git 
+control and if the repo was public. I guess the same question goes for 
+some of the other tools not distributed in the main Lustre branch, (eg tar).
+
+Thanks,
+Kit
+
+-- 
+---
+Kit Westneat
+kwestneat at datadirectnet.com
+812-484-8485
+
+
+
+From vilobh.meshram at gmail.com  Tue Feb  2 22:01:21 2010
+From: vilobh.meshram at gmail.com (Vilobh Meshram)
+Date: Wed, 3 Feb 2010 01:01:21 -0500
+Subject: [Lustre-devel] Need info on NAL and LNET
+Message-ID: <ef958901002022201s5f6353eeg13ba36fb49acf2c3@mail.gmail.com>
+
+Hi,
+
+I am looking for some design docs on Network abstraction layer and LNET.Can
+you please point me to them?
+
+Thanks.
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20100203/89a54592/attachment.htm>
+
+From nikita.danilov at clusterstor.com  Wed Feb  3 01:18:58 2010
+From: nikita.danilov at clusterstor.com (Nikita Danilov)
+Date: Wed, 3 Feb 2010 11:18:58 +0200
+Subject: [Lustre-devel] Need info on NAL and LNET
+In-Reply-To: <ef958901002022201s5f6353eeg13ba36fb49acf2c3@mail.gmail.com>
+References: <ef958901002022201s5f6353eeg13ba36fb49acf2c3@mail.gmail.com>
+Message-ID: <8acda98c1002030118w59e091abr60914eab9c2ef9ef@mail.gmail.com>
+
+2010/2/3 Vilobh Meshram <vilobh.meshram at gmail.com>:
+> Hi,
+
+Hello Vilobh,
+
+> I am looking for some design docs on Network abstraction layer and LNET.Can
+> you please point me to them?
+
+apart from (arguably scarce) documentation in lnet/doc, one can start
+with Sandia portals documentation, which still matches overall LNET
+design (the interfaces, of course, diverged):
+http://code.google.com/p/portals4/downloads/list
+
+> Thanks.
+
+Thank you,
+Nikita.
+
+
+From Vitaly.Fertman at Sun.COM  Wed Feb  3 08:46:42 2010
+From: Vitaly.Fertman at Sun.COM (Vitaly Fertman)
+Date: Wed, 03 Feb 2010 19:46:42 +0300
+Subject: [Lustre-devel] SOM re-design, overview
+Message-ID: <A2258830-1799-49C9-B1F5-97739051DD24@Sun.COM>
+
+I. Introduction.
+
+SOM is split to several simple mechanisms: invalidation, revalidation,
+llog cleanup.
+
+1. Invalidation.
+
+Once file is opened for modification, SOM cache is invalidated, this is
+a modification of inode EA on MDS, not synchronous so we need to  
+protect this
+change against MDS failure -- IO to OST will create a llog record.
+
+2. Revalidation.
+
+The main idea is to re-use the basic getattr mechanism, client already  
+gather
+attributes from both MDS & OST and the only missed bit is to send  
+attributes
+back to MDS. However, it is done only if needed -- a client asks for  
+file
+attributes by itself and MDS decides it is time to rebuild the cache,  
+tells
+the client in reply to do it.
+
+MDS has no in-core state while SOM revalidation, if client is evicted  
+or so, there
+is no problem as inode is not pinned in the memory. However, we still  
+want to mark
+this inode as "SOM rebuild is in progress" because we do not want to  
+have many
+clients performing SOM rebuild in parallel.
+
+If MDS decides to rebuild the cache too early, OST must be able to  
+detect it!
+Once detected and reported to client in reply on glimpse, client just  
+interrupts.
+
+2.1. Revalidation time.
+
+MDS is not notified when clients completes their writes (there is no  
+DONE_WRITING
+RPC nymore), and IOEpoch closes on file close. By that time clients  
+may still have
+dirty cache and we do not want to force client to flush it  
+immediately, MDS just
+waits for SOM_TIMEOUT before starting the revalidation.
+
+SOM_TIMEOUT covers the time client will keep the data in cache, the  
+flush and
+commit on OST: SOM_TIMEOUT = CLIENT_FLUSH_TIMEOUT + OST_COMMIT_TIMEOUT
+
+Revalidation is done when file is closed, so OST is able to detect the  
+revalidation
+is too early by existent extent lock or not committed data.
+
+SOM_TIMEOUT may also reflect the MDS idea that we do not need clients  
+cache
+anymore, and OST will initiate lock cancel when get such a  
+notification on glimpse.
+
+2.2. Advantages
+
+- no overhead for too early revalidation, no extra rpc;
+- no overhead for revalidation, except the final md_setattr, which can  
+be batched;
+- no extra in-core state on MDS;
+- no extra activity on client nor on MDS;
+
+2.3. Disadvantages
+
+- first client has no SOM cache benefits;
+
+3. LLOG cleanup.
+
+The main idea is to not rely on clients in propagating llog cookies  
+from OST to
+MDS, but sending them directly from OST to MDS. Indeed:
+- client is not informing MDS about write completion and not having  
+llog cookies
+   by the time of close (although DONE_WRITING could do it);
+- client may be evicted from MDS and we get llog record leackage --  
+nobody will
+   take care of it till the next modification;
+- SOM cache revalidation is done on-demand so could be done much later;
+
+OST sends llog records to MDS immediately once the transaction with  
+this llog
+record is committed, batched to save on the amount of RPC. Once SOM  
+invalidation
+committed, MDS sends llog cancel back, batched again.
+
+IO comes to OST with IOEpoch# assigned, OST creates a llog record for  
+this IOepoch and updates IOEpoch# in inode EA. IOEpoch# in EA tells  
+next IO that
+llog record for this IOEpoch is already created. LLOG record indicates  
+SOM
+cache on MDS for this IOEpoch needs to be invalidated -- once  
+invalidation commits, llog record is not needed. This way OST has no  
+in-core states.
+
+Advantages:
+- minimum RPC overhead, evrything is batched;
+- quick LLOG cancel;
+- no in-core states on OST.
+
+II. Recovery.
+
+1. Client eviction.
+
+After eviction, client can proceeds with its IO to files MDS has  
+closed on
+eviction. This IO must be blocked right on client, until files are not  
+re-opened,
+otherwise we will not be able to rebuild SOM cache -- new IO will  
+destroy it.
+
+However, client get known about its eviction not immediately and even  
+after
+that it may already have some RPC in-fligth (it concerns lockless IO  
+or extent
+lock enqueue only, cached IO under already existent locks is allowed  
+as can be
+controlled by OST through these extent locks).
+
+One of the possible solutions here is timeouts. MDS closes all the  
+opened by the
+evicted client files and therefore opened IOEpochs, since close, SOM  
+cache cannot
+be rebuild for SOM_RECOVERY_TIMEOUT which must ensure:
+- the client knows it is evicted;
+- the last client's RPC in-flight, sent before it has got known it is  
+evicted
+  from MDS, would either complete or would be blocked;
+
+At the same time client may have a dirty data, so MDS needs to let it  
+to flush
+and commit on OST, thus MDS waits for
+	SOM_TIMEOUT = max(SOM_RECOVERY_TIMEOUT, CLIENT_FLUSH_TIMEOUT)
+                     + OST_COMMIT_TIMEOUT
+
+If RPC in-flight comes to OST too late, client is already reconnected,  
+OST
+skips RPC from previous connections, but client resends it. This  
+resend can
+be blocked on the client (if the client detects it is evicted from MDS  
+in the
+meanwhile).
+
+2. MDS failover.
+
+MDS waits for SOM_TIMEOUT after the bootup before starting to rebuild  
+SOM
+cache globally. Reasons are the same as for client eviction, as some  
+client
+may be evicted over the failover as well; globally because MDS does  
+not have
+a list of files involved.
+
+Of course, SOM is disabled for a file if some OST in its stripeset has  
+not
+synchronised LLOGs with MDS yet.
+
+--
+Vitaly
+
+
+From Alex.Zhuravlev at Sun.COM  Wed Feb  3 09:05:15 2010
+From: Alex.Zhuravlev at Sun.COM (Alex Zhuravlev)
+Date: Wed, 03 Feb 2010 20:05:15 +0300
+Subject: [Lustre-devel] SOM re-design, overview
+In-Reply-To: <A2258830-1799-49C9-B1F5-97739051DD24@Sun.COM>
+References: <A2258830-1799-49C9-B1F5-97739051DD24@Sun.COM>
+Message-ID: <4B69ACCB.4020006@sun.com>
+
+On 2/3/10 7:46 PM, Vitaly Fertman wrote:
+> I. Introduction.
+>
+> SOM is split to several simple mechanisms: invalidation, revalidation,
+> llog cleanup.
+
+for ones who are new with SOM (Size on MDS):
+
+SOM attributes - i_size, i_blocks and i_atime of a file, currently we
+take them from OST (meaning a bunch of RPCs, and 2 * RTT at least)
+
+in order to improve some workloads (like ls -l) we'd like to cache SOM
+attributes so that getattr can be done in RTT with 1 RPC.
+
+revalidation - a process to cache SOM attributes on MDS. we can do
+revalidation when file isn't open for write and all cached (dirty)
+data is written.
+
+invalidation - a process to drop cached SOM attributes on MDS. 
+invalidation starts when file is open for write. from this point to
+successful revalidation SOM attributes can't be cached on MDS and
+instead should be taken from OST (as we do currently).
+
+
+z.
+
+
+From Nathan.Rutman at Sun.COM  Wed Feb  3 11:12:48 2010
+From: Nathan.Rutman at Sun.COM (Nathan Rutman)
+Date: Wed, 03 Feb 2010 11:12:48 -0800
+Subject: [Lustre-devel] e2fsprogs and git
+In-Reply-To: <4B68743C.8020000@ddn.com>
+References: <4B68743C.8020000@ddn.com>
+Message-ID: <5731116F-8002-47BD-B39A-F26B494217E5@sun.com>
+
+I think the answer is "no" at the moment - you'll have to get them from the old locations (cvs, sun download site)
+
+On Feb 2, 2010, at 10:51 AM, Kit Westneat wrote:
+
+> Hi Lustre group,
+> 
+> I was wondering if the Sun modified e2fsprogs source was under git 
+> control and if the repo was public. I guess the same question goes for 
+> some of the other tools not distributed in the main Lustre branch, (eg tar).
+> 
+> Thanks,
+> Kit
+> 
+> -- 
+> ---
+> Kit Westneat
+> kwestneat at datadirectnet.com
+> 812-484-8485
+> 
+> _______________________________________________
+> Lustre-devel mailing list
+> Lustre-devel at lists.lustre.org
+> http://lists.lustre.org/mailman/listinfo/lustre-devel
+
+
+
+From magawake at gmail.com  Fri Feb  5 05:16:10 2010
+From: magawake at gmail.com (Mag Gam)
+Date: Fri, 5 Feb 2010 08:16:10 -0500
+Subject: [Lustre-devel] Fwd: The Lustre community and GIT
+In-Reply-To: <2b20c7140912301820k72f100c2q22d7e482ac560da5@mail.gmail.com>
+References: <2b20c7140912130831t658c2790hb38c3752c18ec128@mail.gmail.com>
+	<2b20c7140912131047qf0417f1mf3f3d9a8fc751dc0@mail.gmail.com>
+	<5F225623-87E0-4A91-988C-8B789B63E46D@sun.com>
+	<0BF036E2-E2A0-4612-B567-4C78794B0C45@clusterstor.com>
+	<1cbd6f830912271649n188095dcp9c65d96bd16eb71e@mail.gmail.com>
+	<18F59523-4EFC-4FA5-9F46-29D2D3AB2C6A@sun.com>
+	<2b20c7140912301820k72f100c2q22d7e482ac560da5@mail.gmail.com>
+Message-ID: <1cbd6f831002050516v13ac0a17u2f312dd967a3a1fc@mail.gmail.com>
+
+There was a lot of steam about the GIT conversion but it seems there
+haven't been any commits since Dec 14 2009. Or is there another site I
+can see for the updates?
+
+TIA
+
+
+On Wed, Dec 30, 2009 at 9:20 PM, Peter Braam
+<peter.braam at clusterstor.com> wrote:
+>
+>
+> On Wed, Dec 30, 2009 at 11:12 PM, Andreas Dilger <adilger at sun.com> wrote:
+>>
+>> On 2009-12-27, at 17:49, Mag Gam wrote:
+>> > I though majority of the lustre development and support was from Sun.
+>> > This is news to us.
+>>
+>> Peter has his own opinions and motivations, and does not in any way
+>> speak for Sun. ?His comments should in no way be confused with any
+>> statement of direction for Lustre. ?Sun will continue Lustre
+>> development and support in the future.
+>>
+>
+> Indeed. ?Let's see if Sun's VP of HPC Marc Hamilton can clarify what he told
+> someone who works for me. ?Hopefully the plans have changed. ?I haven't met
+> anybody who is informed about the facts, and doesn't share my concerns,
+> including many senior staff in the Lustre team.
+> As for my own motivations, I would like the Lustre community to continue to
+> aid high-end HPC.
+> Peter
+>>
+>> > Nevertheless I am glad Sun did this conversion.
+>>
+>> Thanks. ?We worked hard to make sure the transition to Git was
+>> successful.
+>>
+>> > Couple of questions:
+>> >
+>> > 1) What will happen to the Wiki? It still has a lot of Sun stuff on
+>> > it (logo)
+>>
+>> The wiki is continuing to be improved by our documentation team.
+>>
+>> > 2) Will we still keep bugzilla.lustre.org?
+>>
+>> Yes.
+>>
+>> > 3) Will there ever be a git over http? This is important for people
+>> > who are behind firewalls.
+>>
+>> I'll pass that question on to our Git administration folks.
+>>
+>> > Also, it would be nice to have the RPMs on the Wiki instead of
+>> > registering with Sun.
+>>
+>> I don't think that will be changing in the near future, but our
+>> management is aware of this issue.
+>>
+>> > On Sat, Dec 26, 2009 at 10:01 AM, Peter Braam
+>> > <peter.braam at clusterstor.com> wrote:
+>> >> Sent from my iPhone
+>> >>
+>> >> On Dec 15, 2009, at 14:05, Andreas Dilger <adilger at sun.com> wrote:
+>> >>
+>> >>> Hello Peter,
+>> >>>
+>> >>> As previously announced, we have already made the initial Lustre
+>> >>> repository available to everyone this week at git.lustre.org. ?This
+>> >>> repository contains all of the main development and release branches
+>> >>> and their history. ?It's where all of the Sun developers and
+>> >>> maintaners will get their sources from, and it will continue to be
+>> >>> available under the GPL v2 license as it always has been.
+>> >>>
+>> >>> Sun's policy of prioritizing stability, not just for releases but
+>> >>> also
+>> >>> to underpin development, makes safeguarding the quality of this
+>> >>> repository paramount. ?Everyone contributing to the Lustre sources -
+>> >>> not just internal Sun engineers but also external contributors like
+>> >>> LLNL, CEA, ORNL and DDN - is therefore subject to the same
+>> >>> gatekeeping
+>> >>> procedures and must follow the same patch submission, testing and
+>> >>> landing processes. ?These are further detailed in the wiki pages
+>> >>> that
+>> >>> were in the original announcement:
+>> >>>
+>> >>> http://wiki.lustre.org/index.php/Accessing_Lustre_Code
+>> >>> http://wiki.lustre.org/index.php/Submitting_Patches
+>> >>>
+>> >>>
+>> >>
+>> >> Sun is no longer supporting the Lustre community (storage OEMs and
+>> >> others have been refused further support). ?The model you describe
+>> >> won't apply much longer I think. ?People will be looking for
+>> >> different
+>> >> arrangements.
+>> >>
+>> >> Peter
+>> >>
+>> >>
+>> >>
+>> >>> For people not familiar with Git, it should be clarified that
+>> >>> limiting commits to the Sun Prime repository does not in any way
+>> >>> restrict access to the Lustre code, or the ability of non-Sun
+>> >>> developers to share their own Git clone with the Lustre community.
+>> >>> Developers will be able to host their own Lustre clones (essentially
+>> >>> full repositories) as and where they wish. ?The major advantage of
+>> >>> Git is that anyone can pull from any repository, or in fact from a
+>> >>> number of different repositories at the same time - this choice is
+>> >>> left to the user.
+>> >>>
+>> >>> This is the same model used by the Linux kernel, and has proven to
+>> >>> work well with Git. ?Each kernel developer hosts their own clone(s)
+>> >>> at git.kernel.org, or at some other site like repo.or.cz, or
+>> >>> github.com
+>> >>> , and when they have changes to submit upstream they send an email
+>> >>> (usually containing both the patch, and the git URL to pull from) to
+>> >>> the subsystem maintainer, or to Linus directly, requesting that he
+>> >>> pull their changes. ?This pull request is normally only sent after
+>> >>> the patch has been reviewed, possibly multiple times, ?by the
+>> >>> appropriate subsystem maintainers. ?Each developer has full control
+>> >>> over their own clone, and in fact it is rare that more than one
+>> >>> person has push access to a clone.
+>> >>>
+>> >>> The fact that there are many different clones (some more important,
+>> >>> and others less so) in no way implies that the kernel is being
+>> >>> forked, but rather that this is the standard way in which to use Git
+>> >>> to exchange changes. ?The location at which a clone is hosted also
+>> >>> has no bearing on its usefulness.
+>> >>>
+>> >>>
+>> >>>
+>> >>> To answer your specific concerns in more detail,
+>> >>>
+>> >>> On 2009-12-13, at 11:47, Peter Braam wrote:
+>> >>>> 1. We need a public repository, where non Sun community members can
+>> >>>> commit.
+>> >>>>
+>> >>>> a. ?There are Lustre users than have their own branches. ?LLNL has
+>> >>>> probably the best tested branch among all users. ?DDN's customers
+>> >>>> have a version of Lustre that includes patches not yet in Sun's
+>> >>>> releases. ?It would be very valuable if these kind of releases
+>> >>>> could be collected in a publicly accessible GIT repository.
+>> >>>
+>> >>> That is true even today - most of the patches that are in the DDN
+>> >>> branches were initially developed by Sun and are already in the
+>> >>> publicly-available Lustre CVS, and many of the LLNL patches have or
+>> >>> are being landed for the 1.8.2 release.
+>> >>>
+>> >>> As you know, there will always be a delta of patches that are not in
+>> >>> an official release, and will be available in the next one. ?With
+>> >>> the increase in testing to improve the quality of new releases
+>> >>> compared to the past, releases are by necessity less frequent.
+>> >>> Should anyone have a desire for more bleeding-edge code, they have
+>> >>> always been able fetch the current branch before its release,
+>> >>> regardless of whether this is Git or CVS. ?We maintain a number of
+>> >>> different branches (b1_8 for incremental development,
+>> >>> b_release_1_8_1 for critical fixes on the 1.8.1 release, etc) these
+>> >>> are already available to the public.
+>> >>>
+>> >>>> I doubt that Sun will give commit rights to external entities (this
+>> >>>> is not unreasonable, Sun needs to control what code enters its
+>> >>>> repositories). ?Hence I think that the community would be better
+>> >>>> served with a GIT repository in a public place, like github, that
+>> >>>> can give such access.
+>> >>>
+>> >>> While CVS was very restrictive in terms of managing external commit
+>> >>> permissions due to its monolithic repository, some external
+>> >>> contributors have had commit access to CVS prior our migration to
+>> >>> Git, based on need. ?With the migration to Git there is no need to
+>> >>> manage such access ourselves, as developers are able to host their
+>> >>> clones wherever they want. ?The git.lustre.org repository will
+>> >>> remain the canonical source for Sun releases, and we will be happy
+>> >>> to pull fixes into this repository that meet the quality guidelines
+>> >>> stated above. ?I for one would welcome external inspectors on
+>> >>> patches, and we continue to work with external sites to do scale
+>> >>> testing of Lustre.
+>> >>>
+>> >>>> My group at ClusterStor has reserved the "lustre" project at Github
+>> >>>> and we will give keys to any and all organizations that wish to
+>> >>>> make serious contributions to Lustre. ?I was in particular hoping
+>> >>>> that LLNL would be willing to commit their releases to that public
+>> >>>> place.
+>> >>>
+>> >>>
+>> >>> Note that with Git and github.com there is no need to give keys to
+>> >>> anyone, and in fact that would seem to be detrimental to
+>> >>> ClusterStor, because the "lustre" clone you have reserved is within
+>> >>> your company's private hosting space (i.e.
+>> >>> http://github.com/clusterstor/lustre
+>> >>> ). ?With Github (or Git in general) it is possible for anyone to
+>> >>> make their own clone or mirror of a repository at any time, no keys
+>> >>> or permission required, and it will appear ashttp://github.com/
+>> >>> {user}/lustre or whatever they want to call it.
+>> >>>
+>> >>>> b. ?Everyone is uncertain about what Sun will do with Lustre
+>> >>>> (proprietary Solaris / ZFS server releases and discontinued support
+>> >>>> for Linux servers have been mentioned to me several times now). ?A
+>> >>>> public repository with the open code will be valuable for the
+>> >>>> community and promote continued development and access.
+>> >>>
+>> >>> I agree that a public repository is important, and we will continue
+>> >>> to host one at git.lustre.org as we have in the past for CVS, and it
+>> >>> can and should be cloned as needed. ?As you are hopefully aware,
+>> >>> with Git every checkout has a full copy of the repository, including
+>> >>> all history, so the code is already very "open" and "public".
+>> >>> Lustre is, and will continue to be, available as GPL software.
+>> >>>
+>> >>> We definitely welcome external contributions to Lustre, which have
+>> >>> in the past been done by a small number of people outside of Sun. ?I
+>> >>> don't think the choice of CVS or Git or hosting site has ever been a
+>> >>> limiting factor in this regard. ?We look forward to contributions of
+>> >>> fixes, designs, and features, from ClusterStor, as we would with any
+>> >>> Lustre contributor.
+>> >>>
+>> >>>> 2. We need MUCH more in the repository than Sun is putting into it.
+>> >>>>
+>> >>>> There are many development branches and sometimes abandoned
+>> >>>> projects that still have a lot of value. ?For example, there is a
+>> >>>> nearly complete OS X client port - what if someone wanted to pick
+>> >>>> that up? ?Similarly, there are projects like size on MDS or the
+>> >>>> network request scheduler that may need help from the community to
+>> >>>> get finished or re-prioritized.
+>> >>>
+>> >>> All of the Lustre history is still available in CVS, as it has
+>> >>> always been. ?As far as I know (I've never checked it out myself)
+>> >>> even the OS/X client port is publicly available today, which was not
+>> >>> true a few years ago.
+>> >>>
+>> >>> Due to the convoluted branch, repository, and tag abuse that was
+>> >>> used to manage the Lustre code in CVS, there is a non-zero effort
+>> >>> required to migrate any of the branches in CVS to Git. ?Rather than
+>> >>> bring all of the old detritus along into Git, only the main
+>> >>> development/production branches are being automatically migrated
+>> >>> initially.
+>> >>>
+>> >>> Now that the Git migration is complete, the Sun maintainers of non-
+>> >>> release features (HSM, SOM, CMD, NRS, etc) will be creating Git
+>> >>> clones and landing their work into them as time permits.
+>> >>>
+>> >>> If anyone wants to import one of the other CVS branches (e.g. OS/X),
+>> >>> all they will need to do is create a patch from that branch and then
+>> >>> commit this into their own Git clone.
+>> >>>
+>> >>>> It is unclear to me if these kind of branches can be found in the
+>> >>>> publicly available CVS.
+>> >>>
+>> >>> Yes, they can, as they always have been. ?The CVS repository will
+>> >>> remain available indefinitely for spelunking expeditions should the
+>> >>> need arise. ?Note that the full history that leads to the current
+>> >>> release branches (b1_6, b1_8, HEAD) is available in Git, so there is
+>> >>> at least a trail of breadcrumbs leading to where we are today.
+>> >>>
+>> >>>> If they can, a collection of relevant branches, broadly along the
+>> >>>> lines of what I mention above, should be placed in the public GIT
+>> >>>> repository.
+>> >>>
+>> >>> For currently-active branches this was already our plan. ?For
+>> >>> historical and inactive branches, and we welcome any contributions
+>> >>> that bring these ancient CVS branches back to life. ?Nikita is
+>> >>> probably best positioned to know what needs to be imported from the
+>> >>> OS/X branch in CVS, and if there are other particular branches that
+>> >>> contain important work we'll be happy to discuss them with you. ?It
+>> >>> will of course be possible to create Git clones for these old
+>> >>> branches as needed.
+>> >>>
+>> >>>> 3. Brian's email message seems to indicate that Sun's git
+>> >>>> repository will be used for Sun development. ?In the past there
+>> >>>> were two CVS repositories - a read-only one that was publicly
+>> >>>> accessible and when I last controlled the group it was updated very
+>> >>>> frequently with all open source code (presently, it seems to only
+>> >>>> contain releases, not the development stream of commits).
+>> >>>
+>> >>> That's not correct. ?The public cvs.lustre.org repository in fact
+>> >>> contains all of the Lustre commits and all of the history. ?I just
+>> >>> did a checkout and there are in fact tags and branches for the pre-
+>> >>> release 1.8.2 builds, lprocfs rewrite, CMD, etc. that are very much
+>> >>> works in progress.
+>> >>>
+>> >>> One of the very last commits on CVS HEAD was on Thursday before CVS
+>> >>> went read-only, from a patch submitted by LLNL:
+>> >>>
+>> >>> revision 1.593
+>> >>> date: 2009/12/10 13:52:51; ?author: dzogin; ?state: Exp; ?lines:
+>> >>> +5 -0
+>> >>> Branch HEAD
+>> >>> b=21259
+>> >>> i=andrew.perepechko
+>> >>> i=alexey.lyashkov
+>> >>> ----------------------------------------------------------------------
+>> >>> Description: Allow non-root access for "lfs check".
+>> >>> Details ? ?: Added a check in obd_class_ioctl() for
+>> >>> OBD_IOC_PING_TARGET.
+>> >>>
+>> >>>
+>> >>>> It is unclear how Sun can manage development with this git
+>> >>>> repository given that parts of its work are proprietary (like the
+>> >>>> Windows port) or unreleased (like the ZFS work). ?Can we get more
+>> >>>> insight in what Brian is alluding to?
+>> >>>
+>> >>> I'm not sure what "alluding" you are alluding to?
+>> >>>
+>> >>> Of course, if there is any proprietary code developed it will just
+>> >>> not be pushed to the public git.lustre.org repository. ?I expect
+>> >>> that any proprietary or unreleased code that ClusterStor is already
+>> >>> or will develop will similarly not be posted publicly until you are
+>> >>> ready to do so.
+>> >>>
+>> >>> Sun's current in-progress code will very likely reside in separate
+>> >>> clones at git.lustre.org, but will not be merged into the Sun Prime
+>> >>> repository for an official release until it is inspected, tested,
+>> >>> and has permission to land. ?Pulls into the Sun Prime repository
+>> >>> will be done by the release manager for each branch, as previously
+>> >>> stated. ?The Lustre engineers at ClusterStor are already familiar
+>> >>> with this process and have already had their first patch pass
+>> >>> inspections and it is ready for landing.
+>> >>>
+>> >>> That is one of the major benefits of Git over CVS - that there ISN'T
+>> >>> a single repository, and in fact every clone has a full copy of the
+>> >>> history and can be used by anyone. ?There is no need to have all of
+>> >>> the development done in branches on a single repository, but rather
+>> >>> to keep projects in their own clones.
+>> >>>
+>> >>> That allows developers to do local commits on their machines, to
+>> >>> push it to their public clone if they want to share their work and/
+>> >>> or make an offsite backup, and people are free to choose which clone
+>> >>> one they use. ?Sun's Prime repository used for releases will only
+>> >>> contain stable Lustre code. ?This is the Git usage model for the
+>> >>> Linux kernel, and think it is a good one to follow for Lustre as
+>> >>> well. ?You are free to manage your clones in some other way.
+>> >>>
+>> >>> Cheers, Andreas
+>> >>> --
+>> >>> Andreas Dilger
+>> >>> Sr. Staff Engineer, Lustre Group
+>> >>> Sun Microsystems of Canada, Inc.
+>> >> _______________________________________________
+>> >> Lustre-devel mailing list
+>> >> Lustre-devel at lists.lustre.org
+>> >> http://lists.lustre.org/mailman/listinfo/lustre-devel
+>> >>
+>>
+>>
+>> Cheers, Andreas
+>> --
+>> Andreas Dilger
+>> Sr. Staff Engineer, Lustre Group
+>> Sun Microsystems of Canada, Inc.
+>>
+>> _______________________________________________
+>> Lustre-devel mailing list
+>> Lustre-devel at lists.lustre.org
+>> http://lists.lustre.org/mailman/listinfo/lustre-devel
+>
+>
+
+
+From eeb at sun.com  Fri Feb  5 09:12:51 2010
+From: eeb at sun.com (Eric Barton)
+Date: Fri, 05 Feb 2010 17:12:51 +0000
+Subject: [Lustre-devel] server-side resending & bulk transfer
+In-Reply-To: <20100205163524.GW236@granier.hd.free.fr>
+References: <20100205163524.GW236@granier.hd.free.fr>
+Message-ID: <002d01caa686$72c40d40$584c27c0$@com>
+
+Johann,
+
+cc-ing lustre-devel.
+
+Yes, the server could retry the bulk if it times out and this
+will be safe for the client since its bulk buffer is auto-unlinked,
+so only 1 bulk PUT/GET can match it.  But if the problem happens
+on the way back to the server rather than the way out to the client,
+you're hosed since the bulk has completed from the client's POV.
+
+This should be an exceptional circumstance - i.e. a router has
+actually failed - so I think it's better just to stick with the
+client retrying from scratch rather than tying down a server thread
+until it has decided whether there was a router failure or the
+client really crashed.
+
+Roll on the health network! :)
+
+    Cheers,
+              Eric
+
+> -----Original Message-----
+> From: Johann Lombardi [mailto:johann at sun.com]
+> Sent: 05 February 2010 4:35 PM
+> To: lustre-tech-leads at sun.com
+> Subject: server-side resending & bulk transfer
+> 
+> Hi,
+> 
+> As you know, the most important part of server-side resending is to resend
+> lock callbacks since a lost of such a message ends up with a client eviction
+> (except for glimpses which are resent indefinitely causing other problems).
+> 
+> That being said, another aspect is losing a message during bulk transfer, and
+> more particularly the start bulk signal issued by LNET.
+> Unlike lock callback rpcs, losing the start bulk signal is not fatal since
+> the bulk transfer will timeout on the server side, the request be dropped
+> and the client will resend after reconnection. This is indeed harmless,
+> but still causes slowdown which could be avoided according to LLNL if we
+> try to resend the start bulk signal (bug 21714). Brian Behlendorf's
+> proposal is to resend the start bulk signal after the first l_wait_event()
+> timeout in ost_brw_write(). However, we don't know if this is safe to do,
+> e.g. how does the client react if it receives duplicated start bulk signals?
+> 
+> Johann
+
+
+
+From adilger at sun.com  Fri Feb  5 09:42:16 2010
+From: adilger at sun.com (Andreas Dilger)
+Date: Fri, 05 Feb 2010 10:42:16 -0700
+Subject: [Lustre-devel] Fwd: The Lustre community and GIT
+In-Reply-To: <1cbd6f831002050516v13ac0a17u2f312dd967a3a1fc@mail.gmail.com>
+References: <2b20c7140912130831t658c2790hb38c3752c18ec128@mail.gmail.com>
+	<2b20c7140912131047qf0417f1mf3f3d9a8fc751dc0@mail.gmail.com>
+	<5F225623-87E0-4A91-988C-8B789B63E46D@sun.com>
+	<0BF036E2-E2A0-4612-B567-4C78794B0C45@clusterstor.com>
+	<1cbd6f830912271649n188095dcp9c65d96bd16eb71e@mail.gmail.com>
+	<18F59523-4EFC-4FA5-9F46-29D2D3AB2C6A@sun.com>
+	<2b20c7140912301820k72f100c2q22d7e482ac560da5@mail.gmail.com>
+	<1cbd6f831002050516v13ac0a17u2f312dd967a3a1fc@mail.gmail.com>
+Message-ID: <EF6D5C73-C268-4321-A5AE-B5A985EE509B@sun.com>
+
+On 2010-02-05, at 06:16, Mag Gam wrote:
+> There was a lot of steam about the GIT conversion but it seems there
+> haven't been any commits since Dec 14 2009. Or is there another site I
+> can see for the updates?
+
+The official git repository at git://git.lustre.org/prime/lustre.git  
+is both the public repository and the same one that the Lustre  
+developers use and is of course updated all the time.  It contains  
+both the HEAD (2.0) and b1_8 branches.
+
+If you are having trouble accessing this repo, please let us know.
+
+> On Wed, Dec 30, 2009 at 9:20 PM, Peter Braam
+> <peter.braam at clusterstor.com> wrote:
+>>
+>> On Wed, Dec 30, 2009 at 11:12 PM, Andreas Dilger <adilger at sun.com>  
+>> wrote:
+>>>
+>>> On 2009-12-27, at 17:49, Mag Gam wrote:
+>>>> I though majority of the lustre development and support was from  
+>>>> Sun.
+>>>> This is news to us.
+>>>
+>>> Peter has his own opinions and motivations, and does not in any way
+>>> speak for Sun.  His comments should in no way be confused with any
+>>> statement of direction for Lustre.  Sun will continue Lustre
+>>> development and support in the future.
+>>>
+>>
+>> Indeed.  Let's see if Sun's VP of HPC Marc Hamilton can clarify  
+>> what he told
+>> someone who works for me.  Hopefully the plans have changed.  I  
+>> haven't met
+>> anybody who is informed about the facts, and doesn't share my  
+>> concerns,
+>> including many senior staff in the Lustre team.
+>> As for my own motivations, I would like the Lustre community to  
+>> continue to
+>> aid high-end HPC.
+>> Peter
+>>>
+>>>> Nevertheless I am glad Sun did this conversion.
+>>>
+>>> Thanks.  We worked hard to make sure the transition to Git was
+>>> successful.
+>>>
+>>>> Couple of questions:
+>>>>
+>>>> 1) What will happen to the Wiki? It still has a lot of Sun stuff on
+>>>> it (logo)
+>>>
+>>> The wiki is continuing to be improved by our documentation team.
+>>>
+>>>> 2) Will we still keep bugzilla.lustre.org?
+>>>
+>>> Yes.
+>>>
+>>>> 3) Will there ever be a git over http? This is important for people
+>>>> who are behind firewalls.
+>>>
+>>> I'll pass that question on to our Git administration folks.
+>>>
+>>>> Also, it would be nice to have the RPMs on the Wiki instead of
+>>>> registering with Sun.
+>>>
+>>> I don't think that will be changing in the near future, but our
+>>> management is aware of this issue.
+>>>
+>>>> On Sat, Dec 26, 2009 at 10:01 AM, Peter Braam
+>>>> <peter.braam at clusterstor.com> wrote:
+>>>>> Sent from my iPhone
+>>>>>
+>>>>> On Dec 15, 2009, at 14:05, Andreas Dilger <adilger at sun.com> wrote:
+>>>>>
+>>>>>> Hello Peter,
+>>>>>>
+>>>>>> As previously announced, we have already made the initial Lustre
+>>>>>> repository available to everyone this week at git.lustre.org.   
+>>>>>> This
+>>>>>> repository contains all of the main development and release  
+>>>>>> branches
+>>>>>> and their history.  It's where all of the Sun developers and
+>>>>>> maintaners will get their sources from, and it will continue to  
+>>>>>> be
+>>>>>> available under the GPL v2 license as it always has been.
+>>>>>>
+>>>>>> Sun's policy of prioritizing stability, not just for releases but
+>>>>>> also
+>>>>>> to underpin development, makes safeguarding the quality of this
+>>>>>> repository paramount.  Everyone contributing to the Lustre  
+>>>>>> sources -
+>>>>>> not just internal Sun engineers but also external contributors  
+>>>>>> like
+>>>>>> LLNL, CEA, ORNL and DDN - is therefore subject to the same
+>>>>>> gatekeeping
+>>>>>> procedures and must follow the same patch submission, testing and
+>>>>>> landing processes.  These are further detailed in the wiki pages
+>>>>>> that
+>>>>>> were in the original announcement:
+>>>>>>
+>>>>>> http://wiki.lustre.org/index.php/Accessing_Lustre_Code
+>>>>>> http://wiki.lustre.org/index.php/Submitting_Patches
+>>>>>>
+>>>>>>
+>>>>>
+>>>>> Sun is no longer supporting the Lustre community (storage OEMs and
+>>>>> others have been refused further support).  The model you describe
+>>>>> won't apply much longer I think.  People will be looking for
+>>>>> different
+>>>>> arrangements.
+>>>>>
+>>>>> Peter
+>>>>>
+>>>>>
+>>>>>
+>>>>>> For people not familiar with Git, it should be clarified that
+>>>>>> limiting commits to the Sun Prime repository does not in any way
+>>>>>> restrict access to the Lustre code, or the ability of non-Sun
+>>>>>> developers to share their own Git clone with the Lustre  
+>>>>>> community.
+>>>>>> Developers will be able to host their own Lustre clones  
+>>>>>> (essentially
+>>>>>> full repositories) as and where they wish.  The major advantage  
+>>>>>> of
+>>>>>> Git is that anyone can pull from any repository, or in fact  
+>>>>>> from a
+>>>>>> number of different repositories at the same time - this choice  
+>>>>>> is
+>>>>>> left to the user.
+>>>>>>
+>>>>>> This is the same model used by the Linux kernel, and has proven  
+>>>>>> to
+>>>>>> work well with Git.  Each kernel developer hosts their own  
+>>>>>> clone(s)
+>>>>>> at git.kernel.org, or at some other site like repo.or.cz, or
+>>>>>> github.com
+>>>>>> , and when they have changes to submit upstream they send an  
+>>>>>> email
+>>>>>> (usually containing both the patch, and the git URL to pull  
+>>>>>> from) to
+>>>>>> the subsystem maintainer, or to Linus directly, requesting that  
+>>>>>> he
+>>>>>> pull their changes.  This pull request is normally only sent  
+>>>>>> after
+>>>>>> the patch has been reviewed, possibly multiple times,  by the
+>>>>>> appropriate subsystem maintainers.  Each developer has full  
+>>>>>> control
+>>>>>> over their own clone, and in fact it is rare that more than one
+>>>>>> person has push access to a clone.
+>>>>>>
+>>>>>> The fact that there are many different clones (some more  
+>>>>>> important,
+>>>>>> and others less so) in no way implies that the kernel is being
+>>>>>> forked, but rather that this is the standard way in which to  
+>>>>>> use Git
+>>>>>> to exchange changes.  The location at which a clone is hosted  
+>>>>>> also
+>>>>>> has no bearing on its usefulness.
+>>>>>>
+>>>>>>
+>>>>>>
+>>>>>> To answer your specific concerns in more detail,
+>>>>>>
+>>>>>> On 2009-12-13, at 11:47, Peter Braam wrote:
+>>>>>>> 1. We need a public repository, where non Sun community  
+>>>>>>> members can
+>>>>>>> commit.
+>>>>>>>
+>>>>>>> a.  There are Lustre users than have their own branches.  LLNL  
+>>>>>>> has
+>>>>>>> probably the best tested branch among all users.  DDN's  
+>>>>>>> customers
+>>>>>>> have a version of Lustre that includes patches not yet in Sun's
+>>>>>>> releases.  It would be very valuable if these kind of releases
+>>>>>>> could be collected in a publicly accessible GIT repository.
+>>>>>>
+>>>>>> That is true even today - most of the patches that are in the DDN
+>>>>>> branches were initially developed by Sun and are already in the
+>>>>>> publicly-available Lustre CVS, and many of the LLNL patches  
+>>>>>> have or
+>>>>>> are being landed for the 1.8.2 release.
+>>>>>>
+>>>>>> As you know, there will always be a delta of patches that are  
+>>>>>> not in
+>>>>>> an official release, and will be available in the next one.  With
+>>>>>> the increase in testing to improve the quality of new releases
+>>>>>> compared to the past, releases are by necessity less frequent.
+>>>>>> Should anyone have a desire for more bleeding-edge code, they  
+>>>>>> have
+>>>>>> always been able fetch the current branch before its release,
+>>>>>> regardless of whether this is Git or CVS.  We maintain a number  
+>>>>>> of
+>>>>>> different branches (b1_8 for incremental development,
+>>>>>> b_release_1_8_1 for critical fixes on the 1.8.1 release, etc)  
+>>>>>> these
+>>>>>> are already available to the public.
+>>>>>>
+>>>>>>> I doubt that Sun will give commit rights to external entities  
+>>>>>>> (this
+>>>>>>> is not unreasonable, Sun needs to control what code enters its
+>>>>>>> repositories).  Hence I think that the community would be better
+>>>>>>> served with a GIT repository in a public place, like github,  
+>>>>>>> that
+>>>>>>> can give such access.
+>>>>>>
+>>>>>> While CVS was very restrictive in terms of managing external  
+>>>>>> commit
+>>>>>> permissions due to its monolithic repository, some external
+>>>>>> contributors have had commit access to CVS prior our migration to
+>>>>>> Git, based on need.  With the migration to Git there is no need  
+>>>>>> to
+>>>>>> manage such access ourselves, as developers are able to host  
+>>>>>> their
+>>>>>> clones wherever they want.  The git.lustre.org repository will
+>>>>>> remain the canonical source for Sun releases, and we will be  
+>>>>>> happy
+>>>>>> to pull fixes into this repository that meet the quality  
+>>>>>> guidelines
+>>>>>> stated above.  I for one would welcome external inspectors on
+>>>>>> patches, and we continue to work with external sites to do scale
+>>>>>> testing of Lustre.
+>>>>>>
+>>>>>>> My group at ClusterStor has reserved the "lustre" project at  
+>>>>>>> Github
+>>>>>>> and we will give keys to any and all organizations that wish to
+>>>>>>> make serious contributions to Lustre.  I was in particular  
+>>>>>>> hoping
+>>>>>>> that LLNL would be willing to commit their releases to that  
+>>>>>>> public
+>>>>>>> place.
+>>>>>>
+>>>>>>
+>>>>>> Note that with Git and github.com there is no need to give keys  
+>>>>>> to
+>>>>>> anyone, and in fact that would seem to be detrimental to
+>>>>>> ClusterStor, because the "lustre" clone you have reserved is  
+>>>>>> within
+>>>>>> your company's private hosting space (i.e.
+>>>>>> http://github.com/clusterstor/lustre
+>>>>>> ).  With Github (or Git in general) it is possible for anyone to
+>>>>>> make their own clone or mirror of a repository at any time, no  
+>>>>>> keys
+>>>>>> or permission required, and it will appear ashttp://github.com/
+>>>>>> {user}/lustre or whatever they want to call it.
+>>>>>>
+>>>>>>> b.  Everyone is uncertain about what Sun will do with Lustre
+>>>>>>> (proprietary Solaris / ZFS server releases and discontinued  
+>>>>>>> support
+>>>>>>> for Linux servers have been mentioned to me several times  
+>>>>>>> now).  A
+>>>>>>> public repository with the open code will be valuable for the
+>>>>>>> community and promote continued development and access.
+>>>>>>
+>>>>>> I agree that a public repository is important, and we will  
+>>>>>> continue
+>>>>>> to host one at git.lustre.org as we have in the past for CVS,  
+>>>>>> and it
+>>>>>> can and should be cloned as needed.  As you are hopefully aware,
+>>>>>> with Git every checkout has a full copy of the repository,  
+>>>>>> including
+>>>>>> all history, so the code is already very "open" and "public".
+>>>>>> Lustre is, and will continue to be, available as GPL software.
+>>>>>>
+>>>>>> We definitely welcome external contributions to Lustre, which  
+>>>>>> have
+>>>>>> in the past been done by a small number of people outside of  
+>>>>>> Sun.  I
+>>>>>> don't think the choice of CVS or Git or hosting site has ever  
+>>>>>> been a
+>>>>>> limiting factor in this regard.  We look forward to  
+>>>>>> contributions of
+>>>>>> fixes, designs, and features, from ClusterStor, as we would  
+>>>>>> with any
+>>>>>> Lustre contributor.
+>>>>>>
+>>>>>>> 2. We need MUCH more in the repository than Sun is putting  
+>>>>>>> into it.
+>>>>>>>
+>>>>>>> There are many development branches and sometimes abandoned
+>>>>>>> projects that still have a lot of value.  For example, there  
+>>>>>>> is a
+>>>>>>> nearly complete OS X client port - what if someone wanted to  
+>>>>>>> pick
+>>>>>>> that up?  Similarly, there are projects like size on MDS or the
+>>>>>>> network request scheduler that may need help from the  
+>>>>>>> community to
+>>>>>>> get finished or re-prioritized.
+>>>>>>
+>>>>>> All of the Lustre history is still available in CVS, as it has
+>>>>>> always been.  As far as I know (I've never checked it out myself)
+>>>>>> even the OS/X client port is publicly available today, which  
+>>>>>> was not
+>>>>>> true a few years ago.
+>>>>>>
+>>>>>> Due to the convoluted branch, repository, and tag abuse that was
+>>>>>> used to manage the Lustre code in CVS, there is a non-zero effort
+>>>>>> required to migrate any of the branches in CVS to Git.  Rather  
+>>>>>> than
+>>>>>> bring all of the old detritus along into Git, only the main
+>>>>>> development/production branches are being automatically migrated
+>>>>>> initially.
+>>>>>>
+>>>>>> Now that the Git migration is complete, the Sun maintainers of  
+>>>>>> non-
+>>>>>> release features (HSM, SOM, CMD, NRS, etc) will be creating Git
+>>>>>> clones and landing their work into them as time permits.
+>>>>>>
+>>>>>> If anyone wants to import one of the other CVS branches (e.g.  
+>>>>>> OS/X),
+>>>>>> all they will need to do is create a patch from that branch and  
+>>>>>> then
+>>>>>> commit this into their own Git clone.
+>>>>>>
+>>>>>>> It is unclear to me if these kind of branches can be found in  
+>>>>>>> the
+>>>>>>> publicly available CVS.
+>>>>>>
+>>>>>> Yes, they can, as they always have been.  The CVS repository will
+>>>>>> remain available indefinitely for spelunking expeditions should  
+>>>>>> the
+>>>>>> need arise.  Note that the full history that leads to the current
+>>>>>> release branches (b1_6, b1_8, HEAD) is available in Git, so  
+>>>>>> there is
+>>>>>> at least a trail of breadcrumbs leading to where we are today.
+>>>>>>
+>>>>>>> If they can, a collection of relevant branches, broadly along  
+>>>>>>> the
+>>>>>>> lines of what I mention above, should be placed in the public  
+>>>>>>> GIT
+>>>>>>> repository.
+>>>>>>
+>>>>>> For currently-active branches this was already our plan.  For
+>>>>>> historical and inactive branches, and we welcome any  
+>>>>>> contributions
+>>>>>> that bring these ancient CVS branches back to life.  Nikita is
+>>>>>> probably best positioned to know what needs to be imported from  
+>>>>>> the
+>>>>>> OS/X branch in CVS, and if there are other particular branches  
+>>>>>> that
+>>>>>> contain important work we'll be happy to discuss them with  
+>>>>>> you.  It
+>>>>>> will of course be possible to create Git clones for these old
+>>>>>> branches as needed.
+>>>>>>
+>>>>>>> 3. Brian's email message seems to indicate that Sun's git
+>>>>>>> repository will be used for Sun development.  In the past there
+>>>>>>> were two CVS repositories - a read-only one that was publicly
+>>>>>>> accessible and when I last controlled the group it was updated  
+>>>>>>> very
+>>>>>>> frequently with all open source code (presently, it seems to  
+>>>>>>> only
+>>>>>>> contain releases, not the development stream of commits).
+>>>>>>
+>>>>>> That's not correct.  The public cvs.lustre.org repository in fact
+>>>>>> contains all of the Lustre commits and all of the history.  I  
+>>>>>> just
+>>>>>> did a checkout and there are in fact tags and branches for the  
+>>>>>> pre-
+>>>>>> release 1.8.2 builds, lprocfs rewrite, CMD, etc. that are very  
+>>>>>> much
+>>>>>> works in progress.
+>>>>>>
+>>>>>> One of the very last commits on CVS HEAD was on Thursday before  
+>>>>>> CVS
+>>>>>> went read-only, from a patch submitted by LLNL:
+>>>>>>
+>>>>>> revision 1.593
+>>>>>> date: 2009/12/10 13:52:51;  author: dzogin;  state: Exp;  lines:
+>>>>>> +5 -0
+>>>>>> Branch HEAD
+>>>>>> b=21259
+>>>>>> i=andrew.perepechko
+>>>>>> i=alexey.lyashkov
+>>>>>> ----------------------------------------------------------------------
+>>>>>> Description: Allow non-root access for "lfs check".
+>>>>>> Details    : Added a check in obd_class_ioctl() for
+>>>>>> OBD_IOC_PING_TARGET.
+>>>>>>
+>>>>>>
+>>>>>>> It is unclear how Sun can manage development with this git
+>>>>>>> repository given that parts of its work are proprietary (like  
+>>>>>>> the
+>>>>>>> Windows port) or unreleased (like the ZFS work).  Can we get  
+>>>>>>> more
+>>>>>>> insight in what Brian is alluding to?
+>>>>>>
+>>>>>> I'm not sure what "alluding" you are alluding to?
+>>>>>>
+>>>>>> Of course, if there is any proprietary code developed it will  
+>>>>>> just
+>>>>>> not be pushed to the public git.lustre.org repository.  I expect
+>>>>>> that any proprietary or unreleased code that ClusterStor is  
+>>>>>> already
+>>>>>> or will develop will similarly not be posted publicly until you  
+>>>>>> are
+>>>>>> ready to do so.
+>>>>>>
+>>>>>> Sun's current in-progress code will very likely reside in  
+>>>>>> separate
+>>>>>> clones at git.lustre.org, but will not be merged into the Sun  
+>>>>>> Prime
+>>>>>> repository for an official release until it is inspected, tested,
+>>>>>> and has permission to land.  Pulls into the Sun Prime repository
+>>>>>> will be done by the release manager for each branch, as  
+>>>>>> previously
+>>>>>> stated.  The Lustre engineers at ClusterStor are already familiar
+>>>>>> with this process and have already had their first patch pass
+>>>>>> inspections and it is ready for landing.
+>>>>>>
+>>>>>> That is one of the major benefits of Git over CVS - that there  
+>>>>>> ISN'T
+>>>>>> a single repository, and in fact every clone has a full copy of  
+>>>>>> the
+>>>>>> history and can be used by anyone.  There is no need to have  
+>>>>>> all of
+>>>>>> the development done in branches on a single repository, but  
+>>>>>> rather
+>>>>>> to keep projects in their own clones.
+>>>>>>
+>>>>>> That allows developers to do local commits on their machines, to
+>>>>>> push it to their public clone if they want to share their work  
+>>>>>> and/
+>>>>>> or make an offsite backup, and people are free to choose which  
+>>>>>> clone
+>>>>>> one they use.  Sun's Prime repository used for releases will only
+>>>>>> contain stable Lustre code.  This is the Git usage model for the
+>>>>>> Linux kernel, and think it is a good one to follow for Lustre as
+>>>>>> well.  You are free to manage your clones in some other way.
+>>>>>>
+>>>>>> Cheers, Andreas
+>>>>>> --
+>>>>>> Andreas Dilger
+>>>>>> Sr. Staff Engineer, Lustre Group
+>>>>>> Sun Microsystems of Canada, Inc.
+>>>>> _______________________________________________
+>>>>> Lustre-devel mailing list
+>>>>> Lustre-devel at lists.lustre.org
+>>>>> http://lists.lustre.org/mailman/listinfo/lustre-devel
+>>>>>
+>>>
+>>>
+>>> Cheers, Andreas
+>>> --
+>>> Andreas Dilger
+>>> Sr. Staff Engineer, Lustre Group
+>>> Sun Microsystems of Canada, Inc.
+>>>
+>>> _______________________________________________
+>>> Lustre-devel mailing list
+>>> Lustre-devel at lists.lustre.org
+>>> http://lists.lustre.org/mailman/listinfo/lustre-devel
+>>
+>>
+
+
+Cheers, Andreas
+--
+Andreas Dilger
+Sr. Staff Engineer, Lustre Group
+Sun Microsystems of Canada, Inc.
+
+
+
+From dillowda at ornl.gov  Fri Feb  5 09:35:07 2010
+From: dillowda at ornl.gov (David Dillow)
+Date: Fri, 05 Feb 2010 12:35:07 -0500
+Subject: [Lustre-devel] Fwd: The Lustre community and GIT
+In-Reply-To: <1cbd6f831002050516v13ac0a17u2f312dd967a3a1fc@mail.gmail.com>
+References: <2b20c7140912130831t658c2790hb38c3752c18ec128@mail.gmail.com>
+	<2b20c7140912131047qf0417f1mf3f3d9a8fc751dc0@mail.gmail.com>
+	<5F225623-87E0-4A91-988C-8B789B63E46D@sun.com>
+	<0BF036E2-E2A0-4612-B567-4C78794B0C45@clusterstor.com>
+	<1cbd6f830912271649n188095dcp9c65d96bd16eb71e@mail.gmail.com>
+	<18F59523-4EFC-4FA5-9F46-29D2D3AB2C6A@sun.com>
+	<2b20c7140912301820k72f100c2q22d7e482ac560da5@mail.gmail.com>
+	<1cbd6f831002050516v13ac0a17u2f312dd967a3a1fc@mail.gmail.com>
+Message-ID: <1265391307.7005.1.camel@lap75545.ornl.gov>
+
+On Fri, 2010-02-05 at 08:16 -0500, Mag Gam wrote:
+> There was a lot of steam about the GIT conversion but it seems there
+> haven't been any commits since Dec 14 2009. Or is there another site I
+> can see for the updates?
+
+I don't see the problem here -- I have been getting updates regularly.
+Are you doing a "git pull" in your cloned repository prior to running
+"git log" or "gitk"?
+
+-- 
+Dave Dillow
+National Center for Computational Science
+Oak Ridge National Laboratory
+(865) 241-6602 office
+
+
+
+
+From Nicolas.Williams at sun.com  Fri Feb  5 12:20:13 2010
+From: Nicolas.Williams at sun.com (Nicolas Williams)
+Date: Fri, 5 Feb 2010 14:20:13 -0600
+Subject: [Lustre-devel] server-side resending & bulk transfer
+In-Reply-To: <002d01caa686$72c40d40$584c27c0$@com>
+References: <20100205163524.GW236@granier.hd.free.fr>
+	<002d01caa686$72c40d40$584c27c0$@com>
+Message-ID: <20100205202013.GN1061@Sun.COM>
+
+On Fri, Feb 05, 2010 at 05:12:51PM +0000, Eric Barton wrote:
+> On Feb 5, 2010, at 8:35 AM, Johann Lombardi wrote:
+> > Unlike lock callback rpcs, losing the start bulk signal is not fatal since
+> > the bulk transfer will timeout on the server side, the request be dropped
+> > and the client will resend after reconnection. This is indeed harmless,
+> > but still causes slowdown which could be avoided according to LLNL if we
+> > try to resend the start bulk signal (bug 21714). Brian Behlendorf's
+> > proposal is to resend the start bulk signal after the first l_wait_event()
+> > timeout in ost_brw_write(). However, we don't know if this is safe to do,
+> > e.g. how does the client react if it receives duplicated start bulk signals?
+> 
+> Yes, the server could retry the bulk if it times out and this
+> will be safe for the client since its bulk buffer is auto-unlinked,
+> so only 1 bulk PUT/GET can match it.  But if the problem happens
+> on the way back to the server rather than the way out to the client,
+> you're hosed since the bulk has completed from the client's POV.
+> 
+> This should be an exceptional circumstance - i.e. a router has
+> actually failed - so I think it's better just to stick with the
+> client retrying from scratch rather than tying down a server thread
+> until it has decided whether there was a router failure or the
+> client really crashed.
+
+I agree that tying down a server thread on a long block is not a good
+thing.  If the LLNL proposal (resend the start bulk signal) is on the
+money, then the thing to do would be to create a queue and separate
+service thread(s) to handle such resends.
+
+> Roll on the health network! :)
+
+Well, if the deadline here is on the order of 1s or thereabouts then the
+health network isn't likely to help much because we're not going to get
+sub-second dead node detection.  (Well, if we jack up the ping rate and
+reduce the time-to-declare-death low enough, and make sure that HN
+threads and messaging are suitably prioritized, then we might be able to
+get sub-second dead node detection, but my gut feeling is that any
+heuristic approach should wait for longer than 1s.)
+
+Nico
+-- 
+
+
+From eeb at sun.com  Sat Feb  6 04:28:45 2010
+From: eeb at sun.com (Eric Barton)
+Date: Sat, 06 Feb 2010 12:28:45 +0000
+Subject: [Lustre-devel] server-side resending & bulk transfer
+In-Reply-To: <20100205202013.GN1061@Sun.COM>
+References: <20100205163524.GW236@granier.hd.free.fr>
+	<002d01caa686$72c40d40$584c27c0$@com> <20100205202013.GN1061@Sun.COM>
+Message-ID: <008101caa727$ed16ad90$c74408b0$@com>
+
+
+Nico,
+
+> -----Original Message-----
+> From: Nicolas Williams [mailto:Nicolas.Williams at Sun.COM]
+> Sent: 05 February 2010 8:20 PM
+> To: Eric Barton
+> Cc: 'Johann Lombardi'; lustre-devel at lists.lustre.org
+> Subject: Re: [Lustre-devel] server-side resending & bulk transfer
+
+<snip>
+ 
+> I agree that tying down a server thread on a long block is not a good
+> thing.  If the LLNL proposal (resend the start bulk signal) is on the
+> money, then the thing to do would be to create a queue and separate
+> service thread(s) to handle such resends.
+
+That's a dreadful layering violation - how LNET implements
+GET and PUT is down to each LND in each network traversed.  The only
+think you can do at the Lustre level is retry the GET or PUT on the
+assumption that router failure caused the timeout, not the client's
+death.
+ 
+> > Roll on the health network! :)
+> 
+> Well, if the deadline here is on the order of 1s or thereabouts then the
+> health network isn't likely to help much because we're not going to get
+> sub-second dead node detection.  (Well, if we jack up the ping rate and
+> reduce the time-to-declare-death low enough, and make sure that HN
+> threads and messaging are suitably prioritized, then we might be able to
+> get sub-second dead node detection, but my gut feeling is that any
+> heuristic approach should wait for longer than 1s.)
+
+The point is that the server can legitimately dedicate a thread retrying
+communications with the client until it discovers the client is dead.  
+Currently the bulk timeout is the sole, yet unreliable indication of
+this.  A health network that provided reliable notification within 10s
+of seconds would be a considerable improvement.
+
+    Cheers,
+              Eric
+
+
+
+
+
+From magawake at gmail.com  Sat Feb  6 06:10:44 2010
+From: magawake at gmail.com (Mag Gam)
+Date: Sat, 6 Feb 2010 09:10:44 -0500
+Subject: [Lustre-devel] Fwd: The Lustre community and GIT
+In-Reply-To: <EF6D5C73-C268-4321-A5AE-B5A985EE509B@sun.com>
+References: <2b20c7140912130831t658c2790hb38c3752c18ec128@mail.gmail.com>
+	<2b20c7140912131047qf0417f1mf3f3d9a8fc751dc0@mail.gmail.com>
+	<5F225623-87E0-4A91-988C-8B789B63E46D@sun.com>
+	<0BF036E2-E2A0-4612-B567-4C78794B0C45@clusterstor.com>
+	<1cbd6f830912271649n188095dcp9c65d96bd16eb71e@mail.gmail.com>
+	<18F59523-4EFC-4FA5-9F46-29D2D3AB2C6A@sun.com>
+	<2b20c7140912301820k72f100c2q22d7e482ac560da5@mail.gmail.com>
+	<1cbd6f831002050516v13ac0a17u2f312dd967a3a1fc@mail.gmail.com>
+	<EF6D5C73-C268-4321-A5AE-B5A985EE509B@sun.com>
+Message-ID: <1cbd6f831002060610r1cd9d4dfv278e0eefb7afa81c@mail.gmail.com>
+
+Who is the git admin? We would really like to have http access it
+makes a huge difference for people who are behind proxys
+
+
+On Fri, Feb 5, 2010 at 12:42 PM, Andreas Dilger <adilger at sun.com> wrote:
+> On 2010-02-05, at 06:16, Mag Gam wrote:
+>>
+>> There was a lot of steam about the GIT conversion but it seems there
+>> haven't been any commits since Dec 14 2009. Or is there another site I
+>> can see for the updates?
+>
+> The official git repository at git://git.lustre.org/prime/lustre.git is both
+> the public repository and the same one that the Lustre developers use and is
+> of course updated all the time. ?It contains both the HEAD (2.0) and b1_8
+> branches.
+>
+> If you are having trouble accessing this repo, please let us know.
+>
+>> On Wed, Dec 30, 2009 at 9:20 PM, Peter Braam
+>> <peter.braam at clusterstor.com> wrote:
+>>>
+>>> On Wed, Dec 30, 2009 at 11:12 PM, Andreas Dilger <adilger at sun.com> wrote:
+>>>>
+>>>> On 2009-12-27, at 17:49, Mag Gam wrote:
+>>>>>
+>>>>> I though majority of the lustre development and support was from Sun.
+>>>>> This is news to us.
+>>>>
+>>>> Peter has his own opinions and motivations, and does not in any way
+>>>> speak for Sun. ?His comments should in no way be confused with any
+>>>> statement of direction for Lustre. ?Sun will continue Lustre
+>>>> development and support in the future.
+>>>>
+>>>
+>>> Indeed. ?Let's see if Sun's VP of HPC Marc Hamilton can clarify what he
+>>> told
+>>> someone who works for me. ?Hopefully the plans have changed. ?I haven't
+>>> met
+>>> anybody who is informed about the facts, and doesn't share my concerns,
+>>> including many senior staff in the Lustre team.
+>>> As for my own motivations, I would like the Lustre community to continue
+>>> to
+>>> aid high-end HPC.
+>>> Peter
+>>>>
+>>>>> Nevertheless I am glad Sun did this conversion.
+>>>>
+>>>> Thanks. ?We worked hard to make sure the transition to Git was
+>>>> successful.
+>>>>
+>>>>> Couple of questions:
+>>>>>
+>>>>> 1) What will happen to the Wiki? It still has a lot of Sun stuff on
+>>>>> it (logo)
+>>>>
+>>>> The wiki is continuing to be improved by our documentation team.
+>>>>
+>>>>> 2) Will we still keep bugzilla.lustre.org?
+>>>>
+>>>> Yes.
+>>>>
+>>>>> 3) Will there ever be a git over http? This is important for people
+>>>>> who are behind firewalls.
+>>>>
+>>>> I'll pass that question on to our Git administration folks.
+>>>>
+>>>>> Also, it would be nice to have the RPMs on the Wiki instead of
+>>>>> registering with Sun.
+>>>>
+>>>> I don't think that will be changing in the near future, but our
+>>>> management is aware of this issue.
+>>>>
+>>>>> On Sat, Dec 26, 2009 at 10:01 AM, Peter Braam
+>>>>> <peter.braam at clusterstor.com> wrote:
+>>>>>>
+>>>>>> Sent from my iPhone
+>>>>>>
+>>>>>> On Dec 15, 2009, at 14:05, Andreas Dilger <adilger at sun.com> wrote:
+>>>>>>
+>>>>>>> Hello Peter,
+>>>>>>>
+>>>>>>> As previously announced, we have already made the initial Lustre
+>>>>>>> repository available to everyone this week at git.lustre.org. ?This
+>>>>>>> repository contains all of the main development and release branches
+>>>>>>> and their history. ?It's where all of the Sun developers and
+>>>>>>> maintaners will get their sources from, and it will continue to be
+>>>>>>> available under the GPL v2 license as it always has been.
+>>>>>>>
+>>>>>>> Sun's policy of prioritizing stability, not just for releases but
+>>>>>>> also
+>>>>>>> to underpin development, makes safeguarding the quality of this
+>>>>>>> repository paramount. ?Everyone contributing to the Lustre sources -
+>>>>>>> not just internal Sun engineers but also external contributors like
+>>>>>>> LLNL, CEA, ORNL and DDN - is therefore subject to the same
+>>>>>>> gatekeeping
+>>>>>>> procedures and must follow the same patch submission, testing and
+>>>>>>> landing processes. ?These are further detailed in the wiki pages
+>>>>>>> that
+>>>>>>> were in the original announcement:
+>>>>>>>
+>>>>>>> http://wiki.lustre.org/index.php/Accessing_Lustre_Code
+>>>>>>> http://wiki.lustre.org/index.php/Submitting_Patches
+>>>>>>>
+>>>>>>>
+>>>>>>
+>>>>>> Sun is no longer supporting the Lustre community (storage OEMs and
+>>>>>> others have been refused further support). ?The model you describe
+>>>>>> won't apply much longer I think. ?People will be looking for
+>>>>>> different
+>>>>>> arrangements.
+>>>>>>
+>>>>>> Peter
+>>>>>>
+>>>>>>
+>>>>>>
+>>>>>>> For people not familiar with Git, it should be clarified that
+>>>>>>> limiting commits to the Sun Prime repository does not in any way
+>>>>>>> restrict access to the Lustre code, or the ability of non-Sun
+>>>>>>> developers to share their own Git clone with the Lustre community.
+>>>>>>> Developers will be able to host their own Lustre clones (essentially
+>>>>>>> full repositories) as and where they wish. ?The major advantage of
+>>>>>>> Git is that anyone can pull from any repository, or in fact from a
+>>>>>>> number of different repositories at the same time - this choice is
+>>>>>>> left to the user.
+>>>>>>>
+>>>>>>> This is the same model used by the Linux kernel, and has proven to
+>>>>>>> work well with Git. ?Each kernel developer hosts their own clone(s)
+>>>>>>> at git.kernel.org, or at some other site like repo.or.cz, or
+>>>>>>> github.com
+>>>>>>> , and when they have changes to submit upstream they send an email
+>>>>>>> (usually containing both the patch, and the git URL to pull from) to
+>>>>>>> the subsystem maintainer, or to Linus directly, requesting that he
+>>>>>>> pull their changes. ?This pull request is normally only sent after
+>>>>>>> the patch has been reviewed, possibly multiple times, ?by the
+>>>>>>> appropriate subsystem maintainers. ?Each developer has full control
+>>>>>>> over their own clone, and in fact it is rare that more than one
+>>>>>>> person has push access to a clone.
+>>>>>>>
+>>>>>>> The fact that there are many different clones (some more important,
+>>>>>>> and others less so) in no way implies that the kernel is being
+>>>>>>> forked, but rather that this is the standard way in which to use Git
+>>>>>>> to exchange changes. ?The location at which a clone is hosted also
+>>>>>>> has no bearing on its usefulness.
+>>>>>>>
+>>>>>>>
+>>>>>>>
+>>>>>>> To answer your specific concerns in more detail,
+>>>>>>>
+>>>>>>> On 2009-12-13, at 11:47, Peter Braam wrote:
+>>>>>>>>
+>>>>>>>> 1. We need a public repository, where non Sun community members can
+>>>>>>>> commit.
+>>>>>>>>
+>>>>>>>> a. ?There are Lustre users than have their own branches. ?LLNL has
+>>>>>>>> probably the best tested branch among all users. ?DDN's customers
+>>>>>>>> have a version of Lustre that includes patches not yet in Sun's
+>>>>>>>> releases. ?It would be very valuable if these kind of releases
+>>>>>>>> could be collected in a publicly accessible GIT repository.
+>>>>>>>
+>>>>>>> That is true even today - most of the patches that are in the DDN
+>>>>>>> branches were initially developed by Sun and are already in the
+>>>>>>> publicly-available Lustre CVS, and many of the LLNL patches have or
+>>>>>>> are being landed for the 1.8.2 release.
+>>>>>>>
+>>>>>>> As you know, there will always be a delta of patches that are not in
+>>>>>>> an official release, and will be available in the next one. ?With
+>>>>>>> the increase in testing to improve the quality of new releases
+>>>>>>> compared to the past, releases are by necessity less frequent.
+>>>>>>> Should anyone have a desire for more bleeding-edge code, they have
+>>>>>>> always been able fetch the current branch before its release,
+>>>>>>> regardless of whether this is Git or CVS. ?We maintain a number of
+>>>>>>> different branches (b1_8 for incremental development,
+>>>>>>> b_release_1_8_1 for critical fixes on the 1.8.1 release, etc) these
+>>>>>>> are already available to the public.
+>>>>>>>
+>>>>>>>> I doubt that Sun will give commit rights to external entities (this
+>>>>>>>> is not unreasonable, Sun needs to control what code enters its
+>>>>>>>> repositories). ?Hence I think that the community would be better
+>>>>>>>> served with a GIT repository in a public place, like github, that
+>>>>>>>> can give such access.
+>>>>>>>
+>>>>>>> While CVS was very restrictive in terms of managing external commit
+>>>>>>> permissions due to its monolithic repository, some external
+>>>>>>> contributors have had commit access to CVS prior our migration to
+>>>>>>> Git, based on need. ?With the migration to Git there is no need to
+>>>>>>> manage such access ourselves, as developers are able to host their
+>>>>>>> clones wherever they want. ?The git.lustre.org repository will
+>>>>>>> remain the canonical source for Sun releases, and we will be happy
+>>>>>>> to pull fixes into this repository that meet the quality guidelines
+>>>>>>> stated above. ?I for one would welcome external inspectors on
+>>>>>>> patches, and we continue to work with external sites to do scale
+>>>>>>> testing of Lustre.
+>>>>>>>
+>>>>>>>> My group at ClusterStor has reserved the "lustre" project at Github
+>>>>>>>> and we will give keys to any and all organizations that wish to
+>>>>>>>> make serious contributions to Lustre. ?I was in particular hoping
+>>>>>>>> that LLNL would be willing to commit their releases to that public
+>>>>>>>> place.
+>>>>>>>
+>>>>>>>
+>>>>>>> Note that with Git and github.com there is no need to give keys to
+>>>>>>> anyone, and in fact that would seem to be detrimental to
+>>>>>>> ClusterStor, because the "lustre" clone you have reserved is within
+>>>>>>> your company's private hosting space (i.e.
+>>>>>>> http://github.com/clusterstor/lustre
+>>>>>>> ). ?With Github (or Git in general) it is possible for anyone to
+>>>>>>> make their own clone or mirror of a repository at any time, no keys
+>>>>>>> or permission required, and it will appear ashttp://github.com/
+>>>>>>> {user}/lustre or whatever they want to call it.
+>>>>>>>
+>>>>>>>> b. ?Everyone is uncertain about what Sun will do with Lustre
+>>>>>>>> (proprietary Solaris / ZFS server releases and discontinued support
+>>>>>>>> for Linux servers have been mentioned to me several times now). ?A
+>>>>>>>> public repository with the open code will be valuable for the
+>>>>>>>> community and promote continued development and access.
+>>>>>>>
+>>>>>>> I agree that a public repository is important, and we will continue
+>>>>>>> to host one at git.lustre.org as we have in the past for CVS, and it
+>>>>>>> can and should be cloned as needed. ?As you are hopefully aware,
+>>>>>>> with Git every checkout has a full copy of the repository, including
+>>>>>>> all history, so the code is already very "open" and "public".
+>>>>>>> Lustre is, and will continue to be, available as GPL software.
+>>>>>>>
+>>>>>>> We definitely welcome external contributions to Lustre, which have
+>>>>>>> in the past been done by a small number of people outside of Sun. ?I
+>>>>>>> don't think the choice of CVS or Git or hosting site has ever been a
+>>>>>>> limiting factor in this regard. ?We look forward to contributions of
+>>>>>>> fixes, designs, and features, from ClusterStor, as we would with any
+>>>>>>> Lustre contributor.
+>>>>>>>
+>>>>>>>> 2. We need MUCH more in the repository than Sun is putting into it.
+>>>>>>>>
+>>>>>>>> There are many development branches and sometimes abandoned
+>>>>>>>> projects that still have a lot of value. ?For example, there is a
+>>>>>>>> nearly complete OS X client port - what if someone wanted to pick
+>>>>>>>> that up? ?Similarly, there are projects like size on MDS or the
+>>>>>>>> network request scheduler that may need help from the community to
+>>>>>>>> get finished or re-prioritized.
+>>>>>>>
+>>>>>>> All of the Lustre history is still available in CVS, as it has
+>>>>>>> always been. ?As far as I know (I've never checked it out myself)
+>>>>>>> even the OS/X client port is publicly available today, which was not
+>>>>>>> true a few years ago.
+>>>>>>>
+>>>>>>> Due to the convoluted branch, repository, and tag abuse that was
+>>>>>>> used to manage the Lustre code in CVS, there is a non-zero effort
+>>>>>>> required to migrate any of the branches in CVS to Git. ?Rather than
+>>>>>>> bring all of the old detritus along into Git, only the main
+>>>>>>> development/production branches are being automatically migrated
+>>>>>>> initially.
+>>>>>>>
+>>>>>>> Now that the Git migration is complete, the Sun maintainers of non-
+>>>>>>> release features (HSM, SOM, CMD, NRS, etc) will be creating Git
+>>>>>>> clones and landing their work into them as time permits.
+>>>>>>>
+>>>>>>> If anyone wants to import one of the other CVS branches (e.g. OS/X),
+>>>>>>> all they will need to do is create a patch from that branch and then
+>>>>>>> commit this into their own Git clone.
+>>>>>>>
+>>>>>>>> It is unclear to me if these kind of branches can be found in the
+>>>>>>>> publicly available CVS.
+>>>>>>>
+>>>>>>> Yes, they can, as they always have been. ?The CVS repository will
+>>>>>>> remain available indefinitely for spelunking expeditions should the
+>>>>>>> need arise. ?Note that the full history that leads to the current
+>>>>>>> release branches (b1_6, b1_8, HEAD) is available in Git, so there is
+>>>>>>> at least a trail of breadcrumbs leading to where we are today.
+>>>>>>>
+>>>>>>>> If they can, a collection of relevant branches, broadly along the
+>>>>>>>> lines of what I mention above, should be placed in the public GIT
+>>>>>>>> repository.
+>>>>>>>
+>>>>>>> For currently-active branches this was already our plan. ?For
+>>>>>>> historical and inactive branches, and we welcome any contributions
+>>>>>>> that bring these ancient CVS branches back to life. ?Nikita is
+>>>>>>> probably best positioned to know what needs to be imported from the
+>>>>>>> OS/X branch in CVS, and if there are other particular branches that
+>>>>>>> contain important work we'll be happy to discuss them with you. ?It
+>>>>>>> will of course be possible to create Git clones for these old
+>>>>>>> branches as needed.
+>>>>>>>
+>>>>>>>> 3. Brian's email message seems to indicate that Sun's git
+>>>>>>>> repository will be used for Sun development. ?In the past there
+>>>>>>>> were two CVS repositories - a read-only one that was publicly
+>>>>>>>> accessible and when I last controlled the group it was updated very
+>>>>>>>> frequently with all open source code (presently, it seems to only
+>>>>>>>> contain releases, not the development stream of commits).
+>>>>>>>
+>>>>>>> That's not correct. ?The public cvs.lustre.org repository in fact
+>>>>>>> contains all of the Lustre commits and all of the history. ?I just
+>>>>>>> did a checkout and there are in fact tags and branches for the pre-
+>>>>>>> release 1.8.2 builds, lprocfs rewrite, CMD, etc. that are very much
+>>>>>>> works in progress.
+>>>>>>>
+>>>>>>> One of the very last commits on CVS HEAD was on Thursday before CVS
+>>>>>>> went read-only, from a patch submitted by LLNL:
+>>>>>>>
+>>>>>>> revision 1.593
+>>>>>>> date: 2009/12/10 13:52:51; ?author: dzogin; ?state: Exp; ?lines:
+>>>>>>> +5 -0
+>>>>>>> Branch HEAD
+>>>>>>> b=21259
+>>>>>>> i=andrew.perepechko
+>>>>>>> i=alexey.lyashkov
+>>>>>>>
+>>>>>>> ----------------------------------------------------------------------
+>>>>>>> Description: Allow non-root access for "lfs check".
+>>>>>>> Details ? ?: Added a check in obd_class_ioctl() for
+>>>>>>> OBD_IOC_PING_TARGET.
+>>>>>>>
+>>>>>>>
+>>>>>>>> It is unclear how Sun can manage development with this git
+>>>>>>>> repository given that parts of its work are proprietary (like the
+>>>>>>>> Windows port) or unreleased (like the ZFS work). ?Can we get more
+>>>>>>>> insight in what Brian is alluding to?
+>>>>>>>
+>>>>>>> I'm not sure what "alluding" you are alluding to?
+>>>>>>>
+>>>>>>> Of course, if there is any proprietary code developed it will just
+>>>>>>> not be pushed to the public git.lustre.org repository. ?I expect
+>>>>>>> that any proprietary or unreleased code that ClusterStor is already
+>>>>>>> or will develop will similarly not be posted publicly until you are
+>>>>>>> ready to do so.
+>>>>>>>
+>>>>>>> Sun's current in-progress code will very likely reside in separate
+>>>>>>> clones at git.lustre.org, but will not be merged into the Sun Prime
+>>>>>>> repository for an official release until it is inspected, tested,
+>>>>>>> and has permission to land. ?Pulls into the Sun Prime repository
+>>>>>>> will be done by the release manager for each branch, as previously
+>>>>>>> stated. ?The Lustre engineers at ClusterStor are already familiar
+>>>>>>> with this process and have already had their first patch pass
+>>>>>>> inspections and it is ready for landing.
+>>>>>>>
+>>>>>>> That is one of the major benefits of Git over CVS - that there ISN'T
+>>>>>>> a single repository, and in fact every clone has a full copy of the
+>>>>>>> history and can be used by anyone. ?There is no need to have all of
+>>>>>>> the development done in branches on a single repository, but rather
+>>>>>>> to keep projects in their own clones.
+>>>>>>>
+>>>>>>> That allows developers to do local commits on their machines, to
+>>>>>>> push it to their public clone if they want to share their work and/
+>>>>>>> or make an offsite backup, and people are free to choose which clone
+>>>>>>> one they use. ?Sun's Prime repository used for releases will only
+>>>>>>> contain stable Lustre code. ?This is the Git usage model for the
+>>>>>>> Linux kernel, and think it is a good one to follow for Lustre as
+>>>>>>> well. ?You are free to manage your clones in some other way.
+>>>>>>>
+>>>>>>> Cheers, Andreas
+>>>>>>> --
+>>>>>>> Andreas Dilger
+>>>>>>> Sr. Staff Engineer, Lustre Group
+>>>>>>> Sun Microsystems of Canada, Inc.
+>>>>>>
+>>>>>> _______________________________________________
+>>>>>> Lustre-devel mailing list
+>>>>>> Lustre-devel at lists.lustre.org
+>>>>>> http://lists.lustre.org/mailman/listinfo/lustre-devel
+>>>>>>
+>>>>
+>>>>
+>>>> Cheers, Andreas
+>>>> --
+>>>> Andreas Dilger
+>>>> Sr. Staff Engineer, Lustre Group
+>>>> Sun Microsystems of Canada, Inc.
+>>>>
+>>>> _______________________________________________
+>>>> Lustre-devel mailing list
+>>>> Lustre-devel at lists.lustre.org
+>>>> http://lists.lustre.org/mailman/listinfo/lustre-devel
+>>>
+>>>
+>
+>
+> Cheers, Andreas
+> --
+> Andreas Dilger
+> Sr. Staff Engineer, Lustre Group
+> Sun Microsystems of Canada, Inc.
+>
+>
+
+
+From Nathan.Rutman at Sun.COM  Tue Feb  9 11:21:52 2010
+From: Nathan.Rutman at Sun.COM (Nathan Rutman)
+Date: Tue, 09 Feb 2010 11:21:52 -0800
+Subject: [Lustre-devel] server-side resending & bulk transfer
+In-Reply-To: <002d01caa686$72c40d40$584c27c0$@com>
+References: <20100205163524.GW236@granier.hd.free.fr>
+	<002d01caa686$72c40d40$584c27c0$@com>
+Message-ID: <0C48F4A2-5516-42C5-8520-7DC1B6BF08A1@sun.com>
+
+
+On Feb 5, 2010, at 9:12 AM, Eric Barton wrote:
+
+> Johann,
+> 
+> cc-ing lustre-devel.
+> 
+> Yes, the server could retry the bulk if it times out and this
+> will be safe for the client since its bulk buffer is auto-unlinked,
+> so only 1 bulk PUT/GET can match it.  But if the problem happens
+> on the way back to the server rather than the way out to the client,
+> you're hosed since the bulk has completed from the client's POV.
+> 
+> This should be an exceptional circumstance - i.e. a router has
+> actually failed - so I think it's better just to stick with the
+> client retrying from scratch rather than tying down a server thread
+> until it has decided whether there was a router failure or the
+> client really crashed.
+> 
+> Roll on the health network! :)
+> 
+
+
+Eric - this sounds like we can retry the LNetGet/Put whenever we want with
+no ill effects (even if from client's point of view it has completed bulk, it will just
+ignore a signal with unmatched matchbits, right?)  So it's "free" for us to try that
+every time we e.g. send an early reply?  
+For any LND LNetGet/Put does somehow indicate across the wire that the server
+is ready for the bulk, so I'm making the bold assumption that re-calling that will
+re-indicate server readiness (and in particular in the case where that original signal
+got lost).  
+
+
+>    Cheers,
+>              Eric
+> 
+>> -----Original Message-----
+>> From: Johann Lombardi [mailto:johann at sun.com]
+>> Sent: 05 February 2010 4:35 PM
+>> To: lustre-tech-leads at sun.com
+>> Subject: server-side resending & bulk transfer
+>> 
+>> Hi,
+>> 
+>> As you know, the most important part of server-side resending is to resend
+>> lock callbacks since a lost of such a message ends up with a client eviction
+>> (except for glimpses which are resent indefinitely causing other problems).
+>> 
+>> That being said, another aspect is losing a message during bulk transfer, and
+>> more particularly the start bulk signal issued by LNET.
+>> Unlike lock callback rpcs, losing the start bulk signal is not fatal since
+>> the bulk transfer will timeout on the server side, the request be dropped
+>> and the client will resend after reconnection. This is indeed harmless,
+>> but still causes slowdown which could be avoided according to LLNL if we
+>> try to resend the start bulk signal (bug 21714). Brian Behlendorf's
+>> proposal is to resend the start bulk signal after the first l_wait_event()
+>> timeout in ost_brw_write(). However, we don't know if this is safe to do,
+>> e.g. how does the client react if it receives duplicated start bulk signals?
+>> 
+>> Johann
+> 
+> _______________________________________________
+> Lustre-devel mailing list
+> Lustre-devel at lists.lustre.org
+> http://lists.lustre.org/mailman/listinfo/lustre-devel
+
+
+
+From morrone2 at llnl.gov  Thu Feb 11 17:27:53 2010
+From: morrone2 at llnl.gov (Christopher J. Morrone)
+Date: Thu, 11 Feb 2010 17:27:53 -0800
+Subject: [Lustre-devel] hype is ready
+Message-ID: <4B74AE99.1070303@llnl.gov>
+
+Sheila,
+
+Hype is now ready for your tests.
+
+Chris
+
+
+From morrone2 at llnl.gov  Thu Feb 11 17:29:31 2010
+From: morrone2 at llnl.gov (Christopher J. Morrone)
+Date: Thu, 11 Feb 2010 17:29:31 -0800
+Subject: [Lustre-devel] hype is ready
+In-Reply-To: <4B74AE99.1070303@llnl.gov>
+References: <4B74AE99.1070303@llnl.gov>
+Message-ID: <4B74AEFB.2010702@llnl.gov>
+
+Whoops, wrong list.  Apologies.
+
+Christopher J. Morrone wrote:
+> Sheila,
+> 
+> Hype is now ready for your tests.
+> 
+> Chris
+> 
+
+
+
+From Vitaly.Fertman at Sun.COM  Mon Feb 15 08:56:50 2010
+From: Vitaly.Fertman at Sun.COM (Vitaly Fertman)
+Date: Mon, 15 Feb 2010 19:56:50 +0300
+Subject: [Lustre-devel] mtime and ctime handling in lustre
+Message-ID: <182A1028-6F63-43D5-9BF8-F16E03F4C41D@Sun.COM>
+
+As we have many problems with *time handling, some long standing bugs
+(11063) and new ones appear (21489) I have tried to sort this out and
+to design a proper solution, the results are below.
+
+I. Client inode may cache new modification attributes which must not
+be overwritten by server attributes until modification is sent out to
+server.
+
+Modifications: write, setattr, punch. Operations like glimpse, enqueue,
+punch brings OST attributes and overwrite osc_lvb and inode attributes
+(ll_glimpse_size, ll_lock_enqueue, ll_file_punch).
+
+Solution 1. Leave client inode for new modification attribute only.
+
+Do not overwrite it with server attributes at all; although it could be
+merged (leaving the largest time in inode) with server ones as we do in
+ll_update_inode(). OST attributes in its turn will be stored in
+osc_lvb.
+
+Solution 2. Store new modification attributes and OST ones in osc_lvb
+protecting osc_lvb changes with extent lock.
+
+New modification attributes are stored in osc_lvb only under extent
+lock, lockless modification do not change it;
+OST attributes can only overwrite osc_lvb under [0;eof] lock, what
+means all the previous modifications are already flushed on OST,
+osc_lvb is not changed with no lock or under a partial one.
+
+Solution 3. Store new modification attributes and OST ones in inode
+protecting these changes with extent lock.
+
+The same as Solution 2, but needs all the extent locks to be taken in
+operations like glimpse to update inode.
+
+II. Client inode without locks has obsolete attributes and if stat()
+will merge inode with MDS and OST attributes, the result will be wrong
+for set-in-past case.
+
+Solution 1&2: stat() should return the merge of MDS and OST attributes
+only (i.e. lli_lvb & osc_lvb) without inode ones.
+
+Solution 3: stat() will overwrite inode with new attributes, so no
+problem here.
+
+III. Stat() done after modification must return new attributes, even if
+the modification is not sent to OST immediately.
+
+Solution 1: as stat() does not take inode attributes, osc_lvb needs to
+cache new modifications, thus "locked" modification (which takes client
+side locks) must update osc_lvb right on modification. As osc_lvb has
+to keep modification attributes anyway -- solution 1 has no sence
+anymore.
+
+Solution 2 / solution 3: osc_lvb / inode must be updated on "locked"
+modification immediately after taking extent lock, even if client is
+going to cache the change for a while.
+
+IV. Reply from OST with OST attributes must overwrite osc_lvb / inode
+(for solution 2 / 3) IIF the operation has taken a client side [0;eof]
+extent lock for itself.
+
+If client already had [0;eof] lock, it already had a full contol over
+OST attributes and lockless operation should not change it as it could
+be out-of-date.
+
+If client has some not [0;eof] PW lock, due to (III) it may cache the
+modification attributes in osc_lvb / inode and lockless or partially
+locked operations should not overwrite osc_lvb / inode to not lose
+them; the following glimpse will go to OST anyway.
+
+E.g.: there is a dirty cache on client, read->enqueue takes another
+lock, it must not overwrite osc_lvb / inode to let stat() return proper
+attributes later.
+
+Solution 2 / 3: all the lockless (LL) operations must not apply OST
+attributes (obtained in replies) to osc_lvb/inode: getattr, LL setattr,
+LL write, LL punch, LL glimpse;
+
+others must check if they have taken [0;eof] lock: enqueue,write,punch;
+
+V. osc_lvb / inode attributes do not need to be updated when we prepare
+RPC to OST (they were already updated when the modification happened).
+
+Indeed, if client has a partial lock, glimpse will go to OST but will
+not overwrite osc_lvb / inode; if full lock, nobody has changed osc_lvb
+since the modification has taken place.
+
+VI. Several parallel modifications under the same lock (bug=21489)
+
+Client may send some modification in 1 order, server may handle them in
+another, client may get replied in 3rd. Even having [0;eof] lock
+osc_lvb/inode could be modified in wrong order -- not as modifications
+are applied to OST.
+
+Solution 2 / 3: we still need to apply attributes replied from OST to
+osc_lvb / inode, but in the OST transID order.
+
+E.g.: client sends write and set-in-past happens.
+
+Involved OPS: write, setattr, locked punch.
+
+Note, setattr and lockled punch are protected by mutex, so they cannot
+race to each other, whereas write rpc may be sent much later than write
+syscall happened.
+
+In general: solution 2 looks easier to implement. I.e. the proper
+attributes will be stored in lli_lvb & osc_lvb, client inode attributes
+are not used (although could cache new modification attributes, as it
+is already used this way, so it is easier to implement)
+
+Use Cases (describe the worst scenarious we may run into not related to
+solutions described above):
+I.
+1. ls -la on 2 clients
+    extent locks are obtained on clients;
+2. set-in-past
+    we set mtime on all the ost and mds but do not cancel extent locks;
+3. ls -la on 2 clients
+    time must be the same set in past
+II.
+1. write
+    sets new mtime, ctime on OSTs
+2. chmod, rename, link, unlink
+    sets new ctime on MDS
+3. close (may happen before 2)
+    may update some *time attributes on MDS with OST ones.
+4. ls -la
+    must show OST's mtime.
+III.1
+1. client1 writes
+    changes mtime, ctime on osts.
+2. client1 (or client2) sets-in-past within the same second (or not).
+    changes mtime,ctime on MDS,OST
+3. client1 closes (may happen before 2)
+    may update some *time attributes on MDS with OST ones.
+4. client1 does ls -la
+    must show mtime in past.
+III.2
+1. client1 writes
+    changes mtime, ctime on OST
+2. client1 setattrs (or locked punch) from the same client
+    (not necessary in past, under the same extent lock)
+    changes mtime, ctime on OST
+3. client1 write reply
+    updates osc_lvb with writen mtime
+4. client1 setattr reply
+    does not update osc_lvb
+5. client1 does ls -la
+    must show setattr's (punch's) mtime
+IV.1
+1. client1 caches a write (full or partial lock)
+    changes mtime, ctime on OST
+2. client1 glimpses
+    gets OST attributes, puts them to osc_lvb, updates inode with them
+3. ls -la
+    must show write's *time
+IV.2
+1. client1 does setattr-in-past -- enqueue is sent
+2. client1 glimpses -- enqueue is sent
+    gets OST attributes, puts them to osc_lvb, updates inode with them
+3. client1 does setattr-in-past -- setattr is sent
+    client has taken locks on OST, mtime&ctime is updated in inode
+4. glimpses reply
+    no lock, glimpses changes osc_lvb and inode
+3. ls -la
+    must show setattr's *time
+IV.3.
+1. client1 caches data under partial lock
+    changes mtime&ctime on client in inode & osc_lvb
+2. client1 does read under not conflicting lock
+    gets OST attrs in enqueue reply in osc_lvb & inode
+3. client1 writes to OST with wrong data
+    must not lose write attrs
+V.
+1. client1 does ls -la
+    gets MDs & OST attributes
+2. client1 cancels locks
+3. client2 sets-in-past
+4. client1 does ls -la
+    must show time in past, not taken from the inode still cached on
+    client1.
+
+--
+Vitaly
+
+
+From He.Huang at Sun.COM  Mon Feb 15 20:54:09 2010
+From: He.Huang at Sun.COM (Isaac Huang)
+Date: Mon, 15 Feb 2010 23:54:09 -0500
+Subject: [Lustre-devel] Need info on NAL and LNET
+In-Reply-To: <ef958901002022201s5f6353eeg13ba36fb49acf2c3@mail.gmail.com>
+References: <ef958901002022201s5f6353eeg13ba36fb49acf2c3@mail.gmail.com>
+Message-ID: <20100216045409.GA2594@sun.com>
+
+We've recently documented the LNet API in the form of Doxygen
+comments, where you might find some differences from the Sandia
+Portals API:
+https://bugzilla.lustre.org/show_bug.cgi?id=20973
+
+There's also been some discussions on the list about LNet/LND
+interfaces:
+http://www.mail-archive.com/lustre-devel at clusterfs.com/msg00048.html
+(and more if you search through the list)
+
+Isaac
+
+On Wed, Feb 03, 2010 at 01:01:21AM -0500, Vilobh Meshram wrote:
+>    Hi,
+> 
+>    I am looking for some design docs on Network abstraction layer and
+>    LNET.Can you please point me to them?
+> 
+>    Thanks.
+
+> _______________________________________________
+> Lustre-devel mailing list
+> Lustre-devel at lists.lustre.org
+> http://lists.lustre.org/mailman/listinfo/lustre-devel
+
+
+

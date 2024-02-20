@@ -1,0 +1,957 @@
+From eeb at whamcloud.com  Tue Aug  3 22:30:55 2010
+From: eeb at whamcloud.com (Eric Barton)
+Date: Tue, 3 Aug 2010 22:30:55 -0700
+Subject: [Lustre-devel] Lnet routing preferences
+In-Reply-To: <2C7DE72B9BD00F44BAECA5B0CBB87395C3F4A6@hermes.terascala.com>
+References: <2C7DE72B9BD00F44BAECA5B0CBB87395C3F4A6@hermes.terascala.com>
+Message-ID: <007b01cb3396$3ae07290$b0a157b0$@com>
+
+Ben,
+
+> From: lustre-devel-bounces at lists.lustre.org [mailto:lustre-devel-bounces at lists.lustre.org] On Behalf Of Ben Evans
+> Sent: 27 July 2010 11:04 AM
+> 
+> I've been poking around and experimenting with the luster internals
+> on my own, and ran into a question that I haven't been able to track
+> down.
+> 
+
+> For MDS/OSS communications, where there are multiple possible paths
+> (Ethernet, IB, etc.) how does LNET (or Lustre) decide which
+> interface to send messages?
+
+First a bit of explanation...
+
+LNET node addressing is driven by the idea that since an arbitrary
+network topology requires O(n**2) routing tables, it would be good to
+limit the 'n' as much as possible :-)
+
+When Peter Braam and I were discussing how to finesse this issue in
+early implementations of LNET routing, we observed that since Lustre
+is a cluster file system spanning compute clusters, storage clusters
+and mixtures of both, a 2-level addressing scheme which assumes flat
+connectivity within clusters but arbitrary connectivity between
+clusters, limits the 'n' to the number of clusters rather than the
+total number of nodes.  That's why an LNET NID is the concatenation of
+the network and the node-within-network.
+
+Now to your question...
+
+When LNET routes a message, it first checks whether the destination
+NID is in a local network.  If so, it passes the message to the local
+interface on that network.
+
+If the destination is not local, LNET looks up the destination network
+in its route table.  The route table lists all the NIDs of LNET
+routers on local networks that could forward the message to its
+eventual destination with a minimum number of hops.  LNET then chooses
+the router with the shortest queue.
+
+> Ideally, I'd like to send server-to-server messages over a private
+> network and let the clients communicate over the public network
+
+Note that the choice of destination NID is in itself a routing
+decision if there are potentially several to choose from.  For
+example, if I have NIDs x1 at o2ib0 and y1 at tcp0 and you have NIDs
+x2 at 02ib0 and y2 at o2ib0, then whether communications between us are
+routed over o2ib0 or tcp0 is completely determined by the choice of
+NID handed to LNET, not by LNET itself.
+
+So if you want to communicate over a server-only network, you just
+need to use server-only NIDs.
+
+Note however that this requirement may conflict with the desire to do
+link aggregation for performance/failover.  We've been considering
+using NIDs in a way which is much more like conventional IP networks -
+i.e. where the upper levels can specify any destination NID and LNET
+takes a bigger part in the decision about which network to use.
+
+Isaac Huang has been thinking about link aggregation for a while and
+may care to comment on whether he has considered private networks like
+this.
+
+> I'm interested in finding out if there are any gains to be made from
+> a setup like this.
+
+Yes, you could benefit from avoiding any congestion created by client
+communications.
+
+But I must ask - what is it that you want to communicate between
+servers like this and are you sure you're not introducing a scaling or
+deadlock issue?
+
+                Cheers,
+                        Eric
+
+Eric Barton
+CTO Whamcloud Inc.
+
+
+
+
+From marc at llnl.gov  Wed Aug  4 08:24:53 2010
+From: marc at llnl.gov (D. Marc Stearman)
+Date: Wed, 4 Aug 2010 08:24:53 -0700
+Subject: [Lustre-devel] Lnet routing preferences
+In-Reply-To: <007b01cb3396$3ae07290$b0a157b0$@com>
+References: <2C7DE72B9BD00F44BAECA5B0CBB87395C3F4A6@hermes.terascala.com>
+	<007b01cb3396$3ae07290$b0a157b0$@com>
+Message-ID: <43C8BB69-F815-47AD-80D5-028D44098EF7@llnl.gov>
+
+I think what Ben is trying to say is something like this:
+
+You have a small gigabit management network for your server cluster,  
+say tcp0 that would be used just for server to server communication.   
+ie precreate requests from the MDS to the OSS nodes.  You want all of  
+your clients to mount and pass data over your o2ib0 network.   
+Presumably you create your file system with NIDs on both tcp0 and  
+o2ib0.  Clients would mount using mdsnid at o2ib0:/fsname which would  
+force the client traffic to use the IB network since that is all they  
+are connected to.  How does LNET decide which network, tcp0 or o2ib0,  
+to communicate for server traffic.  My understanding is that  
+connections will be setup on both networks since the servers have NIDS  
+on both, so does LNET use the local network with the shortest queue,  
+or does it round robin between them?
+
+-Marc
+
+----
+D. Marc Stearman
+Lustre Operations Lead
+marc at llnl.gov
+925.423.9670
+Pager: 1.888.203.0641
+
+
+
+
+On Aug 3, 2010, at 10:30 PM, Eric Barton wrote:
+
+> Ben,
+>
+>> From: lustre-devel-bounces at lists.lustre.org [mailto:lustre-devel-bounces at lists.lustre.org 
+>> ] On Behalf Of Ben Evans
+>> Sent: 27 July 2010 11:04 AM
+>>
+>> I've been poking around and experimenting with the luster internals
+>> on my own, and ran into a question that I haven't been able to track
+>> down.
+>>
+>
+>> For MDS/OSS communications, where there are multiple possible paths
+>> (Ethernet, IB, etc.) how does LNET (or Lustre) decide which
+>> interface to send messages?
+>
+> First a bit of explanation...
+>
+> LNET node addressing is driven by the idea that since an arbitrary
+> network topology requires O(n**2) routing tables, it would be good to
+> limit the 'n' as much as possible :-)
+>
+> When Peter Braam and I were discussing how to finesse this issue in
+> early implementations of LNET routing, we observed that since Lustre
+> is a cluster file system spanning compute clusters, storage clusters
+> and mixtures of both, a 2-level addressing scheme which assumes flat
+> connectivity within clusters but arbitrary connectivity between
+> clusters, limits the 'n' to the number of clusters rather than the
+> total number of nodes.  That's why an LNET NID is the concatenation of
+> the network and the node-within-network.
+>
+> Now to your question...
+>
+> When LNET routes a message, it first checks whether the destination
+> NID is in a local network.  If so, it passes the message to the local
+> interface on that network.
+>
+> If the destination is not local, LNET looks up the destination network
+> in its route table.  The route table lists all the NIDs of LNET
+> routers on local networks that could forward the message to its
+> eventual destination with a minimum number of hops.  LNET then chooses
+> the router with the shortest queue.
+>
+>> Ideally, I'd like to send server-to-server messages over a private
+>> network and let the clients communicate over the public network
+>
+> Note that the choice of destination NID is in itself a routing
+> decision if there are potentially several to choose from.  For
+> example, if I have NIDs x1 at o2ib0 and y1 at tcp0 and you have NIDs
+> x2 at 02ib0 and y2 at o2ib0, then whether communications between us are
+> routed over o2ib0 or tcp0 is completely determined by the choice of
+> NID handed to LNET, not by LNET itself.
+>
+> So if you want to communicate over a server-only network, you just
+> need to use server-only NIDs.
+>
+> Note however that this requirement may conflict with the desire to do
+> link aggregation for performance/failover.  We've been considering
+> using NIDs in a way which is much more like conventional IP networks -
+> i.e. where the upper levels can specify any destination NID and LNET
+> takes a bigger part in the decision about which network to use.
+>
+> Isaac Huang has been thinking about link aggregation for a while and
+> may care to comment on whether he has considered private networks like
+> this.
+>
+>> I'm interested in finding out if there are any gains to be made from
+>> a setup like this.
+>
+> Yes, you could benefit from avoiding any congestion created by client
+> communications.
+>
+> But I must ask - what is it that you want to communicate between
+> servers like this and are you sure you're not introducing a scaling or
+> deadlock issue?
+>
+>                Cheers,
+>                        Eric
+>
+> Eric Barton
+> CTO Whamcloud Inc.
+>
+>
+> _______________________________________________
+> Lustre-devel mailing list
+> Lustre-devel at lists.lustre.org
+> http://*lists.lustre.org/mailman/listinfo/lustre-devel
+>
+
+
+
+From marc at llnl.gov  Wed Aug  4 08:41:43 2010
+From: marc at llnl.gov (D. Marc Stearman)
+Date: Wed, 4 Aug 2010 08:41:43 -0700
+Subject: [Lustre-devel] Lnet routing preferences
+In-Reply-To: <2C7DE72B9BD00F44BAECA5B0CBB87395CD80B0@hermes.terascala.com>
+References: <2C7DE72B9BD00F44BAECA5B0CBB87395C3F4A6@hermes.terascala.com>
+	<007b01cb3396$3ae07290$b0a157b0$@com>
+	<43C8BB69-F815-47AD-80D5-028D44098EF7@llnl.gov>
+	<2C7DE72B9BD00F44BAECA5B0CBB87395CD80B0@hermes.terascala.com>
+Message-ID: <AAF5E082-14D3-474A-A9AF-0EB92E04C171@llnl.gov>
+
+Right, so you would want to create your file system (or modify via  
+tunefs.lustre) to put the management network's NIDs as the first -- 
+params.  I don't think it will avoid all traffic going over the o2ib0,  
+but perhaps minimize it.
+
+-Marc
+
+----
+D. Marc Stearman
+Lustre Operations Lead
+marc at llnl.gov
+925.423.9670
+Pager: 1.888.203.0641
+
+
+
+
+On Aug 4, 2010, at 8:39 AM, Ben Evans wrote:
+
+> Yes, this is exactly what I'm looking at.  From the hints that Eric
+> provided, and from my digging, it looks like there is a quick check to
+> see which connection has the shortest queue (along with the number of
+> hops and a few other things) and uses that one.  If they're equal it
+> prefers the first connection in the list.
+>
+> -----Original Message-----
+> From: D. Marc Stearman [mailto:marc at llnl.gov]
+> Sent: Wednesday, August 04, 2010 11:25 AM
+> To: Eric Barton
+> Cc: Ben Evans; 'lustre-devel'
+> Subject: Re: [Lustre-devel] Lnet routing preferences
+>
+> I think what Ben is trying to say is something like this:
+>
+> You have a small gigabit management network for your server cluster,
+> say tcp0 that would be used just for server to server communication.
+> ie precreate requests from the MDS to the OSS nodes.  You want all of
+> your clients to mount and pass data over your o2ib0 network.
+> Presumably you create your file system with NIDs on both tcp0 and
+> o2ib0.  Clients would mount using mdsnid at o2ib0:/fsname which would
+> force the client traffic to use the IB network since that is all they
+> are connected to.  How does LNET decide which network, tcp0 or o2ib0,
+> to communicate for server traffic.  My understanding is that
+> connections will be setup on both networks since the servers have NIDS
+> on both, so does LNET use the local network with the shortest queue,
+> or does it round robin between them?
+>
+> -Marc
+>
+> ----
+> D. Marc Stearman
+> Lustre Operations Lead
+> marc at llnl.gov
+> 925.423.9670
+> Pager: 1.888.203.0641
+>
+>
+>
+>
+> On Aug 3, 2010, at 10:30 PM, Eric Barton wrote:
+>
+>> Ben,
+>>
+>>> From: lustre-devel-bounces at lists.lustre.org
+> [mailto:lustre-devel-bounces at lists.lustre.org
+>>> ] On Behalf Of Ben Evans
+>>> Sent: 27 July 2010 11:04 AM
+>>>
+>>> I've been poking around and experimenting with the luster internals
+>>> on my own, and ran into a question that I haven't been able to track
+>>> down.
+>>>
+>>
+>>> For MDS/OSS communications, where there are multiple possible paths
+>>> (Ethernet, IB, etc.) how does LNET (or Lustre) decide which
+>>> interface to send messages?
+>>
+>> First a bit of explanation...
+>>
+>> LNET node addressing is driven by the idea that since an arbitrary
+>> network topology requires O(n**2) routing tables, it would be good to
+>> limit the 'n' as much as possible :-)
+>>
+>> When Peter Braam and I were discussing how to finesse this issue in
+>> early implementations of LNET routing, we observed that since Lustre
+>> is a cluster file system spanning compute clusters, storage clusters
+>> and mixtures of both, a 2-level addressing scheme which assumes flat
+>> connectivity within clusters but arbitrary connectivity between
+>> clusters, limits the 'n' to the number of clusters rather than the
+>> total number of nodes.  That's why an LNET NID is the concatenation  
+>> of
+>> the network and the node-within-network.
+>>
+>> Now to your question...
+>>
+>> When LNET routes a message, it first checks whether the destination
+>> NID is in a local network.  If so, it passes the message to the local
+>> interface on that network.
+>>
+>> If the destination is not local, LNET looks up the destination  
+>> network
+>> in its route table.  The route table lists all the NIDs of LNET
+>> routers on local networks that could forward the message to its
+>> eventual destination with a minimum number of hops.  LNET then  
+>> chooses
+>> the router with the shortest queue.
+>>
+>>> Ideally, I'd like to send server-to-server messages over a private
+>>> network and let the clients communicate over the public network
+>>
+>> Note that the choice of destination NID is in itself a routing
+>> decision if there are potentially several to choose from.  For
+>> example, if I have NIDs x1 at o2ib0 and y1 at tcp0 and you have NIDs
+>> x2 at 02ib0 and y2 at o2ib0, then whether communications between us are
+>> routed over o2ib0 or tcp0 is completely determined by the choice of
+>> NID handed to LNET, not by LNET itself.
+>>
+>> So if you want to communicate over a server-only network, you just
+>> need to use server-only NIDs.
+>>
+>> Note however that this requirement may conflict with the desire to do
+>> link aggregation for performance/failover.  We've been considering
+>> using NIDs in a way which is much more like conventional IP  
+>> networks -
+>> i.e. where the upper levels can specify any destination NID and LNET
+>> takes a bigger part in the decision about which network to use.
+>>
+>> Isaac Huang has been thinking about link aggregation for a while and
+>> may care to comment on whether he has considered private networks  
+>> like
+>> this.
+>>
+>>> I'm interested in finding out if there are any gains to be made from
+>>> a setup like this.
+>>
+>> Yes, you could benefit from avoiding any congestion created by client
+>> communications.
+>>
+>> But I must ask - what is it that you want to communicate between
+>> servers like this and are you sure you're not introducing a scaling  
+>> or
+>> deadlock issue?
+>>
+>>               Cheers,
+>>                       Eric
+>>
+>> Eric Barton
+>> CTO Whamcloud Inc.
+>>
+>>
+>> _______________________________________________
+>> Lustre-devel mailing list
+>> Lustre-devel at lists.lustre.org
+>> http://**lists.lustre.org/mailman/listinfo/lustre-devel
+>>
+>
+>
+
+
+
+From Ben.Evans at terascala.com  Wed Aug  4 08:39:24 2010
+From: Ben.Evans at terascala.com (Ben Evans)
+Date: Wed, 4 Aug 2010 11:39:24 -0400
+Subject: [Lustre-devel] Lnet routing preferences
+In-Reply-To: <43C8BB69-F815-47AD-80D5-028D44098EF7@llnl.gov>
+References: <2C7DE72B9BD00F44BAECA5B0CBB87395C3F4A6@hermes.terascala.com>
+	<007b01cb3396$3ae07290$b0a157b0$@com>
+	<43C8BB69-F815-47AD-80D5-028D44098EF7@llnl.gov>
+Message-ID: <2C7DE72B9BD00F44BAECA5B0CBB87395CD80B0@hermes.terascala.com>
+
+Yes, this is exactly what I'm looking at.  From the hints that Eric
+provided, and from my digging, it looks like there is a quick check to
+see which connection has the shortest queue (along with the number of
+hops and a few other things) and uses that one.  If they're equal it
+prefers the first connection in the list.
+
+-----Original Message-----
+From: D. Marc Stearman [mailto:marc at llnl.gov] 
+Sent: Wednesday, August 04, 2010 11:25 AM
+To: Eric Barton
+Cc: Ben Evans; 'lustre-devel'
+Subject: Re: [Lustre-devel] Lnet routing preferences
+
+I think what Ben is trying to say is something like this:
+
+You have a small gigabit management network for your server cluster,  
+say tcp0 that would be used just for server to server communication.   
+ie precreate requests from the MDS to the OSS nodes.  You want all of  
+your clients to mount and pass data over your o2ib0 network.   
+Presumably you create your file system with NIDs on both tcp0 and  
+o2ib0.  Clients would mount using mdsnid at o2ib0:/fsname which would  
+force the client traffic to use the IB network since that is all they  
+are connected to.  How does LNET decide which network, tcp0 or o2ib0,  
+to communicate for server traffic.  My understanding is that  
+connections will be setup on both networks since the servers have NIDS  
+on both, so does LNET use the local network with the shortest queue,  
+or does it round robin between them?
+
+-Marc
+
+----
+D. Marc Stearman
+Lustre Operations Lead
+marc at llnl.gov
+925.423.9670
+Pager: 1.888.203.0641
+
+
+
+
+On Aug 3, 2010, at 10:30 PM, Eric Barton wrote:
+
+> Ben,
+>
+>> From: lustre-devel-bounces at lists.lustre.org
+[mailto:lustre-devel-bounces at lists.lustre.org 
+>> ] On Behalf Of Ben Evans
+>> Sent: 27 July 2010 11:04 AM
+>>
+>> I've been poking around and experimenting with the luster internals
+>> on my own, and ran into a question that I haven't been able to track
+>> down.
+>>
+>
+>> For MDS/OSS communications, where there are multiple possible paths
+>> (Ethernet, IB, etc.) how does LNET (or Lustre) decide which
+>> interface to send messages?
+>
+> First a bit of explanation...
+>
+> LNET node addressing is driven by the idea that since an arbitrary
+> network topology requires O(n**2) routing tables, it would be good to
+> limit the 'n' as much as possible :-)
+>
+> When Peter Braam and I were discussing how to finesse this issue in
+> early implementations of LNET routing, we observed that since Lustre
+> is a cluster file system spanning compute clusters, storage clusters
+> and mixtures of both, a 2-level addressing scheme which assumes flat
+> connectivity within clusters but arbitrary connectivity between
+> clusters, limits the 'n' to the number of clusters rather than the
+> total number of nodes.  That's why an LNET NID is the concatenation of
+> the network and the node-within-network.
+>
+> Now to your question...
+>
+> When LNET routes a message, it first checks whether the destination
+> NID is in a local network.  If so, it passes the message to the local
+> interface on that network.
+>
+> If the destination is not local, LNET looks up the destination network
+> in its route table.  The route table lists all the NIDs of LNET
+> routers on local networks that could forward the message to its
+> eventual destination with a minimum number of hops.  LNET then chooses
+> the router with the shortest queue.
+>
+>> Ideally, I'd like to send server-to-server messages over a private
+>> network and let the clients communicate over the public network
+>
+> Note that the choice of destination NID is in itself a routing
+> decision if there are potentially several to choose from.  For
+> example, if I have NIDs x1 at o2ib0 and y1 at tcp0 and you have NIDs
+> x2 at 02ib0 and y2 at o2ib0, then whether communications between us are
+> routed over o2ib0 or tcp0 is completely determined by the choice of
+> NID handed to LNET, not by LNET itself.
+>
+> So if you want to communicate over a server-only network, you just
+> need to use server-only NIDs.
+>
+> Note however that this requirement may conflict with the desire to do
+> link aggregation for performance/failover.  We've been considering
+> using NIDs in a way which is much more like conventional IP networks -
+> i.e. where the upper levels can specify any destination NID and LNET
+> takes a bigger part in the decision about which network to use.
+>
+> Isaac Huang has been thinking about link aggregation for a while and
+> may care to comment on whether he has considered private networks like
+> this.
+>
+>> I'm interested in finding out if there are any gains to be made from
+>> a setup like this.
+>
+> Yes, you could benefit from avoiding any congestion created by client
+> communications.
+>
+> But I must ask - what is it that you want to communicate between
+> servers like this and are you sure you're not introducing a scaling or
+> deadlock issue?
+>
+>                Cheers,
+>                        Eric
+>
+> Eric Barton
+> CTO Whamcloud Inc.
+>
+>
+> _______________________________________________
+> Lustre-devel mailing list
+> Lustre-devel at lists.lustre.org
+> http://*lists.lustre.org/mailman/listinfo/lustre-devel
+>
+
+
+
+From peter.braam at gmail.com  Mon Aug  9 16:40:05 2010
+From: peter.braam at gmail.com (Peter J. Braam)
+Date: Mon, 9 Aug 2010 17:40:05 -0600
+Subject: [Lustre-devel] International Lustre Foundation
+Message-ID: <AANLkTimQmQEfML0brF-FvaenD4LA=Tn_cfN+VOj-qx-y@mail.gmail.com>
+
+Dear Lustre Developers & Users,
+
+ It is with great pleasure that we write to tell you that the High
+Performance Cluster File Systems Software Foundation (HPCFS Software
+Foundation) has been incorporated in the United States. Oracle is being
+invited to become a member of the Foundation and to grant the originating
+foundation permission to do business as the ?Lustre Foundation?.
+
+HPCFS is also creating a UK affiliate foundation in order to have a
+non-profit affiliate in the European Union.
+
+The originating US foundation, by collaboration amongst all future members,
+is set up to provide the forum for sharing requirements, experience with
+deployment and use, education and training, a single integrated software
+repository and development tree, quality assurance and testing
+infrastructure, and a single point of worldwide approved software release
+and documentation distribution for the GPL Lustre File System, as does the
+Open Fabrics Alliance (OFA) for its OFED software.
+
+The OFA has enabled the vendor and customer communities to collaborate in
+evolving the interconnect software for HPC from a highly fragmented to a
+unified software approach.  We have every reason to believe that HPCFS will
+have a similar successful trajectory as the IP, patent and collaborative
+working and voting relationships that work in OFA have been replicated in
+the originating foundation bylaws. Initiation and annual dues are intended
+to be modest ($10,000 and less), After the first year, Board members will be
+elected by the members annually.
+
+The foundation does not intend to deliver development or support services
+itself, to avoid competition with established vendors that perform these
+services as part of their business operations.  Instead, it will be a forum
+for collaboration among such vendors and the Lustre user community.
+
+The HPCFS was formed as a result of the discussions initiated in by Prof.
+Thomas Lippert in Juelich concerning the availability of Open Lustre
+Support. An initial approach to the formation of a Lustre Foundation was
+presented there. Since then the foundation initiative has received
+overwhelmingly positive reactions from many government and industrial
+organizations, including support from Lustre leadership at Oracle Inc, who
+is the copyright holder of the Lustre code and the owner of the trademark.
+
+After much discussion with Oracle and many others, and leveraging the OFA
+experience, the foundation has been incorporated and it will apply for IRS
+501(c) 3 tax exemption for its activities/operations.
+
+There are two ways the originating foundation can work internationally:-
+
+  1) The originating foundation can accept memberships from vendors,
+government, academic institutions and individuals living and working
+anywhere in the world, or
+
+  2) The foundation is also set up to work with affiliate member foundations
+in other countries or regions, which can be formed to represent their
+interest and collectively inter-operate with the originating foundation.
+ Each affiliate can work with any entity in their locality to achieve its
+own self interest as well as participate in the originating foundation.
+
+We are inviting you to become an early member of the Foundation by filling
+out and returning the attached Memorandum of Intent.
+
+During the coming months this initial Board of Directors, together with Bill
+Boas who intends to act as Acting-Executive Director, will finalize the
+bylaws and will form Working Groups in charge of collaboratively setting up
+and managing the Foundations work.
+
+Examples of the functions of such working groups might be - Requirements,
+File Systems Architecture, Engineering, Testing and Quality Assurance, Bug
+Tracking and Sustaining Engineering, Marketing and Promotion, Documentation
+and Discussion, Education and Training.
+
+The Board will be searching for and recruiting volunteers from members who
+agree to chair, contribute and participate in these working groups. We
+anticipate coming together in Europe in early September and intend to have a
+full face-to-face meeting of the members in the SC10 timeframe in New
+Orleans in mid November.
+
+We look forward to working with you. Please complete and return the
+memorandum of intent indicating your interest in joining, contributing and
+participating in the Foundation.
+
+Thank you,
+
+ Regards,
+
+Bill Boas
+
+Peter Braam
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20100809/a4f29ed4/attachment.htm>
+-------------- next part --------------
+A non-text attachment was scrubbed...
+Name: HPCFS Memo of Intent, membership and Sponsorship.doc
+Type: application/msword
+Size: 32768 bytes
+Desc: not available
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20100809/a4f29ed4/attachment.doc>
+
+From kenh at cmf.nrl.navy.mil  Thu Aug 12 12:12:36 2010
+From: kenh at cmf.nrl.navy.mil (Ken Hornstein)
+Date: Thu, 12 Aug 2010 15:12:36 -0400
+Subject: [Lustre-devel] Caching the root directory
+Message-ID: <201008121912.o7CJCauK006951@hedwig.cmf.nrl.navy.mil>
+
+So, with a not inconsiderable amount of pain, I've got attribute caching
+working on the Mac client.  Hooray!
+
+But there is one wrinkle that bugs me: I can't figure out how to cache any
+information off of the root directory of a filesystem.
+
+In MacOS X (and from what I can tell, most vnode-derived systems), you
+never get a "lookup" call for the root node in your filesystem; it's
+managed by the operating system, and when you traverse a mountpoint the
+operating system then just substitutes "your" root node for the root
+directory (there's a special function just to fetch the root node information).
+
+The whole setup works out that you never end up with a lookup for the
+root node (the filesystem path is cached so when you would look up "."
+in the root directory, it ends up just back at the root node again
+without a lookup call).  And now that I think about it, I'm not sure
+how you could even do that, since one of the arguments to the lookup
+RPC is the parent directory and what do you put in for that for the
+root node?
+
+Obviously I can still fetch the directory attributes when the OS asks for
+it, but in a perfect world I'd cache that information.  I've looked at the
+Linux client, but it's not clear what happens in the root node case.
+Can someone shed some light on this?  Does Linux cache the root node
+attribute information?  If so, how does it do that?
+
+--Ken
+
+
+From vilobh.meshram at gmail.com  Thu Aug 12 13:48:27 2010
+From: vilobh.meshram at gmail.com (Vilobh Meshram)
+Date: Thu, 12 Aug 2010 16:48:27 -0400
+Subject: [Lustre-devel] Lustre Message Sending/Receiving Problems
+Message-ID: <AANLkTi=HyT-QKEeQ5h_Jx8wb6t=ox7gmg9Lb13RhPtFY@mail.gmail.com>
+
+I want to understand the message encoding and decoding logic in Lustre.I am
+planning to send the lustre_msg (lustre_msg_v2) in the ptlrpc_request with
+some additional fields to the server (MDS). But when I add those fields I
+was not able to see their values at the Server end i.e MDS.For example say
+we now have 8 values + the variable size buffer which might be able to
+include the additional entries.So I want to add some additional entries to
+the variable part of the message.
+
+If you can please give me some insight on the way the Lustre File system
+encodes decodes the messages sent accross nodes it would be helpful.I have
+traced down the following code path  and see that inorder to send the
+message we need only three steps :-
+ptlrpc_prep_req
+ptlrpc_req_set_repsize
+ptlrpc_queue_wait
+
+Do I need to take into consideration any other things ?
+Any help in this regard will be highly useful.
+
+Thanks,
+Vilobh
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20100812/faa31e96/attachment.htm>
+
+From andreas.dilger at oracle.com  Thu Aug 12 14:28:04 2010
+From: andreas.dilger at oracle.com (Andreas Dilger)
+Date: Thu, 12 Aug 2010 15:28:04 -0600
+Subject: [Lustre-devel] Caching the root directory
+In-Reply-To: <201008121912.o7CJCauK006951@hedwig.cmf.nrl.navy.mil>
+References: <201008121912.o7CJCauK006951@hedwig.cmf.nrl.navy.mil>
+Message-ID: <2E548D41-3270-4898-8482-06D813088AED@oracle.com>
+
+On 2010-08-12, at 13:12, Ken Hornstein wrote:
+> So, with a not inconsiderable amount of pain, I've got attribute caching
+> working on the Mac client.  Hooray!
+
+Yay.
+
+> But there is one wrinkle that bugs me: I can't figure out how to cache any
+> information off of the root directory of a filesystem.
+> 
+> In MacOS X (and from what I can tell, most vnode-derived systems), you
+> never get a "lookup" call for the root node in your filesystem; it's
+> managed by the operating system, and when you traverse a mountpoint the
+> operating system then just substitutes "your" root node for the root
+> directory (there's a special function just to fetch the root node information).
+
+I believe the Linux VFS will call revalidate on the root inode as part of the path traversal, so that it can present correct information for that inode.  See, for example, ll_inode_revalidate_it().
+
+> The whole setup works out that you never end up with a lookup for the
+> root node (the filesystem path is cached so when you would look up "."
+> in the root directory, it ends up just back at the root node again
+> without a lookup call).  And now that I think about it, I'm not sure
+> how you could even do that, since one of the arguments to the lookup
+> RPC is the parent directory and what do you put in for that for the
+> root node?
+
+Just leave it blank.
+
+> Obviously I can still fetch the directory attributes when the OS asks for
+> it, but in a perfect world I'd cache that information.  I've looked at the
+> Linux client, but it's not clear what happens in the root node case.
+> Can someone shed some light on this?  Does Linux cache the root node
+> attribute information?  If so, how does it do that?
+
+Caching the entries in the root directory is important, since they are traversed all the time, and also change very rarely.
+
+Cheers, Andreas
+--
+Andreas Dilger
+Lustre Technical Lead
+Oracle Corporation Canada Inc.
+
+
+
+From kenh at cmf.nrl.navy.mil  Thu Aug 12 17:37:20 2010
+From: kenh at cmf.nrl.navy.mil (Ken Hornstein)
+Date: Thu, 12 Aug 2010 20:37:20 -0400
+Subject: [Lustre-devel] Caching the root directory
+In-Reply-To: <2E548D41-3270-4898-8482-06D813088AED@oracle.com>
+Message-ID: <201008130037.o7D0bLYh010763@hedwig.cmf.nrl.navy.mil>
+
+>> The whole setup works out that you never end up with a lookup for the
+>> root node (the filesystem path is cached so when you would look up "."
+>> in the root directory, it ends up just back at the root node again
+>> without a lookup call).  And now that I think about it, I'm not sure
+>> how you could even do that, since one of the arguments to the lookup
+>> RPC is the parent directory and what do you put in for that for the
+>> root node?
+>
+>Just leave it blank.
+
+Hrm.  I'm not sure that will work.
+
+Obviously I can call md_getattr() with just the fid of the root directory;
+that's what is done now if no cached data exists.  But even if CONNECT_ATTRFID
+was supported (which it currently is NOT, as we've discussed previously),
+you need the parent FID in there, because if you DON'T provide it, the
+server will throw an LBUG (which, okay, we all know is a bug, but it's
+still clear that the parent fid needs to be there).
+
+In the case of md_intent_lock() .... hmmm.  I see in ll_revalidate_it()
+that mountpoints are explicitly skipped (and the attributes are fixed up
+in ll_inode_revalidate_it(), which from what I see unless there is a lock
+already, you don't get a new one).  Does d_mountpoint(de) apply to the
+root node?
+
+>From what I can read ... ll_prep_md_op_data() pretty much requires that
+the first argument (the parent inode) needs to be filled in.  The server
+gets a little complicated to follow, but I do see that the server does:
+
+	rc = mdt_object_exists(parent);
+
+inside of mdt_getattr_name_lock().  Which sure would imply to me that things
+are going to be unhappy if you don't supply a parent node.
+
+>Caching the entries in the root directory is important, since they are
+>traversed all the time, and also change very rarely.
+
+Right, I haven't yet gotten to caching the directory pages yet, and everything
+_from_ the root directory down is fine .. it's just the root itself I can't
+quite figure out how to cache the attributes :-/
+
+--Ken
+
+
+From alexey.lyashkov at clusterstor.com  Fri Aug 13 09:51:02 2010
+From: alexey.lyashkov at clusterstor.com (Alexey Lyashkov)
+Date: Fri, 13 Aug 2010 19:51:02 +0300
+Subject: [Lustre-devel] [Lustre-discuss] Lustre Message
+	Sending/Receiving Problems
+In-Reply-To: <AANLkTi=HyT-QKEeQ5h_Jx8wb6t=ox7gmg9Lb13RhPtFY@mail.gmail.com>
+References: <AANLkTi=HyT-QKEeQ5h_Jx8wb6t=ox7gmg9Lb13RhPtFY@mail.gmail.com>
+Message-ID: <D7F3EE2D-0724-47DD-A936-F5CCD60A3888@clusterstor.com>
+
+Hi,
+
+i think you say about lustre 1.8 ptlrpc API ?
+look into ldlm_cli_convert, that good example of using that API.
+for first you must declare sending buffer via ptlrpc_prep_req,
+second, you must declare reply buffer via ptlrpc_req_set_repsize,
+if you want synchronous request processing you should use ptlrpc_queue_wait,
+if you want async request processing, use should assing async completion callback and add into ptlrpcd processing queue via ptlrpcd_add_req.
+
+
+On Aug 12, 2010, at 23:48, Vilobh Meshram wrote:
+
+> 
+> I want to understand the message encoding and decoding logic in Lustre.I am planning to send the lustre_msg (lustre_msg_v2) in the ptlrpc_request with some additional fields to the server (MDS). But when I add those fields I was not able to see their values at the Server end i.e MDS.For example say we now have 8 values + the variable size buffer which might be able to include the additional entries.So I want to add some additional entries to the variable part of the message.
+> 
+> If you can please give me some insight on the way the Lustre File system encodes decodes the messages sent accross nodes it would be helpful.I have traced down the following code path  and see that inorder to send the message we need only three steps :-
+> ptlrpc_prep_req
+> ptlrpc_req_set_repsize
+> ptlrpc_queue_wait
+> 
+> Do I need to take into consideration any other things ?
+> Any help in this regard will be highly useful.
+> 
+> Thanks,
+> Vilobh
+> _______________________________________________
+> Lustre-discuss mailing list
+> Lustre-discuss at lists.lustre.org
+> http://lists.lustre.org/mailman/listinfo/lustre-discuss
+
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20100813/5b0b61a0/attachment.htm>
+
+From alexey.lyashkov at clusterstor.com  Sat Aug 14 01:19:32 2010
+From: alexey.lyashkov at clusterstor.com (Alexey Lyashkov)
+Date: Sat, 14 Aug 2010 11:19:32 +0300
+Subject: [Lustre-devel] Caching the root directory
+In-Reply-To: <201008121912.o7CJCauK006951@hedwig.cmf.nrl.navy.mil>
+References: <201008121912.o7CJCauK006951@hedwig.cmf.nrl.navy.mil>
+Message-ID: <BBB6342B-87C9-44DF-830C-4F1FB9E73DC9@clusterstor.com>
+
+Hi Ken,
+
+I hope attached patches will help in your's work.
+two patches resolve some performance degradation with access to dentry.
+and one patch avoid sending two extra RPC when client want access to LOV EA,
+that strickly need you use use lustre reexport to SMB network, because samba ask xattr for each directory entry when do listing.
+
+-------------- next part --------------
+A non-text attachment was scrubbed...
+Name: generate-lovea.diff
+Type: application/octet-stream
+Size: 2538 bytes
+Desc: not available
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20100814/ad013a72/attachment.obj>
+-------------- next part --------------
+A non-text attachment was scrubbed...
+Name: xattr-interop-1.8.diff
+Type: application/octet-stream
+Size: 2187 bytes
+Desc: not available
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20100814/ad013a72/attachment-0001.obj>
+-------------- next part --------------
+A non-text attachment was scrubbed...
+Name: xattr-interop-HEAD.diff
+Type: application/octet-stream
+Size: 1322 bytes
+Desc: not available
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20100814/ad013a72/attachment-0002.obj>
+-------------- next part --------------
+
+
+From oleg.drokin at oracle.com  Sun Aug 15 23:44:51 2010
+From: oleg.drokin at oracle.com (Oleg Drokin)
+Date: Mon, 16 Aug 2010 02:44:51 -0400
+Subject: [Lustre-devel] Caching the root directory
+In-Reply-To: <201008130037.o7D0bLYh010763@hedwig.cmf.nrl.navy.mil>
+References: <201008130037.o7D0bLYh010763@hedwig.cmf.nrl.navy.mil>
+Message-ID: <1A6F49A5-1714-4B7F-A960-B6D1092EEBDE@oracle.com>
+
+Hello!
+
+On Aug 12, 2010, at 8:37 PM, Ken Hornstein wrote:
+
+> In the case of md_intent_lock() .... hmmm.  I see in ll_revalidate_it()
+> that mountpoints are explicitly skipped (and the attributes are fixed up
+> in ll_inode_revalidate_it(), which from what I see unless there is a lock
+> already, you don't get a new one).  Does d_mountpoint(de) apply to the
+> root node?
+
+No, d_mountpoint() applies to a dentry on some filesystem where something is
+mounted.
+Mountpoints are skipped just because there is no point in looking at their attrs,
+the attrs should come from the underlying fs mounted below.
+
+> 
+>> From what I can read ... ll_prep_md_op_data() pretty much requires that
+> the first argument (the parent inode) needs to be filled in.  The server
+> gets a little complicated to follow, but I do see that the server does:
+> 
+> 	rc = mdt_object_exists(parent);
+> 
+> inside of mdt_getattr_name_lock().  Which sure would imply to me that things
+> are going to be unhappy if you don't supply a parent node.
+
+Well, there is a simple rule for a root of the fs. The rule says
+the parent of the root inode is the root inode.
+
+Besides, when you do getattr by fid (which you do from ll_inode_revalidate),
+you don't have parent anyway, so you onl supply child inode information.
+
+Bye,
+    Oleg
+
+From kenh at cmf.nrl.navy.mil  Mon Aug 16 08:13:32 2010
+From: kenh at cmf.nrl.navy.mil (Ken Hornstein)
+Date: Mon, 16 Aug 2010 11:13:32 -0400
+Subject: [Lustre-devel] Caching the root directory
+In-Reply-To: <1A6F49A5-1714-4B7F-A960-B6D1092EEBDE@oracle.com>
+Message-ID: <201008161513.o7GFDWbe023712@hedwig.cmf.nrl.navy.mil>
+
+>Well, there is a simple rule for a root of the fs. The rule says
+>the parent of the root inode is the root inode.
+
+Hm, I had just tried that, but it didn't seem to work; I'll have to see
+what's going on there.
+
+>Besides, when you do getattr by fid (which you do from ll_inode_revalidate),
+>you don't have parent anyway, so you onl supply child inode information.
+
+Well, if you just call md_getattr(), yes, you can do that with just the
+FID in question; that works fine, and I do that now.  But if you want
+to get a lock so you can cache the attributes using md_intent_lock(),
+then you DEFINITELY need the parent fid; I learned the hard way that if
+you don't include it then the server will throw an LBUG().  This is
+presuming you ignore the server's indication of the lack of support for
+CONNECT_ATTRFID (see previous thread, but the short deal is that it
+was disabled somewhere between 1.8 and 2.0).
+
+--Ken
+
+

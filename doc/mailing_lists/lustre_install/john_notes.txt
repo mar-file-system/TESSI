@@ -1,0 +1,99 @@
+Brian installed CentOS 8.2 brand-new on in16.
+
+Got an error with the AppStream yum repo so ChatGPT helped me make a few changes:
+In /etc/yum.repos.d/CentOS-Linux-BaseOS.repo, I did this:
+#mirrorlist=http://mirrorlist.centos.org/?release=$releasever&arch=$basearch&repo=BaseOS&infra=$infra
+baseurl=http://vault.centos.org/$contentdir/$releasever/BaseOS/$basearch/os/
+
+And in /etc/yum.repos.d/CentOS-Linux-AppStream.repo, I did this:
+#mirrorlist=http://mirrorlist.centos.org/?release=$releasever&arch=$basearch&repo=AppStream&infra=$infra
+baseurl=http://vault.centos.org/$contentdir/$releasever/AppStream/$basearch/os/
+
+I was able to upgrade the kernel very easily:
+> sudo yum install kernel-4.18.0-348.el8
+> sudo grub2-mkconfig -o /boot/grub2/grub.cfg
+> sudo reboot
+
+# then you might want to install ansible and ansible is weird with python3.6
+# on in15, I was able to somehow install ansible with python3.6
+
+Now I am thinking I want to try to do this in QEMU/KVM to make it easier
+to be reproducible.
+
+Following these instructions:
+https://phoenixnap.com/kb/install-kvm-centos
+> sudo yum update
+> sudo yum install @virt
+> sudo systemctl enable --now libvirtd
+> sudo yum -y install virt-top libguestfs-tools
+> Then run this https://gitlab.newmexicoconsortium.org/jbent/tassi/-/blob/main/scripts/set_bridge.sh for the bridge stuff
+> might also need: sudo dnf install virt-install
+> then you can install vm's 
+
+For easier host-resolution:
+> sudo dnf install libvirt-nss
+Edit /etc/nsswitch.conf to change the hosts: line to add libvirt libvirt_guest
+Test with getent hosts [domain_name]
+
+Then the default location for /var/lib/libvirt is in a small disk partition. So do this:
+> sudo mkdir /home/libvirt
+> sudo mv /var/lib/libvirt/images /home/libvirt
+> sudo ln -s /home/libvirt/images/ /var/lib/libvirt/
+
+Now I'm trying to use the freshinstall VM image to set it up to be a base Lustre image using these instructions:
+https://gitlab.newmexicoconsortium.org/jbent/tassi/-/blob/main/doc/lustre_install/lustre_vm.pdf
+
+On the host node, we need to set up a new network.
+
+# this stuff is networking for the guest
+> dnf install network-scripts
+> systemctl disable firewalld
+> vi /etc/selinux/config # set SELINUX=disabled
+> systemctl enable network
+> systemctl start network
+> ip link # to figure out what is the network name
+> vi /etc/sysconfig/network-scripts/ifcfg-enp1s0
+    ONBOOT=yes
+    PREFIX=24
+    IPADDR=192.168.122.101
+    BOOTPROTO=none
+> systemctl disable networkd
+> hostnamectl set-hostname lustrebase
+> reboot
+> systemctl status firewalld
+> systemctl is-enabled network
+> sestatus
+> 
+
+Problem is that the host is not seeing the new IP address but maybe I can ignore that.
+Run list_vms.py to get the MAC address.
+
+
+Dave Bonnie said the host OS doesn't matter but VM is a good idea and Rocky Linux 8.5 is what I should
+run inside the VM. 
+
+This seems to be a good Rocky ISO for minimal 8.5:
+https://download.rockylinux.org/pub/rocky/8.5/isos/x86_64/Rocky-8.5-x86_64-minimal.iso
+Hmm. not available. But 8.9 seems to be available:
+https://download.rockylinux.org/pub/rocky/8/isos/x86_64/Rocky-8.9-x86_64-minimal.iso
+Oh, wait. Maybe here is 8.5:
+https://dl.rockylinux.org/vault/rocky/8.5/Minimal/x86_64/iso/Rocky-8.5-x86_64-minimal.iso
+
+Having a hard time running the VM. Trying to do this:
+> sudo vim /etc/libvirt/qemu.conf
+Following this github Issue https://github.com/jedi4ever/veewee/issues/996
+Looks like root needs to be able to run the virt-install. 
+
+Actually, https://wiki.whamcloud.com/display/PUB/Lustre+Support+Matrix looks like
+RHEL 8.9 is good for 2.15.4
+
+Still struggling so now I was finally able to install a VM using CentOS 8 Stream
+http://mirror.centos.org/centos/8-stream/BaseOS/x86_64/os/
+
+Now just look at the scripts in tassi repo for interacting with qemu
+
+Now I want to install Lustre 2.15.0 since that's what Migel got working.
+
+Following https://wiki.lustre.org/Installing_the_Lustre_Software.
+> sudo yum install kernel-devel
+> sudo yum install kernel-headers

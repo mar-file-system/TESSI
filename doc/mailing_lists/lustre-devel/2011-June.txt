@@ -1,0 +1,863 @@
+From wang at cray.com  Wed Jun  1 19:33:31 2011
+From: wang at cray.com (wang)
+Date: Wed, 1 Jun 2011 19:33:31 -0700
+Subject: [Lustre-devel] discontiguous kiov pages
+Message-ID: <4DE6F67B.6040207@cray.com>
+
+Our gnilnd is running into a hole in kiov list in Lustre 2.1:
+
+LustreError: 17837:0:(gnilnd_cb.c:594:kgnilnd_setup_phys_buffer()) Can't make payload
+contiguous in I/O VM:page 17, offset 0, nob 6350, kiov_offset 0 kiov_len 2254
+LustreError: 17837:0:(gnilnd_cb.c:1751:kgnilnd_send()) unable to setup buffer: -22
+
+Is it now legal for an internal IOV (or KIOV) page to have less than a full page size ?
+
+It used to be that only the first and last page in an IOV were allowed 
+to be of a offset + length < PAGE_SIZE.
+
+It doesn't have this problem with 1.8 client and 2.1 server.
+
+Wally
+
+
+
+
+
+From eeb at whamcloud.com  Thu Jun  2 06:19:14 2011
+From: eeb at whamcloud.com (Eric Barton)
+Date: Thu, 2 Jun 2011 14:19:14 +0100
+Subject: [Lustre-devel] discontiguous kiov pages
+In-Reply-To: <4DE6F67B.6040207@cray.com>
+References: <4DE6F67B.6040207@cray.com>
+Message-ID: <002c01cc2127$ac5b7da0$051278e0$@com>
+
+Wang,
+
+Inline...
+
+> -----Original Message-----
+> From: lustre-devel-bounces at lists.lustre.org [mailto:lustre-devel-bounces at lists.lustre.org] On Behalf
+> Of wang
+> Sent: 02 June 2011 3:34 AM
+> To: lustre-devel at lists.lustre.org
+> Subject: [Lustre-devel] discontiguous kiov pages
+> 
+> Our gnilnd is running into a hole in kiov list in Lustre 2.1:
+> 
+> LustreError: 17837:0:(gnilnd_cb.c:594:kgnilnd_setup_phys_buffer()) Can't make payload
+> contiguous in I/O VM:page 17, offset 0, nob 6350, kiov_offset 0 kiov_len 2254
+> LustreError: 17837:0:(gnilnd_cb.c:1751:kgnilnd_send()) unable to setup buffer: -22
+> 
+> Is it now legal for an internal IOV (or KIOV) page to have less than a full page size ?
+> 
+> It used to be that only the first and last page in an IOV were allowed
+> to be of a offset + length < PAGE_SIZE.
+
+Quite correct.  LNDs have relied on this for years now.
+A change like this should not have occurred without discussion
+about the wider impact.
+
+> It doesn't have this problem with 1.8 client and 2.1 server.
+> 
+> Wally
+> 
+> 
+> 
+> _______________________________________________
+> Lustre-devel mailing list
+> Lustre-devel at lists.lustre.org
+> http://lists.lustre.org/mailman/listinfo/lustre-devel
+
+
+
+From adilger at whamcloud.com  Tue Jun  7 12:02:34 2011
+From: adilger at whamcloud.com (Andreas Dilger)
+Date: Tue, 7 Jun 2011 13:02:34 -0600
+Subject: [Lustre-devel] Orion Landing Plan/Process
+References: <4DE7E760.9050201@whamcloud.com>
+Message-ID: <D18976AD-64D5-416D-A4F4-B6897C93B4E7@whamcloud.com>
+
+This (long) email is of primary interest to developers and testers of
+Lustre, and is focussed on how to integrate the substantial amount of
+development that has been done on the Orion development branch into
+the mainline Lustre release branch in a stable manner, without seriously
+disrupting other ongoing development projects.
+
+Introduction
+============
+The Lustre 2.0 release introduced a new Object Storage Device (OSD)
+interface, which improves the abstraction of the Lustre IO operations
+from the underlying filesystem implementation.  Moving to the new OSD
+interface allows Lustre to start using more advanced back-end filesystems
+like ZFS, and Btrfs in the future.
+
+For Lustre 2.0, the MDS stack was largely moved over to use the new OSD
+interface, but some parts of the MDS code (llogs for distributed recovery
+MDS->OST RPCs, etc) are still using the older "obd/lvfs/fsfilt" interface,
+which has left unwanted complexity in the code.  As well, none of the
+code for the OSS or MGS have been moved to use this new OSD interface,
+leaving a large amount of duplicated code within Lustre, and sometimes
+confusion for developers about which IO methods were in use for a
+particular operation.  Moving everything over to use the OSD interface
+will allow this duplicated code to be removed, and facilitates development
+projects like Distributed Namespace (formerly CMD), unified targets
+(i.e. small files on the MDT), and others in the future.
+
+The Orion project at Whamcloud, in conjunction with LLNL, is focussed
+on completing the restructuring of the Lustre code base to use the OSD
+interface.  LLNL will begin using the Orion branch for their Sequoia
+system (https://asc.llnl.gov/computing_resources/sequoia/) with ZFS
+(http://zfsonlinux.org/lustre.html) as the back-end filesystem.  It is
+expected that the Orion project will take about a year to complete.
+
+Ongoing Development
+===================
+The existing Orion codebase represents a significant amount of development
+that has already been done to update the Lustre server code to use the
+OSD API.  Work is ongoing to complete the transition of the OSS, MGS,
+and recovery code to use the OSD interface.
+
+The large amount of change in this branch presents a serious obstacle to
+integration of this code into the mainline Lustre codebase.  Directly
+landing all of the branch to master would present a significant risk
+of destabilizing the master branch.  Even with significant pre-landing
+testing on the "orion" branch, it will still only be a fraction of the
+different real-world load and environment combinations that are being
+tested by different members of the community.  As well, debugging any
+problems that appear after a large single landing would be very difficult
+and time consuming.
+
+Proposed Landing Process
+========================
+What we propose is to split the current changes in the Orion branch into
+a series of smaller commits to the "master" branch over several months,
+each of which is only changing a specific part of the code.  All of the
+commits will provide stand-alone functionality, that will be pre-tested
+in isolation before landing to meet the quality standards of the master
+branch.
+
+The benefits of making a series of independent commits spread over several
+months are manyfold:
+- each commit can be tested separately, both in advance of landing, and
+  after integration, to isolate defects to the specific areas of the code
+  that have been changed
+- testing can be more extensive and focussed on the code being changed
+- defects in smaller changes are easier to find and fix during pre-landing
+  testing and are easier to isolate after landing
+- in the unlikely case of serious defects appearing after landing, the
+  offending patch(es) can be backed out without forcing all of the
+  unrelated changes from orion to be backed out as well
+- the commits will be isolated to a specific area of code or API, and
+  will be grouped by logical change, rather than the more unordered
+  sequence of changes and bug fixes from the ongoing development
+- spacing major changes over a longer time period it will give other
+  developers (both inside and outside Whamcloud) more time to become
+  aware of the changes in the Orion branch, and adapt their projects to
+  use the changes being made
+- landing parts of the orion branch early means less code is developed
+  that is in conflict with these changes, and less work will need in
+  both the orion and other development branches to merge those changes
+- smaller commits can be inspected more easily by developers, hopefully
+  getting more eyes on the changes being made, and finding bugs earlier
+
+
+As isolated changes are being extracted from the orion development branch,
+they will be inspected, tested to the standard of the master branch, and
+then landed to the master branch.  The orion branch will then be rebased
+against the updated master branch, and the landed changes will be removed
+from the outstanding changes on orion.  This process is shown in the
+attached diagram, and can also be used for larger features unrelated to
+the orion branch.
+
+This development and code contribution model has served the Linux kernel
+community very well to manage integration of large features.  At this
+stage, this email is focussed on raising awareness of these plans within
+the Lustre community.  A separate email detailing the plans for landing
+specific changes will be sent at a later date.
+
+Cheers, Andreas
+--
+Andreas Dilger 
+Principal Engineer
+Whamcloud, Inc.
+
+
+
+
+
+-------------- next part --------------
+A non-text attachment was scrubbed...
+Name: Diagram 1.0.png
+Type: image/png
+Size: 68288 bytes
+Desc: not available
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20110607/0367736e/attachment.png>
+-------------- next part --------------
+
+
+
+Cheers, Andreas
+--
+Andreas Dilger 
+Principal Engineer
+Whamcloud, Inc.
+
+
+
+
+From green at whamcloud.com  Tue Jun  7 16:57:43 2011
+From: green at whamcloud.com (Oleg Drokin)
+Date: Tue, 7 Jun 2011 19:57:43 -0400
+Subject: [Lustre-devel] discontiguous kiov pages
+In-Reply-To: <002c01cc2127$ac5b7da0$051278e0$@com>
+References: <4DE6F67B.6040207@cray.com> <002c01cc2127$ac5b7da0$051278e0$@com>
+Message-ID: <B91FC92C-00B4-4C0B-A0D1-DA2E6912697D@whamcloud.com>
+
+Hello!
+
+On Jun 2, 2011, at 9:19 AM, Eric Barton wrote:
+>> Our gnilnd is running into a hole in kiov list in Lustre 2.1:
+>> 
+>> LustreError: 17837:0:(gnilnd_cb.c:594:kgnilnd_setup_phys_buffer()) Can't make payload
+>> contiguous in I/O VM:page 17, offset 0, nob 6350, kiov_offset 0 kiov_len 2254
+>> LustreError: 17837:0:(gnilnd_cb.c:1751:kgnilnd_send()) unable to setup buffer: -22
+>> 
+>> Is it now legal for an internal IOV (or KIOV) page to have less than a full page size ?
+>> 
+>> It used to be that only the first and last page in an IOV were allowed
+>> to be of a offset + length < PAGE_SIZE.
+> Quite correct.  LNDs have relied on this for years now.
+> A change like this should not have occurred without discussion
+> about the wider impact.
+
+Actually now that we found what's happening, I think the issue is a bit less clear-cut.
+
+What happens here is the client is submitting two niobufs that are not contiguous.
+As such I see no reason why they need to be contiguous in VM too. Sure the 1.8 way of handling
+this situation was to send separate RPCs, but I think even if two RDMA descriptors need to be
+made, we still save plenty of overhead to justify this.
+
+(basically we send three niobufs in this case: file pages 0-1, 40-47 (the 47th one is partial) and 49 (full) ).
+
+Bye,
+    Oleg
+
+From nic at cray.com  Wed Jun  8 09:08:47 2011
+From: nic at cray.com (Nic Henke)
+Date: Wed, 8 Jun 2011 11:08:47 -0500
+Subject: [Lustre-devel] discontiguous kiov pages
+In-Reply-To: <B91FC92C-00B4-4C0B-A0D1-DA2E6912697D@whamcloud.com>
+References: <4DE6F67B.6040207@cray.com> <002c01cc2127$ac5b7da0$051278e0$@com>
+	<B91FC92C-00B4-4C0B-A0D1-DA2E6912697D@whamcloud.com>
+Message-ID: <4DEF9E8F.6070202@cray.com>
+
+On 06/07/2011 06:57 PM, Oleg Drokin wrote:
+> Hello!
+>
+
+>>> It used to be that only the first and last page in an IOV were allowed
+>>> to be of a offset + length<  PAGE_SIZE.
+>> Quite correct.  LNDs have relied on this for years now.
+>> A change like this should not have occurred without discussion
+>> about the wider impact.
+>
+> Actually now that we found what's happening, I think the issue is a bit less clear-cut.
+>
+> What happens here is the client is submitting two niobufs that are not contiguous.
+> As such I see no reason why they need to be contiguous in VM too. Sure the 1.8 way of handling
+> this situation was to send separate RPCs, but I think even if two RDMA descriptors need to be
+> made, we still save plenty of overhead to justify this.
+>
+> (basically we send three niobufs in this case: file pages 0-1, 40-47 (the 47th one is partial) and 49 (full) ).
+
+Oleg - it isn't clear to me what fix you are suggesting here. Are you 
+saying LNet/LNDs should handle this situation (partial internal page) 
+under the covers by setting up multiple RDMA on their own? This sounds 
+like an LND API change, requiring a fix and validation for every LND. I 
+*think* we might end up violating LNet layering here by having to adjust 
+internal LNet structures from the LND to make sure the 2nd and 
+subsequent RDMA landed at the correct spot in the MD, etc.
+
+At least for our network, and I'd venture a guess for others, there is 
+no way to handle the partial page other than multiple RDMA at the LND 
+layer. When mapping these pages for RDMA, the internal hole can't be 
+handled as we just map a set of physical pages for the HW to read 
+from/write into with a single (address,length) vector. The internal hole 
+would be ignored and would end up corrupting data as we overwrite the hole.
+
+Cheers,
+Nic
+
+
+From jinshan.xiong at whamcloud.com  Wed Jun  8 13:09:36 2011
+From: jinshan.xiong at whamcloud.com (Jinshan Xiong)
+Date: Wed, 8 Jun 2011 13:09:36 -0700
+Subject: [Lustre-devel] discontiguous kiov pages
+In-Reply-To: <4DEF9E8F.6070202@cray.com>
+References: <4DE6F67B.6040207@cray.com> <002c01cc2127$ac5b7da0$051278e0$@com>
+	<B91FC92C-00B4-4C0B-A0D1-DA2E6912697D@whamcloud.com>
+	<4DEF9E8F.6070202@cray.com>
+Message-ID: <242A2918-D133-4A37-A3FF-B49B34CACA08@whamcloud.com>
+
+
+On Jun 8, 2011, at 9:08 AM, Nic Henke wrote:
+
+> On 06/07/2011 06:57 PM, Oleg Drokin wrote:
+>> Hello!
+>> 
+> 
+>>>> It used to be that only the first and last page in an IOV were allowed
+>>>> to be of a offset + length<  PAGE_SIZE.
+>>> Quite correct.  LNDs have relied on this for years now.
+>>> A change like this should not have occurred without discussion
+>>> about the wider impact.
+>> 
+>> Actually now that we found what's happening, I think the issue is a bit less clear-cut.
+>> 
+>> What happens here is the client is submitting two niobufs that are not contiguous.
+>> As such I see no reason why they need to be contiguous in VM too. Sure the 1.8 way of handling
+>> this situation was to send separate RPCs, but I think even if two RDMA descriptors need to be
+>> made, we still save plenty of overhead to justify this.
+>> 
+>> (basically we send three niobufs in this case: file pages 0-1, 40-47 (the 47th one is partial) and 49 (full) ).
+> 
+> Oleg - it isn't clear to me what fix you are suggesting here. Are you 
+> saying LNet/LNDs should handle this situation (partial internal page) 
+> under the covers by setting up multiple RDMA on their own? This sounds 
+> like an LND API change, requiring a fix and validation for every LND. I 
+> *think* we might end up violating LNet layering here by having to adjust 
+> internal LNet structures from the LND to make sure the 2nd and 
+> subsequent RDMA landed at the correct spot in the MD, etc.
+
+Please refer to LU-394 for detail description of this problem. For those who cannot access our jira system, I'm going to summarize it here.
+
+The problem is as follows:
+0. First, the app wrote a partial page A at the end of file, and it had enough grant on client side, so page A was cached;
+1. app sought forward and wrote another page B which exceeded the quota limit, so it has to be written in sync mode(see vvp_io_commit_write);
+2. in current implementation of CLIO, for performance consideration, writing page B will include as many cached pages as possible to compose an RPC, this includes page A;
+
+So here comes the problem. The file size can only be extended until writing of page B succeed, otherwise, the file size is wrong in case writing of B fails. This causes ap_refresh_count() to page A returned oap_count less than CFS_PAGE_SIZE. This is why LND saw uncontiguous pages.
+
+Fixing this issue is easy, we only write the sync page in a standalone RPC(not combine with cached pages). This is not a big issue, since it occurs only when quota runs out.
+
+> 
+> At least for our network, and I'd venture a guess for others, there is 
+> no way to handle the partial page other than multiple RDMA at the LND 
+> layer. When mapping these pages for RDMA, the internal hole can't be 
+> handled as we just map a set of physical pages for the HW to read 
+> from/write into with a single (address,length) vector. The internal hole 
+> would be ignored and would end up corrupting data as we overwrite the hole.
+
+Can't aglee more. Having multiple RDMA descriptors will make LND more complex.
+
+What if we transferred the whole page anyway? This is okay because page offset and length will tell server which part of data is really useful. It will waste some bandwidth, but it's far better than issuing one more RPC.
+
+Thanks,
+Jinshan
+
+> 
+> Cheers,
+> Nic
+> _______________________________________________
+> Lustre-devel mailing list
+> Lustre-devel at lists.lustre.org
+> http://lists.lustre.org/mailman/listinfo/lustre-devel
+
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20110608/f788ae77/attachment.htm>
+
+From green at whamcloud.com  Wed Jun  8 20:16:08 2011
+From: green at whamcloud.com (Oleg Drokin)
+Date: Wed, 8 Jun 2011 23:16:08 -0400
+Subject: [Lustre-devel] discontiguous kiov pages
+In-Reply-To: <4DEF9E8F.6070202@cray.com>
+References: <4DE6F67B.6040207@cray.com> <002c01cc2127$ac5b7da0$051278e0$@com>
+	<B91FC92C-00B4-4C0B-A0D1-DA2E6912697D@whamcloud.com>
+	<4DEF9E8F.6070202@cray.com>
+Message-ID: <58BFE163-3240-4C11-9088-6ABB05EB4646@whamcloud.com>
+
+Hello!
+
+On Jun 8, 2011, at 12:08 PM, Nic Henke wrote:
+> Oleg - it isn't clear to me what fix you are suggesting here. Are you 
+> saying LNet/LNDs should handle this situation (partial internal page) 
+> under the covers by setting up multiple RDMA on their own? This sounds 
+> like an LND API change, requiring a fix and validation for every LND. I 
+> *think* we might end up violating LNet layering here by having to adjust 
+> internal LNet structures from the LND to make sure the 2nd and 
+> subsequent RDMA landed at the correct spot in the MD, etc.
+
+What about if we just transfer all such "partial" pages as full pages instead?
+Should work for our and your purposes.
+For Lustre purposes these two are almost like two different transfers anyway.
+In this case we are totally not expecting you to "collapse" the hole.
+
+Hm, I guess this is best handled on the osc level anyway, though. So
+perhaps no changes from lnd side then.
+
+Bye,
+    Oleg
+--
+Oleg Drokin
+Senior Software Engineer
+Whamcloud, Inc.
+
+
+
+From pjones at whamcloud.com  Thu Jun  9 01:37:05 2011
+From: pjones at whamcloud.com (Peter Jones)
+Date: Thu, 09 Jun 2011 01:37:05 -0700
+Subject: [Lustre-devel] discontiguous kiov pages
+In-Reply-To: <242A2918-D133-4A37-A3FF-B49B34CACA08@whamcloud.com>
+References: <4DE6F67B.6040207@cray.com>
+	<002c01cc2127$ac5b7da0$051278e0$@com>	<B91FC92C-00B4-4C0B-A0D1-DA2E6912697D@whamcloud.com>	<4DEF9E8F.6070202@cray.com>
+	<242A2918-D133-4A37-A3FF-B49B34CACA08@whamcloud.com>
+Message-ID: <4DF08631.1010409@whamcloud.com>
+
+Jinshan
+
+While I am sure that many appreciate a high-level overview in the thread 
+instead of needing to redirect to JIRA, everyone should be able to 
+access JIRA if they did want to :-)
+
+Peter
+Whamcloud
+
+On 11-06-08 1:09 PM, Jinshan Xiong wrote:
+>
+> <snip>
+
+> For those who cannot access our jira system, I'm going to summarize it 
+> here.
+>
+
+
+
+From eeb at whamcloud.com  Thu Jun  9 07:38:11 2011
+From: eeb at whamcloud.com (Eric Barton)
+Date: Thu, 9 Jun 2011 15:38:11 +0100
+Subject: [Lustre-devel] discontiguous kiov pages
+In-Reply-To: <58BFE163-3240-4C11-9088-6ABB05EB4646@whamcloud.com>
+References: <4DE6F67B.6040207@cray.com>
+	<002c01cc2127$ac5b7da0$051278e0$@com>	<B91FC92C-00B4-4C0B-A0D1-DA2E6912697D@whamcloud.com>	<4DEF9E8F.6070202@cray.com>
+	<58BFE163-3240-4C11-9088-6ABB05EB4646@whamcloud.com>
+Message-ID: <00f101cc26b2$dce80890$96b819b0$@com>
+
+It seems to me that Jay's suggestion to put the niobufs into
+separate RPCs is a good one - particularly since writing the 2nd
+niobuf should only be attempted after the first to ensure the
+file size is set correctly (BTW this means the 2nd RPC cannot
+be posted until the first has completed - otherwise the RPCs
+could get re-ordered in the network or at the server).  
+
+However it would be nice to aggregate small, possibly unrelated
+I/Os and if/when we do that this issue will crop up again.  If
+we stick with the rule that MDs cannot have internal partial pages,
+we're forced to use 1 MD for each niobuf.  Putting several of these
+in 1 RPC requires separate matchbits for each niobuf to ensure
+correct match of source and sink buffers independent of races in
+the network.  This must be more efficient than scheduling multiple 
+concurrent RPCs each with 1 niobuf, but by how much isn't clear,
+since the bulk transfer phases of both schemes should cause identical
+network traffic.  
+
+So aggregation will probably require LNET/LND support for MDs with
+internal partial pages.  At a guess, this will have strict limits
+for some LNDs and probably can't be done without reducing the total
+number of fragments in such messages.  Also, the interaction with
+LNET routers needs to be considered since mismatched RDMA descriptors
+can potentially double the number of actual RDMA fragments on the
+wire.
+
+          Cheers,
+                   Eric
+
+
+
+
+
+From yoyolu05 at 163.com  Thu Jun  9 01:50:52 2011
+From: yoyolu05 at 163.com (=?UTF-8?Q?Youyou=C2=A0Lu?=)
+Date: Thu, 9 Jun 2011 16:50:52 +0800 (CST)
+Subject: [Lustre-devel] Any Tools for Lustre IO Request Monitoring
+Message-ID: <9d4a060.bde0.1307398cf4a.Coremail.yoyolu05@163.com>
+
+        
+
+
+The IO performance drops dramatically as the MPI-IO threads increases over 512. I am not sure where the performance problems lie. I am about to collect the IO requests to each OST to distinguish the problem of MPI-IO and Lustre. But I am not familiar with any Lustre IO monitoring tool. Any suggestions? 
+Thanks in advance.
+
+--
+Youyou Lu
+Tsinghua University
+
+                
+
+
+
+From acuselton at lbl.gov  Mon Jun 13 10:09:06 2011
+From: acuselton at lbl.gov (Andrew Uselton)
+Date: Mon, 13 Jun 2011 10:09:06 -0700
+Subject: [Lustre-devel] Any Tools for Lustre IO Request Monitoring
+In-Reply-To: <9d4a060.bde0.1307398cf4a.Coremail.yoyolu05@163.com>
+References: <9d4a060.bde0.1307398cf4a.Coremail.yoyolu05@163.com>
+Message-ID: <BANLkTim0_d802EdzA6dRuoOTNzBBVUA1Vg@mail.gmail.com>
+
+Check out this tool:
+
+https://github.com/chaos/lmt/wiki
+
+You can see some graphs generated by analyzing that data stream here:
+
+http://portal.nersc.gov/project/pma/
+
+There's a lot more in LMT (and Lustre!) than I have explored, but I'd be
+happy to discuss what little I do know.
+Cheers,
+Andrew
+
+
+On Thu, Jun 9, 2011 at 1:50 AM, Youyou Lu <yoyolu05 at 163.com> wrote:
+
+>
+>
+>
+> The IO performance drops dramatically as the MPI-IO threads increases over
+> 512. I am not sure where the performance problems lie. I am about to collect
+> the IO requests to each OST to distinguish the problem of MPI-IO and Lustre.
+> But I am not familiar with any Lustre IO monitoring tool. Any suggestions?
+> Thanks in advance.
+>
+> --
+> Youyou Lu
+> Tsinghua University
+>
+>
+>
+> _______________________________________________
+> Lustre-devel mailing list
+> Lustre-devel at lists.lustre.org
+> http://lists.lustre.org/mailman/listinfo/lustre-devel
+>
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20110613/424bfa64/attachment.htm>
+
+From hysom1 at llnl.gov  Tue Jun 14 16:45:59 2011
+From: hysom1 at llnl.gov (Dave Hysom)
+Date: Tue, 14 Jun 2011 16:45:59 -0700
+Subject: [Lustre-devel] extremely slow reads at 1024 procs
+Message-ID: <4DF7F2B7.1010606@llnl.gov>
+
+All,
+
+I've just joined to list and will be searching the archives in case
+this has been addressed before -- so please point me to a past
+thread as appropriate.
+
+Scenario:
+
+We have ~100K files.  Each is 8Mb.  Each is read once, by a single
+processor, using fread.  Once we reach a certain number of processors
+(512 or 1024) some of the reads take enormous amounts of time, up to
+15 minutes.  Our files have stripe=2, which I'm told should be adequate.
+Our application is I/O intensive.
+
+Has anyone had similar experience, and/or have a clue what might be
+going on, and/or let me know what additional details I should include?
+
+thanks, David
+
+
+From di.wang at whamcloud.com  Wed Jun 15 12:10:56 2011
+From: di.wang at whamcloud.com (wangdi)
+Date: Wed, 15 Jun 2011 12:10:56 -0700
+Subject: [Lustre-devel] extremely slow reads at 1024 procs
+In-Reply-To: <4DF7F2B7.1010606@llnl.gov>
+References: <4DF7F2B7.1010606@llnl.gov>
+Message-ID: <4DF903C0.4050100@whamcloud.com>
+
+On 06/14/2011 04:45 PM, Dave Hysom wrote:
+> All,
+>
+> I've just joined to list and will be searching the archives in case
+> this has been addressed before -- so please point me to a past
+> thread as appropriate.
+>
+> Scenario:
+>
+> We have ~100K files.  Each is 8Mb.  Each is read once, by a single
+> processor, using fread.  Once we reach a certain number of processors
+> (512 or 1024) some of the reads take enormous amounts of time, up to
+> 15 minutes.  Our files have stripe=2, which I'm told should be adequate.
+> Our application is I/O intensive.
+>
+> Has anyone had similar experience, and/or have a clue what might be
+> going on, and/or let me know what additional details I should include?
+
+How many processors(read threads?) on each client? What is the offset 
+and bytes (> 1M) for each read in your application? Are they align with 
+the stripe_size. Sometimes, Lustre read is very sensitive to these 
+factors, especially for read intense application. These are steps you 
+can try,
+
+1. Check those read parameters of your application. bytes should >= 1M, 
+and offset is better to be align with the stripe_size.
+
+2. Check whether these files are distributed evenly over all OSTs?
+
+3. Check rpc stats on client side(lctl get_param osc.*.rpc_stats) to see 
+the quality of RPCs. Probably increase max_read_ahead_whole_mb and 
+max_read_ahead_per_file_mb (lctl set_param llite.*.max_read_ahead_mb = XXX).
+
+4. Disable read_cache on OST. (lctl conf_param 
+lustre-OST000X.ost.read_cache_enable = 0), since it only read once.
+     Or  shrink the readcache_max_filesize <8M  
+(/proc/fs/lustre/obdfilter/lustre-OST0000/readcache_max_filesize = XXX).
+
+5. There is a fix about read offset aligned 
+(http://jira.whamcloud.com/browse/LU-15) landed in 1.8.6, which will 
+probably help as well.
+
+But doing 3, 4 needs to be sysadmin, and will likely affect other users. 
+not sure you can do that.
+
+Thanks
+Wangdi
+
+> thanks, David
+> _______________________________________________
+> Lustre-devel mailing list
+> Lustre-devel at lists.lustre.org
+> http://lists.lustre.org/mailman/listinfo/lustre-devel
+
+
+
+From liaotoad at gmail.com  Tue Jun 21 20:44:38 2011
+From: liaotoad at gmail.com (Jianwei Liao)
+Date: Wed, 22 Jun 2011 12:44:38 +0900
+Subject: [Lustre-devel] MDS recovery in Lustre
+Message-ID: <BANLkTinomA6vF3N3oBQy64sH2tdZUtehyQ@mail.gmail.com>
+
+Hi all,
+I am a new comer to Lustre.
+Recently, I have read some documents about Lustre file system and am
+interested in MDS recovery.
+1) I was wondering that during MDS recovery(resend, and replay etc.), both
+the clients who involved in the recovery or the others(who are not involved
+in the recovery process) could access the MDS to get the file information or
+not.
+Simply speaking, during MDS recovery, is the MDS available or not?
+2) Compared with non-VBR recovery, how about the time needed for MDS
+recovery while using VBR.
+
+Thank you very much.
+Best regards,
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20110622/5af776c7/attachment.htm>
+
+From liaotoad at gmail.com  Tue Jun 21 20:49:06 2011
+From: liaotoad at gmail.com (Jianwei Liao)
+Date: Wed, 22 Jun 2011 12:49:06 +0900
+Subject: [Lustre-devel] MDS recovery
+Message-ID: <BANLkTikudy_LFXZHr1NP6wfYr8c6fpSujQ@mail.gmail.com>
+
+Hi all,
+I am a new comer to Lustre.
+Recently, I have read some documents about Lustre file system and am
+interested in MDS recovery.
+1) I was wondering that during MDS recovery(resend, and replay etc.), both
+the clients who involved in the recovery or the others(who are not involved
+in the recovery process) could access the MDS to get the file information or
+not.
+Simply speaking, during MDS recovery, is the MDS available or not?
+2) Compared with non-VBR recovery, how about the time needed for MDS
+recovery while using VBR.
+
+Thank you very much.
+Best regards,
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20110622/60a802fc/attachment.htm>
+
+From liaotoad at gmail.com  Tue Jun 21 20:52:34 2011
+From: liaotoad at gmail.com (Jianwei Liao)
+Date: Wed, 22 Jun 2011 12:52:34 +0900
+Subject: [Lustre-devel] MDS recovery
+Message-ID: <BANLkTi=SBNhfTz+L6Ly21KdWuhj+1wO+BA@mail.gmail.com>
+
+Hi all,
+I am a new comer to Lustre.
+Recently, I have read some documents about Lustre file system and am
+interested in MDS recovery.
+1) I was wondering that during MDS recovery(resend, and replay etc.), both
+the clients who involved in the recovery or the others(who are not involved
+in the recovery process) could access the MDS to get the file information or
+not.
+Simply speaking, during MDS recovery, is the MDS available or not?
+2) Compared with non-VBR recovery, how about the time needed for MDS
+recovery while using VBR.
+
+Thank you very much.
+Best regards,
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20110622/9239900b/attachment.htm>
+
+From jsimmons at infradead.org  Wed Jun 22 09:00:51 2011
+From: jsimmons at infradead.org (James Simmons)
+Date: Wed, 22 Jun 2011 17:00:51 +0100 (BST)
+Subject: [Lustre-devel] SuSE server support
+Message-ID: <alpine.LFD.2.00.1106221653050.5547@casper.infradead.org>
+
+
+Hello.
+
+	I just finsihed up the SuSE code port of ldiskfs for Lustre 2.1.
+The link is http://jira.whamcloud.com/browse/LU-335 and the git branch is
+http://review.whamcloud.com/#change,575. Currently two SuSE versions are 
+supported.
+
+SuSE SP0 - 2.6.27.48-0.12.1
+SuSE SP1 - 2.6.32.12-0.7
+ 
+SP0 is at the end line but at my work we still will need to support it. As 
+for SP1 that is a moving target. In order for SP1 support to work at all 
+parties involved must agree on a single kernel version to work with, which 
+is one of the reasons I posted this message. The second reason is to have
+people test this code out. Please don't use it in a production 
+environment :-) It could eat your data!! Thank  you.
+ 
+
+
+From adilger at whamcloud.com  Wed Jun 22 10:59:52 2011
+From: adilger at whamcloud.com (Andreas Dilger)
+Date: Wed, 22 Jun 2011 11:59:52 -0600
+Subject: [Lustre-devel] MDS recovery in Lustre
+In-Reply-To: <BANLkTinomA6vF3N3oBQy64sH2tdZUtehyQ@mail.gmail.com>
+References: <BANLkTinomA6vF3N3oBQy64sH2tdZUtehyQ@mail.gmail.com>
+Message-ID: <BBB312B2-8E37-4E8D-BECF-6DA0431A72B3@whamcloud.com>
+
+On 2011-06-21, at 9:44 PM, Jianwei Liao wrote:
+> I am a new comer to Lustre.
+> Recently, I have read some documents about Lustre file system and am interested in MDS recovery.
+> 1) I was wondering that during MDS recovery(resend, and replay etc.), both the clients who involved in the recovery or the others(who are not involved in the recovery process) could access the MDS to get the file information or not.
+> Simply speaking, during MDS recovery, is the MDS available or not?
+
+No, during recovery for both the MDT and OST filesystems, only clients that
+were previously connected are able to reconnect and perform operations, until
+either recovery with all connected clients finishes, or recovery times out.
+If recovery times out then clients which did not reconnect, or that did
+reconnect or were unable to complete recovery, are evicted.
+
+This avoids any problems with new clients connecting and changing the state
+of the filesystem and causing RPC replay to fail.
+
+> 2) Compared with non-VBR recovery, how about the time needed for MDS recovery while using VBR.
+
+I don't think we've ever done any measurements of this.  I don't think it is
+currently any faster, since only a single thread is doing the recovery.  In
+theory, replay with VBR could be done in parallel because each object has
+its own "replay stream" that is independently verified by VBR, but I don't
+think that the time to replay the RPCs is a significant factor in the total
+recovery time.
+
+Currently, I believe most of the time is spent simply waiting for clients to
+reconnect and begin recovery.  The "Imperative Recovery" project is working
+to reduce this timeout significantly.
+
+Cheers, Andreas
+--
+Andreas Dilger 
+Principal Engineer
+Whamcloud, Inc.
+
+
+
+
+
+From nrutman at gmail.com  Wed Jun 29 12:55:25 2011
+From: nrutman at gmail.com (Nathan Rutman)
+Date: Wed, 29 Jun 2011 12:55:25 -0700
+Subject: [Lustre-devel] NRS HLD
+Message-ID: <24C12A32-1D42-4327-8F8F-B9D30471B8C8@gmail.com>
+
+Sharing with the community.  All comments welcome.
+This HLD (high-level design) for a Network Request Scheduler is more about infrastructure than algorithm.
+
+
+
+
+
+We're actually in the DLD (detailed-level design) stage at the moment (sorry it didn't occur to me to 
+post this earlier).  I'll post the DLD after some minor revision.
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20110629/8fce916d/attachment.htm>
+-------------- next part --------------
+A non-text attachment was scrubbed...
+Name: NRS HLD.pdf
+Type: application/pdf
+Size: 325187 bytes
+Desc: not available
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20110629/8fce916d/attachment.pdf>
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20110629/8fce916d/attachment-0001.htm>
+
+From nikitas_angelinas at xyratex.com  Thu Jun 30 08:49:49 2011
+From: nikitas_angelinas at xyratex.com (Nikitas Angelinas)
+Date: Thu, 30 Jun 2011 16:49:49 +0100
+Subject: [Lustre-devel] NRS HLD
+In-Reply-To: <24C12A32-1D42-4327-8F8F-B9D30471B8C8@gmail.com>
+References: <24C12A32-1D42-4327-8F8F-B9D30471B8C8@gmail.com>
+Message-ID: <1309448989.27038.5.camel@localhost.localdomain>
+
+Hi,
+
+There is a slightly more up-to-date version of the HLD, which I am
+attaching.
+
+
+Thanks,
+Nikitas
+
+On Wed, 2011-06-29 at 12:55 -0700, Nathan Rutman wrote:
+> Sharing with the community.  All comments welcome.
+> This HLD (high-level design) for a Network Request Scheduler is more
+> about infrastructure than algorithm.
+> 
+> 
+> 
+> 
+> We're actually in the DLD (detailed-level design) stage at the moment
+> (sorry it didn't occur to me to 
+> post this earlier).  I'll post the DLD after some minor revision.
+> _______________________________________________
+> Lustre-devel mailing list
+> Lustre-devel at lists.lustre.org
+> http://lists.lustre.org/mailman/listinfo/lustre-devel
+
+
+______________________________________________________________________
+This email may contain privileged or confidential information, which should only be used for the purpose for which it was sent by Xyratex. No further rights or licenses are granted to use such information. If you are not the intended recipient of this message, please notify the sender by return and delete it. You may not use, copy, disclose or rely on the information contained in it.
+ 
+Internet email is susceptible to data corruption, interception and unauthorised amendment for which Xyratex does not accept liability. While we have taken reasonable precautions to ensure that this email is free of viruses, Xyratex does not accept liability for the presence of any computer viruses in this email, nor for any losses caused as a result of viruses.
+ 
+Xyratex Technology Limited (03134912), Registered in England & Wales, Registered Office, Langstone Road, Havant, Hampshire, PO9 1SA.
+ 
+The Xyratex group of companies also includes, Xyratex Ltd, registered in Bermuda, Xyratex International Inc, registered in California, Xyratex (Malaysia) Sdn Bhd registered in Malaysia, Xyratex Technology (Wuxi) Co Ltd registered in The People's Republic of China and Xyratex Japan Limited registered in Japan.
+______________________________________________________________________
+ 
+
+-------------- next part --------------
+A non-text attachment was scrubbed...
+Name: HLD_of_Lustre_NRS.pdf
+Type: application/pdf
+Size: 276401 bytes
+Desc: not available
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20110630/d2dd9e88/attachment.pdf>
+

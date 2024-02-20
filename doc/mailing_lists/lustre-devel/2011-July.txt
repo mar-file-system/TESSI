@@ -1,0 +1,3120 @@
+From liang at whamcloud.com  Sat Jul  2 03:48:35 2011
+From: liang at whamcloud.com (Liang Zhen)
+Date: Sat, 2 Jul 2011 18:48:35 +0800
+Subject: [Lustre-devel] NRS HLD
+In-Reply-To: <1309448989.27038.5.camel@localhost.localdomain>
+References: <24C12A32-1D42-4327-8F8F-B9D30471B8C8@gmail.com>
+	<1309448989.27038.5.camel@localhost.localdomain>
+Message-ID: <88C87A8C-8DB5-4602-863B-9B77FF93C0D1@whamcloud.com>
+
+Hi Nikitas,
+
+It's a very interesting document, thanks for sharing these great ideas.
+May I ask whether there are any tests/numbers based on OBRR description
+in HLD? We always want to see numbers from these algorithms, unfortunately
+there is no reliable testing result from the patch on BZ 13634.
+
+We are actually considering about NRS as well, although we don't have a
+formal design document like this HLD, but we'd like to share a few
+preliminary ideas for discussion:
+
+- Target Based Round Robin (TBRR) probably is something worth to have
+
+  Briefly, it's just load balancing over OSTs to improve overall server
+  performance.
+
+- Fairness for clients and resource control for jobs
+
+  I think they are similar to CBRR and UBRR described in your document
+  though I didn't see too much detail about them in the HLD.
+  Personally, I think they are important and we probably will do some tests
+  for CBRR survey very soon.
+
+  . Client-Based Round Robin (CBRR) can guarantee the server responses
+    to all clients fairly, and get whole-cluster load balancing, improve
+    concurrency of clients and jobs, and get better overall performance.
+
+  . resource control for jobs, some users complained that a busy job will
+    hog all resources on servers, and make the cluster not usable for other
+    control command or sysadmin. So it might be helpful to support job
+    resource control inside NRS.
+
+- Layering NRS polices
+
+  Of course, OBRR is very important policy for NRS, but it might be
+  helpful to have multiple polices working at the same time, i.e:
+
+  . bind OSTs on CPU partitions on NUMA system(please see more detail at
+    http://jira.whamcloud.com/browse/LU-56)
+
+  . Service threads on each CPU partition can do TBRR for bound OSTs. If
+    there is no CPU partition (like current Lustre) or OSTs are not bound
+    on CPU partitions, service threads just do round robin over all OSTs.
+
+  . OBRR inside each OST
+
+  . of course, these layers should be tunable.
+
+- Overhead of layerd polices
+  . there definitely will be some overhead for inserting/removing
+    request from these queues (or whatever), so we want some very scalable
+    algorithms to implement these polices.
+
+Again, these are just some preliminary ideas, so we would appreciate any
+comment and suggestion.
+
+Thanks
+Liang
+
+
+On Jun 30, 2011, at 11:49 PM, Nikitas Angelinas wrote:
+
+> Hi,
+> 
+> There is a slightly more up-to-date version of the HLD, which I am
+> attaching.
+> 
+> 
+> Thanks,
+> Nikitas
+> 
+> On Wed, 2011-06-29 at 12:55 -0700, Nathan Rutman wrote:
+>> Sharing with the community.  All comments welcome.
+>> This HLD (high-level design) for a Network Request Scheduler is more
+>> about infrastructure than algorithm.
+>> 
+>> 
+>> 
+>> 
+>> We're actually in the DLD (detailed-level design) stage at the moment
+>> (sorry it didn't occur to me to 
+>> post this earlier).  I'll post the DLD after some minor revision.
+>> _______________________________________________
+>> Lustre-devel mailing list
+>> Lustre-devel at lists.lustre.org
+>> http://lists.lustre.org/mailman/listinfo/lustre-devel
+> 
+> 
+> ______________________________________________________________________
+> This email may contain privileged or confidential information, which should only be used for the purpose for which it was sent by Xyratex. No further rights or licenses are granted to use such information. If you are not the intended recipient of this message, please notify the sender by return and delete it. You may not use, copy, disclose or rely on the information contained in it.
+> 
+> Internet email is susceptible to data corruption, interception and unauthorised amendment for which Xyratex does not accept liability. While we have taken reasonable precautions to ensure that this email is free of viruses, Xyratex does not accept liability for the presence of any computer viruses in this email, nor for any losses caused as a result of viruses.
+> 
+> Xyratex Technology Limited (03134912), Registered in England & Wales, Registered Office, Langstone Road, Havant, Hampshire, PO9 1SA.
+> 
+> The Xyratex group of companies also includes, Xyratex Ltd, registered in Bermuda, Xyratex International Inc, registered in California, Xyratex (Malaysia) Sdn Bhd registered in Malaysia, Xyratex Technology (Wuxi) Co Ltd registered in The People's Republic of China and Xyratex Japan Limited registered in Japan.
+> ______________________________________________________________________
+> 
+> 
+> <HLD_of_Lustre_NRS.pdf>_______________________________________________
+> Lustre-devel mailing list
+> Lustre-devel at lists.lustre.org
+> http://lists.lustre.org/mailman/listinfo/lustre-devel
+
+
+
+From Nathan_Rutman at xyratex.com  Sat Jul  2 08:39:50 2011
+From: Nathan_Rutman at xyratex.com (Nathan Rutman)
+Date: Sat, 2 Jul 2011 08:39:50 -0700
+Subject: [Lustre-devel] NRS HLD
+In-Reply-To: <88C87A8C-8DB5-4602-863B-9B77FF93C0D1@whamcloud.com>
+References: <24C12A32-1D42-4327-8F8F-B9D30471B8C8@gmail.com>
+	<1309448989.27038.5.camel@localhost.localdomain>
+	<88C87A8C-8DB5-4602-863B-9B77FF93C0D1@whamcloud.com>
+Message-ID: <8C4CE53E-8A87-43FE-B27F-F44B5E3D7550@us.xyratex.com>
+
+I think there is a whole slew of interesting possibilities to try out once an infrastructure for implementing different policies is in place. We're trying to get that infrastructure established first; we will be able to switch between policies dynamically to see their effects and optimize performance. People will be able to easily add new policies to test. 
+You raise a good point about the SMP scaling patches; we will have to take a close look to make sure we don't undo any of the work you've done there. 
+
+On Jul 2, 2011, at 3:49 AM, "Liang Zhen" <liang at whamcloud.com> wrote:
+
+> Hi Nikitas,
+> 
+> It's a very interesting document, thanks for sharing these great ideas.
+> May I ask whether there are any tests/numbers based on OBRR description
+> in HLD? We always want to see numbers from these algorithms, unfortunately
+> there is no reliable testing result from the patch on BZ 13634.
+> 
+> We are actually considering about NRS as well, although we don't have a
+> formal design document like this HLD, but we'd like to share a few
+> preliminary ideas for discussion:
+> 
+> - Target Based Round Robin (TBRR) probably is something worth to have
+> 
+>  Briefly, it's just load balancing over OSTs to improve overall server
+>  performance.
+> 
+> - Fairness for clients and resource control for jobs
+> 
+>  I think they are similar to CBRR and UBRR described in your document
+>  though I didn't see too much detail about them in the HLD.
+>  Personally, I think they are important and we probably will do some tests
+>  for CBRR survey very soon.
+> 
+>  . Client-Based Round Robin (CBRR) can guarantee the server responses
+>    to all clients fairly, and get whole-cluster load balancing, improve
+>    concurrency of clients and jobs, and get better overall performance.
+> 
+>  . resource control for jobs, some users complained that a busy job will
+>    hog all resources on servers, and make the cluster not usable for other
+>    control command or sysadmin. So it might be helpful to support job
+>    resource control inside NRS.
+> 
+> - Layering NRS polices
+> 
+>  Of course, OBRR is very important policy for NRS, but it might be
+>  helpful to have multiple polices working at the same time, i.e:
+> 
+>  . bind OSTs on CPU partitions on NUMA system(please see more detail at
+>    http://jira.whamcloud.com/browse/LU-56)
+> 
+>  . Service threads on each CPU partition can do TBRR for bound OSTs. If
+>    there is no CPU partition (like current Lustre) or OSTs are not bound
+>    on CPU partitions, service threads just do round robin over all OSTs.
+> 
+>  . OBRR inside each OST
+> 
+>  . of course, these layers should be tunable.
+> 
+> - Overhead of layerd polices
+>  . there definitely will be some overhead for inserting/removing
+>    request from these queues (or whatever), so we want some very scalable
+>    algorithms to implement these polices.
+> 
+> Again, these are just some preliminary ideas, so we would appreciate any
+> comment and suggestion.
+> 
+> Thanks
+> Liang
+> 
+> 
+> On Jun 30, 2011, at 11:49 PM, Nikitas Angelinas wrote:
+> 
+>> Hi,
+>> 
+>> There is a slightly more up-to-date version of the HLD, which I am
+>> attaching.
+>> 
+>> 
+>> Thanks,
+>> Nikitas
+>> 
+>> On Wed, 2011-06-29 at 12:55 -0700, Nathan Rutman wrote:
+>>> Sharing with the community.  All comments welcome.
+>>> This HLD (high-level design) for a Network Request Scheduler is more
+>>> about infrastructure than algorithm.
+>>> 
+>>> 
+>>> 
+>>> 
+>>> We're actually in the DLD (detailed-level design) stage at the moment
+>>> (sorry it didn't occur to me to 
+>>> post this earlier).  I'll post the DLD after some minor revision.
+>>> _______________________________________________
+>>> Lustre-devel mailing list
+>>> Lustre-devel at lists.lustre.org
+>>> http://lists.lustre.org/mailman/listinfo/lustre-devel
+>> 
+>> 
+>> ______________________________________________________________________
+>> This email may contain privileged or confidential information, which should only be used for the purpose for which it was sent by Xyratex. No further rights or licenses are granted to use such information. If you are not the intended recipient of this message, please notify the sender by return and delete it. You may not use, copy, disclose or rely on the information contained in it.
+>> 
+>> Internet email is susceptible to data corruption, interception and unauthorised amendment for which Xyratex does not accept liability. While we have taken reasonable precautions to ensure that this email is free of viruses, Xyratex does not accept liability for the presence of any computer viruses in this email, nor for any losses caused as a result of viruses.
+>> 
+>> Xyratex Technology Limited (03134912), Registered in England & Wales, Registered Office, Langstone Road, Havant, Hampshire, PO9 1SA.
+>> 
+>> The Xyratex group of companies also includes, Xyratex Ltd, registered in Bermuda, Xyratex International Inc, registered in California, Xyratex (Malaysia) Sdn Bhd registered in Malaysia, Xyratex Technology (Wuxi) Co Ltd registered in The People's Republic of China and Xyratex Japan Limited registered in Japan.
+>> ______________________________________________________________________
+>> 
+>> 
+>> <HLD_of_Lustre_NRS.pdf>_______________________________________________
+>> Lustre-devel mailing list
+>> Lustre-devel at lists.lustre.org
+>> http://lists.lustre.org/mailman/listinfo/lustre-devel
+> 
+> _______________________________________________
+> Lustre-devel mailing list
+> Lustre-devel at lists.lustre.org
+> http://lists.lustre.org/mailman/listinfo/lustre-devel
+______________________________________________________________________
+This email may contain privileged or confidential information, which should only be used for the purpose for which it was sent by Xyratex. No further rights or licenses are granted to use such information. If you are not the intended recipient of this message, please notify the sender by return and delete it. You may not use, copy, disclose or rely on the information contained in it.
+ 
+Internet email is susceptible to data corruption, interception and unauthorised amendment for which Xyratex does not accept liability. While we have taken reasonable precautions to ensure that this email is free of viruses, Xyratex does not accept liability for the presence of any computer viruses in this email, nor for any losses caused as a result of viruses.
+ 
+Xyratex Technology Limited (03134912), Registered in England & Wales, Registered Office, Langstone Road, Havant, Hampshire, PO9 1SA.
+ 
+The Xyratex group of companies also includes, Xyratex Ltd, registered in Bermuda, Xyratex International Inc, registered in California, Xyratex (Malaysia) Sdn Bhd registered in Malaysia, Xyratex Technology (Wuxi) Co Ltd registered in The People's Republic of China and Xyratex Japan Limited registered in Japan.
+______________________________________________________________________
+ 
+
+
+
+From liang at whamcloud.com  Tue Jul  5 02:20:12 2011
+From: liang at whamcloud.com (Liang Zhen)
+Date: Tue, 5 Jul 2011 17:20:12 +0800
+Subject: [Lustre-devel] NRS HLD
+In-Reply-To: <8C4CE53E-8A87-43FE-B27F-F44B5E3D7550@us.xyratex.com>
+References: <24C12A32-1D42-4327-8F8F-B9D30471B8C8@gmail.com>
+	<1309448989.27038.5.camel@localhost.localdomain>
+	<88C87A8C-8DB5-4602-863B-9B77FF93C0D1@whamcloud.com>
+	<8C4CE53E-8A87-43FE-B27F-F44B5E3D7550@us.xyratex.com>
+Message-ID: <61BD608D-C941-4741-8200-79752803AF5D@whamcloud.com>
+
+Hi Nathan,
+
+We also have some ideas about infrastructure of NRS and would like to share
+them at here for discussion:
+
+- a common library to support inserting/removing prioritized requests, which 
+  should be scalable even for millions of requests
+
+- each policy only needs to provide:
+  . private data ("heap", more details below)
+  . a sorting callback to prioritize requests
+
+By this way, most common code can be put into libcfs and ptlrpc modules,
+instead of having a whole bunch of policy functions to sort requests in
+each policy (like the patch on BZ 13634).
+
+Here is the concept of "heap" mentioned above:
+
+(it's quoted from the following link)
+A heap is a specialized tree-based data structure that satisfies the heap
+property: if B is a child node of A, then key(A) ? key(B). This implies that an
+element with the greatest key is always in the root node, and so such a heap is
+sometimes called a max-heap. Alternatively, if the comparison is reversed, the
+smallest element is always in the root node, which results in a min-heap.
+
+Please see more detail at:
+http://en.wikipedia.org/wiki/Heap_%28data_structure%29
+
+Heap can give (log N) for both inserting element and removing element with
+greatest/lowest key, so it's very scalable, here are some sample heap APIs
+from a simple prototype:
+
+    /* create a heap, @compare is callback for sorting elements */
+    cfs_binheap_t *cfs_binheap_create(cfs_binheap_cmp_t compare,
+                                      unsigned int flags);
+
+    /* destroy a heap */
+    void cfs_binheap_destroy(cfs_binheap_t *h);
+
+    /* insert @element into heap */
+    int cfs_binheap_insert(cfs_binheap_t *h, void *elelment);
+
+    /* pop root for the @heap, which has greatest/lowest key in @heap */
+    void *cfs_binheap_pop_root(cfs_binheap_t *heap);
+
+and an example of using "heap" to implement Client-Based Round Robin:
+
+  - allocating a "heap" for the service which needs CBRR
+
+  - the service also have a "global round-number" which is always incremental
+    . GRN: Global Round Number
+    . CRN: Client Round Number
+    . RRN: Request Round Number
+
+  Process of inserting a request
+  - when there is new request:
+    . if the incoming request is the first request for a client, assign
+      the GRN to both the RRN of the request and CNR of the client
+
+    . if the incoming request isn't the first request for a client,
+      increase the CNR on the client then assign it to RRN of the request.
+
+  - insert the request into the heap, the heap can sort requests based
+    on callback like this:
+    . primary key is RRN of request
+
+    . secondary key is client ID (i.e: nid of client), secondary keys are
+      compared only if primary keys are equal
+
+  Process of dequeue a request:
+
+  - pop the root element from the heap, which should always has the lowest RRN
+
+  - if the RRN of the request is larger than GRN of the service,
+    which means the service has already handled all requests with <= GRN and
+    should set the GRN of service to the RRN of request
+
+Again, this just an example to demonstrate how to use "heap" to implement CBRR
+and show some preliminary ideas, it could be helpful to raise some discussion
+at here and to see whether it's possible to improve and apply this to NRS and
+make it to be a common library for future implementation of OBRR or any
+policy needs to prioritize requests, or for QoS.
+
+Thanks
+Liang
+
+On Jul 2, 2011, at 11:39 PM, Nathan Rutman wrote:
+
+> I think there is a whole slew of interesting possibilities to try out once an infrastructure for implementing different policies is in place. We're trying to get that infrastructure established first; we will be able to switch between policies dynamically to see their effects and optimize performance. People will be able to easily add new policies to test. 
+> You raise a good point about the SMP scaling patches; we will have to take a close look to make sure we don't undo any of the work you've done there. 
+> 
+> On Jul 2, 2011, at 3:49 AM, "Liang Zhen" <liang at whamcloud.com> wrote:
+> 
+>> Hi Nikitas,
+>> 
+>> It's a very interesting document, thanks for sharing these great ideas.
+>> May I ask whether there are any tests/numbers based on OBRR description
+>> in HLD? We always want to see numbers from these algorithms, unfortunately
+>> there is no reliable testing result from the patch on BZ 13634.
+>> 
+>> We are actually considering about NRS as well, although we don't have a
+>> formal design document like this HLD, but we'd like to share a few
+>> preliminary ideas for discussion:
+>> 
+>> - Target Based Round Robin (TBRR) probably is something worth to have
+>> 
+>> Briefly, it's just load balancing over OSTs to improve overall server
+>> performance.
+>> 
+>> - Fairness for clients and resource control for jobs
+>> 
+>> I think they are similar to CBRR and UBRR described in your document
+>> though I didn't see too much detail about them in the HLD.
+>> Personally, I think they are important and we probably will do some tests
+>> for CBRR survey very soon.
+>> 
+>> . Client-Based Round Robin (CBRR) can guarantee the server responses
+>>   to all clients fairly, and get whole-cluster load balancing, improve
+>>   concurrency of clients and jobs, and get better overall performance.
+>> 
+>> . resource control for jobs, some users complained that a busy job will
+>>   hog all resources on servers, and make the cluster not usable for other
+>>   control command or sysadmin. So it might be helpful to support job
+>>   resource control inside NRS.
+>> 
+>> - Layering NRS polices
+>> 
+>> Of course, OBRR is very important policy for NRS, but it might be
+>> helpful to have multiple polices working at the same time, i.e:
+>> 
+>> . bind OSTs on CPU partitions on NUMA system(please see more detail at
+>>   http://jira.whamcloud.com/browse/LU-56)
+>> 
+>> . Service threads on each CPU partition can do TBRR for bound OSTs. If
+>>   there is no CPU partition (like current Lustre) or OSTs are not bound
+>>   on CPU partitions, service threads just do round robin over all OSTs.
+>> 
+>> . OBRR inside each OST
+>> 
+>> . of course, these layers should be tunable.
+>> 
+>> - Overhead of layerd polices
+>> . there definitely will be some overhead for inserting/removing
+>>   request from these queues (or whatever), so we want some very scalable
+>>   algorithms to implement these polices.
+>> 
+>> Again, these are just some preliminary ideas, so we would appreciate any
+>> comment and suggestion.
+>> 
+>> Thanks
+>> Liang
+>> 
+>> 
+>> On Jun 30, 2011, at 11:49 PM, Nikitas Angelinas wrote:
+>> 
+>>> Hi,
+>>> 
+>>> There is a slightly more up-to-date version of the HLD, which I am
+>>> attaching.
+>>> 
+>>> 
+>>> Thanks,
+>>> Nikitas
+>>> 
+>>> On Wed, 2011-06-29 at 12:55 -0700, Nathan Rutman wrote:
+>>>> Sharing with the community.  All comments welcome.
+>>>> This HLD (high-level design) for a Network Request Scheduler is more
+>>>> about infrastructure than algorithm.
+>>>> 
+>>>> 
+>>>> 
+>>>> 
+>>>> We're actually in the DLD (detailed-level design) stage at the moment
+>>>> (sorry it didn't occur to me to 
+>>>> post this earlier).  I'll post the DLD after some minor revision.
+>>>> _______________________________________________
+>>>> Lustre-devel mailing list
+>>>> Lustre-devel at lists.lustre.org
+>>>> http://lists.lustre.org/mailman/listinfo/lustre-devel
+>>> 
+>>> 
+>>> ______________________________________________________________________
+>>> This email may contain privileged or confidential information, which should only be used for the purpose for which it was sent by Xyratex. No further rights or licenses are granted to use such information. If you are not the intended recipient of this message, please notify the sender by return and delete it. You may not use, copy, disclose or rely on the information contained in it.
+>>> 
+>>> Internet email is susceptible to data corruption, interception and unauthorised amendment for which Xyratex does not accept liability. While we have taken reasonable precautions to ensure that this email is free of viruses, Xyratex does not accept liability for the presence of any computer viruses in this email, nor for any losses caused as a result of viruses.
+>>> 
+>>> Xyratex Technology Limited (03134912), Registered in England & Wales, Registered Office, Langstone Road, Havant, Hampshire, PO9 1SA.
+>>> 
+>>> The Xyratex group of companies also includes, Xyratex Ltd, registered in Bermuda, Xyratex International Inc, registered in California, Xyratex (Malaysia) Sdn Bhd registered in Malaysia, Xyratex Technology (Wuxi) Co Ltd registered in The People's Republic of China and Xyratex Japan Limited registered in Japan.
+>>> ______________________________________________________________________
+>>> 
+>>> 
+>>> <HLD_of_Lustre_NRS.pdf>_______________________________________________
+>>> Lustre-devel mailing list
+>>> Lustre-devel at lists.lustre.org
+>>> http://lists.lustre.org/mailman/listinfo/lustre-devel
+>> 
+>> _______________________________________________
+>> Lustre-devel mailing list
+>> Lustre-devel at lists.lustre.org
+>> http://lists.lustre.org/mailman/listinfo/lustre-devel
+> ______________________________________________________________________
+> This email may contain privileged or confidential information, which should only be used for the purpose for which it was sent by Xyratex. No further rights or licenses are granted to use such information. If you are not the intended recipient of this message, please notify the sender by return and delete it. You may not use, copy, disclose or rely on the information contained in it.
+> 
+> Internet email is susceptible to data corruption, interception and unauthorised amendment for which Xyratex does not accept liability. While we have taken reasonable precautions to ensure that this email is free of viruses, Xyratex does not accept liability for the presence of any computer viruses in this email, nor for any losses caused as a result of viruses.
+> 
+> Xyratex Technology Limited (03134912), Registered in England & Wales, Registered Office, Langstone Road, Havant, Hampshire, PO9 1SA.
+> 
+> The Xyratex group of companies also includes, Xyratex Ltd, registered in Bermuda, Xyratex International Inc, registered in California, Xyratex (Malaysia) Sdn Bhd registered in Malaysia, Xyratex Technology (Wuxi) Co Ltd registered in The People's Republic of China and Xyratex Japan Limited registered in Japan.
+> ______________________________________________________________________
+> 
+> 
+
+
+
+From adilger at whamcloud.com  Wed Jul  6 19:25:15 2011
+From: adilger at whamcloud.com (Andreas Dilger)
+Date: Wed, 6 Jul 2011 20:25:15 -0600
+Subject: [Lustre-devel] Queries regarding Lustre Throughput Numbers with
+	mdtest benchmark
+In-Reply-To: <BANLkTinfUB6k2ar8g=BrJgcngZSsaYCr_w@mail.gmail.com>
+References: <BANLkTinfUB6k2ar8g=BrJgcngZSsaYCr_w@mail.gmail.com>
+Message-ID: <B6F73F72-01B8-4925-A50D-D922EF705734@whamcloud.com>
+
+On 2011-06-22, at 5:06 PM, vilobh meshram wrote:
+> I have a query regarding Lustre Throughput Numbers with mdtest benchmark.I am running mdtest benhmark with following options :-
+> 
+> /home/meshram/mpich2-new/mpich2-1.4/mpich2-install/bin/mpirun -np 256 -hostfile ./hostfile ./mdtest -z 3 -b 10 -I 5 -v -d /tmp/l66
+> 
+> 
+> where ,
+> mdtest - is the standard benchmark to test metadata operations. [https://computing.llnl.gov/?set=code&page=sio_downloads ]
+> /tmp/l66 is my Lustre mount.
+> I am using 1Gige Network with TCP transport.
+> hostfile has 8 host nodes
+> I am varying the number of processes as we can see in following table . 
+> I was amazed by the throughput which I got. I think this is too huge. Can someone please let me know if these numbers are correct ?
+> 
+> 
+> 
+> 4 Process      : File creation     :      0.501 sec,  44392.140 ops/sec
+> 8 Process      : File creation     :      0.685 sec,  64890.598 ops/sec
+> 16 Process    : File creation     :      1.426 sec,  62318.798 ops/sec
+> 32 Process    : File creation     :      2.947 sec,  60312.766 ops/sec
+> 64 Process    : File creation     :      5.630 sec,  63142.760 ops/sec
+> 128 Process  : File creation     :     13.208 sec,  53835.707 ops/sec
+> 256 Process  : File creation     :     24.601 sec,  57804.777 ops/sec
+
+Seems nobody has responded to your email, and I just found it buried in my
+inbox.
+
+I agree that the numbers are quite high, especially for GigE networking.
+More typical numbers are in the 5-20k creates/sec (depending on network
+and MDS hardware).
+
+That said, the above may not be completely impossible for small file
+counts (allowing all of the creates to be served from cache), or if the
+client+MDS+OSS are all on the same node (which avoids any network latency).
+
+You also didn't describe the Lustre filesystem, nor what version you are
+testing.  This workload has gotten a faster with Lustre 2.1, and it stands
+to get faster in Lustre 2.2 also.
+
+Cheers, Andreas
+--
+Andreas Dilger 
+Principal Engineer
+Whamcloud, Inc.
+
+
+
+
+
+From nikitas_angelinas at xyratex.com  Thu Jul  7 07:34:02 2011
+From: nikitas_angelinas at xyratex.com (Nikitas Angelinas)
+Date: Thu, 07 Jul 2011 15:34:02 +0100
+Subject: [Lustre-devel] NRS HLD
+In-Reply-To: <61BD608D-C941-4741-8200-79752803AF5D@whamcloud.com>
+References: <24C12A32-1D42-4327-8F8F-B9D30471B8C8@gmail.com>
+	<1309448989.27038.5.camel@localhost.localdomain>
+	<88C87A8C-8DB5-4602-863B-9B77FF93C0D1@whamcloud.com>
+	<8C4CE53E-8A87-43FE-B27F-F44B5E3D7550@us.xyratex.com>
+	<61BD608D-C941-4741-8200-79752803AF5D@whamcloud.com>
+Message-ID: <1310049242.2181.120.camel@localhost.localdomain>
+
+Hi Liang,
+
+
+Thank you for sharing these great ideas; I think the task lends itself
+well to adding different schemes that performance can benefit from. To
+answer an earlier question, we unfortunately don't have any numbers or
+have performed any tests related to the NRS task. We'll obviously
+publish any such data as soon as we get our first policy developed, and
+under test.
+
+Both Nathan and I think you raise a very good point by highlighting the
+need for a scalable data structure that can sort elements in libcfs, as
+different policies could probably make use of such a facility, and may
+actually require it if they need to address scalability-related issues
+(there's an older, related topic
+http://lists.lustre.org/pipermail/lustre-devel/2008-January/002230.html
+which I'm sure you're already aware of).
+
+I think there are some holes in my understanding of the example you gave
+on using the binary heap in conjunction with GRN/CRN/RRN to implement a
+CBRR policy. Is the GRN incremented with every incoming request? And how
+can two requests end up with the same RRN? I'm sure the logic makes
+sense, this is probably me just being daft :-).
+
+Can I ask if there is a binary heap implementation living in a branch
+somewhere, or you plan on landing one on master at some point? There is
+some code attached on the thread I have pasted above, but I have not had
+a look through it; going through the thread posts, it seems to be in
+working and well-performing state.
+
+For the first policy we aim to develop ("obj_extents" in the HLD)
+although OBRR-like, we are not looking at using any data structures that
+are out of the norm, at present. The idea is that we 
+pick up requests from the service in-queue and add requests in
+number-limited (or perhaps size-limited) per-object groupings, sorted by
+offset, which are either populated in-place in the normal service
+request queue, or use the normal service request queue as an
+intermediate queue (just to avoid much processing in what is now the
+pre-processing stage for RPCs), before they are added to the sorted
+queue, from where they are eventually dispatched. We are looking at
+using a libcfs hash for resolving incoming requests to the appropriate
+object grouping, much like the OBRR implementation in the prototype NRS
+patch does; I think this method will naturally avoid any request
+starvation issues, but I am not sure it will perform as well as an OBRR
+implementation using a heap. Hope the description above makes some
+sense; if you see any problems with it, then please do let us know.
+
+The NRS architectural specification at
+http://wiki.lustre.org/index.php/Architecture_-_Network_Request_Scheduler has references to additional aspects to the task. Are you looking at providing some form of POP capability, or reproducing offset stream ordering, at present? These both sound like features that perhaps the framework itself could benefit from, at least in part irrespective of policy, I think. We seem to have at least one use case where we could do with clients passing additional information with each RPC, in QoS, so it seems like resource control, and catering for offset stream consistency may add additional ones.
+
+
+Regards,
+Nikitas
+
+
+
+
+
+
+On Tue, 2011-07-05 at 17:20 +0800, Liang Zhen wrote: 
+> Hi Nathan,
+> 
+> We also have some ideas about infrastructure of NRS and would like to share
+> them at here for discussion:
+> 
+> - a common library to support inserting/removing prioritized requests, which 
+>   should be scalable even for millions of requests
+> 
+> - each policy only needs to provide:
+>   . private data ("heap", more details below)
+>   . a sorting callback to prioritize requests
+> 
+> By this way, most common code can be put into libcfs and ptlrpc modules,
+> instead of having a whole bunch of policy functions to sort requests in
+> each policy (like the patch on BZ 13634).
+> 
+> Here is the concept of "heap" mentioned above:
+> 
+> (it's quoted from the following link)
+> A heap is a specialized tree-based data structure that satisfies the heap
+> property: if B is a child node of A, then key(A) ? key(B). This implies that an
+> element with the greatest key is always in the root node, and so such a heap is
+> sometimes called a max-heap. Alternatively, if the comparison is reversed, the
+> smallest element is always in the root node, which results in a min-heap.
+> 
+> Please see more detail at:
+> http://en.wikipedia.org/wiki/Heap_%28data_structure%29
+> 
+> Heap can give (log N) for both inserting element and removing element with
+> greatest/lowest key, so it's very scalable, here are some sample heap APIs
+> from a simple prototype:
+> 
+>     /* create a heap, @compare is callback for sorting elements */
+>     cfs_binheap_t *cfs_binheap_create(cfs_binheap_cmp_t compare,
+>                                       unsigned int flags);
+> 
+>     /* destroy a heap */
+>     void cfs_binheap_destroy(cfs_binheap_t *h);
+> 
+>     /* insert @element into heap */
+>     int cfs_binheap_insert(cfs_binheap_t *h, void *elelment);
+> 
+>     /* pop root for the @heap, which has greatest/lowest key in @heap */
+>     void *cfs_binheap_pop_root(cfs_binheap_t *heap);
+> 
+> and an example of using "heap" to implement Client-Based Round Robin:
+> 
+>   - allocating a "heap" for the service which needs CBRR
+> 
+>   - the service also have a "global round-number" which is always incremental
+>     . GRN: Global Round Number
+>     . CRN: Client Round Number
+>     . RRN: Request Round Number
+> 
+>   Process of inserting a request
+>   - when there is new request:
+>     . if the incoming request is the first request for a client, assign
+>       the GRN to both the RRN of the request and CNR of the client
+> 
+>     . if the incoming request isn't the first request for a client,
+>       increase the CNR on the client then assign it to RRN of the request.
+> 
+>   - insert the request into the heap, the heap can sort requests based
+>     on callback like this:
+>     . primary key is RRN of request
+> 
+>     . secondary key is client ID (i.e: nid of client), secondary keys are
+>       compared only if primary keys are equal
+> 
+>   Process of dequeue a request:
+> 
+>   - pop the root element from the heap, which should always has the lowest RRN
+> 
+>   - if the RRN of the request is larger than GRN of the service,
+>     which means the service has already handled all requests with <= GRN and
+>     should set the GRN of service to the RRN of request
+> 
+> Again, this just an example to demonstrate how to use "heap" to implement CBRR
+> and show some preliminary ideas, it could be helpful to raise some discussion
+> at here and to see whether it's possible to improve and apply this to NRS and
+> make it to be a common library for future implementation of OBRR or any
+> policy needs to prioritize requests, or for QoS.
+> 
+> Thanks
+> Liang
+> 
+> On Jul 2, 2011, at 11:39 PM, Nathan Rutman wrote:
+> 
+> > I think there is a whole slew of interesting possibilities to try out once an infrastructure for implementing different policies is in place. We're trying to get that infrastructure established first; we will be able to switch between policies dynamically to see their effects and optimize performance. People will be able to easily add new policies to test. 
+> > You raise a good point about the SMP scaling patches; we will have to take a close look to make sure we don't undo any of the work you've done there. 
+> > 
+> > On Jul 2, 2011, at 3:49 AM, "Liang Zhen" <liang at whamcloud.com> wrote:
+> > 
+> >> Hi Nikitas,
+> >> 
+> >> It's a very interesting document, thanks for sharing these great ideas.
+> >> May I ask whether there are any tests/numbers based on OBRR description
+> >> in HLD? We always want to see numbers from these algorithms, unfortunately
+> >> there is no reliable testing result from the patch on BZ 13634.
+> >> 
+> >> We are actually considering about NRS as well, although we don't have a
+> >> formal design document like this HLD, but we'd like to share a few
+> >> preliminary ideas for discussion:
+> >> 
+> >> - Target Based Round Robin (TBRR) probably is something worth to have
+> >> 
+> >> Briefly, it's just load balancing over OSTs to improve overall server
+> >> performance.
+> >> 
+> >> - Fairness for clients and resource control for jobs
+> >> 
+> >> I think they are similar to CBRR and UBRR described in your document
+> >> though I didn't see too much detail about them in the HLD.
+> >> Personally, I think they are important and we probably will do some tests
+> >> for CBRR survey very soon.
+> >> 
+> >> . Client-Based Round Robin (CBRR) can guarantee the server responses
+> >>   to all clients fairly, and get whole-cluster load balancing, improve
+> >>   concurrency of clients and jobs, and get better overall performance.
+> >> 
+> >> . resource control for jobs, some users complained that a busy job will
+> >>   hog all resources on servers, and make the cluster not usable for other
+> >>   control command or sysadmin. So it might be helpful to support job
+> >>   resource control inside NRS.
+> >> 
+> >> - Layering NRS polices
+> >> 
+> >> Of course, OBRR is very important policy for NRS, but it might be
+> >> helpful to have multiple polices working at the same time, i.e:
+> >> 
+> >> . bind OSTs on CPU partitions on NUMA system(please see more detail at
+> >>   http://jira.whamcloud.com/browse/LU-56)
+> >> 
+> >> . Service threads on each CPU partition can do TBRR for bound OSTs. If
+> >>   there is no CPU partition (like current Lustre) or OSTs are not bound
+> >>   on CPU partitions, service threads just do round robin over all OSTs.
+> >> 
+> >> . OBRR inside each OST
+> >> 
+> >> . of course, these layers should be tunable.
+> >> 
+> >> - Overhead of layerd polices
+> >> . there definitely will be some overhead for inserting/removing
+> >>   request from these queues (or whatever), so we want some very scalable
+> >>   algorithms to implement these polices.
+> >> 
+> >> Again, these are just some preliminary ideas, so we would appreciate any
+> >> comment and suggestion.
+> >> 
+> >> Thanks
+> >> Liang
+> >> 
+> >> 
+> >> On Jun 30, 2011, at 11:49 PM, Nikitas Angelinas wrote:
+> >> 
+> >>> Hi,
+> >>> 
+> >>> There is a slightly more up-to-date version of the HLD, which I am
+> >>> attaching.
+> >>> 
+> >>> 
+> >>> Thanks,
+> >>> Nikitas
+> >>> 
+> >>> On Wed, 2011-06-29 at 12:55 -0700, Nathan Rutman wrote:
+> >>>> Sharing with the community.  All comments welcome.
+> >>>> This HLD (high-level design) for a Network Request Scheduler is more
+> >>>> about infrastructure than algorithm.
+> >>>> 
+> >>>> 
+> >>>> 
+> >>>> 
+> >>>> We're actually in the DLD (detailed-level design) stage at the moment
+> >>>> (sorry it didn't occur to me to 
+> >>>> post this earlier).  I'll post the DLD after some minor revision.
+> >>>> _______________________________________________
+> >>>> Lustre-devel mailing list
+> >>>> Lustre-devel at lists.lustre.org
+> >>>> http://lists.lustre.org/mailman/listinfo/lustre-devel
+> >>> 
+> >>> 
+> >>> ______________________________________________________________________
+> >>> This email may contain privileged or confidential information, which should only be used for the purpose for which it was sent by Xyratex. No further rights or licenses are granted to use such information. If you are not the intended recipient of this message, please notify the sender by return and delete it. You may not use, copy, disclose or rely on the information contained in it.
+> >>> 
+> >>> Internet email is susceptible to data corruption, interception and unauthorised amendment for which Xyratex does not accept liability. While we have taken reasonable precautions to ensure that this email is free of viruses, Xyratex does not accept liability for the presence of any computer viruses in this email, nor for any losses caused as a result of viruses.
+> >>> 
+> >>> Xyratex Technology Limited (03134912), Registered in England & Wales, Registered Office, Langstone Road, Havant, Hampshire, PO9 1SA.
+> >>> 
+> >>> The Xyratex group of companies also includes, Xyratex Ltd, registered in Bermuda, Xyratex International Inc, registered in California, Xyratex (Malaysia) Sdn Bhd registered in Malaysia, Xyratex Technology (Wuxi) Co Ltd registered in The People's Republic of China and Xyratex Japan Limited registered in Japan.
+> >>> ______________________________________________________________________
+> >>> 
+> >>> 
+> >>> <HLD_of_Lustre_NRS.pdf>_______________________________________________
+> >>> Lustre-devel mailing list
+> >>> Lustre-devel at lists.lustre.org
+> >>> http://lists.lustre.org/mailman/listinfo/lustre-devel
+> >> 
+> >> _______________________________________________
+> >> Lustre-devel mailing list
+> >> Lustre-devel at lists.lustre.org
+> >> http://lists.lustre.org/mailman/listinfo/lustre-devel
+> > ______________________________________________________________________
+> > This email may contain privileged or confidential information, which should only be used for the purpose for which it was sent by Xyratex. No further rights or licenses are granted to use such information. If you are not the intended recipient of this message, please notify the sender by return and delete it. You may not use, copy, disclose or rely on the information contained in it.
+> > 
+> > Internet email is susceptible to data corruption, interception and unauthorised amendment for which Xyratex does not accept liability. While we have taken reasonable precautions to ensure that this email is free of viruses, Xyratex does not accept liability for the presence of any computer viruses in this email, nor for any losses caused as a result of viruses.
+> > 
+> > Xyratex Technology Limited (03134912), Registered in England & Wales, Registered Office, Langstone Road, Havant, Hampshire, PO9 1SA.
+> > 
+> > The Xyratex group of companies also includes, Xyratex Ltd, registered in Bermuda, Xyratex International Inc, registered in California, Xyratex (Malaysia) Sdn Bhd registered in Malaysia, Xyratex Technology (Wuxi) Co Ltd registered in The People's Republic of China and Xyratex Japan Limited registered in Japan.
+> > ______________________________________________________________________
+> > 
+> > 
+> 
+
+
+______________________________________________________________________
+This email may contain privileged or confidential information, which should only be used for the purpose for which it was sent by Xyratex. No further rights or licenses are granted to use such information. If you are not the intended recipient of this message, please notify the sender by return and delete it. You may not use, copy, disclose or rely on the information contained in it.
+ 
+Internet email is susceptible to data corruption, interception and unauthorised amendment for which Xyratex does not accept liability. While we have taken reasonable precautions to ensure that this email is free of viruses, Xyratex does not accept liability for the presence of any computer viruses in this email, nor for any losses caused as a result of viruses.
+ 
+Xyratex Technology Limited (03134912), Registered in England & Wales, Registered Office, Langstone Road, Havant, Hampshire, PO9 1SA.
+ 
+The Xyratex group of companies also includes, Xyratex Ltd, registered in Bermuda, Xyratex International Inc, registered in California, Xyratex (Malaysia) Sdn Bhd registered in Malaysia, Xyratex Technology (Wuxi) Co Ltd registered in The People's Republic of China and Xyratex Japan Limited registered in Japan.
+______________________________________________________________________
+ 
+
+
+
+From liang at whamcloud.com  Fri Jul  8 20:34:32 2011
+From: liang at whamcloud.com (Liang Zhen)
+Date: Sat, 9 Jul 2011 11:34:32 +0800
+Subject: [Lustre-devel] NRS HLD
+In-Reply-To: <1310049242.2181.120.camel@localhost.localdomain>
+References: <24C12A32-1D42-4327-8F8F-B9D30471B8C8@gmail.com>
+	<1309448989.27038.5.camel@localhost.localdomain>
+	<88C87A8C-8DB5-4602-863B-9B77FF93C0D1@whamcloud.com>
+	<8C4CE53E-8A87-43FE-B27F-F44B5E3D7550@us.xyratex.com>
+	<61BD608D-C941-4741-8200-79752803AF5D@whamcloud.com>
+	<1310049242.2181.120.camel@localhost.localdomain>
+Message-ID: <06B2896D-1A6A-4738-96AD-95D9B04AE9A4@whamcloud.com>
+
+Hi Nikitas,
+
+As you can see, I've posted my prototype on our Jira, hope it can help on
+explaining how binheap can be used for NRS because it will be too complex
+for me to explain all things by English, :-)
+
+http://jira.whamcloud.com/browse/LU-398
+http://jira.whamcloud.com/secure/attachment/10300/nrs_liang_v2.patch
+
+I got this prototype a couple of weeks ago and we are looking for a chance
+to get some performance data with it.
+
+It's not fully tested and not reviewed, so I posted it just for discussion
+and hope it can help us to understand things better and avoid rework.
+If I was wrong in the prototype or my points here, please just correct me
+either on Jira or at here.
+
+the prototype contains:
+
+  - implementation of binheap
+
+  - a simple framework for NRS
+
+  - client-round-robin implemented by binheap
+
+Because it's just a prototype and I don't have any document (sorry...)
+so I'm going to give some introduction at here.
+
+  A few concepts:
+
+  - NRS policy
+    the algorithm of adding/sorting/removing requests
+
+  - NRS policy head
+    . it's a list of NRS polices
+
+    . a policy head must has a default-policy (i.e: FIFO), default-policy
+      should never fail and can't be disable
+
+    . a policy-head can have one active-policy, or no active-policy at all.
+      If there is an active-policy, request should firstly be handled by it.
+      If the active-policy failed to handle request, the request will
+      be delivered to default-policy.
+
+      If no active-policy, request will always be handled by default-policy.
+
+      I think it's similar but a little different with your design(Please
+      correct me if I was wrong), the "secondary policy" in your design
+      is somehow like default-policy here, I'm wondering why we want to
+      specify secondary-policy for each policy, instead of just let all
+      polices share a default policy.
+
+    . user can activate/deactivate poilicy at runtime
+
+    . ptlrpc service should always poll over all polices to find pending
+      requests (even from inactive polices), so requests wouldn't be forgotten
+      forever when user deactivate policy at runtime.
+
+  - NRS object
+    target object, i.e: it represents a client (or export) for
+    client-round-robin, or it represents an OST object for object-round-robin
+
+  - NRS target
+    NRS-target is private data of NRS-policy, A NRS-target can contains
+    many NRS-objects, just like storage-target to storage-objects.
+
+  - NRS request
+    NRS-request is a stub embedded in ptlrpc_request, each NRS-object can
+    have 1-N pending NRS-requests.
+
+  Logic specifications
+
+  - each service has two NRS-policy-heads, one for regular requests,
+    another for HP (high priority) requests
+
+  - user can register/unregister a NRS-policy for a service, either for
+    for regular NRS-policy-heads, or for HP NRS-policy-heads
+
+  - Two polices so far:
+
+    . FIFO list, which is default
+
+    . client-round-robin based on binheap
+      it's actually round-robin over exports for now, user can
+      activate/deactivate it by lprocfs.
+      We can change it to round-robin over client NIDs in the future,
+      or just add a new policy.
+
+  - ptlrpc service threads call active/default NRS-policy to sort incoming
+    requests policy::nrs_ops::op_req_add()
+
+    . requests can ben sorted by round & sequence number recorded on
+      NRS-target and NRS-object, buffer offset from request can also be
+      counted in as sorting key for using it as disk elevator in the future
+
+  - ptlrpc service threads will poll request (round-robin) from all
+    NRS-polices on NRS-policy-head by calling policy::nrs_ops::op_req_first(),
+    which returns the request with the highest priority in the binheap or
+    just the first request if it's FIFO mode, the request can be removed from
+    NRS-target by calling policy::nrs_ops::op_req_del().
+
+  - object-round-robin (not in the prototype)
+
+    I agree cfs_hash can be used to find out object, also, I noticed the
+    patch on BZ 13634 is using list + rbtree to implement object-round-robin
+    and I'm not very clear about your sorting solution but I think binheap
+    could be an option. By using binheap,two data structures (list + rbtree,
+    or list+list) can be replaced by one (binheap), and all sorting operations
+    are invisible to user (user just needs to provide compare callback)
+
+    The major difference between client-round-robin and object-round-robin is:
+
+    . NRS-object of client-round-robin is a client, round-number on NRS-object
+      is unique for each request.
+
+    . NRS-object of object-round-robin is an OST object, round-number on
+      NRS-object doesn't have to be unique, which means multiple NRS-requests
+      for one NRS-object can share the same round-number, and these requests
+      are sorted by buffer offset in binheap.
+      As you said, we can "consume" the round-number by counting grouped
+      RPCs or data size.
+
+Anyway, these are just my preliminary ideas, any comment and suggestions
+would be great.
+
+Some information about binheap:
+
+  There are some changes for the binheap posted by Eric:
+
+  - In the original version, user just needs address of element while
+    inserting it, users have no idea about where the element is and
+    can't remove element unless it's root of binheap.
+    In current version, user needs to provide a pointer of
+    cfs_binheap_node_t, which should be embedded in element structure.
+
+    example:
+        struct foo_type {
+            cfs_binheap_node_t  node;
+        } foo;
+        cfs_binheap_insert(h, &foo.node);
+
+    with this change, user can remove element at any position
+
+    example:
+        cfs_binheap_remove(h, &foo.node);
+
+  - there are two options if user wants to have atomically insert:
+
+    . preallocate memory for binheap if caller can estimate heap size,
+      cfs_binheap_create(..., count);
+
+    . use flag CBH_FLAG_ATOMIC_GROW
+      cfs_binheap_create(..., CBH_FLAG_ATOMIC_GROW, count);
+
+  Here is the list of all APIs
+
+    cfs_binheap_t *cfs_binheap_create(cfs_binheap_ops_t *ops,
+                                      unsigned int flags, unsigned count);
+
+    void cfs_binheap_destroy(cfs_binheap_t *h);
+
+    cfs_binheap_node_t *cfs_binheap_find(cfs_binheap_t *h, unsigned int idx);
+
+    int cfs_binheap_insert(cfs_binheap_t *h, cfs_binheap_node_t *e);
+
+    void cfs_binheap_remove(cfs_binheap_t *h, cfs_binheap_node_t *e);
+
+  And some inline wrappers:
+
+    int cfs_binheap_size(cfs_binheap_t *h)
+
+    int cfs_binheap_is_empty(cfs_binheap_t *h)
+
+    cfs_binheap_node_t *cfs_binheap_root(cfs_binheap_t *h)
+
+    cfs_binheap_node_t *cfs_binheap_remove_root(cfs_binheap_t *h)
+
+Anyway, hope these discussion can help us to understand the whole thing better
+so we can get agreement about how to move on this project.
+
+Thanks
+Liang
+
+
+
+On Jul 7, 2011, at 10:34 PM, Nikitas Angelinas wrote:
+
+> Hi Liang,
+> 
+> 
+> Thank you for sharing these great ideas; I think the task lends itself
+> well to adding different schemes that performance can benefit from. To
+> answer an earlier question, we unfortunately don't have any numbers or
+> have performed any tests related to the NRS task. We'll obviously
+> publish any such data as soon as we get our first policy developed, and
+> under test.
+> 
+> Both Nathan and I think you raise a very good point by highlighting the
+> need for a scalable data structure that can sort elements in libcfs, as
+> different policies could probably make use of such a facility, and may
+> actually require it if they need to address scalability-related issues
+> (there's an older, related topic
+> http://lists.lustre.org/pipermail/lustre-devel/2008-January/002230.html
+> which I'm sure you're already aware of).
+> 
+> I think there are some holes in my understanding of the example you gave
+> on using the binary heap in conjunction with GRN/CRN/RRN to implement a
+> CBRR policy. Is the GRN incremented with every incoming request? And how
+> can two requests end up with the same RRN? I'm sure the logic makes
+> sense, this is probably me just being daft :-).
+> 
+> Can I ask if there is a binary heap implementation living in a branch
+> somewhere, or you plan on landing one on master at some point? There is
+> some code attached on the thread I have pasted above, but I have not had
+> a look through it; going through the thread posts, it seems to be in
+> working and well-performing state.
+> 
+> For the first policy we aim to develop ("obj_extents" in the HLD)
+> although OBRR-like, we are not looking at using any data structures that
+> are out of the norm, at present. The idea is that we 
+> pick up requests from the service in-queue and add requests in
+> number-limited (or perhaps size-limited) per-object groupings, sorted by
+> offset, which are either populated in-place in the normal service
+> request queue, or use the normal service request queue as an
+> intermediate queue (just to avoid much processing in what is now the
+> pre-processing stage for RPCs), before they are added to the sorted
+> queue, from where they are eventually dispatched. We are looking at
+> using a libcfs hash for resolving incoming requests to the appropriate
+> object grouping, much like the OBRR implementation in the prototype NRS
+> patch does; I think this method will naturally avoid any request
+> starvation issues, but I am not sure it will perform as well as an OBRR
+> implementation using a heap. Hope the description above makes some
+> sense; if you see any problems with it, then please do let us know.
+> 
+> The NRS architectural specification at
+> http://wiki.lustre.org/index.php/Architecture_-_Network_Request_Scheduler has references to additional aspects to the task. Are you looking at providing some form of POP capability, or reproducing offset stream ordering, at present? These both sound like features that perhaps the framework itself could benefit from, at least in part irrespective of policy, I think. We seem to have at least one use case where we could do with clients passing additional information with each RPC, in QoS, so it seems like resource control, and catering for offset stream consistency may add additional ones.
+> 
+> 
+> Regards,
+> Nikitas
+> 
+> 
+> 
+> 
+> 
+> 
+> On Tue, 2011-07-05 at 17:20 +0800, Liang Zhen wrote: 
+>> Hi Nathan,
+>> 
+>> We also have some ideas about infrastructure of NRS and would like to share
+>> them at here for discussion:
+>> 
+>> - a common library to support inserting/removing prioritized requests, which 
+>>  should be scalable even for millions of requests
+>> 
+>> - each policy only needs to provide:
+>>  . private data ("heap", more details below)
+>>  . a sorting callback to prioritize requests
+>> 
+>> By this way, most common code can be put into libcfs and ptlrpc modules,
+>> instead of having a whole bunch of policy functions to sort requests in
+>> each policy (like the patch on BZ 13634).
+>> 
+>> Here is the concept of "heap" mentioned above:
+>> 
+>> (it's quoted from the following link)
+>> A heap is a specialized tree-based data structure that satisfies the heap
+>> property: if B is a child node of A, then key(A) ? key(B). This implies that an
+>> element with the greatest key is always in the root node, and so such a heap is
+>> sometimes called a max-heap. Alternatively, if the comparison is reversed, the
+>> smallest element is always in the root node, which results in a min-heap.
+>> 
+>> Please see more detail at:
+>> http://en.wikipedia.org/wiki/Heap_%28data_structure%29
+>> 
+>> Heap can give (log N) for both inserting element and removing element with
+>> greatest/lowest key, so it's very scalable, here are some sample heap APIs
+>> from a simple prototype:
+>> 
+>>    /* create a heap, @compare is callback for sorting elements */
+>>    cfs_binheap_t *cfs_binheap_create(cfs_binheap_cmp_t compare,
+>>                                      unsigned int flags);
+>> 
+>>    /* destroy a heap */
+>>    void cfs_binheap_destroy(cfs_binheap_t *h);
+>> 
+>>    /* insert @element into heap */
+>>    int cfs_binheap_insert(cfs_binheap_t *h, void *elelment);
+>> 
+>>    /* pop root for the @heap, which has greatest/lowest key in @heap */
+>>    void *cfs_binheap_pop_root(cfs_binheap_t *heap);
+>> 
+>> and an example of using "heap" to implement Client-Based Round Robin:
+>> 
+>>  - allocating a "heap" for the service which needs CBRR
+>> 
+>>  - the service also have a "global round-number" which is always incremental
+>>    . GRN: Global Round Number
+>>    . CRN: Client Round Number
+>>    . RRN: Request Round Number
+>> 
+>>  Process of inserting a request
+>>  - when there is new request:
+>>    . if the incoming request is the first request for a client, assign
+>>      the GRN to both the RRN of the request and CNR of the client
+>> 
+>>    . if the incoming request isn't the first request for a client,
+>>      increase the CNR on the client then assign it to RRN of the request.
+>> 
+>>  - insert the request into the heap, the heap can sort requests based
+>>    on callback like this:
+>>    . primary key is RRN of request
+>> 
+>>    . secondary key is client ID (i.e: nid of client), secondary keys are
+>>      compared only if primary keys are equal
+>> 
+>>  Process of dequeue a request:
+>> 
+>>  - pop the root element from the heap, which should always has the lowest RRN
+>> 
+>>  - if the RRN of the request is larger than GRN of the service,
+>>    which means the service has already handled all requests with <= GRN and
+>>    should set the GRN of service to the RRN of request
+>> 
+>> Again, this just an example to demonstrate how to use "heap" to implement CBRR
+>> and show some preliminary ideas, it could be helpful to raise some discussion
+>> at here and to see whether it's possible to improve and apply this to NRS and
+>> make it to be a common library for future implementation of OBRR or any
+>> policy needs to prioritize requests, or for QoS.
+>> 
+>> Thanks
+>> Liang
+>> 
+>> On Jul 2, 2011, at 11:39 PM, Nathan Rutman wrote:
+>> 
+>>> I think there is a whole slew of interesting possibilities to try out once an infrastructure for implementing different policies is in place. We're trying to get that infrastructure established first; we will be able to switch between policies dynamically to see their effects and optimize performance. People will be able to easily add new policies to test. 
+>>> You raise a good point about the SMP scaling patches; we will have to take a close look to make sure we don't undo any of the work you've done there. 
+>>> 
+>>> On Jul 2, 2011, at 3:49 AM, "Liang Zhen" <liang at whamcloud.com> wrote:
+>>> 
+>>>> Hi Nikitas,
+>>>> 
+>>>> It's a very interesting document, thanks for sharing these great ideas.
+>>>> May I ask whether there are any tests/numbers based on OBRR description
+>>>> in HLD? We always want to see numbers from these algorithms, unfortunately
+>>>> there is no reliable testing result from the patch on BZ 13634.
+>>>> 
+>>>> We are actually considering about NRS as well, although we don't have a
+>>>> formal design document like this HLD, but we'd like to share a few
+>>>> preliminary ideas for discussion:
+>>>> 
+>>>> - Target Based Round Robin (TBRR) probably is something worth to have
+>>>> 
+>>>> Briefly, it's just load balancing over OSTs to improve overall server
+>>>> performance.
+>>>> 
+>>>> - Fairness for clients and resource control for jobs
+>>>> 
+>>>> I think they are similar to CBRR and UBRR described in your document
+>>>> though I didn't see too much detail about them in the HLD.
+>>>> Personally, I think they are important and we probably will do some tests
+>>>> for CBRR survey very soon.
+>>>> 
+>>>> . Client-Based Round Robin (CBRR) can guarantee the server responses
+>>>>  to all clients fairly, and get whole-cluster load balancing, improve
+>>>>  concurrency of clients and jobs, and get better overall performance.
+>>>> 
+>>>> . resource control for jobs, some users complained that a busy job will
+>>>>  hog all resources on servers, and make the cluster not usable for other
+>>>>  control command or sysadmin. So it might be helpful to support job
+>>>>  resource control inside NRS.
+>>>> 
+>>>> - Layering NRS polices
+>>>> 
+>>>> Of course, OBRR is very important policy for NRS, but it might be
+>>>> helpful to have multiple polices working at the same time, i.e:
+>>>> 
+>>>> . bind OSTs on CPU partitions on NUMA system(please see more detail at
+>>>>  http://jira.whamcloud.com/browse/LU-56)
+>>>> 
+>>>> . Service threads on each CPU partition can do TBRR for bound OSTs. If
+>>>>  there is no CPU partition (like current Lustre) or OSTs are not bound
+>>>>  on CPU partitions, service threads just do round robin over all OSTs.
+>>>> 
+>>>> . OBRR inside each OST
+>>>> 
+>>>> . of course, these layers should be tunable.
+>>>> 
+>>>> - Overhead of layerd polices
+>>>> . there definitely will be some overhead for inserting/removing
+>>>>  request from these queues (or whatever), so we want some very scalable
+>>>>  algorithms to implement these polices.
+>>>> 
+>>>> Again, these are just some preliminary ideas, so we would appreciate any
+>>>> comment and suggestion.
+>>>> 
+>>>> Thanks
+>>>> Liang
+>>>> 
+>>>> 
+>>>> On Jun 30, 2011, at 11:49 PM, Nikitas Angelinas wrote:
+>>>> 
+>>>>> Hi,
+>>>>> 
+>>>>> There is a slightly more up-to-date version of the HLD, which I am
+>>>>> attaching.
+>>>>> 
+>>>>> 
+>>>>> Thanks,
+>>>>> Nikitas
+>>>>> 
+>>>>> On Wed, 2011-06-29 at 12:55 -0700, Nathan Rutman wrote:
+>>>>>> Sharing with the community.  All comments welcome.
+>>>>>> This HLD (high-level design) for a Network Request Scheduler is more
+>>>>>> about infrastructure than algorithm.
+>>>>>> 
+>>>>>> 
+>>>>>> 
+>>>>>> 
+>>>>>> We're actually in the DLD (detailed-level design) stage at the moment
+>>>>>> (sorry it didn't occur to me to 
+>>>>>> post this earlier).  I'll post the DLD after some minor revision.
+>>>>>> _______________________________________________
+>>>>>> Lustre-devel mailing list
+>>>>>> Lustre-devel at lists.lustre.org
+>>>>>> http://lists.lustre.org/mailman/listinfo/lustre-devel
+>>>>> 
+>>>>> 
+>>>>> ______________________________________________________________________
+>>>>> This email may contain privileged or confidential information, which should only be used for the purpose for which it was sent by Xyratex. No further rights or licenses are granted to use such information. If you are not the intended recipient of this message, please notify the sender by return and delete it. You may not use, copy, disclose or rely on the information contained in it.
+>>>>> 
+>>>>> Internet email is susceptible to data corruption, interception and unauthorised amendment for which Xyratex does not accept liability. While we have taken reasonable precautions to ensure that this email is free of viruses, Xyratex does not accept liability for the presence of any computer viruses in this email, nor for any losses caused as a result of viruses.
+>>>>> 
+>>>>> Xyratex Technology Limited (03134912), Registered in England & Wales, Registered Office, Langstone Road, Havant, Hampshire, PO9 1SA.
+>>>>> 
+>>>>> The Xyratex group of companies also includes, Xyratex Ltd, registered in Bermuda, Xyratex International Inc, registered in California, Xyratex (Malaysia) Sdn Bhd registered in Malaysia, Xyratex Technology (Wuxi) Co Ltd registered in The People's Republic of China and Xyratex Japan Limited registered in Japan.
+>>>>> ______________________________________________________________________
+>>>>> 
+>>>>> 
+>>>>> <HLD_of_Lustre_NRS.pdf>_______________________________________________
+>>>>> Lustre-devel mailing list
+>>>>> Lustre-devel at lists.lustre.org
+>>>>> http://lists.lustre.org/mailman/listinfo/lustre-devel
+>>>> 
+>>>> _______________________________________________
+>>>> Lustre-devel mailing list
+>>>> Lustre-devel at lists.lustre.org
+>>>> http://lists.lustre.org/mailman/listinfo/lustre-devel
+>>> ______________________________________________________________________
+>>> This email may contain privileged or confidential information, which should only be used for the purpose for which it was sent by Xyratex. No further rights or licenses are granted to use such information. If you are not the intended recipient of this message, please notify the sender by return and delete it. You may not use, copy, disclose or rely on the information contained in it.
+>>> 
+>>> Internet email is susceptible to data corruption, interception and unauthorised amendment for which Xyratex does not accept liability. While we have taken reasonable precautions to ensure that this email is free of viruses, Xyratex does not accept liability for the presence of any computer viruses in this email, nor for any losses caused as a result of viruses.
+>>> 
+>>> Xyratex Technology Limited (03134912), Registered in England & Wales, Registered Office, Langstone Road, Havant, Hampshire, PO9 1SA.
+>>> 
+>>> The Xyratex group of companies also includes, Xyratex Ltd, registered in Bermuda, Xyratex International Inc, registered in California, Xyratex (Malaysia) Sdn Bhd registered in Malaysia, Xyratex Technology (Wuxi) Co Ltd registered in The People's Republic of China and Xyratex Japan Limited registered in Japan.
+>>> ______________________________________________________________________
+>>> 
+>>> 
+>> 
+> 
+> 
+> ______________________________________________________________________
+> This email may contain privileged or confidential information, which should only be used for the purpose for which it was sent by Xyratex. No further rights or licenses are granted to use such information. If you are not the intended recipient of this message, please notify the sender by return and delete it. You may not use, copy, disclose or rely on the information contained in it.
+> 
+> Internet email is susceptible to data corruption, interception and unauthorised amendment for which Xyratex does not accept liability. While we have taken reasonable precautions to ensure that this email is free of viruses, Xyratex does not accept liability for the presence of any computer viruses in this email, nor for any losses caused as a result of viruses.
+> 
+> Xyratex Technology Limited (03134912), Registered in England & Wales, Registered Office, Langstone Road, Havant, Hampshire, PO9 1SA.
+> 
+> The Xyratex group of companies also includes, Xyratex Ltd, registered in Bermuda, Xyratex International Inc, registered in California, Xyratex (Malaysia) Sdn Bhd registered in Malaysia, Xyratex Technology (Wuxi) Co Ltd registered in The People's Republic of China and Xyratex Japan Limited registered in Japan.
+> ______________________________________________________________________
+> 
+> 
+
+
+
+From adilger at whamcloud.com  Sat Jul  9 00:53:10 2011
+From: adilger at whamcloud.com (Andreas Dilger)
+Date: Sat, 9 Jul 2011 01:53:10 -0600
+Subject: [Lustre-devel] NRS HLD
+In-Reply-To: <06B2896D-1A6A-4738-96AD-95D9B04AE9A4@whamcloud.com>
+References: <24C12A32-1D42-4327-8F8F-B9D30471B8C8@gmail.com>
+	<1309448989.27038.5.camel@localhost.localdomain>
+	<88C87A8C-8DB5-4602-863B-9B77FF93C0D1@whamcloud.com>
+	<8C4CE53E-8A87-43FE-B27F-F44B5E3D7550@us.xyratex.com>
+	<61BD608D-C941-4741-8200-79752803AF5D@whamcloud.com>
+	<1310049242.2181.120.camel@localhost.localdomain>
+	<06B2896D-1A6A-4738-96AD-95D9B04AE9A4@whamcloud.com>
+Message-ID: <C9272EDA-83DB-4ACE-A1A9-CE9DB52AAF60@whamcloud.com>
+
+I think another policy type that is important to users is "minimum bandwidth" or "maximum bandwidth". Please ensure that any framework that is implemented can also be used in this manner. Ideally this would be part of the initial implementation. 
+
+Cheers, Andreas
+
+On 2011-07-08, at 9:34 PM, Liang Zhen <liang at whamcloud.com> wrote:
+
+> Hi Nikitas,
+> 
+> As you can see, I've posted my prototype on our Jira, hope it can help on
+> explaining how binheap can be used for NRS because it will be too complex
+> for me to explain all things by English, :-)
+> 
+> http://jira.whamcloud.com/browse/LU-398
+> http://jira.whamcloud.com/secure/attachment/10300/nrs_liang_v2.patch
+> 
+> I got this prototype a couple of weeks ago and we are looking for a chance
+> to get some performance data with it.
+> 
+> It's not fully tested and not reviewed, so I posted it just for discussion
+> and hope it can help us to understand things better and avoid rework.
+> If I was wrong in the prototype or my points here, please just correct me
+> either on Jira or at here.
+> 
+> the prototype contains:
+> 
+>  - implementation of binheap
+> 
+>  - a simple framework for NRS
+> 
+>  - client-round-robin implemented by binheap
+> 
+> Because it's just a prototype and I don't have any document (sorry...)
+> so I'm going to give some introduction at here.
+> 
+>  A few concepts:
+> 
+>  - NRS policy
+>    the algorithm of adding/sorting/removing requests
+> 
+>  - NRS policy head
+>    . it's a list of NRS polices
+> 
+>    . a policy head must has a default-policy (i.e: FIFO), default-policy
+>      should never fail and can't be disable
+> 
+>    . a policy-head can have one active-policy, or no active-policy at all.
+>      If there is an active-policy, request should firstly be handled by it.
+>      If the active-policy failed to handle request, the request will
+>      be delivered to default-policy.
+> 
+>      If no active-policy, request will always be handled by default-policy.
+> 
+>      I think it's similar but a little different with your design(Please
+>      correct me if I was wrong), the "secondary policy" in your design
+>      is somehow like default-policy here, I'm wondering why we want to
+>      specify secondary-policy for each policy, instead of just let all
+>      polices share a default policy.
+> 
+>    . user can activate/deactivate poilicy at runtime
+> 
+>    . ptlrpc service should always poll over all polices to find pending
+>      requests (even from inactive polices), so requests wouldn't be forgotten
+>      forever when user deactivate policy at runtime.
+> 
+>  - NRS object
+>    target object, i.e: it represents a client (or export) for
+>    client-round-robin, or it represents an OST object for object-round-robin
+> 
+>  - NRS target
+>    NRS-target is private data of NRS-policy, A NRS-target can contains
+>    many NRS-objects, just like storage-target to storage-objects.
+> 
+>  - NRS request
+>    NRS-request is a stub embedded in ptlrpc_request, each NRS-object can
+>    have 1-N pending NRS-requests.
+> 
+>  Logic specifications
+> 
+>  - each service has two NRS-policy-heads, one for regular requests,
+>    another for HP (high priority) requests
+> 
+>  - user can register/unregister a NRS-policy for a service, either for
+>    for regular NRS-policy-heads, or for HP NRS-policy-heads
+> 
+>  - Two polices so far:
+> 
+>    . FIFO list, which is default
+> 
+>    . client-round-robin based on binheap
+>      it's actually round-robin over exports for now, user can
+>      activate/deactivate it by lprocfs.
+>      We can change it to round-robin over client NIDs in the future,
+>      or just add a new policy.
+> 
+>  - ptlrpc service threads call active/default NRS-policy to sort incoming
+>    requests policy::nrs_ops::op_req_add()
+> 
+>    . requests can ben sorted by round & sequence number recorded on
+>      NRS-target and NRS-object, buffer offset from request can also be
+>      counted in as sorting key for using it as disk elevator in the future
+> 
+>  - ptlrpc service threads will poll request (round-robin) from all
+>    NRS-polices on NRS-policy-head by calling policy::nrs_ops::op_req_first(),
+>    which returns the request with the highest priority in the binheap or
+>    just the first request if it's FIFO mode, the request can be removed from
+>    NRS-target by calling policy::nrs_ops::op_req_del().
+> 
+>  - object-round-robin (not in the prototype)
+> 
+>    I agree cfs_hash can be used to find out object, also, I noticed the
+>    patch on BZ 13634 is using list + rbtree to implement object-round-robin
+>    and I'm not very clear about your sorting solution but I think binheap
+>    could be an option. By using binheap,two data structures (list + rbtree,
+>    or list+list) can be replaced by one (binheap), and all sorting operations
+>    are invisible to user (user just needs to provide compare callback)
+> 
+>    The major difference between client-round-robin and object-round-robin is:
+> 
+>    . NRS-object of client-round-robin is a client, round-number on NRS-object
+>      is unique for each request.
+> 
+>    . NRS-object of object-round-robin is an OST object, round-number on
+>      NRS-object doesn't have to be unique, which means multiple NRS-requests
+>      for one NRS-object can share the same round-number, and these requests
+>      are sorted by buffer offset in binheap.
+>      As you said, we can "consume" the round-number by counting grouped
+>      RPCs or data size.
+> 
+> Anyway, these are just my preliminary ideas, any comment and suggestions
+> would be great.
+> 
+> Some information about binheap:
+> 
+>  There are some changes for the binheap posted by Eric:
+> 
+>  - In the original version, user just needs address of element while
+>    inserting it, users have no idea about where the element is and
+>    can't remove element unless it's root of binheap.
+>    In current version, user needs to provide a pointer of
+>    cfs_binheap_node_t, which should be embedded in element structure.
+> 
+>    example:
+>        struct foo_type {
+>            cfs_binheap_node_t  node;
+>        } foo;
+>        cfs_binheap_insert(h, &foo.node);
+> 
+>    with this change, user can remove element at any position
+> 
+>    example:
+>        cfs_binheap_remove(h, &foo.node);
+> 
+>  - there are two options if user wants to have atomically insert:
+> 
+>    . preallocate memory for binheap if caller can estimate heap size,
+>      cfs_binheap_create(..., count);
+> 
+>    . use flag CBH_FLAG_ATOMIC_GROW
+>      cfs_binheap_create(..., CBH_FLAG_ATOMIC_GROW, count);
+> 
+>  Here is the list of all APIs
+> 
+>    cfs_binheap_t *cfs_binheap_create(cfs_binheap_ops_t *ops,
+>                                      unsigned int flags, unsigned count);
+> 
+>    void cfs_binheap_destroy(cfs_binheap_t *h);
+> 
+>    cfs_binheap_node_t *cfs_binheap_find(cfs_binheap_t *h, unsigned int idx);
+> 
+>    int cfs_binheap_insert(cfs_binheap_t *h, cfs_binheap_node_t *e);
+> 
+>    void cfs_binheap_remove(cfs_binheap_t *h, cfs_binheap_node_t *e);
+> 
+>  And some inline wrappers:
+> 
+>    int cfs_binheap_size(cfs_binheap_t *h)
+> 
+>    int cfs_binheap_is_empty(cfs_binheap_t *h)
+> 
+>    cfs_binheap_node_t *cfs_binheap_root(cfs_binheap_t *h)
+> 
+>    cfs_binheap_node_t *cfs_binheap_remove_root(cfs_binheap_t *h)
+> 
+> Anyway, hope these discussion can help us to understand the whole thing better
+> so we can get agreement about how to move on this project.
+> 
+> Thanks
+> Liang
+> 
+> 
+> 
+> On Jul 7, 2011, at 10:34 PM, Nikitas Angelinas wrote:
+> 
+>> Hi Liang,
+>> 
+>> 
+>> Thank you for sharing these great ideas; I think the task lends itself
+>> well to adding different schemes that performance can benefit from. To
+>> answer an earlier question, we unfortunately don't have any numbers or
+>> have performed any tests related to the NRS task. We'll obviously
+>> publish any such data as soon as we get our first policy developed, and
+>> under test.
+>> 
+>> Both Nathan and I think you raise a very good point by highlighting the
+>> need for a scalable data structure that can sort elements in libcfs, as
+>> different policies could probably make use of such a facility, and may
+>> actually require it if they need to address scalability-related issues
+>> (there's an older, related topic
+>> http://lists.lustre.org/pipermail/lustre-devel/2008-January/002230.html
+>> which I'm sure you're already aware of).
+>> 
+>> I think there are some holes in my understanding of the example you gave
+>> on using the binary heap in conjunction with GRN/CRN/RRN to implement a
+>> CBRR policy. Is the GRN incremented with every incoming request? And how
+>> can two requests end up with the same RRN? I'm sure the logic makes
+>> sense, this is probably me just being daft :-).
+>> 
+>> Can I ask if there is a binary heap implementation living in a branch
+>> somewhere, or you plan on landing one on master at some point? There is
+>> some code attached on the thread I have pasted above, but I have not had
+>> a look through it; going through the thread posts, it seems to be in
+>> working and well-performing state.
+>> 
+>> For the first policy we aim to develop ("obj_extents" in the HLD)
+>> although OBRR-like, we are not looking at using any data structures that
+>> are out of the norm, at present. The idea is that we 
+>> pick up requests from the service in-queue and add requests in
+>> number-limited (or perhaps size-limited) per-object groupings, sorted by
+>> offset, which are either populated in-place in the normal service
+>> request queue, or use the normal service request queue as an
+>> intermediate queue (just to avoid much processing in what is now the
+>> pre-processing stage for RPCs), before they are added to the sorted
+>> queue, from where they are eventually dispatched. We are looking at
+>> using a libcfs hash for resolving incoming requests to the appropriate
+>> object grouping, much like the OBRR implementation in the prototype NRS
+>> patch does; I think this method will naturally avoid any request
+>> starvation issues, but I am not sure it will perform as well as an OBRR
+>> implementation using a heap. Hope the description above makes some
+>> sense; if you see any problems with it, then please do let us know.
+>> 
+>> The NRS architectural specification at
+>> http://wiki.lustre.org/index.php/Architecture_-_Network_Request_Scheduler has references to additional aspects to the task. Are you looking at providing some form of POP capability, or reproducing offset stream ordering, at present? These both sound like features that perhaps the framework itself could benefit from, at least in part irrespective of policy, I think. We seem to have at least one use case where we could do with clients passing additional information with each RPC, in QoS, so it seems like resource control, and catering for offset stream consistency may add additional ones.
+>> 
+>> 
+>> Regards,
+>> Nikitas
+>> 
+>> 
+>> 
+>> 
+>> 
+>> 
+>> On Tue, 2011-07-05 at 17:20 +0800, Liang Zhen wrote: 
+>>> Hi Nathan,
+>>> 
+>>> We also have some ideas about infrastructure of NRS and would like to share
+>>> them at here for discussion:
+>>> 
+>>> - a common library to support inserting/removing prioritized requests, which 
+>>> should be scalable even for millions of requests
+>>> 
+>>> - each policy only needs to provide:
+>>> . private data ("heap", more details below)
+>>> . a sorting callback to prioritize requests
+>>> 
+>>> By this way, most common code can be put into libcfs and ptlrpc modules,
+>>> instead of having a whole bunch of policy functions to sort requests in
+>>> each policy (like the patch on BZ 13634).
+>>> 
+>>> Here is the concept of "heap" mentioned above:
+>>> 
+>>> (it's quoted from the following link)
+>>> A heap is a specialized tree-based data structure that satisfies the heap
+>>> property: if B is a child node of A, then key(A) ? key(B). This implies that an
+>>> element with the greatest key is always in the root node, and so such a heap is
+>>> sometimes called a max-heap. Alternatively, if the comparison is reversed, the
+>>> smallest element is always in the root node, which results in a min-heap.
+>>> 
+>>> Please see more detail at:
+>>> http://en.wikipedia.org/wiki/Heap_%28data_structure%29
+>>> 
+>>> Heap can give (log N) for both inserting element and removing element with
+>>> greatest/lowest key, so it's very scalable, here are some sample heap APIs
+>>> from a simple prototype:
+>>> 
+>>>   /* create a heap, @compare is callback for sorting elements */
+>>>   cfs_binheap_t *cfs_binheap_create(cfs_binheap_cmp_t compare,
+>>>                                     unsigned int flags);
+>>> 
+>>>   /* destroy a heap */
+>>>   void cfs_binheap_destroy(cfs_binheap_t *h);
+>>> 
+>>>   /* insert @element into heap */
+>>>   int cfs_binheap_insert(cfs_binheap_t *h, void *elelment);
+>>> 
+>>>   /* pop root for the @heap, which has greatest/lowest key in @heap */
+>>>   void *cfs_binheap_pop_root(cfs_binheap_t *heap);
+>>> 
+>>> and an example of using "heap" to implement Client-Based Round Robin:
+>>> 
+>>> - allocating a "heap" for the service which needs CBRR
+>>> 
+>>> - the service also have a "global round-number" which is always incremental
+>>>   . GRN: Global Round Number
+>>>   . CRN: Client Round Number
+>>>   . RRN: Request Round Number
+>>> 
+>>> Process of inserting a request
+>>> - when there is new request:
+>>>   . if the incoming request is the first request for a client, assign
+>>>     the GRN to both the RRN of the request and CNR of the client
+>>> 
+>>>   . if the incoming request isn't the first request for a client,
+>>>     increase the CNR on the client then assign it to RRN of the request.
+>>> 
+>>> - insert the request into the heap, the heap can sort requests based
+>>>   on callback like this:
+>>>   . primary key is RRN of request
+>>> 
+>>>   . secondary key is client ID (i.e: nid of client), secondary keys are
+>>>     compared only if primary keys are equal
+>>> 
+>>> Process of dequeue a request:
+>>> 
+>>> - pop the root element from the heap, which should always has the lowest RRN
+>>> 
+>>> - if the RRN of the request is larger than GRN of the service,
+>>>   which means the service has already handled all requests with <= GRN and
+>>>   should set the GRN of service to the RRN of request
+>>> 
+>>> Again, this just an example to demonstrate how to use "heap" to implement CBRR
+>>> and show some preliminary ideas, it could be helpful to raise some discussion
+>>> at here and to see whether it's possible to improve and apply this to NRS and
+>>> make it to be a common library for future implementation of OBRR or any
+>>> policy needs to prioritize requests, or for QoS.
+>>> 
+>>> Thanks
+>>> Liang
+>>> 
+>>> On Jul 2, 2011, at 11:39 PM, Nathan Rutman wrote:
+>>> 
+>>>> I think there is a whole slew of interesting possibilities to try out once an infrastructure for implementing different policies is in place. We're trying to get that infrastructure established first; we will be able to switch between policies dynamically to see their effects and optimize performance. People will be able to easily add new policies to test. 
+>>>> You raise a good point about the SMP scaling patches; we will have to take a close look to make sure we don't undo any of the work you've done there. 
+>>>> 
+>>>> On Jul 2, 2011, at 3:49 AM, "Liang Zhen" <liang at whamcloud.com> wrote:
+>>>> 
+>>>>> Hi Nikitas,
+>>>>> 
+>>>>> It's a very interesting document, thanks for sharing these great ideas.
+>>>>> May I ask whether there are any tests/numbers based on OBRR description
+>>>>> in HLD? We always want to see numbers from these algorithms, unfortunately
+>>>>> there is no reliable testing result from the patch on BZ 13634.
+>>>>> 
+>>>>> We are actually considering about NRS as well, although we don't have a
+>>>>> formal design document like this HLD, but we'd like to share a few
+>>>>> preliminary ideas for discussion:
+>>>>> 
+>>>>> - Target Based Round Robin (TBRR) probably is something worth to have
+>>>>> 
+>>>>> Briefly, it's just load balancing over OSTs to improve overall server
+>>>>> performance.
+>>>>> 
+>>>>> - Fairness for clients and resource control for jobs
+>>>>> 
+>>>>> I think they are similar to CBRR and UBRR described in your document
+>>>>> though I didn't see too much detail about them in the HLD.
+>>>>> Personally, I think they are important and we probably will do some tests
+>>>>> for CBRR survey very soon.
+>>>>> 
+>>>>> . Client-Based Round Robin (CBRR) can guarantee the server responses
+>>>>> to all clients fairly, and get whole-cluster load balancing, improve
+>>>>> concurrency of clients and jobs, and get better overall performance.
+>>>>> 
+>>>>> . resource control for jobs, some users complained that a busy job will
+>>>>> hog all resources on servers, and make the cluster not usable for other
+>>>>> control command or sysadmin. So it might be helpful to support job
+>>>>> resource control inside NRS.
+>>>>> 
+>>>>> - Layering NRS polices
+>>>>> 
+>>>>> Of course, OBRR is very important policy for NRS, but it might be
+>>>>> helpful to have multiple polices working at the same time, i.e:
+>>>>> 
+>>>>> . bind OSTs on CPU partitions on NUMA system(please see more detail at
+>>>>> http://jira.whamcloud.com/browse/LU-56)
+>>>>> 
+>>>>> . Service threads on each CPU partition can do TBRR for bound OSTs. If
+>>>>> there is no CPU partition (like current Lustre) or OSTs are not bound
+>>>>> on CPU partitions, service threads just do round robin over all OSTs.
+>>>>> 
+>>>>> . OBRR inside each OST
+>>>>> 
+>>>>> . of course, these layers should be tunable.
+>>>>> 
+>>>>> - Overhead of layerd polices
+>>>>> . there definitely will be some overhead for inserting/removing
+>>>>> request from these queues (or whatever), so we want some very scalable
+>>>>> algorithms to implement these polices.
+>>>>> 
+>>>>> Again, these are just some preliminary ideas, so we would appreciate any
+>>>>> comment and suggestion.
+>>>>> 
+>>>>> Thanks
+>>>>> Liang
+>>>>> 
+>>>>> 
+>>>>> On Jun 30, 2011, at 11:49 PM, Nikitas Angelinas wrote:
+>>>>> 
+>>>>>> Hi,
+>>>>>> 
+>>>>>> There is a slightly more up-to-date version of the HLD, which I am
+>>>>>> attaching.
+>>>>>> 
+>>>>>> 
+>>>>>> Thanks,
+>>>>>> Nikitas
+>>>>>> 
+>>>>>> On Wed, 2011-06-29 at 12:55 -0700, Nathan Rutman wrote:
+>>>>>>> Sharing with the community.  All comments welcome.
+>>>>>>> This HLD (high-level design) for a Network Request Scheduler is more
+>>>>>>> about infrastructure than algorithm.
+>>>>>>> 
+>>>>>>> 
+>>>>>>> 
+>>>>>>> 
+>>>>>>> We're actually in the DLD (detailed-level design) stage at the moment
+>>>>>>> (sorry it didn't occur to me to 
+>>>>>>> post this earlier).  I'll post the DLD after some minor revision.
+>>>>>>> _______________________________________________
+>>>>>>> Lustre-devel mailing list
+>>>>>>> Lustre-devel at lists.lustre.org
+>>>>>>> http://lists.lustre.org/mailman/listinfo/lustre-devel
+>>>>>> 
+>>>>>> 
+>>>>>> ______________________________________________________________________
+>>>>>> This email may contain privileged or confidential information, which should only be used for the purpose for which it was sent by Xyratex. No further rights or licenses are granted to use such information. If you are not the intended recipient of this message, please notify the sender by return and delete it. You may not use, copy, disclose or rely on the information contained in it.
+>>>>>> 
+>>>>>> Internet email is susceptible to data corruption, interception and unauthorised amendment for which Xyratex does not accept liability. While we have taken reasonable precautions to ensure that this email is free of viruses, Xyratex does not accept liability for the presence of any computer viruses in this email, nor for any losses caused as a result of viruses.
+>>>>>> 
+>>>>>> Xyratex Technology Limited (03134912), Registered in England & Wales, Registered Office, Langstone Road, Havant, Hampshire, PO9 1SA.
+>>>>>> 
+>>>>>> The Xyratex group of companies also includes, Xyratex Ltd, registered in Bermuda, Xyratex International Inc, registered in California, Xyratex (Malaysia) Sdn Bhd registered in Malaysia, Xyratex Technology (Wuxi) Co Ltd registered in The People's Republic of China and Xyratex Japan Limited registered in Japan.
+>>>>>> ______________________________________________________________________
+>>>>>> 
+>>>>>> 
+>>>>>> <HLD_of_Lustre_NRS.pdf>_______________________________________________
+>>>>>> Lustre-devel mailing list
+>>>>>> Lustre-devel at lists.lustre.org
+>>>>>> http://lists.lustre.org/mailman/listinfo/lustre-devel
+>>>>> 
+>>>>> _______________________________________________
+>>>>> Lustre-devel mailing list
+>>>>> Lustre-devel at lists.lustre.org
+>>>>> http://lists.lustre.org/mailman/listinfo/lustre-devel
+>>>> ______________________________________________________________________
+>>>> This email may contain privileged or confidential information, which should only be used for the purpose for which it was sent by Xyratex. No further rights or licenses are granted to use such information. If you are not the intended recipient of this message, please notify the sender by return and delete it. You may not use, copy, disclose or rely on the information contained in it.
+>>>> 
+>>>> Internet email is susceptible to data corruption, interception and unauthorised amendment for which Xyratex does not accept liability. While we have taken reasonable precautions to ensure that this email is free of viruses, Xyratex does not accept liability for the presence of any computer viruses in this email, nor for any losses caused as a result of viruses.
+>>>> 
+>>>> Xyratex Technology Limited (03134912), Registered in England & Wales, Registered Office, Langstone Road, Havant, Hampshire, PO9 1SA.
+>>>> 
+>>>> The Xyratex group of companies also includes, Xyratex Ltd, registered in Bermuda, Xyratex International Inc, registered in California, Xyratex (Malaysia) Sdn Bhd registered in Malaysia, Xyratex Technology (Wuxi) Co Ltd registered in The People's Republic of China and Xyratex Japan Limited registered in Japan.
+>>>> ______________________________________________________________________
+>>>> 
+>>>> 
+>>> 
+>> 
+>> 
+>> ______________________________________________________________________
+>> This email may contain privileged or confidential information, which should only be used for the purpose for which it was sent by Xyratex. No further rights or licenses are granted to use such information. If you are not the intended recipient of this message, please notify the sender by return and delete it. You may not use, copy, disclose or rely on the information contained in it.
+>> 
+>> Internet email is susceptible to data corruption, interception and unauthorised amendment for which Xyratex does not accept liability. While we have taken reasonable precautions to ensure that this email is free of viruses, Xyratex does not accept liability for the presence of any computer viruses in this email, nor for any losses caused as a result of viruses.
+>> 
+>> Xyratex Technology Limited (03134912), Registered in England & Wales, Registered Office, Langstone Road, Havant, Hampshire, PO9 1SA.
+>> 
+>> The Xyratex group of companies also includes, Xyratex Ltd, registered in Bermuda, Xyratex International Inc, registered in California, Xyratex (Malaysia) Sdn Bhd registered in Malaysia, Xyratex Technology (Wuxi) Co Ltd registered in The People's Republic of China and Xyratex Japan Limited registered in Japan.
+>> ______________________________________________________________________
+>> 
+>> 
+> 
+> _______________________________________________
+> Lustre-devel mailing list
+> Lustre-devel at lists.lustre.org
+> http://lists.lustre.org/mailman/listinfo/lustre-devel
+
+
+From liang at whamcloud.com  Mon Jul 11 01:20:27 2011
+From: liang at whamcloud.com (Liang Zhen)
+Date: Mon, 11 Jul 2011 16:20:27 +0800
+Subject: [Lustre-devel] NRS HLD
+In-Reply-To: <C9272EDA-83DB-4ACE-A1A9-CE9DB52AAF60@whamcloud.com>
+References: <24C12A32-1D42-4327-8F8F-B9D30471B8C8@gmail.com>
+	<1309448989.27038.5.camel@localhost.localdomain>
+	<88C87A8C-8DB5-4602-863B-9B77FF93C0D1@whamcloud.com>
+	<8C4CE53E-8A87-43FE-B27F-F44B5E3D7550@us.xyratex.com>
+	<61BD608D-C941-4741-8200-79752803AF5D@whamcloud.com>
+	<1310049242.2181.120.camel@localhost.localdomain>
+	<06B2896D-1A6A-4738-96AD-95D9B04AE9A4@whamcloud.com>
+	<C9272EDA-83DB-4ACE-A1A9-CE9DB52AAF60@whamcloud.com>
+Message-ID: <540D3371-1B99-4F61-ACF6-047312557FF3@whamcloud.com>
+
+Andreas, could you give a little more information about this, or point me to the link about this?
+
+Thanks
+Liang
+
+On Jul 9, 2011, at 3:53 PM, Andreas Dilger wrote:
+
+> I think another policy type that is important to users is "minimum bandwidth" or "maximum bandwidth". Please ensure that any framework that is implemented can also be used in this manner. Ideally this would be part of the initial implementation. 
+> 
+> Cheers, Andreas
+> 
+
+
+
+From adilger at whamcloud.com  Mon Jul 11 12:46:08 2011
+From: adilger at whamcloud.com (Andreas Dilger)
+Date: Mon, 11 Jul 2011 13:46:08 -0600
+Subject: [Lustre-devel] NRS HLD
+In-Reply-To: <540D3371-1B99-4F61-ACF6-047312557FF3@whamcloud.com>
+References: <24C12A32-1D42-4327-8F8F-B9D30471B8C8@gmail.com>
+	<1309448989.27038.5.camel@localhost.localdomain>
+	<88C87A8C-8DB5-4602-863B-9B77FF93C0D1@whamcloud.com>
+	<8C4CE53E-8A87-43FE-B27F-F44B5E3D7550@us.xyratex.com>
+	<61BD608D-C941-4741-8200-79752803AF5D@whamcloud.com>
+	<1310049242.2181.120.camel@localhost.localdomain>
+	<06B2896D-1A6A-4738-96AD-95D9B04AE9A4@whamcloud.com>
+	<C9272EDA-83DB-4ACE-A1A9-CE9DB52AAF60@whamcloud.com>
+	<540D3371-1B99-4F61-ACF6-047312557FF3@whamcloud.com>
+Message-ID: <C0B61E75-ADA3-4109-9331-41D93C6B8FEF@whamcloud.com>
+
+I don't know if this feature is listed specifically in Qian's NRS design, but the idea is simple. The desire is to guarantee some node or cluster (~= LNET network) a specific amount of bandwidth, so that it is not starved for bandwidth when competing against a large cluster with many thousands of clients. Simple Client-Based RR will uniformly allocate bandwidth to each client, but this will weight the aggregate bandwidth by the ratio of clients in each network.
+
+Having Network-Based RR would be better (allowing uniform bandwidth sharing among the networks) , but the most flexible and usable policy from a user/admin point of view is to ensure that some client/network can always get N MB/s, preferably in relatively uniform increments over the second, if it has any outstanding requests.
+
+A simple extension to this policy is to allow limiting bandwidth for a specific client or network to some maximum over each second. 
+
+Cheers, Andreas
+
+On 2011-07-11, at 2:20 AM, Liang Zhen <liang at whamcloud.com> wrote:
+
+> Andreas, could you give a little more information about this, or point me to the link about this?
+> 
+> Thanks
+> Liang
+> 
+> On Jul 9, 2011, at 3:53 PM, Andreas Dilger wrote:
+> 
+>> I think another policy type that is important to users is "minimum bandwidth" or "maximum bandwidth". Please ensure that any framework that is implemented can also be used in this manner. Ideally this would be part of the initial implementation. 
+>> 
+>> Cheers, Andreas
+>> 
+> 
+
+
+From Mark.Hills at framestore.com  Tue Jul 19 03:41:36 2011
+From: Mark.Hills at framestore.com (Mark Hills)
+Date: Tue, 19 Jul 2011 11:41:36 +0100 (BST)
+Subject: [Lustre-devel] [PATCH] Fix task IO accounting on reads
+In-Reply-To: <001F682B-CF29-4835-8A0B-5BBFA4021715@whamcloud.com>
+References: <alpine.LFD.2.01.1104261356450.21670@sys880.ldn.framestore.com>
+	<5870C1C1-3775-4CC8-B619-C79B6799D6E5@whamcloud.com>
+	<alpine.LFD.2.01.1104270854090.20691@sys880.ldn.framestore.com>
+	<3059315E-A6DA-4AC1-BEB9-B3AF7E48AC36@whamcloud.com>
+	<alpine.LFD.2.01.1104271806090.9273@sys880.ldn.framestore.com>
+	<001F682B-CF29-4835-8A0B-5BBFA4021715@whamcloud.com>
+Message-ID: <alpine.LFD.2.01.1107191135050.22747@sys880.ldn.framestore.com>
+
+On Wed, 27 Apr 2011, Andreas Dilger wrote:
+
+[...]
+> for inclusion into the next 1.8 release the updated patch should be 
+> attached to a new bug at bugzilla.lustre.org, and a review requested on 
+> the patch (I can be one of the reviewers).  For inclusion into the 2.1 
+> release, please create a new bug at jira.whamcloud.com with the updated 
+> patch.  The patch should include the standard kernel "Signed-off-by: 
+> {your name} <your email>" line.
+>
+> Sorry for the complexity in submitting patches while development 
+> transitions away from Oracle for newer releases.
+
+Hi Andreas, I created an entry in Bugzilla with the revised patch attached 
+to it:
+
+  https://bugzilla.lustre.org/show_bug.cgi?id=24536
+
+I wasn't able to add you as reviewer, because I could not clearly see a 
+field to do this.
+
+As for the 2.1 release, I took a quick look and it seems the code has 
+changed substantially and the patch does not apply.
+
+I don't even have a 2.1 setup to verify the bug exists. And as I'm 
+unfamiliar with the code, I don't think I can reasonably make an 
+equivalent patch to 2.1 right now.
+
+Thanks
+
+-- 
+Mark
+
+
+From pjones at whamcloud.com  Tue Jul 19 05:34:03 2011
+From: pjones at whamcloud.com (Peter Jones)
+Date: Tue, 19 Jul 2011 05:34:03 -0700
+Subject: [Lustre-devel] [PATCH] Fix task IO accounting on reads
+In-Reply-To: <alpine.LFD.2.01.1107191135050.22747@sys880.ldn.framestore.com>
+References: <alpine.LFD.2.01.1104261356450.21670@sys880.ldn.framestore.com>
+	<5870C1C1-3775-4CC8-B619-C79B6799D6E5@whamcloud.com>
+	<alpine.LFD.2.01.1104270854090.20691@sys880.ldn.framestore.com>
+	<3059315E-A6DA-4AC1-BEB9-B3AF7E48AC36@whamcloud.com>
+	<alpine.LFD.2.01.1104271806090.9273@sys880.ldn.framestore.com>
+	<001F682B-CF29-4835-8A0B-5BBFA4021715@whamcloud.com>
+	<alpine.LFD.2.01.1107191135050.22747@sys880.ldn.framestore.com>
+Message-ID: <4E2579BB.7070202@whamcloud.com>
+
+Mark
+
+Sorry if Andreas was not clear enough about contributing patches. 
+Hopefully the more detailed information at 
+http://wiki.whamcloud.com/display/PUB/Submitting+Changes will help. If 
+you are only able to work with 1.8.x then by all means upload the patch 
+into gerrit and another engineer could handle porting it to master 
+(subject to other priorities of course). IIRC Framestore did not sign a 
+Sun\Oracle contributor agreement so I suspect Oracle will not land your 
+patch.
+
+Regards
+
+Peter
+
+On 11-07-19 3:41 AM, Mark Hills wrote:
+> On Wed, 27 Apr 2011, Andreas Dilger wrote:
+>
+> [...]
+>> for inclusion into the next 1.8 release the updated patch should be
+>> attached to a new bug at bugzilla.lustre.org, and a review requested on
+>> the patch (I can be one of the reviewers).  For inclusion into the 2.1
+>> release, please create a new bug at jira.whamcloud.com with the updated
+>> patch.  The patch should include the standard kernel "Signed-off-by:
+>> {your name}<your email>" line.
+>>
+>> Sorry for the complexity in submitting patches while development
+>> transitions away from Oracle for newer releases.
+> Hi Andreas, I created an entry in Bugzilla with the revised patch attached
+> to it:
+>
+>    https://bugzilla.lustre.org/show_bug.cgi?id=24536
+>
+> I wasn't able to add you as reviewer, because I could not clearly see a
+> field to do this.
+>
+> As for the 2.1 release, I took a quick look and it seems the code has
+> changed substantially and the patch does not apply.
+>
+> I don't even have a 2.1 setup to verify the bug exists. And as I'm
+> unfamiliar with the code, I don't think I can reasonably make an
+> equivalent patch to 2.1 right now.
+>
+> Thanks
+>
+
+-- 
+Peter Jones
+Whamcloud, Inc.
+www.whamcloud.com
+
+
+
+From Mark.Hills at framestore.com  Tue Jul 19 09:08:08 2011
+From: Mark.Hills at framestore.com (Mark Hills)
+Date: Tue, 19 Jul 2011 17:08:08 +0100 (BST)
+Subject: [Lustre-devel] [PATCH] Fix task IO accounting on reads
+In-Reply-To: <CAA6TbrM8LSL41forun6bFgaV5gvRju0rJaJJd3piFPQTwTkSJA@mail.gmail.com>
+References: <alpine.LFD.2.01.1104261356450.21670@sys880.ldn.framestore.com>
+	<CAA6TbrM8LSL41forun6bFgaV5gvRju0rJaJJd3piFPQTwTkSJA@mail.gmail.com>
+Message-ID: <alpine.LFD.2.01.1107191701270.9249@sys880.ldn.framestore.com>
+
+On Tue, 19 Jul 2011, Richard Henwood wrote:
+
+> On Tue, Apr 26, 2011 at 11:06 AM, Mark Hills <Mark.Hills at framestore.com> wrote:
+> > We've often found it inconvenient that reads from Lustre mounts do not
+> > correctly increment IO counts (/proc/<pid>/io).
+> >
+> > Below is a patch which aims to fix this functionality.
+> >
+> > The symptom is that writes are accounted for, but not reads. It seems that
+> > the accounting it normally done in the kernels page writeback and
+> > readahead functionality. Therefore as Lustre implements its own readahead,
+> > it must also maintain its own accounting on reads (but not writes).
+> >
+> 
+> Hi Mark;
+> 
+> Are you aware of the (soon to land) patch:
+> Lustre client procfs stats: read_bytes does not record the number of
+> bytes transfered from the fs:
+> http://jira.whamcloud.com/browse/LU-333
+
+I was aware of these stats (and this patch), but I concluded that they did 
+not track memory mapped access.
+
+So I think our patches address two separate parts of the process. But I'm 
+happy to be corrected -- it was some time ago that I did this.
+
+-- 
+Mark
+
+
+From rhenwood at whamcloud.com  Tue Jul 19 07:31:42 2011
+From: rhenwood at whamcloud.com (Richard Henwood)
+Date: Tue, 19 Jul 2011 09:31:42 -0500
+Subject: [Lustre-devel] [PATCH] Fix task IO accounting on reads
+In-Reply-To: <alpine.LFD.2.01.1104261356450.21670@sys880.ldn.framestore.com>
+References: <alpine.LFD.2.01.1104261356450.21670@sys880.ldn.framestore.com>
+Message-ID: <CAA6TbrM8LSL41forun6bFgaV5gvRju0rJaJJd3piFPQTwTkSJA@mail.gmail.com>
+
+On Tue, Apr 26, 2011 at 11:06 AM, Mark Hills <Mark.Hills at framestore.com> wrote:
+> We've often found it inconvenient that reads from Lustre mounts do not
+> correctly increment IO counts (/proc/<pid>/io).
+>
+> Below is a patch which aims to fix this functionality.
+>
+> The symptom is that writes are accounted for, but not reads. It seems that
+> the accounting it normally done in the kernels page writeback and
+> readahead functionality. Therefore as Lustre implements its own readahead,
+> it must also maintain its own accounting on reads (but not writes).
+>
+
+Hi Mark;
+
+Are you aware of the (soon to land) patch:
+Lustre client procfs stats: read_bytes does not record the number of
+bytes transfered from the fs:
+http://jira.whamcloud.com/browse/LU-333
+
+
+richard,
+-- 
+Richard.Henwood at whamcloud.com
+Whamcloud Inc.
+tel: +1 512 410 9612
+
+
+From rhenwood at whamcloud.com  Tue Jul 19 10:03:28 2011
+From: rhenwood at whamcloud.com (Richard Henwood)
+Date: Tue, 19 Jul 2011 12:03:28 -0500
+Subject: [Lustre-devel] [PATCH] Fix task IO accounting on reads
+In-Reply-To: <alpine.LFD.2.01.1107191701270.9249@sys880.ldn.framestore.com>
+References: <alpine.LFD.2.01.1104261356450.21670@sys880.ldn.framestore.com>
+	<CAA6TbrM8LSL41forun6bFgaV5gvRju0rJaJJd3piFPQTwTkSJA@mail.gmail.com>
+	<alpine.LFD.2.01.1107191701270.9249@sys880.ldn.framestore.com>
+Message-ID: <CAA6TbrMDSSKE1MwyjBhjP1Tfm2j=ZEhriestOFKM=kr0NQUBmw@mail.gmail.com>
+
+On Tue, Jul 19, 2011 at 11:08 AM, Mark Hills <Mark.Hills at framestore.com> wrote:
+<snip>
+>
+> I was aware of these stats (and this patch), but I concluded that they did
+> not track memory mapped access.
+>
+> So I think our patches address two separate parts of the process. But I'm
+> happy to be corrected -- it was some time ago that I did this.
+>
+
+It was indeed a while ago, and I'm sorry I missed this conversation
+when it was current!
+
+It seems that both patches have the same motivation for reliable read
+stats, but the patches are different with complementary approaches.
+
+richard,
+-- 
+Richard.Henwood at whamcloud.com
+Whamcloud Inc.
+tel: +1 512 410 9612
+
+
+From jhammond at tacc.utexas.edu  Thu Jul 21 13:15:14 2011
+From: jhammond at tacc.utexas.edu (John Hammond)
+Date: Thu, 21 Jul 2011 15:15:14 -0500
+Subject: [Lustre-devel] open(), getattr(), and negative dentries
+Message-ID: <4E2888D2.7090201@tacc.utexas.edu>
+
+Dear Lustre-devel,
+
+It appears that stating a non-existent file on Lustre causes a negative
+dentry to be created, while opening it does not.  If I understand
+correctly, this also means that every open of a non-existent file that
+misses the dentry cache causes an RPC to the MDS.  Is there a reason for
+the difference?
+
+Thanks,
+
+John
+
+-- 
+John L. Hammond
+TACC, The University of Texas at Austin
+jhammond at tacc.utexas.edu
+
+
+
+From green at whamcloud.com  Tue Jul 26 22:02:23 2011
+From: green at whamcloud.com (Oleg Drokin)
+Date: Wed, 27 Jul 2011 01:02:23 -0400
+Subject: [Lustre-devel] open(), getattr(), and negative dentries
+In-Reply-To: <4E2888D2.7090201@tacc.utexas.edu>
+References: <4E2888D2.7090201@tacc.utexas.edu>
+Message-ID: <6A3C39D7-A059-4E1A-B73E-92F84AA2DE7D@whamcloud.com>
+
+Hello!
+
+On Jul 21, 2011, at 4:15 PM, John Hammond wrote:
+
+> It appears that stating a non-existent file on Lustre causes a negative
+> dentry to be created, while opening it does not.  If I understand
+> correctly, this also means that every open of a non-existent file that
+> misses the dentry cache causes an RPC to the MDS.  Is there a reason for
+> the difference?
+
+Open does not return a parent dir lock back to the client and this is what guards
+negative dentries.
+So if you do ls -l on the dir, and then do your open (without O_CREATE!)
+the negative dentry will be cached because of the pre-existing lock.
+In fact is the dir was last modified sufficiently long ago (like several seconds have passed),
+even lookup of the dir itself (even done as part of the path lookup to the filename)
+would return you the needed lock and negative dentry will be cached.
+
+Bye,
+    Oleg
+--
+Oleg Drokin
+Senior Software Engineer
+Whamcloud, Inc.
+
+
+
+From Mark.Hills at framestore.com  Wed Jul 27 09:21:52 2011
+From: Mark.Hills at framestore.com (Mark Hills)
+Date: Wed, 27 Jul 2011 17:21:52 +0100 (BST)
+Subject: [Lustre-devel] Hangs with cgroup memory controller
+Message-ID: <alpine.LFD.2.01.1107271556070.7176@sys880.ldn.framestore.com>
+
+We are unable to use the combination of Lustre and the cgroup memory 
+controller, because of intermittent hangs when trying to close the cgroup.
+
+In a thread on LKML [1] we diagnosed that the problem was a leak of page 
+accounting or resources.
+
+Memory pages are charged to the cgroup, but the cgroup is unable to 
+un-charge them, and so it spins. It suggests that, perhaps, at least one 
+page gets allocated but not placed in the LRU.
+
+Using the NFS client, via a gateway, has never shown this problem.
+
+I'm in the client code, but I really need some pointers. And disadvantaged 
+by being unable to find a reproducable test case. Any ideas?
+
+Our system is Lustre 1.8.6 server, with clients on Linux 2.6.32 and Lustre 
+1.8.5.
+
+Thanks
+
+[1] https://lkml.org/lkml/2010/9/9/534
+
+-- 
+Mark
+
+
+
+
+From adilger at whamcloud.com  Wed Jul 27 10:11:28 2011
+From: adilger at whamcloud.com (Andreas Dilger)
+Date: Wed, 27 Jul 2011 11:11:28 -0600
+Subject: [Lustre-devel] Hangs with cgroup memory controller
+In-Reply-To: <alpine.LFD.2.01.1107271556070.7176@sys880.ldn.framestore.com>
+References: <alpine.LFD.2.01.1107271556070.7176@sys880.ldn.framestore.com>
+Message-ID: <BE324D9D-3D7B-4D9E-8F3D-316F259871FC@whamcloud.com>
+
+Two ideas come to mind. On is that the reason you are having difficulty to reproduce the problem is that it only happens after some fault condition. Possibly you need the client to do recovery to an OST and resend a bulk RPC, or resend due to a checksum error?  It might also be due to application IO types (e.g. mmap, direct IO, pwrite, splice, etc).
+
+Possibly you can correlate reproducer cases with Lustre errors on the console?
+
+Lustre also has memory debugging that can be enabled, but without a reasonably concise reproducer it would be difficult to log/analyze so much data for hours of runtime.
+
+Cheers, Andreas
+
+On 2011-07-27, at 10:21 AM, Mark Hills <Mark.Hills at framestore.com> wrote:
+
+> We are unable to use the combination of Lustre and the cgroup memory 
+> controller, because of intermittent hangs when trying to close the cgroup.
+> 
+> In a thread on LKML [1] we diagnosed that the problem was a leak of page 
+> accounting or resources.
+> 
+> Memory pages are charged to the cgroup, but the cgroup is unable to 
+> un-charge them, and so it spins. It suggests that, perhaps, at least one 
+> page gets allocated but not placed in the LRU.
+> 
+> Using the NFS client, via a gateway, has never shown this problem.
+> 
+> I'm in the client code, but I really need some pointers. And disadvantaged 
+> by being unable to find a reproducable test case. Any ideas?
+> 
+> Our system is Lustre 1.8.6 server, with clients on Linux 2.6.32 and Lustre 
+> 1.8.5.
+> 
+> Thanks
+> 
+> [1] https://lkml.org/lkml/2010/9/9/534
+> 
+> -- 
+> Mark
+> 
+> 
+> _______________________________________________
+> Lustre-devel mailing list
+> Lustre-devel at lists.lustre.org
+> http://lists.lustre.org/mailman/listinfo/lustre-devel
+
+
+From Mark.Hills at framestore.com  Wed Jul 27 10:33:10 2011
+From: Mark.Hills at framestore.com (Mark Hills)
+Date: Wed, 27 Jul 2011 18:33:10 +0100 (BST)
+Subject: [Lustre-devel] Hangs with cgroup memory controller
+In-Reply-To: <BE324D9D-3D7B-4D9E-8F3D-316F259871FC@whamcloud.com>
+References: <alpine.LFD.2.01.1107271556070.7176@sys880.ldn.framestore.com>
+	<BE324D9D-3D7B-4D9E-8F3D-316F259871FC@whamcloud.com>
+Message-ID: <alpine.LFD.2.01.1107271820040.6411@sys880.ldn.framestore.com>
+
+On Wed, 27 Jul 2011, Andreas Dilger wrote:
+
+> Two ideas come to mind. On is that the reason you are having difficulty 
+> to reproduce the problem is that it only happens after some fault 
+> condition. Possibly you need the client to do recovery to an OST and 
+> resend a bulk RPC, or resend due to a checksum error?
+
+Is there an easy way to trigger some error cases like this?
+
+> It might also be due to application IO types (e.g. mmap, direct IO, 
+> pwrite, splice, etc).
+
+Yes, of course. Although I didn't gather any statistics, there wasn't a 
+clear standout application which was more affected than others.
+
+> Possibly you can correlate reproducer cases with Lustre errors on the 
+> console?
+
+Back when I tried this last year on the production system, I wasn't able 
+to see corresponding errors. But I don't have any of this data around any 
+more.
+
+I'd need to do some tests on the production system to capture one case.
+
+> Lustre also has memory debugging that can be enabled, but without a 
+> reasonably concise reproducer it would be difficult to log/analyze so 
+> much data for hours of runtime.
+
+If I am able to capture a case, is there a way to, for example, dump a 
+list of Lustre pages still held by the client? And correlate these with 
+the files in question?
+
+What I am thinking is that I could stop the running processes and attempt 
+to drain all the pages, and this could hopefully leave a small number of 
+'bad' ones -- with the files in question I could at least help to identify 
+the I/O type.
+
+Thanks for your reply
+
+-- 
+Mark
+
+
+From Mark.Hills at framestore.com  Wed Jul 27 11:57:57 2011
+From: Mark.Hills at framestore.com (Mark Hills)
+Date: Wed, 27 Jul 2011 19:57:57 +0100 (BST)
+Subject: [Lustre-devel] Hangs with cgroup memory controller
+In-Reply-To: <BE324D9D-3D7B-4D9E-8F3D-316F259871FC@whamcloud.com>
+References: <alpine.LFD.2.01.1107271556070.7176@sys880.ldn.framestore.com>
+	<BE324D9D-3D7B-4D9E-8F3D-316F259871FC@whamcloud.com>
+Message-ID: <alpine.LFD.2.01.1107271922560.7176@sys880.ldn.framestore.com>
+
+On Wed, 27 Jul 2011, Andreas Dilger wrote:
+
+[...] 
+> Possibly you can correlate reproducer cases with Lustre errors on the 
+> console?
+
+I've managed to catch the bad state, on a clean client too -- there's no 
+errors reported from Lustre in dmesg.
+
+Here's the information reported by the cgroup. It seems that there's a 
+discrepancy of 2x pages (the 'cache' field, pgpgin, pgpgout).
+
+The process which was in the group terminated a long time ago.
+
+I can leave the machine in this state until tomorrow, so any suggestions 
+for data to capture that could help trace this bug would be welcomed. 
+Thanks.
+
+# cd /cgroup/p25321
+
+# echo 1 > memory.force_empty
+<hangs: the bug>
+
+# cat tasks
+<none>
+
+# cat memory.max_usage_in_bytes 
+1281351680
+
+# cat memory.usage_in_bytes 
+8192
+
+# cat memory.stat 
+cache 8192                   <--- two pages
+rss 0
+mapped_file 0
+pgpgin 396369                <--- two pages higher than pgpgout
+pgpgout 396367
+swap 0
+inactive_anon 0
+active_anon 0
+inactive_file 0
+active_file 0
+unevictable 0
+hierarchical_memory_limit 8388608000
+hierarchical_memsw_limit 10485760000
+total_cache 8192
+total_rss 0
+total_mapped_file 0
+total_pgpgin 396369
+total_pgpgout 396367
+total_swap 0
+total_inactive_anon 0
+total_active_anon 0
+total_inactive_file 0
+total_active_file 0
+total_unevictable 0
+
+# echo 1 > /proc/sys/vm/drop_caches
+<success>
+
+# echo 2 > /proc/sys/vm/drop_caches
+<success>
+
+# cat memory.stat
+<same as above>
+
+-- 
+Mark
+
+
+From adilger at whamcloud.com  Wed Jul 27 12:16:28 2011
+From: adilger at whamcloud.com (Andreas Dilger)
+Date: Wed, 27 Jul 2011 13:16:28 -0600
+Subject: [Lustre-devel] Hangs with cgroup memory controller
+In-Reply-To: <alpine.LFD.2.01.1107271922560.7176@sys880.ldn.framestore.com>
+References: <alpine.LFD.2.01.1107271556070.7176@sys880.ldn.framestore.com>
+	<BE324D9D-3D7B-4D9E-8F3D-316F259871FC@whamcloud.com>
+	<alpine.LFD.2.01.1107271922560.7176@sys880.ldn.framestore.com>
+Message-ID: <5DBD4462-2AAA-4657-9EBB-9633336DD972@whamcloud.com>
+
+On 2011-07-27, at 12:57 PM, Mark Hills wrote:
+> On Wed, 27 Jul 2011, Andreas Dilger wrote:
+> [...] 
+>> Possibly you can correlate reproducer cases with Lustre errors on the 
+>> console?
+> 
+> I've managed to catch the bad state, on a clean client too -- there's no 
+> errors reported from Lustre in dmesg.
+> 
+> Here's the information reported by the cgroup. It seems that there's a 
+> discrepancy of 2x pages (the 'cache' field, pgpgin, pgpgout).
+
+To dump Lustre pagecache pages use "lctl get_param llite.*.dump_page_cache",
+which will print the inode, page index, read/write access, and page flags.
+
+It wouldn't hurt to dump the kernel debug log, but it is unlikely to hold
+anything useful.
+
+> The process which was in the group terminated a long time ago.
+> 
+> I can leave the machine in this state until tomorrow, so any suggestions 
+> for data to capture that could help trace this bug would be welcomed. 
+> Thanks.
+> 
+> # cd /cgroup/p25321
+> 
+> # echo 1 > memory.force_empty
+> <hangs: the bug>
+> 
+> # cat tasks
+> <none>
+> 
+> # cat memory.max_usage_in_bytes 
+> 1281351680
+> 
+> # cat memory.usage_in_bytes 
+> 8192
+> 
+> # cat memory.stat 
+> cache 8192                   <--- two pages
+> rss 0
+> mapped_file 0
+> pgpgin 396369                <--- two pages higher than pgpgout
+> pgpgout 396367
+> swap 0
+> inactive_anon 0
+> active_anon 0
+> inactive_file 0
+> active_file 0
+> unevictable 0
+> hierarchical_memory_limit 8388608000
+> hierarchical_memsw_limit 10485760000
+> total_cache 8192
+> total_rss 0
+> total_mapped_file 0
+> total_pgpgin 396369
+> total_pgpgout 396367
+> total_swap 0
+> total_inactive_anon 0
+> total_active_anon 0
+> total_inactive_file 0
+> total_active_file 0
+> total_unevictable 0
+> 
+> # echo 1 > /proc/sys/vm/drop_caches
+> <success>
+> 
+> # echo 2 > /proc/sys/vm/drop_caches
+> <success>
+> 
+> # cat memory.stat
+> <same as above>
+> 
+> -- 
+> Mark
+
+
+Cheers, Andreas
+--
+Andreas Dilger 
+Principal Engineer
+Whamcloud, Inc.
+
+
+
+
+
+From Mark.Hills at framestore.com  Thu Jul 28 06:53:11 2011
+From: Mark.Hills at framestore.com (Mark Hills)
+Date: Thu, 28 Jul 2011 14:53:11 +0100 (BST)
+Subject: [Lustre-devel] Hangs with cgroup memory controller
+In-Reply-To: <5DBD4462-2AAA-4657-9EBB-9633336DD972@whamcloud.com>
+References: <alpine.LFD.2.01.1107271556070.7176@sys880.ldn.framestore.com>
+	<BE324D9D-3D7B-4D9E-8F3D-316F259871FC@whamcloud.com>
+	<alpine.LFD.2.01.1107271922560.7176@sys880.ldn.framestore.com>
+	<5DBD4462-2AAA-4657-9EBB-9633336DD972@whamcloud.com>
+Message-ID: <alpine.LFD.2.01.1107281415530.6411@sys880.ldn.framestore.com>
+
+On Wed, 27 Jul 2011, Andreas Dilger wrote:
+
+> On 2011-07-27, at 12:57 PM, Mark Hills wrote:
+> > On Wed, 27 Jul 2011, Andreas Dilger wrote:
+> > [...] 
+> >> Possibly you can correlate reproducer cases with Lustre errors on the 
+> >> console?
+> > 
+> > I've managed to catch the bad state, on a clean client too -- there's no 
+> > errors reported from Lustre in dmesg.
+> > 
+> > Here's the information reported by the cgroup. It seems that there's a 
+> > discrepancy of 2x pages (the 'cache' field, pgpgin, pgpgout).
+> 
+> To dump Lustre pagecache pages use "lctl get_param llite.*.dump_page_cache",
+> which will print the inode, page index, read/write access, and page flags.
+
+So I lost the previous test case, but acquired another. This time there 
+are 147 pages of difference. But not listed by the lctl command, which 
+gives an empty list.
+
+The cgroup reports approx. 600KiB used as 'cache' (memory.stat). Yet 
+/proc/meminfo does not; only 69KiB.
+
+But, what caught my attention is that cgroup 'cache' value dropped 
+slightly a few minutes later. drop_caches method wasn't touching this 
+memory. But when I put the system under memory pressure, these pages were 
+discarded and 'cached' was reduced. Until eventually the the cgroup 
+unhangs.
+
+So what I observed is that the pages cannot be forced out of the cache -- 
+only by memory pressure.
+
+I did a quick test on the regular behaviour, and drop_caches normally 
+works fine with Lustre content, both in and out of a cgroup. So these 
+pages are 'special' in some way.
+
+It is possible that some pages could not be in LRU, but would still be 
+seen by the memory pressure codepaths?
+
+Thanks
+
+# cd /group/p1243
+
+# echo 1 > memory.force_empty
+<hangs>
+
+# echo 2 > /proc/sys/vm/drop_caches
+
+# lctl get_param llite.*.dump_page_cache
+llite.beta-ffff88042b186400.dump_page_cache=
+gener |  llap  cookie  origin wq du wb | page inode index count [ page flags ]
+
+# cat memory.usage_in_bytes 
+602112
+
+# cat memory.stat
+cache 602112
+rss 0
+mapped_file 0
+pgpgin 1998315
+pgpgout 1998168
+swap 0
+inactive_anon 0
+active_anon 0
+inactive_file 0
+active_file 0
+unevictable 0
+hierarchical_memory_limit 16777216000
+hierarchical_memsw_limit 20971520000
+total_cache 602112
+total_rss 0
+total_mapped_file 0
+total_pgpgin 1998315
+total_pgpgout 1998168
+total_swap 0
+total_inactive_anon 0
+total_active_anon 0
+total_inactive_file 0
+total_active_file 0
+total_unevictable 0
+
+# cat /proc/meminfo 
+MemTotal:       16464728 kB
+MemFree:        15875412 kB
+Buffers:             256 kB
+Cached:            69540 kB
+SwapCached:            0 kB
+Active:            59452 kB
+Inactive:          87736 kB
+Active(anon):      33072 kB
+Inactive(anon):    61224 kB
+Active(file):      26380 kB
+Inactive(file):    26512 kB
+Unevictable:         228 kB
+Mlocked:               0 kB
+SwapTotal:      16587072 kB
+SwapFree:       16587072 kB
+Dirty:                 0 kB
+Writeback:             0 kB
+AnonPages:         77620 kB
+Mapped:            26768 kB
+Shmem:             16676 kB
+Slab:              67120 kB
+SReclaimable:      29136 kB
+SUnreclaim:        37984 kB
+KernelStack:        3336 kB
+PageTables:        10292 kB
+NFS_Unstable:          0 kB
+Bounce:                0 kB
+WritebackTmp:          0 kB
+CommitLimit:    24819436 kB
+Committed_AS:     659876 kB
+VmallocTotal:   34359738367 kB
+VmallocUsed:      320240 kB
+VmallocChunk:   34359359884 kB
+HardwareCorrupted:     0 kB
+HugePages_Total:       0
+HugePages_Free:        0
+HugePages_Rsvd:        0
+HugePages_Surp:        0
+Hugepagesize:       2048 kB
+DirectMap4k:        7488 kB
+DirectMap2M:    16764928 kB
+
+<some time later>
+
+# cat memory.stat | grep cache
+cache 581632
+
+# echo 2 > /proc/sys/vm/drop_caches
+
+# cat memory.stat | grep cache
+cache 581632
+
+<put system under memory pressure>
+
+# cat memory.stat | grep cache
+cache 118784
+
+<keep going>
+
+# cat memory.stat | grep cache
+cache 0
+
+<memory.force_empty un-hangs>
+
+-- 
+Mark
+
+
+From adilger at whamcloud.com  Thu Jul 28 10:10:22 2011
+From: adilger at whamcloud.com (Andreas Dilger)
+Date: Thu, 28 Jul 2011 11:10:22 -0600
+Subject: [Lustre-devel] Hangs with cgroup memory controller
+In-Reply-To: <alpine.LFD.2.01.1107281415530.6411@sys880.ldn.framestore.com>
+References: <alpine.LFD.2.01.1107271556070.7176@sys880.ldn.framestore.com>
+	<BE324D9D-3D7B-4D9E-8F3D-316F259871FC@whamcloud.com>
+	<alpine.LFD.2.01.1107271922560.7176@sys880.ldn.framestore.com>
+	<5DBD4462-2AAA-4657-9EBB-9633336DD972@whamcloud.com>
+	<alpine.LFD.2.01.1107281415530.6411@sys880.ldn.framestore.com>
+Message-ID: <E33CBAC5-08FA-49CA-970C-605A4DBE7B3B@whamcloud.com>
+
+If you get another system in this hang there are some more things you could check:
+
+lctl get_param memused pagesused
+
+This will print the count of all memory Lustre still thinks is allocated. 
+
+Check the slab cache allocations (/proc/slabinfo) for Lustre slab objects. Usually they are called ll_* or ldlm_* and are listed in sequence. 
+
+Enable memory allocation tracing before applying memory pressure:
+
+lctl set_param debug=+malloc
+
+And then when the memory is freed dump the debug logs:
+
+lctl dk /tmp/debug
+
+And grep out the "free" lines. 
+
+The other thing that may free Lustre memory is to remove the modules, but you need to keep libcfs loaded in order to be able to dump the debug log. 
+
+Cheers, Andreas
+
+On 2011-07-28, at 7:53 AM, Mark Hills <Mark.Hills at framestore.com> wrote:
+
+> On Wed, 27 Jul 2011, Andreas Dilger wrote:
+> 
+>> On 2011-07-27, at 12:57 PM, Mark Hills wrote:
+>>> On Wed, 27 Jul 2011, Andreas Dilger wrote:
+>>> [...] 
+>>>> Possibly you can correlate reproducer cases with Lustre errors on the 
+>>>> console?
+>>> 
+>>> I've managed to catch the bad state, on a clean client too -- there's no 
+>>> errors reported from Lustre in dmesg.
+>>> 
+>>> Here's the information reported by the cgroup. It seems that there's a 
+>>> discrepancy of 2x pages (the 'cache' field, pgpgin, pgpgout).
+>> 
+>> To dump Lustre pagecache pages use "lctl get_param llite.*.dump_page_cache",
+>> which will print the inode, page index, read/write access, and page flags.
+> 
+> So I lost the previous test case, but acquired another. This time there 
+> are 147 pages of difference. But not listed by the lctl command, which 
+> gives an empty list.
+> 
+> The cgroup reports approx. 600KiB used as 'cache' (memory.stat). Yet 
+> /proc/meminfo does not; only 69KiB.
+> 
+> But, what caught my attention is that cgroup 'cache' value dropped 
+> slightly a few minutes later. drop_caches method wasn't touching this 
+> memory. But when I put the system under memory pressure, these pages were 
+> discarded and 'cached' was reduced. Until eventually the the cgroup 
+> unhangs.
+> 
+> So what I observed is that the pages cannot be forced out of the cache -- 
+> only by memory pressure.
+> 
+> I did a quick test on the regular behaviour, and drop_caches normally 
+> works fine with Lustre content, both in and out of a cgroup. So these 
+> pages are 'special' in some way.
+> 
+> It is possible that some pages could not be in LRU, but would still be 
+> seen by the memory pressure codepaths?
+> 
+> Thanks
+> 
+> # cd /group/p1243
+> 
+> # echo 1 > memory.force_empty
+> <hangs>
+> 
+> # echo 2 > /proc/sys/vm/drop_caches
+> 
+> # lctl get_param llite.*.dump_page_cache
+> llite.beta-ffff88042b186400.dump_page_cache=
+> gener |  llap  cookie  origin wq du wb | page inode index count [ page flags ]
+> 
+> # cat memory.usage_in_bytes 
+> 602112
+> 
+> # cat memory.stat
+> cache 602112
+> rss 0
+> mapped_file 0
+> pgpgin 1998315
+> pgpgout 1998168
+> swap 0
+> inactive_anon 0
+> active_anon 0
+> inactive_file 0
+> active_file 0
+> unevictable 0
+> hierarchical_memory_limit 16777216000
+> hierarchical_memsw_limit 20971520000
+> total_cache 602112
+> total_rss 0
+> total_mapped_file 0
+> total_pgpgin 1998315
+> total_pgpgout 1998168
+> total_swap 0
+> total_inactive_anon 0
+> total_active_anon 0
+> total_inactive_file 0
+> total_active_file 0
+> total_unevictable 0
+> 
+> # cat /proc/meminfo 
+> MemTotal:       16464728 kB
+> MemFree:        15875412 kB
+> Buffers:             256 kB
+> Cached:            69540 kB
+> SwapCached:            0 kB
+> Active:            59452 kB
+> Inactive:          87736 kB
+> Active(anon):      33072 kB
+> Inactive(anon):    61224 kB
+> Active(file):      26380 kB
+> Inactive(file):    26512 kB
+> Unevictable:         228 kB
+> Mlocked:               0 kB
+> SwapTotal:      16587072 kB
+> SwapFree:       16587072 kB
+> Dirty:                 0 kB
+> Writeback:             0 kB
+> AnonPages:         77620 kB
+> Mapped:            26768 kB
+> Shmem:             16676 kB
+> Slab:              67120 kB
+> SReclaimable:      29136 kB
+> SUnreclaim:        37984 kB
+> KernelStack:        3336 kB
+> PageTables:        10292 kB
+> NFS_Unstable:          0 kB
+> Bounce:                0 kB
+> WritebackTmp:          0 kB
+> CommitLimit:    24819436 kB
+> Committed_AS:     659876 kB
+> VmallocTotal:   34359738367 kB
+> VmallocUsed:      320240 kB
+> VmallocChunk:   34359359884 kB
+> HardwareCorrupted:     0 kB
+> HugePages_Total:       0
+> HugePages_Free:        0
+> HugePages_Rsvd:        0
+> HugePages_Surp:        0
+> Hugepagesize:       2048 kB
+> DirectMap4k:        7488 kB
+> DirectMap2M:    16764928 kB
+> 
+> <some time later>
+> 
+> # cat memory.stat | grep cache
+> cache 581632
+> 
+> # echo 2 > /proc/sys/vm/drop_caches
+> 
+> # cat memory.stat | grep cache
+> cache 581632
+> 
+> <put system under memory pressure>
+> 
+> # cat memory.stat | grep cache
+> cache 118784
+> 
+> <keep going>
+> 
+> # cat memory.stat | grep cache
+> cache 0
+> 
+> <memory.force_empty un-hangs>
+> 
+> -- 
+> Mark
+
+
+From Mark.Hills at framestore.com  Fri Jul 29 07:39:12 2011
+From: Mark.Hills at framestore.com (Mark Hills)
+Date: Fri, 29 Jul 2011 15:39:12 +0100 (BST)
+Subject: [Lustre-devel] Hangs with cgroup memory controller
+In-Reply-To: <E33CBAC5-08FA-49CA-970C-605A4DBE7B3B@whamcloud.com>
+References: <alpine.LFD.2.01.1107271556070.7176@sys880.ldn.framestore.com>
+	<BE324D9D-3D7B-4D9E-8F3D-316F259871FC@whamcloud.com>
+	<alpine.LFD.2.01.1107271922560.7176@sys880.ldn.framestore.com>
+	<5DBD4462-2AAA-4657-9EBB-9633336DD972@whamcloud.com>
+	<alpine.LFD.2.01.1107281415530.6411@sys880.ldn.framestore.com>
+	<E33CBAC5-08FA-49CA-970C-605A4DBE7B3B@whamcloud.com>
+Message-ID: <alpine.LFD.2.01.1107291504480.15112@sys880.ldn.framestore.com>
+
+On Thu, 28 Jul 2011, Andreas Dilger wrote:
+
+> If you get another system in this hang there are some more things you 
+> could check:
+> 
+> lctl get_param memused pagesused
+> 
+> This will print the count of all memory Lustre still thinks is 
+> allocated.
+> 
+> Check the slab cache allocations (/proc/slabinfo) for Lustre slab 
+> objects. Usually they are called ll_* or ldlm_* and are listed in 
+> sequence.
+> 
+> Enable memory allocation tracing before applying memory pressure:
+> 
+> lctl set_param debug=+malloc
+> 
+> And then when the memory is freed dump the debug logs:
+> 
+> lctl dk /tmp/debug
+> 
+> And grep out the "free" lines.
+
+I followed these steps. Neither /proc/slabinfo nor Lustre's own logs show 
+activity at the point where the pages are forced out due to memory 
+pressure.
+
+(There's a certain amount of periodic noise in the debug logs, but looking 
+beyond that I was able to force memory pressure, watch pages out, and 
+Lustre logged nothing)
+
+As before, dumping Lustre pagecache pages shows nothing.
+
+So it looks like these aren't Lustre pages. Furthermore...
+ 
+> The other thing that may free Lustre memory is to remove the modules, 
+> but you need to keep libcfs loaded in order to be able to dump the debug 
+> log.
+
+I then unmounted the filesystem and removed all the modules, right the way 
+down to libcfs.
+
+On completion the cgroup still reported a certain amount of cached memory. 
+And on memory pressure this was freed. Exactly the same as with the 
+modules loaded.
+
+I think this enforces the explanation above, that they aren't Lustre pages 
+at all (though perhaps they used to be.)
+
+But they are some side effect of Lustre activity; this whole problem only 
+happens when Lustre disks are mounted and accessed.
+
+Hosts with Lustre mounted via an NFS gateway perform flawlessly for months 
+(and they still have Lustre modules loaded.) Whereas a host with Lustre 
+mounted directly (and no other changes) fails -- it can be made to block a 
+cgroup in 10 minutes or so.
+
+The kernel seems to be able to handle these pages, rather than them being 
+an inconsistency in data structures. Is there a reasonable explanation for 
+pages like this in the kernel? One that could hopefully trace them back to 
+their source.
+
+Thanks
+
+-- 
+Mark
+
+
+
+# echo 2 > /proc/sys/vm/drop_caches
+
+# lctl get_param llite.*.dump_page_cache
+llite.beta-ffff88040bdb9800.dump_page_cache=
+gener |  llap  cookie  origin wq du wb | page inode index count [ page flags ]
+llite.pi-ffff88040bde6000.dump_page_cache=
+gener |  llap  cookie  origin wq du wb | page inode index count [ page flags ]
+
+# cat /cgroup/d*/memory.usage_in_bytes
+61440
+1069056
+1892352
+92405760
+
+# lctl get_param memused pagesused
+lnet.memused=925199
+memused=16609140
+
+pagesused=0
+
+# cat /proc/slabinfo | grep ll_
+ll_import_cache        0      0   1248   26    8 : tunables    0    0    0 : slabdata      0      0      0
+ll_obdo_cache        312    312    208   39    2 : tunables    0    0    0 : slabdata      8      8      0
+ll_obd_dev_cache      45     45   5696    5    8 : tunables    0    0    0 : slabdata      9      9      0
+
+# cat /proc/slabinfo | grep ldlm_
+ldlm_locks           361    532    576   28    4 : tunables    0    0    0 : slabdata     19     19      0
+
+<memory pressure>
+
+# cat /cgroup/d*/memory.usage_in_bytes
+0
+0
+0
+12288
+
+# cat /proc/slabinfo | grep ll_
+ll_import_cache        0      0   1248   26    8 : tunables    0    0    0 : slabdata      0      0      0
+ll_obdo_cache        312    312    208   39    2 : tunables    0    0    0 : slabdata      8      8      0
+ll_obd_dev_cache      45     45   5696    5    8 : tunables    0    0    0 : slabdata      9      9      0
+
+# cat /proc/slabinfo | grep ldlm_
+ldlm_locks           361    532    576   28    4 : tunables    0    0    0 : slabdata     19     19      0
+
+# lctl get_param memused pagesused
+lnet.memused=925199
+memused=16609140
+
+pagesused=0
+
+# umount /net/lustre
+<in dmesg>
+LustreError: 20169:0:(ldlm_request.c:1034:ldlm_cli_cancel_req()) Got rc -108 from cancel RPC: canceling anyway
+LustreError: 20169:0:(ldlm_request.c:1592:ldlm_cli_cancel_list()) ldlm_cli_cancel_list: -108
+LustreError: 20169:0:(ldlm_request.c:1034:ldlm_cli_cancel_req()) Got rc -108 from cancel RPC: canceling anyway
+LustreError: 20169:0:(ldlm_request.c:1592:ldlm_cli_cancel_list()) ldlm_cli_cancel_list: -108
+
+# rmmod mgc
+# rmmod mdc
+# rmmod osc
+# rmmod lov
+# rmmod lquota
+# rmmod ptlrpc
+# rmmod lvfs
+# rmmod lnet
+# rmmod obdclass
+# rmmod ksocklnd
+# rmmod libcfs
+
+# echo 2 > /proc/sys/vm/drop_caches
+
+# cat /cgroup/d*/memory.usage_in_bytes
+0
+0
+0
+12288
+
+<memory pressure>
+
+# cat /cgroup/d*/memory.usage_in_bytes
+0
+0
+0
+0
+
+
+
+
+From robin.humble+lustre at anu.edu.au  Fri Jul 29 00:15:16 2011
+From: robin.humble+lustre at anu.edu.au (Robin Humble)
+Date: Fri, 29 Jul 2011 03:15:16 -0400
+Subject: [Lustre-devel] Hangs with cgroup memory controller
+In-Reply-To: <alpine.LFD.2.01.1107271922560.7176@sys880.ldn.framestore.com>
+References: <alpine.LFD.2.01.1107271556070.7176@sys880.ldn.framestore.com>
+	<BE324D9D-3D7B-4D9E-8F3D-316F259871FC@whamcloud.com>
+	<alpine.LFD.2.01.1107271922560.7176@sys880.ldn.framestore.com>
+Message-ID: <20110729071516.GA15971@grizzly.cita.utoronto.ca>
+
+On Wed, Jul 27, 2011 at 07:57:57PM +0100, Mark Hills wrote:
+>On Wed, 27 Jul 2011, Andreas Dilger wrote:
+>> Possibly you can correlate reproducer cases with Lustre errors on the 
+>> console?
+>I've managed to catch the bad state, on a clean client too -- there's no 
+>errors reported from Lustre in dmesg.
+>
+>Here's the information reported by the cgroup. It seems that there's a 
+>discrepancy of 2x pages (the 'cache' field, pgpgin, pgpgout).
+>
+>The process which was in the group terminated a long time ago.
+>
+>I can leave the machine in this state until tomorrow, so any suggestions 
+>for data to capture that could help trace this bug would be welcomed. 
+>Thanks.
+
+maybe try
+  vm.zone_reclaim_mode=0
+with zone_reclaim_mode=1 (even without memcg) we saw ~infinite scanning
+for pages when doing Lustre i/o + memory pressure, which also hung up a
+core in 100% system time. the scanning can be seen with
+  grep scan /proc/zoneinfo
+
+that zone_reclaim_mode=0 helps our problem could be related to your
+memcg semi-missing pages, or perhaps it's a workaround for a core
+kernel problem with zones - we only have Lustre so can't distinguish.
+
+secondly, and even more of a long shot - I presume slab isn't accounted
+as part of memcg, but you could also try clearing the ldlm locks. Linux
+is reluctant to drop inodes caches until the locks are cleared first
+  lctl set_param ldlm.namespaces.*.lru_size=clear
+
+cheers,
+robin
+
+
+From Mark.Hills at framestore.com  Fri Jul 29 09:42:24 2011
+From: Mark.Hills at framestore.com (Mark Hills)
+Date: Fri, 29 Jul 2011 17:42:24 +0100 (BST)
+Subject: [Lustre-devel] Hangs with cgroup memory controller
+In-Reply-To: <20110729071516.GA15971@grizzly.cita.utoronto.ca>
+References: <alpine.LFD.2.01.1107271556070.7176@sys880.ldn.framestore.com>
+	<BE324D9D-3D7B-4D9E-8F3D-316F259871FC@whamcloud.com>
+	<alpine.LFD.2.01.1107271922560.7176@sys880.ldn.framestore.com>
+	<20110729071516.GA15971@grizzly.cita.utoronto.ca>
+Message-ID: <alpine.LFD.2.01.1107291731250.15112@sys880.ldn.framestore.com>
+
+On Fri, 29 Jul 2011, Robin Humble wrote:
+
+> On Wed, Jul 27, 2011 at 07:57:57PM +0100, Mark Hills wrote:
+> >On Wed, 27 Jul 2011, Andreas Dilger wrote:
+> >> Possibly you can correlate reproducer cases with Lustre errors on the 
+> >> console?
+> >I've managed to catch the bad state, on a clean client too -- there's no 
+> >errors reported from Lustre in dmesg.
+> >
+> >Here's the information reported by the cgroup. It seems that there's a 
+> >discrepancy of 2x pages (the 'cache' field, pgpgin, pgpgout).
+> >
+> >The process which was in the group terminated a long time ago.
+> >
+> >I can leave the machine in this state until tomorrow, so any suggestions 
+> >for data to capture that could help trace this bug would be welcomed. 
+> >Thanks.
+> 
+> maybe try
+>   vm.zone_reclaim_mode=0
+> with zone_reclaim_mode=1 (even without memcg) we saw ~infinite scanning
+> for pages when doing Lustre i/o + memory pressure, which also hung up a
+> core in 100% system time.
+
+0 is the default on this kernel, and is what we have been using. I tried 
+the other possibilities, without any difference.
+
+I think it's the reclaim that's actually working; if I understand 
+correctly it scans the pages looking for a good match to reclaim.
+
+But cgroup.force_empty relies on the LRU, and the pages cannot be found 
+here.
+
+> the scanning can be seen with
+>   grep scan /proc/zoneinfo
+
+I don't see any incrementing of these counters when the memory is freed by 
+memory pressure.
+
+> that zone_reclaim_mode=0 helps our problem could be related to your
+> memcg semi-missing pages, or perhaps it's a workaround for a core
+> kernel problem with zones - we only have Lustre so can't distinguish.
+> 
+> secondly, and even more of a long shot - I presume slab isn't accounted
+> as part of memcg, but you could also try clearing the ldlm locks. Linux
+> is reluctant to drop inodes caches until the locks are cleared first
+>   lctl set_param ldlm.namespaces.*.lru_size=clear
+
+I tried this, and it didn't remove the cache pages. Or enable them to be 
+removed.
+
+-- 
+Mark
+
+

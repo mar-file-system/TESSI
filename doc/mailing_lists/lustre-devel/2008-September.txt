@@ -1,0 +1,1804 @@
+From aik at fnal.gov  Wed Sep  3 13:58:31 2008
+From: aik at fnal.gov (Alex Kulyavtsev)
+Date: Wed, 03 Sep 2008 15:58:31 -0500
+Subject: [Lustre-devel] Summary of our HSM discussion
+In-Reply-To: <48B87B46.8050200@sun.com>
+References: <C4BCA140.5486%peter.braam@sun.com> <48B85E2D.8000109@sun.com>
+	<48B86F3C.9080909@Sun.COM> <48B87B46.8050200@sun.com>
+Message-ID: <48BEFA77.8020708@fnal.gov>
+
+Hello,
+sorry for breaking into discussion. Please find inlined
+
+Nathaniel Rutman wrote:
+> Rick Matthews wrote:
+>   
+>> On 08/29/08 15:38, Nathaniel Rutman wrote:
+>>     
+(Snip)
+>>
+>>> We'll have to add a flag into the lov_ea indicating "in HSM", and 
+>>> then block for file retrieval (#2).
+>>>       
+>> Correct...with a small twist...the HSM holds copies of data even when 
+>> they continue to exist in native disk. The "release" of this space 
+>> then doesn't need to
+>> wait for a slower data mover. So, change "in HSM" to "only in HSM" and 
+>> you are correct.
+>>     
+> right, that's what I had in mind.
+>   
+- What is definition of "ONLY in HSM" ?
+- Are these flags exposed to end user ?
+
+Consider use case :
+User has someFile striped across two osts:  OST1 and OST2. File is in 
+HSM as well.
+OST2 is down. User reads the file and reaches stripe residing on OST2 
+(or open() checks ost status )
+In this case it will be nice to stage file from tape as a whole or only 
+stripes residing on OST2.
+Also, when OST2 restarts it shall remove stale stripes and MDT points to 
+right OST set after retrieval.
+I realize it makes things more complicated and adds more triggers to #2  
+for file retrieval.
+
+Back to flags definition :
+Thus staging from tape may be triggered by several conditions including
+ (  File_is_Resident ) and (File_is_in_HSM) and (OST_is_Not_Available)
+in addition to
+ ( ! File_is_Resident ) and (File_is_in_HSM)
+
+It may worth to keep flags  (File_is_Resident) and (File_is_in_HSM) 
+separate  as 
+"File_is_in_HSM" is a fundamental file property indicating "permanent" 
+storage of the file and other flags reflect file state (file is resident 
+on disk)
+or transient condition (ost is down).
+
+The other use case when end user writes file to lustre/HSM system and 
+waits till file reaches the tape before deleting the original while 
+checking file status time to time.
+It can be done if "File_is_in_HSM" flag is exposed to end user by some 
+command or if  HSM fileID is set in EA.
+In this case user wants to know "is in hsm" part of the flag regardless 
+"file is resident on disk". Keeping flags separate will help with logic 
+and synchronization.
+
+Best regards, Alex.
+
+(snip)
+>>> Peter Braam wrote:
+>>>       
+>>>> The steps to reach a first implementation can be summarized as:
+>>>>
+>>>>    1. Include file closes in the changelog, if the file was opened for
+>>>>       write. Include timestamps in the changelog entries. This allows
+>>>>       the changelog processor to see files that have become inactive
+>>>>       and pass them on for archiving.
+>>>>    2. Build an open call that blocks for file retrieval and adapts
+>>>>       timeouts to avoid error returns.
+>>>>    3. Until a least-recently-used log is built, use the e2scan utility
+>>>>       to generate lists of candidates for purging.
+>>>>    4. Translate events and scan results into a form that they can be
+>>>>       understood by ADM.
+>>>>    5. Work with a single coordinator, whose role it is to avoid
+>>>>       getting multiple ?close? records for the same file (a basic
+>>>>       filter for events).
+>>>>    6. Do not use initiators ? these can come later and assist with
+>>>>       load balancing and free-ing space on demand (both of which we
+>>>>       can ignore for the first release)
+>>>>    7. Do not use multiple agents ? the agents can move stripes of
+>>>>       files etc, and this is not needed with a basic user level
+>>>>       solution, based on consuming the log. The only thing the agent
+>>>>       must do in release one is get the attention of a data mover to
+>>>>       restore files on demand.
+>>>>
+>>>>
+>>>> Peter
+>>>> ------------------------------------------------------------------------ 
+>>>>
+>>>>
+>>>> _______________________________________________
+>>>> Lustre-devel mailing list
+>>>> Lustre-devel at lists.lustre.org
+>>>> http://lists.lustre.org/mailman/listinfo/lustre-devel
+>>>>   
+>>>>         
+>>     
+>
+> _______________________________________________
+> Lustre-devel mailing list
+> Lustre-devel at lists.lustre.org
+> http://lists.lustre.org/mailman/listinfo/lustre-devel
+>   
+
+
+
+
+From Peter.Braam at Sun.COM  Thu Sep  4 00:59:24 2008
+From: Peter.Braam at Sun.COM (Peter Braam)
+Date: Thu, 04 Sep 2008 09:59:24 +0200
+Subject: [Lustre-devel] Summary of our HSM discussion
+In-Reply-To: <48BEFA77.8020708@fnal.gov>
+Message-ID: <C4E561FC.7800%peter.braam@sun.com>
+
+
+
+
+On 9/3/08 10:58 PM, "Alex Kulyavtsev" <aik at fnal.gov> wrote:
+
+> Hello,
+> sorry for breaking into discussion. Please find inlined
+> 
+> Nathaniel Rutman wrote:
+>> Rick Matthews wrote:
+>>   
+>>> On 08/29/08 15:38, Nathaniel Rutman wrote:
+>>>     
+> (Snip)
+>>> 
+>>>> We'll have to add a flag into the lov_ea indicating "in HSM", and
+>>>> then block for file retrieval (#2).
+>>>>       
+>>> Correct...with a small twist...the HSM holds copies of data even when
+>>> they continue to exist in native disk. The "release" of this space
+>>> then doesn't need to
+>>> wait for a slower data mover. So, change "in HSM" to "only in HSM" and
+>>> you are correct.
+>>>     
+>> right, that's what I had in mind.
+>>   
+> - What is definition of "ONLY in HSM" ?
+> - Are these flags exposed to end user ?
+
+They will be extended attributes accessible with the xattr utilities.
+
+If there is a standard for such attributes, we should use it to avoid
+introducing yet another set of product specific attributes.
+
+> 
+> Consider use case :
+> User has someFile striped across two osts:  OST1 and OST2. File is in
+> HSM as well.
+> OST2 is down. User reads the file and reaches stripe residing on OST2
+> (or open() checks ost status )
+> In this case it will be nice to stage file from tape as a whole or only
+> stripes residing on OST2.
+> Also, when OST2 restarts it shall remove stale stripes and MDT points to
+> right OST set after retrieval.
+> I realize it makes things more complicated and adds more triggers to #2
+> for file retrieval.
+
+Nice idea, but building this into the FS is really a refinement that we
+should not be going after too soon.  When OST2 returns to the cluster, we
+have cleanup work, and building all the administration infrastructure for
+this is a lot of work.
+
+With a copy_from_hsm command users should be able to do this.
+
+Lsxattr <pathname> -- see file is on tape
+Lfs getfid <pathname> -- get its fid
+Copy_from_hsm <fid> <path> -- copy it in
+
+> 
+> Back to flags definition :
+> Thus staging from tape may be triggered by several conditions including
+>  (  File_is_Resident ) and (File_is_in_HSM) and (OST_is_Not_Available)
+> in addition to
+>  ( ! File_is_Resident ) and (File_is_in_HSM)
+> 
+> It may worth to keep flags  (File_is_Resident) and (File_is_in_HSM)
+> separate  as 
+> "File_is_in_HSM" is a fundamental file property indicating "permanent"
+> storage of the file and other flags reflect file state (file is resident
+> on disk)
+> or transient condition (ost is down).
+
+Reminder: File_is_in_HSM needs to be cleared if the file changes again.
+Files change on the OSS, not on the MDS, where are the flags? We can trust
+version propagation from OSS to MDS only when SOM is present.
+
+> 
+> The other use case when end user writes file to lustre/HSM system and
+> waits till file reaches the tape before deleting the original while
+> checking file status time to time.
+
+Yes.
+
+> It can be done if "File_is_in_HSM" flag is exposed to end user by some
+> command or if  HSM fileID is set in EA.
+
+The HSM fileID will NOT be in the EA at all.  The flag can be exposed.
+
+> In this case user wants to know "is in hsm" part of the flag regardless
+> "file is resident on disk". Keeping flags separate will help with logic
+> and synchronization.
+
+We want a flag file is NOT resident on disk, since otherwise we need to tag
+all files, but that is a detail.
+
+Peter
+
+> 
+> Best regards, Alex.
+> 
+> (snip)
+>>>> Peter Braam wrote:
+>>>>       
+>>>>> The steps to reach a first implementation can be summarized as:
+>>>>> 
+>>>>>    1. Include file closes in the changelog, if the file was opened for
+>>>>>       write. Include timestamps in the changelog entries. This allows
+>>>>>       the changelog processor to see files that have become inactive
+>>>>>       and pass them on for archiving.
+>>>>>    2. Build an open call that blocks for file retrieval and adapts
+>>>>>       timeouts to avoid error returns.
+>>>>>    3. Until a least-recently-used log is built, use the e2scan utility
+>>>>>       to generate lists of candidates for purging.
+>>>>>    4. Translate events and scan results into a form that they can be
+>>>>>       understood by ADM.
+>>>>>    5. Work with a single coordinator, whose role it is to avoid
+>>>>>       getting multiple ?close? records for the same file (a basic
+>>>>>       filter for events).
+>>>>>    6. Do not use initiators ? these can come later and assist with
+>>>>>       load balancing and free-ing space on demand (both of which we
+>>>>>       can ignore for the first release)
+>>>>>    7. Do not use multiple agents ? the agents can move stripes of
+>>>>>       files etc, and this is not needed with a basic user level
+>>>>>       solution, based on consuming the log. The only thing the agent
+>>>>>       must do in release one is get the attention of a data mover to
+>>>>>       restore files on demand.
+>>>>> 
+>>>>> 
+>>>>> Peter
+>>>>> ------------------------------------------------------------------------
+>>>>> 
+>>>>> 
+>>>>> _______________________________________________
+>>>>> Lustre-devel mailing list
+>>>>> Lustre-devel at lists.lustre.org
+>>>>> http://lists.lustre.org/mailman/listinfo/lustre-devel
+>>>>>   
+>>>>>         
+>>>     
+>> 
+>> _______________________________________________
+>> Lustre-devel mailing list
+>> Lustre-devel at lists.lustre.org
+>> http://lists.lustre.org/mailman/listinfo/lustre-devel
+>>   
+> 
+> 
+> _______________________________________________
+> Lustre-devel mailing list
+> Lustre-devel at lists.lustre.org
+> http://lists.lustre.org/mailman/listinfo/lustre-devel
+
+
+
+
+From Alexander.Zarochentsev at Sun.COM  Sat Sep  6 23:31:39 2008
+From: Alexander.Zarochentsev at Sun.COM (Alexander Zarochentsev)
+Date: Sun, 07 Sep 2008 10:31:39 +0400
+Subject: [Lustre-devel] [RFC] COS performance testing
+Message-ID: <200809071031.39676.alexander.zarochentsev@sun.com>
+
+Hello,
+
+The COS performance testing plan currently contains only few items:
+
+1. parallel creates from two mountpoints in different directories (COS 
+should add no overhead, there are not dependent transactions)
+
+2. parallel creates from two mountpoints in one shared directory (COS 
+should add no overhead due to parallel dir operations and hashed 
+directory locks)
+
+3. create files from one mountpoint and delete from another mountpoint,
+the test program is attached to the bug.
+(this really measures COS overhead)
+
+The latest test is a corner case when all transactions are dependent. 
+Would be better to have more complex tests with a mix of dependent and 
+independent operations and more clients?
+
+BTW, I have preliminary test results,
+elapsed time and number of disk transactions for the performance
+tests:
+
+TEST                |   COS OFF     |   COS ON
+----------------------------------------------
+1. 2 clients create |  24.55 sec    |  25.06 sec
+10000 files each    |  166  trans   |  154 trans
+in own directories  |               |
+                    |               |
+2. 2 clients,       |  30.46 sec    |  25.01 sec
+2x10000 files,      |  206 trans    |  157 trans
+one shared dir      |               |
+                    |               |
+3. create / delete  |  39.28 sec    |  38.84 sec
+of 10000 files      |  92 trans     |  10462 trans
+
+the tests are done on my home two-cores machine with 1G RAM, SATA HDD 
+but CPU clock was throttled due to high CPU temperature, so the results 
+are not very stable.
+
+Thanks,
+-- 
+Alexander "Zam" Zarochentsev
+Staff Engineer
+Lustre Group, Sun Microsystems
+
+
+From devindk at sun.com  Wed Sep 10 14:19:53 2008
+From: devindk at sun.com (Pearlene Devin)
+Date: Wed, 10 Sep 2008 14:19:53 -0700
+Subject: [Lustre-devel] No Study Needed,
+	Buy Degree/Bacheloor/Dip1oma/Maaster at affordable price yyv 8vzo
+In-Reply-To: <6f2c01c91266$7f6b1719$5d5b5bf3@rs2l883>
+Message-ID: <1221081593.2335@sun.com>
+
+    
+Now you can buy Bacheelor, Degree, MasteerMBA, PhDD at L0W price!
+  
+Give us a Call for More inquiry
+   
+No Exams/Interview/Books/tests/classes        
+100% No Pre-School qualification Required!    
+    
+------------------------------      
+Inside USA: 1-718-989-5740      
+0utside USA: +1-718-989-5740   
+------------------------------     
+   
+Bacheelor, Degree, MasteerMBA, PhDD available In the field of Your choice So you can even become a doctor and receive All the Benefits that Comes with it!    
+        
+Please leave below 3 Info in voicemail:     
+      
+1) Your name      
+2) Your country        
+3) Your phone no. [Please include CountryCode]    
+        
+Call Now! 24 hours a Day, 7 Days a Week waiting for your call    
+    
+------------------------------      
+Inside USA: 1-718-989-5740   
+0utside USA: +1-718-989-5740      
+------------------------------        
+      
+Our Staff will get back to You in 1 - 3 working days        
+   
+   
+        
+      
+     
+        
+
+
+From eeb at sun.com  Tue Sep 16 04:05:56 2008
+From: eeb at sun.com (Eric Barton)
+Date: Tue, 16 Sep 2008 12:05:56 +0100
+Subject: [Lustre-devel] CMD directory split
+In-Reply-To: <20080916082246.GN3241@webber.adilger.int>
+References: <20080912071835.GP3086@webber.adilger.int>
+	<1FEE196D-471A-4D96-A722-1479B7192ACF@Sun.COM>
+	<245E1B64-9341-48B9-B6A4-E88153D5B7A7@Sun.COM>
+	<20080915021630.GB4090@webber.adilger.int>
+	<18638.14045.141758.231275@gargle.gargle.HOWL>
+	<20080916082246.GN3241@webber.adilger.int>
+Message-ID: <831F789FF0CC4FFD8D5C15DC082731AF@ebpc>
+
+Guys,
+
+I'm cc-ing lustre-devel - it's of general interest.
+
+I definitely think the first CMD product releases should stick to
+static directory layouts with all directories contained within a
+single MDT by default - i.e. you have to do something special to
+create a striped dir.  Meanwhile we should start ASAP on completing
+the design of automatic dir splitting to handle _all_ the recovery
+cases.
+
+IMHO, a one-time-only directory split seems a bit too all-or-nothing.
+What is the reasoning behind the assumption that further splitting is
+not required?  Also, directory size doesn't necessarily seem like the
+only or even the best clue about when to split and how.  So here are a
+couple of suggestions.
+
+1. Consider the split from 1 MDT to several just as a special case of
+   migration - i.e. allow arbitrary n->m re-layout over MDTs.  We
+   would like to support metadata migration in any case for space
+   management.  Andreas' ideas about migration by mirroring seem
+   equally applicable to directories (furthermore mirrored directories
+   seem like a valuable component of a namespace availability and
+   resilience feature).
+
+2. Keep the discussion on policy (when to split) separate from
+   mechanism (how to split).
+
+    Cheers,
+              Eric
+
+> 
+> -----Original Message-----
+> From: Andreas.Dilger at Sun.COM [mailto:Andreas.Dilger at Sun.COM] On Behalf Of Andreas Dilger
+> Sent: 16 September 2008 9:23 AM
+> To: Nikita Danilov
+> Cc: Yury Umanets; Eric Barton; Alex Zhuravlev
+> Subject: Re: CMD directory split
+> 
+> On Sep 15, 2008  14:20 +0400, Nikita Danilov wrote:
+> > Andreas Dilger writes:
+> >  > I think we can have a very simple directory split if we
+> >  > consider the directory split like file IO instead of inserting
+> >  > thousands of dirents.
+> > 
+> > In some sense this is already done. Split (cmm/cmm_split.c) uses
+> > the same interface as readdir to construct a pagesful of directory
+> > entries and to send them to a slave mdt, where they are
+> > inserted. It is not raw `write', because actual directory page
+> > format is encapsulated within osd
+> 
+> Yes, I was thinking of something like this, I didn't know that is
+> how it is actually handled.  The other issue is that the directory
+> creation and insertions should be done in a single transaction in
+> order to simplify recovery.  In that case we don't have to worry
+> about the case where the directory is partially created and
+> populated.
+> 
+> > It's my impression that other source of trouble with split is a
+> > complicated locking scheme that it requires to keep clients happy.
+> 
+> How is the locking of the directory any different than the locking
+> on the LOV EA needed to restripe a file for migration?  The locks on
+> the inodes themselves do not change, because the inodes are not
+> moving.  The pages on the directory itself are revoked on a regular
+> basis whenever there is a new insertion in any case (i.e. when the
+> directory is split).
+> 
+> It would seem that the only thing which needs to be changed is the
+> LMV EA on the clients.
+> 
+> > It would be _much_ easier if directories were split at the time of
+> > creation like files are. That would also eliminate almost all
+> > recovery issues and page-shuffling mechanics.
+> 
+> This might be possible for a simple initial implementation, but it
+> isn't a good long-term solution.  Consider the problems we face even
+> today with widely-striped files - stat slowdowns to track the
+> size/mtime/ctime, readdir will always have to do RPCs to each MDT to
+> get the entries even if there are only a few entries, unlinks will
+> need multiple RPCs, etc.
+> 
+> In contrast, we can tune the split threshold so that the majority of
+> small directories remain on a single MDT, and only large directories
+> are split (with some small overhead for the split).
+> 
+> In the future we have to consider configurations with hundreds or
+> even thousands of MDTs, perhaps one on each OST, in order to scale
+> metadata and small file performance dramatically.
+> 
+> Cheers, Andreas
+> --
+> Andreas Dilger
+> Sr. Staff Engineer, Lustre Group
+> Sun Microsystems of Canada, Inc.
+> 
+> 
+
+
+
+From Peter.Braam at Sun.COM  Tue Sep 16 09:00:28 2008
+From: Peter.Braam at Sun.COM (Peter Braam)
+Date: Tue, 16 Sep 2008 10:00:28 -0600
+Subject: [Lustre-devel] CMD directory split
+In-Reply-To: <831F789FF0CC4FFD8D5C15DC082731AF@ebpc>
+Message-ID: <C4F5343C.7AA6%peter.braam@sun.com>
+
+If these dynamic layout changes are being considered, doing so for file data
+first or in parallel might make sense.
+
+I think that fixed directory striping patterns may in fact be fine for a
+long tim to come. Spread directory entries over a particular pool or over
+any nodes using a certain width may be all we need.
+
+Peter
+
+
+On 9/16/08 5:05 AM, "Eric Barton" <eeb at sun.com> wrote:
+
+> Guys,
+> 
+> I'm cc-ing lustre-devel - it's of general interest.
+> 
+> I definitely think the first CMD product releases should stick to
+> static directory layouts with all directories contained within a
+> single MDT by default - i.e. you have to do something special to
+> create a striped dir.  Meanwhile we should start ASAP on completing
+> the design of automatic dir splitting to handle _all_ the recovery
+> cases.
+> 
+> IMHO, a one-time-only directory split seems a bit too all-or-nothing.
+> What is the reasoning behind the assumption that further splitting is
+> not required?  Also, directory size doesn't necessarily seem like the
+> only or even the best clue about when to split and how.  So here are a
+> couple of suggestions.
+> 
+> 1. Consider the split from 1 MDT to several just as a special case of
+>    migration - i.e. allow arbitrary n->m re-layout over MDTs.  We
+>    would like to support metadata migration in any case for space
+>    management.  Andreas' ideas about migration by mirroring seem
+>    equally applicable to directories (furthermore mirrored directories
+>    seem like a valuable component of a namespace availability and
+>    resilience feature).
+> 
+> 2. Keep the discussion on policy (when to split) separate from
+>    mechanism (how to split).
+> 
+>     Cheers,
+>               Eric
+> 
+>> 
+>> -----Original Message-----
+>> From: Andreas.Dilger at Sun.COM [mailto:Andreas.Dilger at Sun.COM] On Behalf Of
+>> Andreas Dilger
+>> Sent: 16 September 2008 9:23 AM
+>> To: Nikita Danilov
+>> Cc: Yury Umanets; Eric Barton; Alex Zhuravlev
+>> Subject: Re: CMD directory split
+>> 
+>> On Sep 15, 2008  14:20 +0400, Nikita Danilov wrote:
+>>> Andreas Dilger writes:
+>>>> I think we can have a very simple directory split if we
+>>>> consider the directory split like file IO instead of inserting
+>>>> thousands of dirents.
+>>> 
+>>> In some sense this is already done. Split (cmm/cmm_split.c) uses
+>>> the same interface as readdir to construct a pagesful of directory
+>>> entries and to send them to a slave mdt, where they are
+>>> inserted. It is not raw `write', because actual directory page
+>>> format is encapsulated within osd
+>> 
+>> Yes, I was thinking of something like this, I didn't know that is
+>> how it is actually handled.  The other issue is that the directory
+>> creation and insertions should be done in a single transaction in
+>> order to simplify recovery.  In that case we don't have to worry
+>> about the case where the directory is partially created and
+>> populated.
+>> 
+>>> It's my impression that other source of trouble with split is a
+>>> complicated locking scheme that it requires to keep clients happy.
+>> 
+>> How is the locking of the directory any different than the locking
+>> on the LOV EA needed to restripe a file for migration?  The locks on
+>> the inodes themselves do not change, because the inodes are not
+>> moving.  The pages on the directory itself are revoked on a regular
+>> basis whenever there is a new insertion in any case (i.e. when the
+>> directory is split).
+>> 
+>> It would seem that the only thing which needs to be changed is the
+>> LMV EA on the clients.
+>> 
+>>> It would be _much_ easier if directories were split at the time of
+>>> creation like files are. That would also eliminate almost all
+>>> recovery issues and page-shuffling mechanics.
+>> 
+>> This might be possible for a simple initial implementation, but it
+>> isn't a good long-term solution.  Consider the problems we face even
+>> today with widely-striped files - stat slowdowns to track the
+>> size/mtime/ctime, readdir will always have to do RPCs to each MDT to
+>> get the entries even if there are only a few entries, unlinks will
+>> need multiple RPCs, etc.
+>> 
+>> In contrast, we can tune the split threshold so that the majority of
+>> small directories remain on a single MDT, and only large directories
+>> are split (with some small overhead for the split).
+>> 
+>> In the future we have to consider configurations with hundreds or
+>> even thousands of MDTs, perhaps one on each OST, in order to scale
+>> metadata and small file performance dramatically.
+>> 
+>> Cheers, Andreas
+>> --
+>> Andreas Dilger
+>> Sr. Staff Engineer, Lustre Group
+>> Sun Microsystems of Canada, Inc.
+>> 
+>> 
+> 
+> _______________________________________________
+> Lustre-devel mailing list
+> Lustre-devel at lists.lustre.org
+> http://lists.lustre.org/mailman/listinfo/lustre-devel
+
+
+
+
+From Nathan.Rutman at Sun.COM  Fri Sep 19 10:39:48 2008
+From: Nathan.Rutman at Sun.COM (Nathaniel Rutman)
+Date: Fri, 19 Sep 2008 10:39:48 -0700
+Subject: [Lustre-devel] Changelog API
+Message-ID: <48D3E3E4.1030006@sun.com>
+
+A metadata changelog feature will be added in Lustre 2.0.  Changelogs 
+are per-MDD persistent logs that record namespace change events, e.g. 
+file creation, deletion, rename, mtime changes, etc.  Progress can be 
+followed in bug 15699.
+
+
+Changelog API
+
+
+Configuring changelogs - lctl commands:
+> lctl set_param mdd.*.changelog <on|off>
+Enable/disable changelog record keeping
+
+> lctl set_param -n mdd.*.changelog_mask "[[+|-]<event>] ..."
+Set or modify the event types that are recorded in the changelog
+e.g. > lctl set_param  mdd.*.changelog_mask "all -attr -slink -open -close"
+     > lctl get_param "mdd.*.changelog_mask"
+     mdd.lustre-MDT0000.changelog_mask=
+     MARK CREAT MKDIR HLINK UNLNK RMDIR RNMFM RNMTO IOCTL TRUNC XATTR UNKNW
+
+
+Using changelogs - LFS commands:
+> lfs diff
+Show the metadata changes in a filesystem between two snapshot times.
+usage: diff [--follow] <mdtname> [startrec [endrec]]
+The --follow flag causes this command to block waiting for new changelog events.
+
+> lfs clear_changelog
+clear_changelog: Purge old changelog records up to <endrec> to free up space.
+usage: clear_changelog <mdtname> <endrec>
+
+
+Data format is ascii text, 1 record per line:
+<record_#> <commandtype> <timestamp> t=<target_fid> p=<parent_fid> <filename>
+
+xen1:/r/cfs/b_hd_changelog/lustre/tests# lfs diff lustre
+1 00MARK  4405821883 t=[0x0/0x10001] p=[0x0/0x0] mdd_obd-lustre-MDT0000-0
+2 02MKDIR 4405821890 t=[0x100000400/0x5] p=[0x100000400/0x4] pics
+3 02MKDIR 4405821892 t=[0x100000400/0x6] p=[0x100000400/0x5] 2008
+4 02MKDIR 4405821894 t=[0x100000400/0x7] p=[0x100000400/0x6] zachy
+5 01CREAT 4405821898 t=[0x100000400/0x8] p=[0x100000400/0x7] timestamp
+6 01CREAT 4405821904 t=[0x100000400/0x9] p=[0x100000400/0x7] pic1.jpg
+7 07RNMFM 4405821915 t=[0x100000400/0x7] p=[0x100000400/0x6] zachy
+8 08RNMTO 4405821915 t=[0x100000400/0x7] p=[0x100000400/0x5] zach
+9 03HLINK 4405821922 t=[0x100000400/0x9] p=[0x100000400/0x6] portland.jpg
+10 04SLINK 4405821926 t=[0x100000400/0xa] p=[0x100000400/0x5] desktop.jpg
+11 05UNLNK 4405821929 t=[0x100000400/0xa] p=[0x100000400/0x5] desktop.jpg
+
+
+Record types are:
+MARK    internal record keeping
+CREAT   regular file creation
+MKDIR   directory creation
+HLINK   hardlink
+SLINK   softlink
+UNLNK   regular file removal
+RMDIR   directory removal
+RNMFM   rename, original
+RNMTO   rename, final
+OPEN    file opened for write
+CLOSE   file closed for write
+IOCTL   ioctl on file or dir
+TRUNC   regular file truncated
+ATTR    attribute change
+XATTR   extended attribute change
+UNKNW   unknown op
+
+
+Writing your own changelog consumer -- llapi interface:
+int llapi_changelog_open(const char *mdtname, long long startrec);
+  Returns a file descriptor for a read-only file representation of the changelog, starting from
+record <startrec>.  The file descriptor can be used with select(2) or poll(2) to wait for new
+events.
+
+int llapi_changelog_clear(const char *mdtname, long long endrec);
+  Permanently removes old changelog records through <endrec>, freeing up disk space.
+
+
+
+From Peter.Braam at Sun.COM  Sun Sep 21 16:40:25 2008
+From: Peter.Braam at Sun.COM (Peter Braam)
+Date: Mon, 22 Sep 2008 07:40:25 +0800
+Subject: [Lustre-devel] Doubly indexed tree / changelogs
+Message-ID: <C4FCFC69.7CC2%peter.braam@sun.com>
+
+Hi Nikita, Nathan -
+
+After some pondering I have come to two conclusions.
+
+To encode filesets, we need a tree that makes two iterations fast:
+
+1. list all filesets that contain a certain object
+2. list all objects in a certain fileset
+
+Is there a doubly indexed tree for this?
+
+Secondly, to make the changelogs useful and scalable for filesets we will
+need to be able to list all changelog entries associated with a certain
+inode efficiently.  I see two ways to do this ? one is an auxiliary
+directory file mapping inodes to many changelog entries, the second is to
+embed forward and backward pointers in the changelog entries to build a
+linked list rooted at the inode (using an EA in the inode pointing to the
+first and last element of the list).  Both have some overheads.  What are
+your thoughts?
+
+Peter
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20080922/8c54f19d/attachment.htm>
+
+From Alex.Zhuravlev at Sun.COM  Sun Sep 21 22:52:57 2008
+From: Alex.Zhuravlev at Sun.COM (Alex Zhuravlev)
+Date: Mon, 22 Sep 2008 09:52:57 +0400
+Subject: [Lustre-devel] Doubly indexed tree / changelogs
+In-Reply-To: <C4FCFC69.7CC2%peter.braam@sun.com>
+References: <C4FCFC69.7CC2%peter.braam@sun.com>
+Message-ID: <48D732B9.6090309@sun.com>
+
+can object migrate between filesets? if not, we probably
+can use fid's sequence as a record in that index?
+
+thanks, Alex
+
+Peter Braam wrote:
+> Hi Nikita, Nathan -
+> 
+> After some pondering I have come to two conclusions.
+> 
+> To encode filesets, we need a tree that makes two iterations fast:
+> 
+>    1. list all filesets that contain a certain object
+>    2. list all objects in a certain fileset
+> 
+> 
+> Is there a doubly indexed tree for this?
+> 
+> Secondly, to make the changelogs useful and scalable for filesets we 
+> will need to be able to list all changelog entries associated with a 
+> certain inode efficiently.  I see two ways to do this ? one is an 
+> auxiliary directory file mapping inodes to many changelog entries, the 
+> second is to embed forward and backward pointers in the changelog 
+> entries to build a linked list rooted at the inode (using an EA in the 
+> inode pointing to the first and last element of the list).  Both have 
+> some overheads.  What are your thoughts?
+> 
+> Peter
+> 
+> 
+> ------------------------------------------------------------------------
+> 
+> _______________________________________________
+> Lustre-devel mailing list
+> Lustre-devel at lists.lustre.org
+> http://lists.lustre.org/mailman/listinfo/lustre-devel
+
+
+
+From Peter.Braam at Sun.COM  Sun Sep 21 23:58:56 2008
+From: Peter.Braam at Sun.COM (Peter Braam)
+Date: Mon, 22 Sep 2008 14:58:56 +0800
+Subject: [Lustre-devel] Doubly indexed tree / changelogs
+In-Reply-To: <48D732B9.6090309@sun.com>
+Message-ID: <C4FD6330.7CD7%peter.braam@sun.com>
+
+Objects can be in many filesets, and be added to some, removed from others.
+
+I think this is an almost arbitrary collection of pairs (FID, fileset-id)
+and we need it indexed by both.
+
+Peter
+
+
+On 9/22/08 1:52 PM, "Alex Zhuravlev" <Alex.Zhuravlev at Sun.COM> wrote:
+
+> can object migrate between filesets? if not, we probably
+> can use fid's sequence as a record in that index?
+> 
+> thanks, Alex
+> 
+> Peter Braam wrote:
+>> Hi Nikita, Nathan -
+>> 
+>> After some pondering I have come to two conclusions.
+>> 
+>> To encode filesets, we need a tree that makes two iterations fast:
+>> 
+>>    1. list all filesets that contain a certain object
+>>    2. list all objects in a certain fileset
+>> 
+>> 
+>> Is there a doubly indexed tree for this?
+>> 
+>> Secondly, to make the changelogs useful and scalable for filesets we
+>> will need to be able to list all changelog entries associated with a
+>> certain inode efficiently.  I see two ways to do this ? one is an
+>> auxiliary directory file mapping inodes to many changelog entries, the
+>> second is to embed forward and backward pointers in the changelog
+>> entries to build a linked list rooted at the inode (using an EA in the
+>> inode pointing to the first and last element of the list).  Both have
+>> some overheads.  What are your thoughts?
+>> 
+>> Peter
+>> 
+>> 
+>> ------------------------------------------------------------------------
+>> 
+>> _______________________________________________
+>> Lustre-devel mailing list
+>> Lustre-devel at lists.lustre.org
+>> http://lists.lustre.org/mailman/listinfo/lustre-devel
+> 
+
+
+
+
+From Alex.Zhuravlev at Sun.COM  Mon Sep 22 00:05:54 2008
+From: Alex.Zhuravlev at Sun.COM (Alex Zhuravlev)
+Date: Mon, 22 Sep 2008 11:05:54 +0400
+Subject: [Lustre-devel] Doubly indexed tree / changelogs
+In-Reply-To: <C4FD6330.7CD7%peter.braam@sun.com>
+References: <C4FD6330.7CD7%peter.braam@sun.com>
+Message-ID: <48D743D2.6010201@sun.com>
+
+IMHO, it'd be useful to insert aggregations into that index.
+just to keep the index small. say, subtree?
+
+thanks, Alex
+
+Peter Braam wrote:
+> Objects can be in many filesets, and be added to some, removed from others.
+> 
+> I think this is an almost arbitrary collection of pairs (FID, fileset-id)
+> and we need it indexed by both.
+> 
+> Peter
+> 
+> 
+> On 9/22/08 1:52 PM, "Alex Zhuravlev" <Alex.Zhuravlev at Sun.COM> wrote:
+> 
+>> can object migrate between filesets? if not, we probably
+>> can use fid's sequence as a record in that index?
+>>
+>> thanks, Alex
+>>
+>> Peter Braam wrote:
+>>> Hi Nikita, Nathan -
+>>>
+>>> After some pondering I have come to two conclusions.
+>>>
+>>> To encode filesets, we need a tree that makes two iterations fast:
+>>>
+>>>    1. list all filesets that contain a certain object
+>>>    2. list all objects in a certain fileset
+>>>
+>>>
+>>> Is there a doubly indexed tree for this?
+>>>
+>>> Secondly, to make the changelogs useful and scalable for filesets we
+>>> will need to be able to list all changelog entries associated with a
+>>> certain inode efficiently.  I see two ways to do this ? one is an
+>>> auxiliary directory file mapping inodes to many changelog entries, the
+>>> second is to embed forward and backward pointers in the changelog
+>>> entries to build a linked list rooted at the inode (using an EA in the
+>>> inode pointing to the first and last element of the list).  Both have
+>>> some overheads.  What are your thoughts?
+>>>
+>>> Peter
+>>>
+>>>
+>>> ------------------------------------------------------------------------
+>>>
+>>> _______________________________________________
+>>> Lustre-devel mailing list
+>>> Lustre-devel at lists.lustre.org
+>>> http://lists.lustre.org/mailman/listinfo/lustre-devel
+> 
+> 
+
+
+
+From Peter.Braam at Sun.COM  Mon Sep 22 00:13:59 2008
+From: Peter.Braam at Sun.COM (Peter Braam)
+Date: Mon, 22 Sep 2008 15:13:59 +0800
+Subject: [Lustre-devel] Doubly indexed tree / changelogs
+In-Reply-To: <48D743D2.6010201@sun.com>
+Message-ID: <C4FD66B7.7CDA%peter.braam@sun.com>
+
+Sure, when aggregations apply.  But they do not apply in general (e.g.
+Filesets that are search results) and we need a doubly indexed tree for
+that.
+
+Hence my question, what doubly indexed trees exist?
+
+Peter
+
+
+On 9/22/08 3:05 PM, "Alex Zhuravlev" <Alex.Zhuravlev at Sun.COM> wrote:
+
+> IMHO, it'd be useful to insert aggregations into that index.
+> just to keep the index small. say, subtree?
+> 
+> thanks, Alex
+> 
+> Peter Braam wrote:
+>> Objects can be in many filesets, and be added to some, removed from others.
+>> 
+>> I think this is an almost arbitrary collection of pairs (FID, fileset-id)
+>> and we need it indexed by both.
+>> 
+>> Peter
+>> 
+>> 
+>> On 9/22/08 1:52 PM, "Alex Zhuravlev" <Alex.Zhuravlev at Sun.COM> wrote:
+>> 
+>>> can object migrate between filesets? if not, we probably
+>>> can use fid's sequence as a record in that index?
+>>> 
+>>> thanks, Alex
+>>> 
+>>> Peter Braam wrote:
+>>>> Hi Nikita, Nathan -
+>>>> 
+>>>> After some pondering I have come to two conclusions.
+>>>> 
+>>>> To encode filesets, we need a tree that makes two iterations fast:
+>>>> 
+>>>>    1. list all filesets that contain a certain object
+>>>>    2. list all objects in a certain fileset
+>>>> 
+>>>> 
+>>>> Is there a doubly indexed tree for this?
+>>>> 
+>>>> Secondly, to make the changelogs useful and scalable for filesets we
+>>>> will need to be able to list all changelog entries associated with a
+>>>> certain inode efficiently.  I see two ways to do this ? one is an
+>>>> auxiliary directory file mapping inodes to many changelog entries, the
+>>>> second is to embed forward and backward pointers in the changelog
+>>>> entries to build a linked list rooted at the inode (using an EA in the
+>>>> inode pointing to the first and last element of the list).  Both have
+>>>> some overheads.  What are your thoughts?
+>>>> 
+>>>> Peter
+>>>> 
+>>>> 
+>>>> ------------------------------------------------------------------------
+>>>> 
+>>>> _______________________________________________
+>>>> Lustre-devel mailing list
+>>>> Lustre-devel at lists.lustre.org
+>>>> http://lists.lustre.org/mailman/listinfo/lustre-devel
+>> 
+>> 
+> 
+
+
+
+
+From Alex.Zhuravlev at Sun.COM  Mon Sep 22 00:26:55 2008
+From: Alex.Zhuravlev at Sun.COM (Alex Zhuravlev)
+Date: Mon, 22 Sep 2008 11:26:55 +0400
+Subject: [Lustre-devel] Doubly indexed tree / changelogs
+In-Reply-To: <C4FD66B7.7CDA%peter.braam@sun.com>
+References: <C4FD66B7.7CDA%peter.braam@sun.com>
+Message-ID: <48D748BF.1030404@sun.com>
+
+Peter Braam wrote:
+> Sure, when aggregations apply.  But they do not apply in general (e.g.
+> Filesets that are search results) and we need a doubly indexed tree for
+> that.
+
+ah, clear enough
+
+> Hence my question, what doubly indexed trees exist?
+
+there is K-D tree, but I'm not sure it fits here.
+
+if number of filesets is limited, then we probably could build a table of
+all possible filesets ovelapping and put table's index into inode? this is
+for reverse mapping to find all filesystems for given inode.
+
+
+thanks, Alex
+
+
+
+From Nathan.Rutman at Sun.COM  Mon Sep 22 20:49:21 2008
+From: Nathan.Rutman at Sun.COM (Nathaniel Rutman)
+Date: Mon, 22 Sep 2008 20:49:21 -0700
+Subject: [Lustre-devel] Doubly indexed tree / changelogs
+In-Reply-To: <C4FCFC69.7CC2%peter.braam@sun.com>
+References: <C4FCFC69.7CC2%peter.braam@sun.com>
+Message-ID: <48D86741.2060101@sun.com>
+
+I actually added a "previous record" pointer in each changelog entry, 
+but fill it in only where it is cheap -- when the metadata object is 
+already in the cache I record the last changelog entry there. If it's 
+not in the cache, I don't know where the last record associated with 
+that fid is. We could store the last record number with the inode (EA?), 
+but that would potentially be painful if we are recording e.g. file 
+open/closes.
+Forward pointers are also problematic, in that I don't want to go back 
+and modify the old record every time a new one is recorded (seems like 
+this will make the disks very seek-y), and I think maybe we don't need 
+forward pointers anyhow (use case?). Anyhow, this effectively doubles 
+the changelog write impact. Maybe that's ok: Manoj's measurements put 
+the changelog overhead at only about 4% using mdsrate.
+
+Peter Braam wrote:
+> Hi Nikita, Nathan -
+>
+> After some pondering I have come to two conclusions.
+>
+> To encode filesets, we need a tree that makes two iterations fast:
+>
+>    1. list all filesets that contain a certain object
+>    2. list all objects in a certain fileset
+>
+>
+> Is there a doubly indexed tree for this?
+>
+> Secondly, to make the changelogs useful and scalable for filesets we 
+> will need to be able to list all changelog entries associated with a 
+> certain inode efficiently. I see two ways to do this ? one is an 
+> auxiliary directory file mapping inodes to many changelog entries, the 
+> second is to embed forward and backward pointers in the changelog 
+> entries to build a linked list rooted at the inode (using an EA in the 
+> inode pointing to the first and last element of the list). Both have 
+> some overheads. What are your thoughts?
+>
+> Peter
+> ------------------------------------------------------------------------
+>
+> _______________________________________________
+> Lustre-devel mailing list
+> Lustre-devel at lists.lustre.org
+> http://lists.lustre.org/mailman/listinfo/lustre-devel
+>   
+
+
+
+From Nikita.Danilov at Sun.COM  Tue Sep 23 00:38:45 2008
+From: Nikita.Danilov at Sun.COM (Nikita Danilov)
+Date: Tue, 23 Sep 2008 11:38:45 +0400
+Subject: [Lustre-devel] Doubly indexed tree / changelogs
+In-Reply-To: <C4FCFC69.7CC2%peter.braam@sun.com>
+References: <C4FCFC69.7CC2%peter.braam@sun.com>
+Message-ID: <18648.40197.532872.168033@gargle.gargle.HOWL>
+
+Peter Braam writes:
+ > Hi Nikita, Nathan -
+ > 
+ > After some pondering I have come to two conclusions.
+ > 
+ > To encode filesets, we need a tree that makes two iterations fast:
+ > 
+ > 1. list all filesets that contain a certain object
+ > 2. list all objects in a certain fileset
+ > 
+ > Is there a doubly indexed tree for this?
+
+I don't know of a data-structure that provides ready solution for this.
+As Alex pointed out k-d-trees do not fit there (they effectively use a
+key composed of the alternating sequences of bits of the original keys),
+and `geographical trees' that data bases use to store 2-d data use very
+special notion of proximity.
+
+But, thinking about a fileset as a generalized directory, isn't this the
+same problem as `list all files in directory' and `find all parent
+directories of a file'? It probably makes sense to use the same
+mechanism to deal with directories and filesets.
+
+Our current solution is to use EA to keep track of all parent
+directories, do you see any problems with applying it to filesets?
+
+ > 
+ > Peter
+
+Nikita.
+
+
+From Peter.Braam at Sun.COM  Tue Sep 23 02:20:34 2008
+From: Peter.Braam at Sun.COM (Peter Braam)
+Date: Tue, 23 Sep 2008 17:20:34 +0800
+Subject: [Lustre-devel] Doubly indexed tree / changelogs
+In-Reply-To: <48D86741.2060101@sun.com>
+Message-ID: <C4FED5E2.7D39%peter.braam@sun.com>
+
+
+
+
+On 9/23/08 11:49 AM, "Nathaniel Rutman" <Nathan.Rutman at Sun.COM> wrote:
+
+> I actually added a "previous record" pointer in each changelog entry,
+> but fill it in only where it is cheap -- when the metadata object is
+> already in the cache I record the last changelog entry there. If it's
+> not in the cache, I don't know where the last record associated with
+> that fid is. We could store the last record number with the inode (EA?),
+> but that would potentially be painful if we are recording e.g. file
+> open/closes.
+
+Previous records are free - you get the previous one from the EA in the
+inode, and replace the inode with the record info of the record you are
+adding.  But for rename operations and others there are multiple pointers
+like this needed.
+
+
+
+> Forward pointers are also problematic, in that I don't want to go back
+> and modify the old record every time a new one is recorded (seems like
+> this will make the disks very seek-y), and I think maybe we don't need
+> forward pointers anyhow (use case?). Anyhow, this effectively doubles
+> the changelog write impact. Maybe that's ok: Manoj's measurements put
+> the changelog overhead at only about 4% using mdsrate.
+
+Wow - that is amazingly low.
+
+It is better to think about it before hacking it in I think.
+
+
+Peter
+
+> 
+> Peter Braam wrote:
+>> Hi Nikita, Nathan -
+>> 
+>> After some pondering I have come to two conclusions.
+>> 
+>> To encode filesets, we need a tree that makes two iterations fast:
+>> 
+>>    1. list all filesets that contain a certain object
+>>    2. list all objects in a certain fileset
+>> 
+>> 
+>> Is there a doubly indexed tree for this?
+>> 
+>> Secondly, to make the changelogs useful and scalable for filesets we
+>> will need to be able to list all changelog entries associated with a
+>> certain inode efficiently. I see two ways to do this ? one is an
+>> auxiliary directory file mapping inodes to many changelog entries, the
+>> second is to embed forward and backward pointers in the changelog
+>> entries to build a linked list rooted at the inode (using an EA in the
+>> inode pointing to the first and last element of the list). Both have
+>> some overheads. What are your thoughts?
+>> 
+>> Peter
+>> ------------------------------------------------------------------------
+>> 
+>> _______________________________________________
+>> Lustre-devel mailing list
+>> Lustre-devel at lists.lustre.org
+>> http://lists.lustre.org/mailman/listinfo/lustre-devel
+>>   
+> 
+> _______________________________________________
+> Lustre-devel mailing list
+> Lustre-devel at lists.lustre.org
+> http://lists.lustre.org/mailman/listinfo/lustre-devel
+
+
+
+
+From Nathan.Rutman at Sun.COM  Tue Sep 23 14:46:38 2008
+From: Nathan.Rutman at Sun.COM (Nathaniel Rutman)
+Date: Tue, 23 Sep 2008 14:46:38 -0700
+Subject: [Lustre-devel] Doubly indexed tree / changelogs
+In-Reply-To: <C4FED5E2.7D39%peter.braam@sun.com>
+References: <C4FED5E2.7D39%peter.braam@sun.com>
+Message-ID: <48D963BE.7050305@sun.com>
+
+Peter Braam wrote:
+>
+> On 9/23/08 11:49 AM, "Nathaniel Rutman" <Nathan.Rutman at Sun.COM> wrote:
+>
+>   
+>> I actually added a "previous record" pointer in each changelog entry,
+>> but fill it in only where it is cheap -- when the metadata object is
+>> already in the cache I record the last changelog entry there. If it's
+>> not in the cache, I don't know where the last record associated with
+>> that fid is. We could store the last record number with the inode (EA?),
+>> but that would potentially be painful if we are recording e.g. file
+>> open/closes.
+>>     
+>
+> Previous records are free - you get the previous one from the EA in the
+> inode, and replace the inode with the record info of the record you are
+> adding.  But for rename operations and others there are multiple pointers
+> like this needed.
+>   
+Currently I'm not reading or writing any EA for the changelog. Yes, if 
+you want to tie in the fwd/back ptrs to the inode itself we need to do 
+this, but I thought we were specifically discussing alternatives to 
+doing that here (e.g. "auxiliary directory file mapping inodes to many 
+changelog entries".) If we are e.g. recording every open/close for a 
+file, do we really want to read/write the EA on the MDT every time, in 
+addition to the changelog llog entry?
+
+> Secondly, to make the changelogs useful and scalable for filesets we 
+> will need to be able to list all changelog entries associated with a 
+> certain inode efficiently. I see two ways to do this ? one is an 
+> auxiliary directory file mapping inodes to many changelog entries, the 
+> second is to embed forward and backward pointers in the changelog 
+> entries to build a linked list rooted at the inode (using an EA in the 
+> inode pointing to the first and last element of the list). Both have 
+> some overheads. What are your thoughts?
+>
+> 
+
+
+
+
+
+From Peter.Braam at Sun.COM  Tue Sep 23 15:48:50 2008
+From: Peter.Braam at Sun.COM (Peter Braam)
+Date: Wed, 24 Sep 2008 06:48:50 +0800
+Subject: [Lustre-devel] Doubly indexed tree / changelogs
+In-Reply-To: <48D963BE.7050305@sun.com>
+Message-ID: <C4FF9352.7D86%peter.braam@sun.com>
+
+
+
+
+On 9/24/08 5:46 AM, "Nathaniel Rutman" <Nathan.Rutman at Sun.COM> wrote:
+
+> Peter Braam wrote:
+>> 
+>> On 9/23/08 11:49 AM, "Nathaniel Rutman" <Nathan.Rutman at Sun.COM> wrote:
+>> 
+>>   
+>>> I actually added a "previous record" pointer in each changelog entry,
+>>> but fill it in only where it is cheap -- when the metadata object is
+>>> already in the cache I record the last changelog entry there. If it's
+>>> not in the cache, I don't know where the last record associated with
+>>> that fid is. We could store the last record number with the inode (EA?),
+>>> but that would potentially be painful if we are recording e.g. file
+>>> open/closes.
+>>>     
+>> 
+>> Previous records are free - you get the previous one from the EA in the
+>> inode, and replace the inode with the record info of the record you are
+>> adding.  But for rename operations and others there are multiple pointers
+>> like this needed.
+>>   
+> Currently I'm not reading or writing any EA for the changelog. Yes, if
+> you want to tie in the fwd/back ptrs to the inode itself we need to do
+> this, but I thought we were specifically discussing alternatives to
+> doing that here (e.g. "auxiliary directory file mapping inodes to many
+> changelog entries".)
+
+Good point.
+
+> If we are e.g. recording every open/close for a
+> file, do we really want to read/write the EA on the MDT every time, in
+> addition to the changelog llog entry?
+
+You are writing that inode anyway, so it doesn't cost more I/O if the EA is
+embedded.
+
+Peter
+
+> 
+>> Secondly, to make the changelogs useful and scalable for filesets we
+>> will need to be able to list all changelog entries associated with a
+>> certain inode efficiently. I see two ways to do this ? one is an
+>> auxiliary directory file mapping inodes to many changelog entries, the
+>> second is to embed forward and backward pointers in the changelog
+>> entries to build a linked list rooted at the inode (using an EA in the
+>> inode pointing to the first and last element of the list). Both have
+>> some overheads. What are your thoughts?
+>> 
+>> 
+> 
+> 
+> 
+
+
+
+
+From Peter.Braam at Sun.COM  Tue Sep 23 19:48:48 2008
+From: Peter.Braam at Sun.COM (Peter Braam)
+Date: Wed, 24 Sep 2008 10:48:48 +0800
+Subject: [Lustre-devel] Interoperability ambitions
+In-Reply-To: <48D9A1F3.5020504@sun.com>
+Message-ID: <C4FFCB90.7DC3%peter.braam@sun.com>
+
+Yes - and having this "stop the client" principle will make for something
+that can be used in future upgrade scenarios as well.
+
+Note that I have copied lustre-devel as this is of general interest.
+
+Peter
+
+
+On 9/24/08 10:12 AM, "Huang Hua" <H.Huang at Sun.COM> wrote:
+
+> Hello All,
+> 
+> This is what I propose (it is mentioned in the revised HLD: see bug
+> 11824, but I'd like to enhance it as followings)
+> 
+> 
+> --------------------------------
+> Upgrade is a special fail-over, invoked and controlled by administrator.
+> We can try to make the whole lustre into a ``Quiescent'' state and block
+> any update operations.
+> This is something similar while we take a snapshot for a file system.
+> Clients block any incoming update operations (maybe all operations
+> except sys_statfs()) and sync all pending operations. By this, all
+> transactions on client side and server side are committed. There are
+> only some ``open'' requests in the replay queue. These open requests are
+> already committed on server side. They are still in replay queue because
+> the files are not closed yet.
+> 
+> In this "Quiescent" state, all read-only operations, such as getattr,
+> lookup, statfs can pass through.
+> Maybe only statfs() can pass through. Wire protocol for statfs() does
+> not change from 1.8 to 2.0.
+> And this enables users can execute "df" command in this state.
+> 
+> This idea is similar to super_operation->write_super_lockfs() in local
+> file system.
+> 
+> By this mechanism, we can avoid reformatting for all requests except
+> open+create enqueue.
+> Since the open+create enqueue itself is committed by server at the time
+> of upgrade, the server only need to open the newly created file.
+> The new file, created by 1.8 MDS server, can be opened by 2.0 MDS server
+> while replay.
+> 
+> The clients will leave this "Quiescent" state while the upgrade is done.
+> 
+> This will tremendously simplify the upgrade.
+> Especially the reformatting of all resend/replay/delayed request, and
+> then handle replay case in upgrade case, and
+> test all possible upgrade cases.
+> --------------------------------
+> 
+> What's your comment?
+> 
+> Thanks,
+> Huang Hua
+> 
+> 
+> 
+> Andreas Dilger wrote:
+>> On Sep 23, 2008  08:33 +0800, Peter J. Braam wrote:
+>>   
+>>> I understood from Huang Hua that a considerable degree of perfection is
+>>> being pursued with the interoperability of 1.8 clients and 1.8/2.0 servers.
+>>> 
+>>> In particular I was quite worried when I heard what Huang Hua has been asked
+>>> to do.  It seems excessive to me to make replay/resend/version recovery all
+>>> work in a failover situation from 1.8 to 2.0.  This requires incredibly
+>>> detailed testing of every RPC that might be rolled back or in transit across
+>>> such an upgrade, something that is not too easy to automate I think.  Quite
+>>> apart from this, it might not be transparent to user applications if during
+>>> 1.8(client)-2.0(server) the same fids are not allocated to the client (I am
+>>> not sure if this would be the case).
+>>>     
+>> 
+>> Minor note - IGIF will ensure that client-visible identifiers remain the
+>> same over a 1.8->2.0 upgrade.  This will NOT be true in the case of a
+>> 2.0->1.8 downgrade (which will require client eviction), but that should
+>> only happen if there are already serious problems with 2.0.
+>> 
+>>   
+>>> It would be much better, to dramatically reduce the hassles with protocol
+>>> interoperability, to have a mechanism to tell a client to wait for
+>>> completion of its requests and block new ones while the server failover is
+>>> in progress.  This would be organized through the configuration lock.  This
+>>> would lead to a situation where no state in the protocol needs to be
+>>> recovered.
+>>> 
+>>> Why is this not being pursued?
+>>> 
+>>> Peter
+>>>     
+>> 
+>> Cheers, Andreas
+>> --
+>> Andreas Dilger
+>> Sr. Staff Engineer, Lustre Group
+>> Sun Microsystems of Canada, Inc.
+>> 
+>>   
+> 
+
+
+
+
+From Peter.Braam at Sun.COM  Tue Sep 23 19:50:51 2008
+From: Peter.Braam at Sun.COM (Peter Braam)
+Date: Wed, 24 Sep 2008 10:50:51 +0800
+Subject: [Lustre-devel] Doubly indexed tree / changelogs
+In-Reply-To: <18648.40197.532872.168033@gargle.gargle.HOWL>
+Message-ID: <C4FFCC0B.7DC3%peter.braam@sun.com>
+
+The idea is ok, but scale may turn out to be different than expected.
+
+There could be a huge amount of filesets containing the word "Bin Laden",
+say 100,000 of them.
+
+Would two directories work?
+
+
+Peter
+
+
+On 9/23/08 3:38 PM, "Nikita Danilov" <Nikita.Danilov at Sun.COM> wrote:
+
+> Peter Braam writes:
+>> Hi Nikita, Nathan -
+>> 
+>> After some pondering I have come to two conclusions.
+>> 
+>> To encode filesets, we need a tree that makes two iterations fast:
+>> 
+>> 1. list all filesets that contain a certain object
+>> 2. list all objects in a certain fileset
+>> 
+>> Is there a doubly indexed tree for this?
+> 
+> I don't know of a data-structure that provides ready solution for this.
+> As Alex pointed out k-d-trees do not fit there (they effectively use a
+> key composed of the alternating sequences of bits of the original keys),
+> and `geographical trees' that data bases use to store 2-d data use very
+> special notion of proximity.
+> 
+> But, thinking about a fileset as a generalized directory, isn't this the
+> same problem as `list all files in directory' and `find all parent
+> directories of a file'? It probably makes sense to use the same
+> mechanism to deal with directories and filesets.
+> 
+> Our current solution is to use EA to keep track of all parent
+> directories, do you see any problems with applying it to filesets?
+> 
+>> 
+>> Peter
+> 
+> Nikita.
+
+
+
+
+From nroberts at yahoo-inc.com  Wed Sep 24 08:43:32 2008
+From: nroberts at yahoo-inc.com (Nathan Roberts)
+Date: Wed, 24 Sep 2008 10:43:32 -0500
+Subject: [Lustre-devel] Question on iopen_lookup()
+Message-ID: <48DA6024.5080507@yahoo-inc.com>
+
+(Sorry if this is duplicated, mailing wasn't cooperating)
+Hello,
+
+I've got a quick question on the open_by_inode support that ldiskfs
+is using.
+
+Since there is only a single magic ".inode" directory inode, AND
+real_lookup() locks the directory mutex when performing the lookup
+of the actual file inode, I'm seeing major contention for this lock.
+The contention makes it impossible for the io scheduler to do anything
+intelligent when there are lots of opens occurring at the same time,
+thus killing small file performance.
+
+Since this directory isn't real I don't think there is a reason
+we need to hold the lock during this type of lookup. I added
+a couple of lines to drop and re-aquire this lock around the
+expensive iget() just to see if it removes the bottleneck. My
+read request rate went up from 96 ops/second to 565 so it does
+seem to help.
+
+Can you see any danger in this type of approach? If it is a completely
+broken approach, any suggestions on how to go about removing this
+contention?
+
+Thanks for any insight.
+Nathan Roberts
+
+
+----
+
+
+static struct dentry *iopen_lookup(struct inode * dir, struct dentry *dentry,
+                                    struct nameidata *nd)
+{
+         struct inode *inode;
+         unsigned long ino;
+         struct list_head *lp;
+         struct dentry *alternate;
+         char buf[IOPEN_NAME_LEN];
+
+         if (dentry->d_name.len >= IOPEN_NAME_LEN)
+                 return ERR_PTR(-ENAMETOOLONG);
+
+         memcpy(buf, dentry->d_name.name, dentry->d_name.len);
+         buf[dentry->d_name.len] = 0;
+
+         if (strcmp(buf, ".") == 0)
+                 ino = dir->i_ino;
+         else if (strcmp(buf, "..") == 0)
+                 ino = EXT3_ROOT_INO;
+         else
+                 ino = simple_strtoul(buf, 0, 0);
+
+         if ((ino != EXT3_ROOT_INO &&
+              ino < EXT3_FIRST_INO(dir->i_sb)) ||
+             ino > le32_to_cpu(EXT3_SB(dir->i_sb)->s_es->s_inodes_count))
+                 return ERR_PTR(-ENOENT);
+
++       mutex_unlock(&dir->i_mutex);
+	inode = iget(dir->i_sb, ino);
++	mutex_lock(&dir->i_mutex);
+         if (!inode)
+                 return ERR_PTR(-EACCES);
+         if (is_bad_inode(inode)) {
+                 iput(inode);
+                 return ERR_PTR(-ENOENT);
+         }
+
+
+
+From eeb at sun.com  Thu Sep 25 08:54:51 2008
+From: eeb at sun.com (Eric Barton)
+Date: Thu, 25 Sep 2008 16:54:51 +0100
+Subject: [Lustre-devel] Simpifying Interoperation
+Message-ID: <CF0D4EA95C1945F18F74426BB95008CE@ebpc>
+
+Here are some first thoughts on Huang Hua's idea to simplify version
+interoperation, and an invitation for further comments...
+
+1. This scheme should not interfere with upgrade via failover pairs,
+   and it must also allow the MDS to be upgraded separately from the
+   OSSs.  I think this means in general that we have to allow
+   piecemeal server upgrades.
+
+2. This scheme need a mechanism that...
+
+   a) notifies clients when a particular server is about to upgrade so
+      that update operations are blocked until the upgrade completes
+      and the client reconnects to the upgraded (and/or failed over)
+      server.
+
+   b) notifies the server when all clients have completed preparation
+      for the upgrade so that no further requests require resend.
+
+   c) notifies clients when all outstanding updates have been
+      committed.  If the server crashes before this point, client
+      replay is still required.  Clients must not poll for this since
+      the server is shutting down.
+
+   The DLM seems the right basic mechanism to notify clients, however
+   current assumptions about acquisition timeouts might be an issue.
+
+   We must also ensure that the race between this server upgrade
+   process and connection establishment (including any new
+   notification locks) by new clients is handled consistently.
+   
+3. It's not clear to me that we need to evict, or even clean the
+   client cache provided the client doesn't attempt any more writes
+   until it has connected to the failover server.  The client can
+   re-acquire all the locks covering its cache during recovery after
+   the upgrade - and there is no need for request refomatting here
+   since locks are replayed explicitly (i.e. new requests are
+   formatted from scratch using the correct protocol version).
+
+   It does seem advisable however to clean the cache before such a
+   significant system incident.
+
+4. We can avoid reformatting requests during open replay if this is
+   also done explicity.
+
+5. This scheme prevents recovery on clients that were disconnected
+   when the upgrade began.  Such clients will simply be evicted when
+   they reconnect even though the server should actually have
+   committed all their replayable requests.
+
+   If this can be prevented, we can probably also dispense with much
+   of the notification described in (2) above.  However it would
+   require (a) a change in the connection protocol to get clients to
+   purge their own replay queue and (b) changes to ensure resent
+   requests can be reconstructed from scratch (but maybe (b) is just
+   another way of saying "request reformatting").
+
+   If this is doable - it further begs the question of whether simply
+   making all server requests synchronous during upgrades is enough to
+   simply most interoperation issues.
+
+6. This is all about client/server communications. Are there any
+   issues for inter-server interoperation?
+
+7. Clients and servers may have to run with different versions for
+   extended periods (one customer ran like this for months).  Does
+   this raise any issues with this scheme?
+
+    Cheers,
+              Eric
+
+
+
+From adilger at sun.com  Fri Sep 26 12:51:30 2008
+From: adilger at sun.com (Andreas Dilger)
+Date: Fri, 26 Sep 2008 13:51:30 -0600
+Subject: [Lustre-devel] Simpifying Interoperation
+In-Reply-To: <CF0D4EA95C1945F18F74426BB95008CE@ebpc>
+References: <CF0D4EA95C1945F18F74426BB95008CE@ebpc>
+Message-ID: <20080926195130.GE10950@webber.adilger.int>
+
+On Sep 25, 2008  16:54 +0100, Eric Barton wrote:
+> 1. This scheme should not interfere with upgrade via failover pairs,
+>    and it must also allow the MDS to be upgraded separately from the
+>    OSSs.  I think this means in general that we have to allow
+>    piecemeal server upgrades.
+> 
+> 2. This scheme need a mechanism that...
+> 
+>    a) notifies clients when a particular server is about to upgrade so
+>       that update operations are blocked until the upgrade completes
+>       and the client reconnects to the upgraded (and/or failed over)
+>       server.
+> 
+>    b) notifies the server when all clients have completed preparation
+>       for the upgrade so that no further requests require resend.
+> 
+>    c) notifies clients when all outstanding updates have been
+>       committed.  If the server crashes before this point, client
+>       replay is still required.  Clients must not poll for this since
+>       the server is shutting down.
+> 
+>    The DLM seems the right basic mechanism to notify clients, however
+>    current assumptions about acquisition timeouts might be an issue.
+> 
+>    We must also ensure that the race between this server upgrade
+>    process and connection establishment (including any new
+>    notification locks) by new clients is handled consistently.
+
+Having the MGS handle the locking here seems like the right thing.
+Something like a persistent "all access" lock that is held by the
+client in the MGS namespace indefinitely, but if the MGS ever revokes
+it the client must block all operations until it can re-get it.
+
+> 3. It's not clear to me that we need to evict, or even clean the
+>    client cache provided the client doesn't attempt any more writes
+>    until it has connected to the failover server.  The client can
+>    re-acquire all the locks covering its cache during recovery after
+>    the upgrade - and there is no need for request refomatting here
+>    since locks are replayed explicitly (i.e. new requests are
+>    formatted from scratch using the correct protocol version).
+> 
+>    It does seem advisable however to clean the cache before such a
+>    significant system incident.
+
+Definitely, yes, flushing the client's dirty data to disk is a good
+idea.  That would also minimize the number and type of things that
+can go wrong during an upgrade.  I wouldn't totally be against the
+server cancelling all of the client locks during an upgrade.  The
+frequency of upgrades is low enough that the cost of repopulating
+the cache is reasonable.  This may also simplify locking changes in
+the future (e.g. if extra data is needed in the LVB or new flags).
+
+> 4. We can avoid reformatting requests during open replay if this is
+>    also done explicity.
+
+No, open replay is done by replaying the original open RPC, which is
+kept indefinitely using the original transaction number.
+
+> 5. This scheme prevents recovery on clients that were disconnected
+>    when the upgrade began.  Such clients will simply be evicted when
+>    they reconnect even though the server should actually have
+>    committed all their replayable requests.
+> 
+>    If this can be prevented, we can probably also dispense with much
+>    of the notification described in (2) above.  However it would
+>    require (a) a change in the connection protocol to get clients to
+>    purge their own replay queue and (b) changes to ensure resent
+>    requests can be reconstructed from scratch (but maybe (b) is just
+>    another way of saying "request reformatting").
+> 
+>    If this is doable - it further begs the question of whether simply
+>    making all server requests synchronous during upgrades is enough to
+>    simply most interoperation issues.
+> 
+> 6. This is all about client/server communications. Are there any
+>    issues for inter-server interoperation?
+
+The current 2.0 update does not change the MDS->OSS protocol in any
+way (AFAIK).  Changes like CROW and FID-on-OST are not yet implemented.
+
+> 7. Clients and servers may have to run with different versions for
+>    extended periods (one customer ran like this for months).  Does
+>    this raise any issues with this scheme?
+
+I don't think so, because the need to interoperate for even a minute
+is no different than a month, once the support is there.
+
+Cheers, Andreas
+--
+Andreas Dilger
+Sr. Staff Engineer, Lustre Group
+Sun Microsystems of Canada, Inc.
+
+
+
+From adilger at sun.com  Fri Sep 26 23:15:02 2008
+From: adilger at sun.com (Andreas Dilger)
+Date: Sat, 27 Sep 2008 00:15:02 -0600
+Subject: [Lustre-devel] Question on iopen_lookup()
+In-Reply-To: <48DA6024.5080507@yahoo-inc.com>
+References: <48DA6024.5080507@yahoo-inc.com>
+Message-ID: <20080927061502.GK10950@webber.adilger.int>
+
+On Sep 24, 2008  10:43 -0500, Nathan Roberts wrote:
+> I've got a quick question on the open_by_inode support that ldiskfs
+> is using.
+> 
+> Since there is only a single magic ".inode" directory inode, AND
+> real_lookup() locks the directory mutex when performing the lookup
+> of the actual file inode, I'm seeing major contention for this lock.
+> The contention makes it impossible for the io scheduler to do anything
+> intelligent when there are lots of opens occurring at the same time,
+> thus killing small file performance.
+
+We're always interested in improving the metadata performance of
+Lustre, and it sounds like you have an interesting patch.
+
+> Since this directory isn't real I don't think there is a reason
+> we need to hold the lock during this type of lookup. I added
+> a couple of lines to drop and re-aquire this lock around the
+> expensive iget() just to see if it removes the bottleneck. My
+> read request rate went up from 96 ops/second to 565 so it does
+> seem to help.
+> 
+> Can you see any danger in this type of approach? If it is a completely
+> broken approach, any suggestions on how to go about removing this
+> contention?
+
+> +       mutex_unlock(&dir->i_mutex);
+> 	inode = iget(dir->i_sb, ino);
+> +	mutex_lock(&dir->i_mutex);
+
+It looks reasonable to make the change you are proposing.  In fact,
+we are also discussing to replace __iopen__ with ext3_fh_to_dentry(),
+which calls ext3_nfs_get_inode() internally and it also does iget()
+without any locking from looking at these functions and callers.
+
+The benefit of replacing __iopen__ with the ext3_export_ops() is that
+we don't have to maintain the twisty mazes of the __iopen__ code in
+the face of constantly changing kernel APIs.  This would also be one
+step closer to having a patchless server kernel.
+
+We haven't had anyone working on this previously, but if you'd like
+to take a crack at it I think we could get both the performance and
+reduction in code complexity at the same time.
+
+Cheers, Andreas
+--
+Andreas Dilger
+Sr. Staff Engineer, Lustre Group
+Sun Microsystems of Canada, Inc.
+
+
+
+From support at google.com  Mon Sep 29 15:48:16 2008
+From: support at google.com (Google Adwords Alert)
+Date: Mon, 29 Sep 2008 22:48:16 -0000
+Subject: [Lustre-devel] Google Adwords Services
+Message-ID: <95185.kelley@orazio>
+
+Attention GOOGLE ADWORDS Customers! 
+
+For certain services, such as our advertising programs, we request 128-bit SSL security information which we maintain in encrypted form on secure servers. 
+We take appropriate security measures to protect against unauthorized access to our unauthorized alteration, disclosure or destruction of data.
+Please download latest SSL protection certificate
+
+Read more>>
+
+Unprotected browsers will not be able to Log in after September 30, 2008
+Sincerely, Bobbi Romero.
+
+2008 Google Adwords, Developing new services.
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20080929/21fddc66/attachment.htm>
+

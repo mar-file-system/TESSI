@@ -1,0 +1,3959 @@
+From bauerj at iodoctors.com  Mon Aug  1 13:46:56 2022
+From: bauerj at iodoctors.com (John Bauer)
+Date: Mon, 1 Aug 2022 15:46:56 -0500
+Subject: [lustre-discuss] llapi_layout_file_comp_del
+In-Reply-To: <5AD10FEB-825C-40AC-B157-694069ADACE4@whamcloud.com>
+References: <49870337-6c2d-dd58-b030-6a6a37efde36@iodoctors.com>
+ <D58CA859-926E-4B94-96AE-DA40C023DF8B@ddn.com>
+ <35eb3280-fb28-0719-0bcb-3c591e62cf01@iodoctors.com>
+ <5AD10FEB-825C-40AC-B157-694069ADACE4@whamcloud.com>
+Message-ID: <22243983-c2d0-e9eb-c992-e69ac3b02b99@iodoctors.com>
+
+Andeas and others,
+
+Thanks again for all the info.? I guess its about time for me to attempt 
+to contribute to the Lustre code base.? A question about 
+llapi_layout_dom_size().? I have code that is building up a multi 
+component layout.? After switching to the second component with 
+llapi_layout_comp_use( layout, LLAPI_COMP_USE_NEXT ) I call 
+llapi_layout_dom_size() so I know where to set the extent start for 
+second component.? Internal to ...dom_size() the current component gets 
+set back to the first component, see below.? I then make calls thinking 
+I am modifying the second component, but I am actually modifying the 
+first.? Is this behavior documented somewhere, that calls to 
+llapi_layout_... functions can change the current component without notice?
+
+Is there a llapi function that returns the lustre file system's max dom 
+size?? I mistakenly thought this was the purpose of 
+llapi_layout_dom_size(), but found out I made a bad assumption. Trying 
+to? find the max dom_size is what sent me down this path.
+
+John
+
+int  llapi_layout_dom_size(struct  llapi_layout *layout,uint64_t  *size)
+{
+         uint64_t  pattern, start;
+         int  rc;
+
+         if  (!layout || !llapi_layout_is_composite(layout)) {
+                 *size =0;
+                 return  0;
+         }
+
+         rc = llapi_layout_comp_use(layout, LLAPI_LAYOUT_COMP_USE_FIRST);
+         if  (rc)
+                 return  -errno;
+
+         rc = llapi_layout_pattern_get(layout, &pattern);
+         if  (rc)
+                 return  -errno;
+
+         if  (pattern != LOV_PATTERN_MDT && pattern != LLAPI_LAYOUT_MDT) {
+                 *size =0;
+                 return  0;
+         }
+
+         rc = llapi_layout_comp_extent_get(layout, &start, size);
+         if  (rc)
+                 return  -errno;
+         if  (start)
+                 return  -ERANGE;
+         return  0;
+}
+
+On 7/28/22 19:42, Andreas Dilger wrote:
+> John, you are probably right that allowing a passed fd would also be 
+> useful, but nobody has done it this way before because of the need to 
+> use O_LOV_DELAY_CREATE within the application code... ?and to be 
+> honest very few applications tune their IO to this extent, especially 
+> with PFL layouts being available to handle 99% of the usage.
+>
+> Please feel free to submit a patch that splits 
+> llapi_layout_file_open() into two functions:
+> - llapi_layout_open_fd() (or ...fd_open()? not sure) that only opens 
+> the file with O_LOV_DELAY_CREATE and returns the fd
+> - llapi_layout_set_by_fd() that sets the layout on the provided fd 
+> (whatever the source)
+>
+> Then?llapi_layout_file_open() would just call those two functions 
+> internally, and you could use only the?llapi_layout_set_by_fd() 
+> function, if available (you could add:
+>
+> #defeine HAVE_LLAPI_LAYOUT_SET_BY_FD
+>
+> in the lustreapi.h header to avoid the need for a separate configure 
+> check. ? Otherwise, your code would call your own internal wrapper of 
+> the same name that calls llapi_layout_file_open() and immediately 
+> closes the returned fd. ?That would be slightly less efficient than 
+> the new API (two opens and closes), but would allow you to migrate to 
+> the new (more efficient) implementation easily in the future.
+>
+> Cheers, Andreas
+>
+>> On Jul 28, 2022, at 14:03, John Bauer <bauerj at iodoctors.com> wrote:
+>>
+>> Andreas,
+>>
+>> Thanks for the info.? A related question: I am using the 
+>> O_LOV_DELAY_CREATE open flag mechanism to open a file and then set 
+>> the composite layout with llapi_layout_file_open().? I was kind of 
+>> surprised this worked.? This ends up opening the file twice and I 
+>> simply close the fd returned from llapi_layout_file_open().? It would 
+>> seem there should be an llapi function such as 
+>> llapi_layout_set_by_fd() to match the llapi_layout_get_by_fd().? I 
+>> need to use this mechanism to set striping for files where the 
+>> pathname is not necessarily known before the open, such as the 
+>> mkstemps() family of opens.? It also makes it easier to handle 
+>> setting striping for files opened with openat().? It seems it would 
+>> be more straight forward for llapi to work with an fd than a pathname 
+>> if a valid fd already exists. Am I missing an easier way to do this?
+>>
+>> Thanks,
+>>
+>> John
+>>
+>> On 7/27/22 16:25, Andreas Dilger wrote:
+>>> The HLD document was written before the feature was implemented, and 
+>>> is outdated. ?The lustreapi.h and llapi_layout_file_comp_del.3 man 
+>>> page are correct. ?Feel free to update the wiki to use the correct 
+>>> argument list.
+>>>
+>>> I believe that it is possible to delete multiple components that 
+>>> match the <flags> argument (e.g. LCME_FL_NEG|LCME_FL_INIT), but I 
+>>> haven't tested that.
+>>>
+>>>> On Jul 26, 2022, at 14:35, John Bauer <bauerj at iodoctors.com> wrote:
+>>>>
+>>>> Hi all,
+>>>>
+>>>> I would like to use the llapi_layout_file_comp_del() function.? I 
+>>>> have found 2 prototypes in different places.? One has the 3rd 
+>>>> argument, uint32_t flags, and the other doesn't.? I suspect the 
+>>>> High Level Design document is incorrect.? The one line of 
+>>>> documentation in lustreapi.h indicates I could delete multiple 
+>>>> components with one call.? How does one do that? What are the 
+>>>> applicable flags?
+>>>>
+>>>> From version 2.12.8 lustreapi.h
+>>>>
+>>>> /**
+>>>> * Delete component(s) by the specified component id or flags.
+>>>> */
+>>>> int ?llapi_layout_file_comp_del(const ?char ?*path, uint32_t ?id, 
+>>>> uint32_t ?flags);
+>>>>
+>>>>
+>>>> From https://wiki.lustre.org/PFL2_High_Level_Design
+>>>>
+>>>> A new interface llapi_layout_file_comp_del(3) to delete 
+>>>> component(s) by the specified component id (accepting LCME_ID_* 
+>>>> wildcards also) from an existing file:
+>>>>
+>>>> int llapi_layout_file_comp_del(const char *path, uint32_t id);
+>>>>
+>>>> John
+>>>>
+>>>> _______________________________________________
+>>>> lustre-discuss mailing list
+>>>> lustre-discuss at lists.lustre.org
+>>>> http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org
+>>>
+>>> Cheers, Andreas
+>>> --
+>>> Andreas Dilger
+>>> Lustre?Principal Architect
+>>> Whamcloud
+>>>
+>>>
+>>>
+>>>
+>>>
+>>>
+>>>
+>
+> Cheers, Andreas
+> --
+> Andreas Dilger
+> Lustre?Principal Architect
+> Whamcloud
+>
+>
+>
+>
+>
+>
+>
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20220801/d3778203/attachment.htm>
+
+From c.kuntz at opendrives.com  Thu Aug  4 21:36:43 2022
+From: c.kuntz at opendrives.com (Christian Kuntz)
+Date: Thu, 4 Aug 2022 21:36:43 -0700
+Subject: [lustre-discuss] Changing default recovery window time settings
+Message-ID: <CANdLGj5dd-3V8AFXb5o3bm7FjiQA-W0Qj5PAxdoX-kH15K+gKQ@mail.gmail.com>
+
+Hello all,
+
+I'm wondering if there is any way to tune the maximum amount of time that
+lustre will use for a recovery window in the event that imperative recovery
+fails due to the failover of an MGS. On MGS failover, we appear to hit a
+default timeout of around 6 minutes that seems to be unavoidable. We're at
+a scale of less than 10 total nodes, so it seems that this timeout could
+safely be made much shorter.
+
+I understand that I'm approaching an unsafe/risky situation and asking for
+it to be made more unsafe, but we'd like to get start time in the event of
+a total cluster failure as fast as possible (within reason, of course).
+Alternatively, any way to manually end the recovery window would be
+appreciated.
+
+Cheers, and thanks for your attention,
+Christian Kuntz
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20220804/a764a271/attachment.htm>
+
+From adilger at whamcloud.com  Sat Aug  6 19:22:19 2022
+From: adilger at whamcloud.com (Andreas Dilger)
+Date: Sun, 7 Aug 2022 02:22:19 +0000
+Subject: [lustre-discuss] Changing default recovery window time settings
+In-Reply-To: <CANdLGj5dd-3V8AFXb5o3bm7FjiQA-W0Qj5PAxdoX-kH15K+gKQ@mail.gmail.com>
+References: <CANdLGj5dd-3V8AFXb5o3bm7FjiQA-W0Qj5PAxdoX-kH15K+gKQ@mail.gmail.com>
+Message-ID: <F859873F-7F79-402A-BFB6-2F561ADF80B4@whamcloud.com>
+
+The maximum amount of time that recovery will run is controlled by "at_max".  The default is 600s (10 mins), but on my 2-client home cluster (with a relatively light load) the recovery is usually finished in 10s or less. 
+
+You can reduce the timeout based on what is your typical time. Note that the recovery should finish sooner even without changing at_max if all of the clients are available (as they should be). 
+
+Cheers, Andreas
+
+> On Aug 4, 2022, at 22:37, Christian Kuntz <c.kuntz at opendrives.com> wrote:
+> 
+> ?
+> Hello all,
+> 
+> I'm wondering if there is any way to tune the maximum amount of time that lustre will use for a recovery window in the event that imperative recovery fails due to the failover of an MGS. On MGS failover, we appear to hit a default timeout of around 6 minutes that seems to be unavoidable. We're at a scale of less than 10 total nodes, so it seems that this timeout could safely be made much shorter.
+> 
+> I understand that I'm approaching an unsafe/risky situation and asking for it to be made more unsafe, but we'd like to get start time in the event of a total cluster failure as fast as possible (within reason, of course). Alternatively, any way to manually end the recovery window would be appreciated.
+> 
+> Cheers, and thanks for your attention,
+> Christian Kuntz
+> _______________________________________________
+> lustre-discuss mailing list
+> lustre-discuss at lists.lustre.org
+> http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org
+
+From mihail.popov at inria.fr  Mon Aug  8 02:00:35 2022
+From: mihail.popov at inria.fr (Mihail Popov)
+Date: Mon, 8 Aug 2022 11:00:35 +0200 (CEST)
+Subject: [lustre-discuss] ICPP 2022 call for participants
+Message-ID: <860798711.11850126.1659949235007.JavaMail.zimbra@inria.fr>
+
+Dear all, 
+
+We wanted to remind you that ICPP'22 will take place virtually from Aug 
+29th to September 1st. 
+
+Registration is free but compulsory: 
+[ https://framaforms.org/icpp22-free-pre-registration-1656607917 | https://framaforms.org/icpp22-free-pre-registration-1656607917 ] 
+
+You can check out the program: 
+[ https://icpp22.gitlabpages.inria.fr/program/ | https://icpp22.gitlabpages.inria.fr/program/ ] , videos of the talks will 
+be available ahead, then the program sessions will be organized as 
+mini-panels! Join the discussion! 
+
+
+We will have three great keynotes: 
+- Tuesday August 30, from 3pm-3.55pm (CEST), Viv Kendon will talk 
+about "Integrating quantum computing with HPC" 
+- Wednesday August 31st, 3pm-3.55pm (CEST) Neil Chue Hong will present 
+"Doing Science in the Digital Age ? If Everyone is Parallel Processing, 
+What?s the Problem?" 
+- Thursday Sept 1st, 3pm-3.55pm (CEST) Dror Feitelson will talk about 
+"Empirical Science and Parallel Systems " 
+
+Best Regards, 
+The ICPP organizing committee. 
+
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20220808/46398438/attachment-0001.htm>
+
+From lsh at jlab.org  Mon Aug  8 13:52:00 2022
+From: lsh at jlab.org (Laura Hild)
+Date: Mon, 8 Aug 2022 20:52:00 +0000
+Subject: [lustre-discuss] lustre-client not working in 8.5
+In-Reply-To: <SN6P114MB113648FCA4507F99448AE73ECDBB9@SN6P114MB1136.NAMP114.PROD.OUTLOOK.COM>
+References: <SN6P114MB113648FCA4507F99448AE73ECDBB9@SN6P114MB1136.NAMP114.PROD.OUTLOOK.COM>
+Message-ID: <BLAPR09MB62112464134AB5FC5EC4366CDC639@BLAPR09MB6211.namprd09.prod.outlook.com>
+
+Hello, Amit-
+
+While I imagine you figured this out in the intervening month, for the benefit of anyone finding this thread later, a common reason for this error, not specific to Lustre, is that module.sig_enforce is enabled, often as a consequence of having Secure Boot enabled, and the module you are trying to load is not signed.
+
+-Laura
+
+
+________________________________________
+Od: lustre-discuss <lustre-discuss-bounces at lists.lustre.org> v imenu Sharma, Amit via lustre-discuss <lustre-discuss at lists.lustre.org>
+Poslano: sreda, 29. junij 2022 15:07
+Za: lustre-discuss at lists.lustre.org
+Zadeva: [EXTERNAL] [lustre-discuss] lustre-client not working in 8.5
+
+Hi Team,
+
+I have successfully installed all required RPM for Lustre-client but when I am running this command .
+ modprobe -v lustre
+I am getting below error.
+modprobe : ERROR : could not insert 'Lustre' : Required key not available.
+
+Please help me how I can resolve this error.
+
+Thanks in advance
+
+Regards,
+Amit
+
+________________________________
+
+This message is for the designated recipient only and may contain privileged, proprietary, or otherwise confidential information. If you have received it in error, please notify the sender immediately and delete the original. Any other use of the e-mail by you is prohibited. Where allowed by local law, electronic communications with Accenture and its affiliates, including e-mail and instant messaging (including content), may be scanned by our systems for the purposes of information security and assessment of internal compliance with Accenture policy. Your privacy is important to us. Accenture uses your personal data only in compliance with data protection laws. For further information on how Accenture processes your personal data, please see our privacy statement at https://www.accenture.com/us-en/privacy-policy.
+______________________________________________________________________________________
+
+www.accenture.com
+
+From Jonathan.Crowder at td.com  Tue Aug  9 06:45:39 2022
+From: Jonathan.Crowder at td.com (Crowder, Jonathan)
+Date: Tue, 9 Aug 2022 13:45:39 +0000
+Subject: [lustre-discuss] Lustre 2.12.6 on RHEL 7.9 not able to mount disks
+ after reboot
+Message-ID: <DM5P118MB01858D3FE4C9B7AD828CB280E8629@DM5P118MB0185.NAMP118.PROD.OUTLOOK.COM>
+
+Hello, this is my first post here so I may need some guidance on the function of this system.
+
+I am in a small team supporting some 36TB lustre servers for a business unit. Our configuration per mount point is one lustre master node and 3 lustre object stores. We had one of the object stores lost to an unidentified reboot and upon getting it booted back into the lustre kernel by azure cloud teams, we saw behavior where we could not get it to remount the raid directories for storage to the local file paths we have set up for them. I can obtain the output soon here, it knows the MGS node, but asks if it's running. I am having difficulty investigating more deeply into why this is happening as the other object stores are working without issue.
+
+Thanks,
+JC
+
+
+Internal
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20220809/1936d412/attachment.htm>
+
+From cory.spitz at hpe.com  Tue Aug  9 14:08:13 2022
+From: cory.spitz at hpe.com (Spitz, Cory James)
+Date: Tue, 9 Aug 2022 21:08:13 +0000
+Subject: [lustre-discuss] Changing default recovery window time settings
+In-Reply-To: <F859873F-7F79-402A-BFB6-2F561ADF80B4@whamcloud.com>
+References: <CANdLGj5dd-3V8AFXb5o3bm7FjiQA-W0Qj5PAxdoX-kH15K+gKQ@mail.gmail.com>
+ <F859873F-7F79-402A-BFB6-2F561ADF80B4@whamcloud.com>
+Message-ID: <SJ0PR84MB1481837A65FE1662F57B564385629@SJ0PR84MB1481.NAMPRD84.PROD.OUTLOOK.COM>
+
+The classical way to put a limit on recovery is to use the recovery_time_soft and recovery_time_hard mount options.
+
+See the mount.lustre options: https://doc.lustre.org/lustre_manual.xhtml#idm139974521647280
+
+recovery_time_soft=timeout
+Allows timeout seconds for clients to reconnect for recovery after a server crash. This timeout is incrementally extended if it is about to expire and the server is still handling new connections from recoverable clients.
+The default soft recovery timeout is 3 times the value of the Lustre timeout parameter (see Section 39.5.2, ?Setting Static Timeouts?<https://doc.lustre.org/lustre_manual.xhtml#section_c24_nt5_dl>). The default Lustre timeout is 100 seconds, which would make the soft recovery timeout default to 300 seconds (5 minutes). The soft recovery timeout is set at mount time and will not change if the Lustre timeout is changed after mount time.
+recovery_time_hard=timeout
+The server is allowed to incrementally extend its timeout up to a hard maximum of timeout seconds.
+The default hard recovery timeout is 9 times the value of the Lustre timeout parameter (see Section 39.5.2, ?Setting Static Timeouts?<https://doc.lustre.org/lustre_manual.xhtml#section_c24_nt5_dl>). The default Lustre timeout is 100 seconds, which would make the hard recovery timeout default to 900 seconds (15 minutes). The hard recovery timeout is set at mount time and will not change if the Lustre timeout is changed after mount time.
+
+
+> Alternatively, any way to manually end the recovery window would be appreciated
+Yes, I think that the abort_recovery option to lctl is allows you to do this at runtime.  See: https://doc.lustre.org/lustre_manual.xhtml#idm139974522276784
+
+
+abort_recovery
+
+Aborts the recovery process on a re-starting MDT or OST.
+
+-Cory
+
+
+On 8/6/22, 9:23 PM, "lustre-discuss" <lustre-discuss-bounces at lists.lustre.org> wrote:
+
+The maximum amount of time that recovery will run is controlled by "at_max".  The default is 600s (10 mins), but on my 2-client home cluster (with a relatively light load) the recovery is usually finished in 10s or less.
+
+You can reduce the timeout based on what is your typical time. Note that the recovery should finish sooner even without changing at_max if all of the clients are available (as they should be).
+
+Cheers, Andreas
+
+> On Aug 4, 2022, at 22:37, Christian Kuntz <c.kuntz at opendrives.com> wrote:
+>
+> ?
+> Hello all,
+>
+> I'm wondering if there is any way to tune the maximum amount of time that lustre will use for a recovery window in the event that imperative recovery fails due to the failover of an MGS. On MGS failover, we appear to hit a default timeout of around 6 minutes that seems to be unavoidable. We're at a scale of less than 10 total nodes, so it seems that this timeout could safely be made much shorter.
+>
+> I understand that I'm approaching an unsafe/risky situation and asking for it to be made more unsafe, but we'd like to get start time in the event of a total cluster failure as fast as possible (within reason, of course). Alternatively, any way to manually end the recovery window would be appreciated.
+>
+> Cheers, and thanks for your attention,
+> Christian Kuntz
+> _______________________________________________
+> lustre-discuss mailing list
+> lustre-discuss at lists.lustre.org
+> http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org<http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org>
+_______________________________________________
+lustre-discuss mailing list
+lustre-discuss at lists.lustre.org
+http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org<http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org>
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20220809/e250b1b6/attachment.htm>
+
+From harr1 at llnl.gov  Tue Aug  9 14:41:03 2022
+From: harr1 at llnl.gov (Cameron Harr)
+Date: Tue, 9 Aug 2022 14:41:03 -0700
+Subject: [lustre-discuss] Lustre 2.12.6 on RHEL 7.9 not able to mount
+ disks after reboot
+In-Reply-To: <DM5P118MB01858D3FE4C9B7AD828CB280E8629@DM5P118MB0185.NAMP118.PROD.OUTLOOK.COM>
+References: <DM5P118MB01858D3FE4C9B7AD828CB280E8629@DM5P118MB0185.NAMP118.PROD.OUTLOOK.COM>
+Message-ID: <11d321f5-42f4-f0dd-459e-76be2dd07b0f@llnl.gov>
+
+JC,
+
+The message where it asks if the MGS is running is a pretty common error 
+that you'll see when something isn't right. There's not a lot of detail 
+in your message but first step is to make sure your OST device is 
+present on the OSS server. You mentioned remounting the RAID 
+directories; is this software/MD RAID? Are you using ldiskfs or ZFS for 
+the backend storage (I'll guess ldiskfs if using MD RAID).
+
+If you've already verified the OST volume is present, see if you can 
+'lctl ping' between the MDS and OSS nodes. I'm not sure what your 
+knowledge base is so forgive me if this is too elementary, but on each 
+node, type 'lctl list_nids' to get the Lustre node identifier, then run 
+'lctl ping <NID>' to make sure you can talk Lustre/LNet between them:
+
+[root at tin1:~]# lctl list_nids
+192.168.101.1 at o2ib1
+
+[root at tin6:~]# lctl list_nids
+192.168.101.6 at o2ib1
+
+[root at tin6:~]# lctl ping 192.168.101.1 at o2ib1
+12345-0 at lo
+12345-192.168.101.1 at o2ib1
+
+[root at tin1:~]# lctl ping 192.168.101.6 at o2ib1
+12345-0 at lo
+12345-192.168.101.6 at o2ib1
+
+If you get a failure (like I/O Error), then you have a communications 
+problem and you'll want to make sure all the correct interfaces are up. 
+If the pings do work, then you'll want to look for messages in 
+/var/log/lustre and dmesg.
+
+Cameron
+
+On 8/9/22 06:45, Crowder, Jonathan via lustre-discuss wrote:
+>
+> Hello, this is my first post here so I may need some guidance on the 
+> function of this system.
+>
+> I am in a small team supporting some 36TB lustre servers for a 
+> business unit. Our configuration per mount point is one lustre master 
+> node and 3 lustre object stores. We had one of the object stores lost 
+> to an unidentified reboot and upon getting it booted back into the 
+> lustre kernel by azure cloud teams, we saw behavior where we could not 
+> get it to remount the raid directories for storage to the local file 
+> paths we have set up for them. I can obtain the output soon here, it 
+> knows the MGS node, but asks if it's running. I am having difficulty 
+> investigating more deeply into why this is happening as the other 
+> object stores are working without issue.
+>
+> Thanks,
+>
+> JC
+>
+>
+> Internal
+>
+>
+> _______________________________________________
+> lustre-discuss mailing list
+> lustre-discuss at lists.lustre.org
+> https://urldefense.us/v3/__http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org__;!!G2kpM7uM-TzIFchu!l2FbiTAR6qhLwbOqf4kfzj8IRp8tfTexTXEOpPVB2ASGCAIVUTpJGN5isgF9Ugs$  
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20220809/1867e6bc/attachment-0001.htm>
+
+From Jonathan.Crowder at td.com  Tue Aug  9 15:16:37 2022
+From: Jonathan.Crowder at td.com (Crowder, Jonathan)
+Date: Tue, 9 Aug 2022 22:16:37 +0000
+Subject: [lustre-discuss] Lustre 2.12.6 on RHEL 7.9 not able to mount
+ disks after reboot
+In-Reply-To: <11d321f5-42f4-f0dd-459e-76be2dd07b0f@llnl.gov>
+References: <DM5P118MB01858D3FE4C9B7AD828CB280E8629@DM5P118MB0185.NAMP118.PROD.OUTLOOK.COM>
+ <11d321f5-42f4-f0dd-459e-76be2dd07b0f@llnl.gov>
+Message-ID: <DM5P118MB0185333C7B57B32EEA8627EDE8629@DM5P118MB0185.NAMP118.PROD.OUTLOOK.COM>
+
+This is fantastic output, you guessed correctly. We use an md raid on ldiskfs. We're getting ext4 io errors on boot and were able to reboot enough to get into a state where we can read the mount, so we are moving data off that mount onto another and rebuilding(which is the intended design of this). We were sometimes able to restore the mount easily, and sometimes we would have to run fsck.ext4 in order to repair or move bad blocks. This back and forth landed us in the ability to move and rebuild as we are doing now.
+
+I will definitely be able to use your input in testing further.
+
+Thanks,
+JC
+
+
+
+Internal
+From: lustre-discuss <lustre-discuss-bounces at lists.lustre.org> On Behalf Of Cameron Harr via lustre-discuss
+Sent: Tuesday, August 9, 2022 5:41 PM
+To: lustre-discuss at lists.lustre.org
+Subject: Re: [lustre-discuss] Lustre 2.12.6 on RHEL 7.9 not able to mount disks after reboot
+
+
+CAUTION: EXTERNAL MAIL. DO NOT CLICK ON LINKS OR OPEN ATTACHMENTS YOU DO NOT TRUST
+ATTENTION : COURRIEL EXTERNE. NE CLIQUEZ PAS SUR DES LIENS ET N'OUVREZ PAS DE PI?CES JOINTES AUXQUELS VOUS NE FAITES PAS CONFIANCE
+
+
+JC,
+
+The message where it asks if the MGS is running is a pretty common error that you'll see when something isn't right. There's not a lot of detail in your message but first step is to make sure your OST device is present on the OSS server. You mentioned remounting the RAID directories; is this software/MD RAID? Are you using ldiskfs or ZFS for the backend storage (I'll guess ldiskfs if using MD RAID).
+
+If you've already verified the OST volume is present, see if you can 'lctl ping' between the MDS and OSS nodes. I'm not sure what your knowledge base is so forgive me if this is too elementary, but on each node, type 'lctl list_nids' to get the Lustre node identifier, then run 'lctl ping <NID>' to make sure you can talk Lustre/LNet between them:
+
+[root at tin1:~]# lctl list_nids
+
+192.168.101.1 at o2ib1<mailto:192.168.101.1 at o2ib1>
+
+
+
+[root at tin6:~]# lctl list_nids
+
+192.168.101.6 at o2ib1<mailto:192.168.101.6 at o2ib1>
+
+
+
+[root at tin6:~]# lctl ping 192.168.101.1 at o2ib1<mailto:192.168.101.1 at o2ib1>
+
+12345-0 at lo
+
+12345-192.168.101.1 at o2ib1<mailto:12345-192.168.101.1 at o2ib1>
+
+
+
+[root at tin1:~]# lctl ping 192.168.101.6 at o2ib1<mailto:192.168.101.6 at o2ib1>
+
+12345-0 at lo
+
+12345-192.168.101.6 at o2ib1<mailto:12345-192.168.101.6 at o2ib1>
+
+If you get a failure (like I/O Error), then you have a communications problem and you'll want to make sure all the correct interfaces are up. If the pings do work, then you'll want to look for messages in /var/log/lustre and dmesg.
+
+Cameron
+On 8/9/22 06:45, Crowder, Jonathan via lustre-discuss wrote:
+Hello, this is my first post here so I may need some guidance on the function of this system.
+
+I am in a small team supporting some 36TB lustre servers for a business unit. Our configuration per mount point is one lustre master node and 3 lustre object stores. We had one of the object stores lost to an unidentified reboot and upon getting it booted back into the lustre kernel by azure cloud teams, we saw behavior where we could not get it to remount the raid directories for storage to the local file paths we have set up for them. I can obtain the output soon here, it knows the MGS node, but asks if it's running. I am having difficulty investigating more deeply into why this is happening as the other object stores are working without issue.
+
+Thanks,
+JC
+
+
+Internal
+
+
+_______________________________________________
+
+lustre-discuss mailing list
+
+lustre-discuss at lists.lustre.org<mailto:lustre-discuss at lists.lustre.org>
+
+https://urldefense.us/v3/__http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org__;!!G2kpM7uM-TzIFchu!l2FbiTAR6qhLwbOqf4kfzj8IRp8tfTexTXEOpPVB2ASGCAIVUTpJGN5isgF9Ugs$<https://clicktime.symantec.com/15tStaNZJe7fN1Rd2QBxh?h=Sv2alGuGQqv2LT-fhBdOjFsaWjrYLSvMk3aOegXZzfI=&u=https://urldefense.us/v3/__http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org__%3B%21%21G2kpM7uM-TzIFchu%21l2FbiTAR6qhLwbOqf4kfzj8IRp8tfTexTXEOpPVB2ASGCAIVUTpJGN5isgF9Ugs%24>
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20220809/d9ab7eef/attachment.htm>
+
+From einar.nass.jensen at ntnu.no  Fri Aug 12 01:37:00 2022
+From: einar.nass.jensen at ntnu.no (=?iso-8859-1?Q?Einar_N=E6ss_Jensen?=)
+Date: Fri, 12 Aug 2022 08:37:00 +0000
+Subject: [lustre-discuss] Invalid jobid size
+Message-ID: <OL1P279MB024109F4677177F7F3F765B3B3679@OL1P279MB0241.NORP279.PROD.OUTLOOK.COM>
+
+logfiles on oss servers are full of these error messages:
+
+Invalid jobid size (37), expect(32)
+
+What does it mean?
+
+we have set this:
+[root at mds-1 ~]# lctl get_param jobid_var jobid_name
+jobid_var=SLURM_JOB_ID
+jobid_name=%j:%u:%h
+
+lustre version is 2.12.6(ddn)
+
+From jlbez at lbl.gov  Fri Aug 12 10:26:15 2022
+From: jlbez at lbl.gov (Jean Luca Bez)
+Date: Fri, 12 Aug 2022 10:26:15 -0700
+Subject: [lustre-discuss] [CFP] PDSW@SC22 - DEADLINE EXTENSION - Papers due
+ August 20, 2022
+Message-ID: <CAJnyNcWpk0K9Qvihe=H22isoWdk3cz6LyGX33dMFpNBpjbiBsg@mail.gmail.com>
+
+[Apologies if you are receiving multiple copies of this CFP. Please do
+forward it to interested colleagues. ]
+
+=======================================================================================
+                              Call for papers: PDSW?22
+                The 7th International Parallel Data Systems Workshop
+                                http://www.pdsw.org
+                      November 14, 2022  1:30 PM - 5:00 PM (CST)
+                      Held in conjunction with SC22, DALLAS, TX
+                      In cooperation with: IEEE Computer Society
+=======================================================================================
+
+We are pleased to announce the 7th International Parallel Data Systems
+Workshop (PDSW?22). PDSW'22 will be hosted in conjunction with SC22: The
+International Conference for High Performance Computing, Networking,
+Storage and Analysis.
+
+Efficient data storage and data management are crucial to scientific
+productivity in both traditional simulation-oriented HPC environments and
+Big Data analysis environments. This issue is further exacerbated by the
+growing volume of experimental and observational data, the widening gap
+between the performance of computational hardware and storage hardware, and
+the emergence of new data-driven algorithms in machine learning. The goal
+of this workshop is to facilitate research that addresses the most critical
+challenges in scientific data storage and data processing. PDSW will
+continue to build on the successful tradition established by its
+predecessor workshops: the Petascale Data Storage Workshop (PDSW,
+2006-2015) and the Data Intensive Scalable Computing Systems (DISCS
+2012-2015) workshop. These workshops were successfully combined in 2016,
+and the resulting joint workshop has attracted up to 38 full paper
+submissions and 140 attendees per year from 2016 to 2021.
+
+We encourage the community to submit original manuscripts that:
+
+   - introduce and evaluate novel algorithms or architectures,
+   - inform the community of important scientific case studies or
+   workloads, or
+   - validate the reproducibility of previously published work
+
+
+Special attention will be given to issues in which community collaboration
+is crucial for problem identification, workload capture, solution
+interoperability, standardization, and shared tools.  We also strongly
+encourage papers to share complete experimental environment information
+(software version numbers, benchmark configurations, etc.) to facilitate
+collaboration.
+
+Topics of interest include the following:
+
+   - Scalable architectures for distributed data storage, archival, and
+   virtualization
+   - The application of new data processing models and algorithms toward
+   scientific computing and analysis
+   - Performance benchmarking, resource management, and workload studies
+   - Enabling cloud and container-based models for scientific data analysis
+   - Techniques for data integrity, availability, reliability, and fault
+   tolerance
+   - Programming models and big data frameworks for data-intensive computing
+   - Hybrid cloud/on-premise data processing
+   - Cloud-specific data storage and transit costs and opportunities
+   - Programmability of storage systems
+   - Data filtering/compressing/reduction techniques
+   - Parallel file systems, metadata management, and complex data management
+   - Integrating computation into the memory and storage hierarchy to
+   facilitate in-situ and in-transit data processing
+   - Alternative data storage models, including object stores and key-value
+   stores
+   - Productivity tools for data-intensive computing, data mining, and
+   knowledge discovery
+   - Tools and techniques for managing data movement among compute and
+   data-intensive components
+   - Cross-cloud data management
+   - Storage system optimization and data analytics with machine learning
+   - Innovative techniques and performance evaluation for new memory and
+   storage systems
+
+
+Regular Paper Submissions
+--------------------------------------
+
+All papers will be evaluated by a competitive peer review process under the
+supervision of the workshop program committee. Selected papers and
+associated talk slides will be made available on the workshop website. The
+papers will also be published by the IEEE Computer Society.
+
+Authors of regular papers are strongly encouraged to submit Artifact
+Description (AD) Appendices that can help to reproduce and validate their
+experimental results. While the inclusion of the AD Appendices is optional
+for PDSW?22, submissions that are accompanied by AD Appendices will be
+given favorable consideration for the PDSW Best Paper award.
+
+PDSW?22 follows the SC22 Reproducibility Initiative
+<https://sc22.supercomputing.org/submit/reproducibility-initiative/>. For
+Artifact Description (AD) Appendices, we will use the format of the SC22
+for PDSW'22 submissions. The AD should include a field for one or more
+links to data (zenodo, figshare, etc.) and code (github, gitlab, bitbucket,
+etc.) repositories. For the Artifacts that will be placed in the code
+repository, we encourage authors to follow the PDSW 2022 Reproducibility
+Addendum
+<https://docs.google.com/document/d/1MurbYCbuoj-NXQzRPelfKk-LrrGClsPnWG2M2SWMVFY/edit?usp=sharing>
+on
+how to structure the artifact, as it will make it easier for the reviewing
+committee and readers of the paper in the future.
+
+Submit a not previously published paper as a PDF file, and indicate authors
+and affiliations. Papers must be up to 5 pages, not less than 10-point
+font, not including references and optional reproducibility appendices.
+Submission site: https://submissions.supercomputing.org/
+
+Papers must use the IEEE conference paper template available at:
+
+https://www.ieee.org/conferences/publishing/templates.html
+
+
+Work-in-progress (WIP) Submissions
+--------------------------------------------------
+There will be a WIP session where presenters provide brief 5-minute talks
+(TBD) on their ongoing work, with fresh problems/solutions. WIP content is
+typically material that may not be mature or complete enough for full paper
+submission and will not be included in the proceedings. A one-page abstract
+is required.
+
+
+Important Dates
+----------------------
+Regular Papers and Reproducibility Study Papers:
+Submissions due: *Aug. 20, 2022, 11:59 PM AoE*
+Paper Notification:   Sep. 9, 2022
+Camera-ready due:  Sep. 30, 2022, 11:59 PM AoE
+
+Work in Progress (WIP):
+Submissions due:  Sep. 16, 2022, 11:59PM AoE
+WIP Notification:  On or before Sep. 23, 2022
+
+
+Workshop Organizers
+------------------------------
+General Chair
+- Kento Sato, RIKEN R-CCS, Japan
+
+Program Co-Chairs
+- Amelie Chi Zhou, Shenzhen University, China
+- Bing Xie, Oak Ridge National Laboratory, USA
+
+Publicity Chair
+- Jean Luca Bez, Lawrence Berkeley National Laboratory, USA
+
+Web and Proceedings Chair
+- Joan Digney, Carnegie Mellon University
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20220812/b0de8a68/attachment-0001.htm>
+
+From sternberg at anl.gov  Fri Aug 12 15:26:55 2022
+From: sternberg at anl.gov (Sternberg, Michael G.)
+Date: Fri, 12 Aug 2022 22:26:55 +0000
+Subject: [lustre-discuss] Invalid jobid size
+In-Reply-To: <OL1P279MB024109F4677177F7F3F765B3B3679@OL1P279MB0241.NORP279.PROD.OUTLOOK.COM>
+References: <OL1P279MB024109F4677177F7F3F765B3B3679@OL1P279MB0241.NORP279.PROD.OUTLOOK.COM>
+Message-ID: <126E3DD3-C12A-4114-8FBD-C6DB05FA3ACA@anl.gov>
+
+Einar,
+
+The strings in your $SLURM_JOB_ID values or host names are likely too long to serve as jobid for the Lustre Jobstats feature .
+
+You might try %H instead of %h in jobid_name. For reference, from the Lustre manual, https://doc.lustre.org/lustre_manual.xhtml#jobstats :
+
+> %e print executable name
+> %g print group ID number
+> %h print fully-qualified hostname
+> %H print short hostname
+> %j print JobID from process environment variable named by the jobid_var parameter
+> %p print numeric process ID
+> %u print user ID number
+
+
+On my system (2.12), I use:
+
+	jobid_var=PBS_JOBID
+	jobid_name=%e.%u
+
+I get job_stats by $PBS_JOBID, as expected, from processes that actually have the variable set, and synthetic %e.%u values from all others, like processes on interactive or backup nodes. This has been working just fine to pinpoint the source of occasional trouble.
+
+Curiously, I don't think the manual spells out what happens when the variable referenced by jobid_var is unset, i.e., the above fallback logic from jobid_var to jobid_name.
+
+
+With best regards,
+-- 
+Michael Sternberg, Ph.D.
+Principal Scientific Computing Administrator
+Center for Nanoscale Materials
+Argonne National Laboratory
+
+
+
+
+> On Aug 12, 2022, at 03:37, Einar N?ss Jensen <einar.nass.jensen at ntnu.no> wrote:
+> logfiles on oss servers are full of these error messages:
+> Invalid jobid size (37), expect(32)
+> What does it mean?
+> 
+> we have set this:
+> [root at mds-1 ~]# lctl get_param jobid_var jobid_name
+> jobid_var=SLURM_JOB_ID
+> jobid_name=%j:%u:%h
+> 
+> lustre version is 2.12.6(ddn)
+
+From adilger at whamcloud.com  Fri Aug 12 16:16:04 2022
+From: adilger at whamcloud.com (Andreas Dilger)
+Date: Fri, 12 Aug 2022 23:16:04 +0000
+Subject: [lustre-discuss] Invalid jobid size
+In-Reply-To: <126E3DD3-C12A-4114-8FBD-C6DB05FA3ACA@anl.gov>
+References: <OL1P279MB024109F4677177F7F3F765B3B3679@OL1P279MB0241.NORP279.PROD.OUTLOOK.COM>
+ <126E3DD3-C12A-4114-8FBD-C6DB05FA3ACA@anl.gov>
+Message-ID: <0C87C536-EF67-4D07-8725-3BFE1827B93E@ddn.com>
+
+Michael,
+I wasn't even aware of this behavior of falling back to jobid_name if $jobid_var is unset.  Could you please file a ticket in Jira LUDOC about this, and ideally submit a patch to explain this in the manual.
+
+Cheers, Andreas
+
+On Aug 12, 2022, at 16:26, Sternberg, Michael G. via lustre-discuss <lustre-discuss at lists.lustre.org<mailto:lustre-discuss at lists.lustre.org>> wrote:
+
+Einar,
+
+The strings in your $SLURM_JOB_ID values or host names are likely too long to serve as jobid for the Lustre Jobstats feature .
+
+You might try %H instead of %h in jobid_name. For reference, from the Lustre manual, https://doc.lustre.org/lustre_manual.xhtml#jobstats :
+
+%e print executable name
+%g print group ID number
+%h print fully-qualified hostname
+%H print short hostname
+%j print JobID from process environment variable named by the jobid_var parameter
+%p print numeric process ID
+%u print user ID number
+
+
+On my system (2.12), I use:
+
+jobid_var=PBS_JOBID
+jobid_name=%e.%u
+
+I get job_stats by $PBS_JOBID, as expected, from processes that actually have the variable set, and synthetic %e.%u values from all others, like processes on interactive or backup nodes. This has been working just fine to pinpoint the source of occasional trouble.
+
+Curiously, I don't think the manual spells out what happens when the variable referenced by jobid_var is unset, i.e., the above fallback logic from jobid_var to jobid_name.
+
+
+With best regards,
+--
+Michael Sternberg, Ph.D.
+Principal Scientific Computing Administrator
+Center for Nanoscale Materials
+Argonne National Laboratory
+
+
+
+
+On Aug 12, 2022, at 03:37, Einar N?ss Jensen <einar.nass.jensen at ntnu.no<mailto:einar.nass.jensen at ntnu.no>> wrote:
+logfiles on oss servers are full of these error messages:
+Invalid jobid size (37), expect(32)
+What does it mean?
+
+we have set this:
+[root at mds-1 ~]# lctl get_param jobid_var jobid_name
+jobid_var=SLURM_JOB_ID
+jobid_name=%j:%u:%h
+
+lustre version is 2.12.6(ddn)
+_______________________________________________
+lustre-discuss mailing list
+lustre-discuss at lists.lustre.org<mailto:lustre-discuss at lists.lustre.org>
+http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org
+
+Cheers, Andreas
+--
+Andreas Dilger
+Lustre Principal Architect
+Whamcloud
+
+
+
+
+
+
+
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20220812/a5084928/attachment-0001.htm>
+
+From einar.nass.jensen at ntnu.no  Sat Aug 13 02:25:34 2022
+From: einar.nass.jensen at ntnu.no (=?utf-8?B?RWluYXIgTsOmc3MgSmVuc2Vu?=)
+Date: Sat, 13 Aug 2022 09:25:34 +0000
+Subject: [lustre-discuss] Invalid jobid size
+In-Reply-To: <0C87C536-EF67-4D07-8725-3BFE1827B93E@ddn.com>
+References: <OL1P279MB024109F4677177F7F3F765B3B3679@OL1P279MB0241.NORP279.PROD.OUTLOOK.COM>
+ <126E3DD3-C12A-4114-8FBD-C6DB05FA3ACA@anl.gov>
+ <0C87C536-EF67-4D07-8725-3BFE1827B93E@ddn.com>
+Message-ID: <BE74A56F-FC68-4D83-955B-86F5657524BD@ntnu.no>
+
+Thanks both of you
+
+I will try to mitigate with changing variables.
+However, I think perhaps it would be helpful if jobid_name could be 64 instead of 32
+
+
+Einar
+
+
+Sent from my ICE X Supercomputer
+Einar N?ss jensen
+einar.nass.jensen at ntnu.no
++47 90990249
+
+
+On 13 Aug 2022, at 01:16, Andreas Dilger <adilger at whamcloud.com> wrote:
+
+? Michael,
+I wasn't even aware of this behavior of falling back to jobid_name if $jobid_var is unset.  Could you please file a ticket in Jira LUDOC about this, and ideally submit a patch to explain this in the manual.
+
+Cheers, Andreas
+
+On Aug 12, 2022, at 16:26, Sternberg, Michael G. via lustre-discuss <lustre-discuss at lists.lustre.org<mailto:lustre-discuss at lists.lustre.org>> wrote:
+
+Einar,
+
+The strings in your $SLURM_JOB_ID values or host names are likely too long to serve as jobid for the Lustre Jobstats feature .
+
+You might try %H instead of %h in jobid_name. For reference, from the Lustre manual, https://doc.lustre.org/lustre_manual.xhtml#jobstats :
+
+%e print executable name
+%g print group ID number
+%h print fully-qualified hostname
+%H print short hostname
+%j print JobID from process environment variable named by the jobid_var parameter
+%p print numeric process ID
+%u print user ID number
+
+
+On my system (2.12), I use:
+
+jobid_var=PBS_JOBID
+jobid_name=%e.%u
+
+I get job_stats by $PBS_JOBID, as expected, from processes that actually have the variable set, and synthetic %e.%u values from all others, like processes on interactive or backup nodes. This has been working just fine to pinpoint the source of occasional trouble.
+
+Curiously, I don't think the manual spells out what happens when the variable referenced by jobid_var is unset, i.e., the above fallback logic from jobid_var to jobid_name.
+
+
+With best regards,
+--
+Michael Sternberg, Ph.D.
+Principal Scientific Computing Administrator
+Center for Nanoscale Materials
+Argonne National Laboratory
+
+
+
+
+On Aug 12, 2022, at 03:37, Einar N?ss Jensen <einar.nass.jensen at ntnu.no<mailto:einar.nass.jensen at ntnu.no>> wrote:
+logfiles on oss servers are full of these error messages:
+Invalid jobid size (37), expect(32)
+What does it mean?
+
+we have set this:
+[root at mds-1 ~]# lctl get_param jobid_var jobid_name
+jobid_var=SLURM_JOB_ID
+jobid_name=%j:%u:%h
+
+lustre version is 2.12.6(ddn)
+_______________________________________________
+lustre-discuss mailing list
+lustre-discuss at lists.lustre.org<mailto:lustre-discuss at lists.lustre.org>
+http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org
+
+Cheers, Andreas
+--
+Andreas Dilger
+Lustre Principal Architect
+Whamcloud
+
+
+
+
+
+
+
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20220813/c4386d54/attachment.htm>
+
+From s.nassyr at fz-juelich.de  Mon Aug 15 01:34:58 2022
+From: s.nassyr at fz-juelich.de (Stepan Nassyr)
+Date: Mon, 15 Aug 2022 10:34:58 +0200
+Subject: [lustre-discuss] network error on bulk WRITE/bad log
+Message-ID: <6be3ebb7-7eb3-13a4-f789-8112dde65b33@fz-juelich.de>
+
+Hi all,
+
+In May I had a failure on a small cluster and asked here (http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/2022-May/018073.html). Due to time constraints I just recreated the filesystem back then.
+
+Now the failure happened again, this time I have more time and can investigate and haven't done anything destructive yet.
+
+I use the following versions:
+
+  *   lustre 2.14.56
+  *   zfs 2.0.7 (previously used 2.1.2, but got told that 2.1.x is not tested well with lustre)
+  *   Nodes are running Rocky Linux 8.6
+  *   uname -r: 4.18.0-372.19.1.el8_6.aarch64
+
+There are 2 IO nodes (io01 and io02), both of them are MDS and OSS and one of them is MGS. Here are the devices:
+
+[snassyr at io02 ~]$ sudo lctl dl
+  0 UP osd-zfs storage-MDT0001-osd storage-MDT0001-osd_UUID 8
+  1 UP mgc MGC10.31.7.61 at o2ib a087e05e-d57c-4561-ad75-6827d4428f54 4
+  2 UP mds MDS MDS_uuid 2
+  3 UP lod storage-MDT0001-mdtlov storage-MDT0001-mdtlov_UUID 3
+  4 UP mdt storage-MDT0001 storage-MDT0001_UUID 8
+  5 UP mdd storage-MDD0001 storage-MDD0001_UUID 3
+  6 UP osp storage-MDT0000-osp-MDT0001 storage-MDT0001-mdtlov_UUID 4
+  7 UP osp storage-OST0000-osc-MDT0001 storage-MDT0001-mdtlov_UUID 4
+  8 UP osp storage-OST0001-osc-MDT0001 storage-MDT0001-mdtlov_UUID 4
+  9 UP lwp storage-MDT0000-lwp-MDT0001 storage-MDT0000-lwp-MDT0001_UUID 4
+ 10 UP osd-zfs storage-OST0001-osd storage-OST0001-osd_UUID 4
+ 11 UP ost OSS OSS_uuid 2
+ 12 UP obdfilter storage-OST0001 storage-OST0001_UUID 6
+ 13 UP lwp storage-MDT0000-lwp-OST0001 storage-MDT0000-lwp-OST0001_UUID 4
+ 14 UP lwp storage-MDT0001-lwp-OST0001 storage-MDT0001-lwp-OST0001_UUID 4
+
+[snassyr at io01 ~]$ sudo lctl dl
+  0 UP osd-zfs MGS-osd MGS-osd_UUID 4
+  1 UP mgs MGS MGS 6
+  2 UP mgc MGC10.31.7.61 at o2ib 9f351a51-0232-4306-a66d-cecee8629329 4
+  3 UP osd-zfs storage-MDT0000-osd storage-MDT0000-osd_UUID 9
+  4 UP mds MDS MDS_uuid 2
+  5 UP lod storage-MDT0000-mdtlov storage-MDT0000-mdtlov_UUID 3
+  6 UP mdt storage-MDT0000 storage-MDT0000_UUID 12
+  7 UP mdd storage-MDD0000 storage-MDD0000_UUID 3
+  8 UP qmt storage-QMT0000 storage-QMT0000_UUID 3
+  9 UP osp storage-MDT0001-osp-MDT0000 storage-MDT0000-mdtlov_UUID 4
+ 10 UP osp storage-OST0000-osc-MDT0000 storage-MDT0000-mdtlov_UUID 4
+ 11 UP osp storage-OST0001-osc-MDT0000 storage-MDT0000-mdtlov_UUID 4
+ 12 UP lwp storage-MDT0000-lwp-MDT0000 storage-MDT0000-lwp-MDT0000_UUID 4
+ 13 UP osd-zfs storage-OST0000-osd storage-OST0000-osd_UUID 4
+ 14 UP ost OSS OSS_uuid 2
+ 15 UP obdfilter storage-OST0000 storage-OST0000_UUID 6
+ 16 UP lwp storage-MDT0000-lwp-OST0000 storage-MDT0000-lwp-OST0000_UUID 4
+ 17 UP lwp storage-MDT0001-lwp-OST0000 storage-MDT0001-lwp-OST0000_UUID 4
+
+On io01 I see repeating errors mentioning a network error:
+
+[65922.582578] LustreError: 20017:0:(ldlm_lib.c:3540:target_bulk_io()) Skipped 11 previous similar messages
+[66494.575431] LNetError: 20017:0:(o2iblnd.c:1880:kiblnd_fmr_pool_map()) Failed to map mr 1/8 elements
+[66494.575442] LNetError: 20017:0:(o2iblnd.c:1880:kiblnd_fmr_pool_map()) Skipped 11 previous similar messages
+[66494.575446] LNetError: 20017:0:(o2iblnd_cb.c:613:kiblnd_fmr_map_tx()) Can't map 32768 bytes (8/8)s: -22
+[66494.575448] LNetError: 20017:0:(o2iblnd_cb.c:613:kiblnd_fmr_map_tx()) Skipped 11 previous similar messages
+[66494.575452] LNetError: 20017:0:(o2iblnd_cb.c:1725:kiblnd_send()) Can't setup PUT src for 10.31.7.62 at o2ib: -22
+[66494.575454] LNetError: 20017:0:(o2iblnd_cb.c:1725:kiblnd_send()) Skipped 11 previous similar messages
+[66494.575458] LustreError: 20017:0:(events.c:477:server_bulk_callback()) event type 5, status -5, desc 00000000cdd4e797
+[66494.575460] LustreError: 20017:0:(events.c:477:server_bulk_callback()) Skipped 11 previous similar messages
+[66546.574314] LustreError: 20017:0:(ldlm_lib.c:3540:target_bulk_io()) @@@ network error on bulk WRITE  req at 0000000070b8f1ab x1740960836990720/t0(0) o1000->storage-MDT0001-mdtlov_UUID at 10.31.7.62@o2ib:522/0<mailto:storage-MDT0001-mdtlov_UUID at 10.31.7.62@o2ib:522/0> lens 336/33016 e 0 to 0 dl 1660376137 ref 1 fl Interpret:/0/0 rc 0/0 job:''
+
+On io02 I see repeating errors mentioning a bad log:
+
+[66582.856444] LustreError: 14905:0:(llog_osd.c:264:llog_osd_read_header()) storage-MDT0000-osp-MDT0001: bad log  [0x200000401:0x1:0x0] header magic: 0x0 (expected 0x10645539)
+[66582.856450] LustreError: 14905:0:(llog_osd.c:264:llog_osd_read_header()) Skipped 11 previous similar messages
+
+I can't make sense of these error messages. How can I recover?
+
+(I have the full dmesg/lctl dk log, but they are too big to attach, is it ok to upload them somewhere and put a link in a reply?)
+
+Thank you and best regards,
+Stepan
+
+
+
+------------------------------------------------------------------------------------------------
+------------------------------------------------------------------------------------------------
+Forschungszentrum Juelich GmbH
+52425 Juelich
+Sitz der Gesellschaft: Juelich
+Eingetragen im Handelsregister des Amtsgerichts Dueren Nr. HR B 3498
+Vorsitzender des Aufsichtsrats: MinDir Volker Rieke
+Geschaeftsfuehrung: Prof. Dr.-Ing. Wolfgang Marquardt (Vorsitzender),
+Karsten Beneke (stellv. Vorsitzender), Prof. Dr. Astrid Lambrecht,
+Prof. Dr. Frauke Melchior
+------------------------------------------------------------------------------------------------
+------------------------------------------------------------------------------------------------
+
+
+Neugierige sind herzlich willkommen am Sonntag, den 21. August 2022, von 10:00 bis 17:00 Uhr. Mehr unter: https://www.tagderneugier.de
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20220815/e4241ad7/attachment.htm>
+
+From pjones at whamcloud.com  Mon Aug 15 05:50:31 2022
+From: pjones at whamcloud.com (Peter Jones)
+Date: Mon, 15 Aug 2022 12:50:31 +0000
+Subject: [lustre-discuss] network error on bulk WRITE/bad log
+In-Reply-To: <6be3ebb7-7eb3-13a4-f789-8112dde65b33@fz-juelich.de>
+References: <6be3ebb7-7eb3-13a4-f789-8112dde65b33@fz-juelich.de>
+Message-ID: <3285C33F-8905-4244-9C69-79384C8A4B36@ddn.com>
+
+Stepan
+
+2.14.56 is not a version of Lustre ? it is an interim dev build. Even if it does not resolve this specific issue, I would strongly recommend switching to the recently released Lustre 2.15.1 release
+
+Peter
+
+From: lustre-discuss <lustre-discuss-bounces at lists.lustre.org> on behalf of Stepan Nassyr via lustre-discuss <lustre-discuss at lists.lustre.org>
+Reply-To: Stepan Nassyr <s.nassyr at fz-juelich.de>
+Date: Monday, August 15, 2022 at 1:35 AM
+To: "lustre-discuss at lists.lustre.org" <lustre-discuss at lists.lustre.org>
+Subject: [lustre-discuss] network error on bulk WRITE/bad log
+
+
+Hi all,
+
+In May I had a failure on a small cluster and asked here (http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/2022-May/018073.html). Due to time constraints I just recreated the filesystem back then.
+
+Now the failure happened again, this time I have more time and can investigate and haven't done anything destructive yet.
+
+I use the following versions:
+
+  *   lustre 2.14.56
+  *   zfs 2.0.7 (previously used 2.1.2, but got told that 2.1.x is not tested well with lustre)
+  *   Nodes are running Rocky Linux 8.6
+  *   uname -r: 4.18.0-372.19.1.el8_6.aarch64
+
+There are 2 IO nodes (io01 and io02), both of them are MDS and OSS and one of them is MGS. Here are the devices:
+
+[snassyr at io02 ~]$ sudo lctl dl
+  0 UP osd-zfs storage-MDT0001-osd storage-MDT0001-osd_UUID 8
+  1 UP mgc MGC10.31.7.61 at o2ib a087e05e-d57c-4561-ad75-6827d4428f54 4
+  2 UP mds MDS MDS_uuid 2
+  3 UP lod storage-MDT0001-mdtlov storage-MDT0001-mdtlov_UUID 3
+  4 UP mdt storage-MDT0001 storage-MDT0001_UUID 8
+  5 UP mdd storage-MDD0001 storage-MDD0001_UUID 3
+  6 UP osp storage-MDT0000-osp-MDT0001 storage-MDT0001-mdtlov_UUID 4
+  7 UP osp storage-OST0000-osc-MDT0001 storage-MDT0001-mdtlov_UUID 4
+  8 UP osp storage-OST0001-osc-MDT0001 storage-MDT0001-mdtlov_UUID 4
+  9 UP lwp storage-MDT0000-lwp-MDT0001 storage-MDT0000-lwp-MDT0001_UUID 4
+ 10 UP osd-zfs storage-OST0001-osd storage-OST0001-osd_UUID 4
+ 11 UP ost OSS OSS_uuid 2
+ 12 UP obdfilter storage-OST0001 storage-OST0001_UUID 6
+ 13 UP lwp storage-MDT0000-lwp-OST0001 storage-MDT0000-lwp-OST0001_UUID 4
+ 14 UP lwp storage-MDT0001-lwp-OST0001 storage-MDT0001-lwp-OST0001_UUID 4
+
+[snassyr at io01 ~]$ sudo lctl dl
+  0 UP osd-zfs MGS-osd MGS-osd_UUID 4
+  1 UP mgs MGS MGS 6
+  2 UP mgc MGC10.31.7.61 at o2ib 9f351a51-0232-4306-a66d-cecee8629329 4
+  3 UP osd-zfs storage-MDT0000-osd storage-MDT0000-osd_UUID 9
+  4 UP mds MDS MDS_uuid 2
+  5 UP lod storage-MDT0000-mdtlov storage-MDT0000-mdtlov_UUID 3
+  6 UP mdt storage-MDT0000 storage-MDT0000_UUID 12
+  7 UP mdd storage-MDD0000 storage-MDD0000_UUID 3
+  8 UP qmt storage-QMT0000 storage-QMT0000_UUID 3
+  9 UP osp storage-MDT0001-osp-MDT0000 storage-MDT0000-mdtlov_UUID 4
+ 10 UP osp storage-OST0000-osc-MDT0000 storage-MDT0000-mdtlov_UUID 4
+ 11 UP osp storage-OST0001-osc-MDT0000 storage-MDT0000-mdtlov_UUID 4
+ 12 UP lwp storage-MDT0000-lwp-MDT0000 storage-MDT0000-lwp-MDT0000_UUID 4
+ 13 UP osd-zfs storage-OST0000-osd storage-OST0000-osd_UUID 4
+ 14 UP ost OSS OSS_uuid 2
+ 15 UP obdfilter storage-OST0000 storage-OST0000_UUID 6
+ 16 UP lwp storage-MDT0000-lwp-OST0000 storage-MDT0000-lwp-OST0000_UUID 4
+ 17 UP lwp storage-MDT0001-lwp-OST0000 storage-MDT0001-lwp-OST0000_UUID 4
+
+On io01 I see repeating errors mentioning a network error:
+
+[65922.582578] LustreError: 20017:0:(ldlm_lib.c:3540:target_bulk_io()) Skipped 11 previous similar messages
+[66494.575431] LNetError: 20017:0:(o2iblnd.c:1880:kiblnd_fmr_pool_map()) Failed to map mr 1/8 elements
+[66494.575442] LNetError: 20017:0:(o2iblnd.c:1880:kiblnd_fmr_pool_map()) Skipped 11 previous similar messages
+[66494.575446] LNetError: 20017:0:(o2iblnd_cb.c:613:kiblnd_fmr_map_tx()) Can't map 32768 bytes (8/8)s: -22
+[66494.575448] LNetError: 20017:0:(o2iblnd_cb.c:613:kiblnd_fmr_map_tx()) Skipped 11 previous similar messages
+[66494.575452] LNetError: 20017:0:(o2iblnd_cb.c:1725:kiblnd_send()) Can't setup PUT src for 10.31.7.62 at o2ib: -22
+[66494.575454] LNetError: 20017:0:(o2iblnd_cb.c:1725:kiblnd_send()) Skipped 11 previous similar messages
+[66494.575458] LustreError: 20017:0:(events.c:477:server_bulk_callback()) event type 5, status -5, desc 00000000cdd4e797
+[66494.575460] LustreError: 20017:0:(events.c:477:server_bulk_callback()) Skipped 11 previous similar messages
+[66546.574314] LustreError: 20017:0:(ldlm_lib.c:3540:target_bulk_io()) @@@ network error on bulk WRITE  req at 0000000070b8f1ab x1740960836990720/t0(0) o1000->storage-MDT0001-mdtlov_UUID at 10.31.7.62@o2ib:522/0<mailto:storage-MDT0001-mdtlov_UUID at 10.31.7.62@o2ib:522/0> lens 336/33016 e 0 to 0 dl 1660376137 ref 1 fl Interpret:/0/0 rc 0/0 job:''
+
+On io02 I see repeating errors mentioning a bad log:
+
+[66582.856444] LustreError: 14905:0:(llog_osd.c:264:llog_osd_read_header()) storage-MDT0000-osp-MDT0001: bad log  [0x200000401:0x1:0x0] header magic: 0x0 (expected 0x10645539)
+[66582.856450] LustreError: 14905:0:(llog_osd.c:264:llog_osd_read_header()) Skipped 11 previous similar messages
+
+I can't make sense of these error messages. How can I recover?
+
+(I have the full dmesg/lctl dk log, but they are too big to attach, is it ok to upload them somewhere and put a link in a reply?)
+
+Thank you and best regards,
+Stepan
+
+
+
+
+------------------------------------------------------------------------------------------------
+------------------------------------------------------------------------------------------------
+Forschungszentrum Juelich GmbH
+52425 Juelich
+Sitz der Gesellschaft: Juelich
+Eingetragen im Handelsregister des Amtsgerichts Dueren Nr. HR B 3498
+Vorsitzender des Aufsichtsrats: MinDir Volker Rieke
+Geschaeftsfuehrung: Prof. Dr.-Ing. Wolfgang Marquardt (Vorsitzender),
+Karsten Beneke (stellv. Vorsitzender), Prof. Dr. Astrid Lambrecht,
+Prof. Dr. Frauke Melchior
+------------------------------------------------------------------------------------------------
+------------------------------------------------------------------------------------------------
+
+
+Neugierige sind herzlich willkommen am Sonntag, den 21. August 2022, von 10:00 bis 17:00 Uhr. Mehr unter: https://www.tagderneugier.de
+
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20220815/81a5e03d/attachment-0001.htm>
+
+From s.nassyr at fz-juelich.de  Tue Aug 16 06:25:39 2022
+From: s.nassyr at fz-juelich.de (Stepan Nassyr)
+Date: Tue, 16 Aug 2022 15:25:39 +0200
+Subject: [lustre-discuss] network error on bulk WRITE/bad log
+In-Reply-To: <3285C33F-8905-4244-9C69-79384C8A4B36@ddn.com>
+References: <6be3ebb7-7eb3-13a4-f789-8112dde65b33@fz-juelich.de>
+ <3285C33F-8905-4244-9C69-79384C8A4B36@ddn.com>
+Message-ID: <7c838e70-1d88-31ca-fef8-ccd91bcb0bd2@fz-juelich.de>
+
+Hello Peter,
+
+Thank you for the reply. I have upgraded lustre to 2.15.1 . The errors 
+persist, however - now I am also seeing a new error on io02:
+
+[ 1749.396942] LustreError: 9216:0:(mdt_handler.c:7499:mdt_iocontrol()) 
+storage-MDT0001: Not supported cmd = 1074292357, rc = -95
+
+I'm not entirely sure how to look up the cmd code and rc -95 seems to 
+just be EOPNOTSUPP, so no additional information here.
+
+Is there a way to look up what the cmd value means?
+
+On 15.08.22 14:50, Peter Jones wrote:
+>
+> Stepan
+>
+> 2.14.56 is not a version of Lustre ? it is an interim dev build. Even 
+> if it does not resolve this specific issue, I would strongly recommend 
+> switching to the recently released Lustre 2.15.1 release
+>
+> Peter
+>
+> *From: *lustre-discuss <lustre-discuss-bounces at lists.lustre.org> on 
+> behalf of Stepan Nassyr via lustre-discuss 
+> <lustre-discuss at lists.lustre.org>
+> *Reply-To: *Stepan Nassyr <s.nassyr at fz-juelich.de>
+> *Date: *Monday, August 15, 2022 at 1:35 AM
+> *To: *"lustre-discuss at lists.lustre.org" <lustre-discuss at lists.lustre.org>
+> *Subject: *[lustre-discuss] network error on bulk WRITE/bad log
+>
+> Hi all,
+>
+> In May I had a failure on a small cluster and asked here 
+> (http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/2022-May/018073.html). 
+> Due to time constraints I just recreated the filesystem back then.
+>
+> Now the failure happened again, this time I have more time and can 
+> investigate and haven't done anything destructive yet.
+>
+> I use the following versions:
+>
+>   * lustre 2.14.56
+>   * zfs 2.0.7 (previously used 2.1.2, but got told that 2.1.x is not
+>     tested well with lustre)
+>   * Nodes are running Rocky Linux 8.6
+>   * uname -r: 4.18.0-372.19.1.el8_6.aarch64
+>
+> There are 2 IO nodes (io01 and io02), both of them are MDS and OSS and 
+> one of them is MGS. Here are the devices:
+>
+> [snassyr at io02 ~]$ sudo lctl dl
+> ? 0 UP osd-zfs storage-MDT0001-osd storage-MDT0001-osd_UUID 8
+> ? 1 UP mgc MGC10.31.7.61 at o2ib a087e05e-d57c-4561-ad75-6827d4428f54 4
+> ? 2 UP mds MDS MDS_uuid 2
+> ? 3 UP lod storage-MDT0001-mdtlov storage-MDT0001-mdtlov_UUID 3
+> ? 4 UP mdt storage-MDT0001 storage-MDT0001_UUID 8
+> ? 5 UP mdd storage-MDD0001 storage-MDD0001_UUID 3
+> ? 6 UP osp storage-MDT0000-osp-MDT0001 storage-MDT0001-mdtlov_UUID 4
+> ? 7 UP osp storage-OST0000-osc-MDT0001 storage-MDT0001-mdtlov_UUID 4
+> ? 8 UP osp storage-OST0001-osc-MDT0001 storage-MDT0001-mdtlov_UUID 4
+> ? 9 UP lwp storage-MDT0000-lwp-MDT0001 storage-MDT0000-lwp-MDT0001_UUID 4
+> ?10 UP osd-zfs storage-OST0001-osd storage-OST0001-osd_UUID 4
+> ?11 UP ost OSS OSS_uuid 2
+> ?12 UP obdfilter storage-OST0001 storage-OST0001_UUID 6
+> ?13 UP lwp storage-MDT0000-lwp-OST0001 storage-MDT0000-lwp-OST0001_UUID 4
+> ?14 UP lwp storage-MDT0001-lwp-OST0001 storage-MDT0001-lwp-OST0001_UUID 4
+>
+> [snassyr at io01 ~]$ sudo lctl dl
+> ? 0 UP osd-zfs MGS-osd MGS-osd_UUID 4
+> ? 1 UP mgs MGS MGS 6
+> ? 2 UP mgc MGC10.31.7.61 at o2ib 9f351a51-0232-4306-a66d-cecee8629329 4
+> ? 3 UP osd-zfs storage-MDT0000-osd storage-MDT0000-osd_UUID 9
+> ? 4 UP mds MDS MDS_uuid 2
+> ? 5 UP lod storage-MDT0000-mdtlov storage-MDT0000-mdtlov_UUID 3
+> ? 6 UP mdt storage-MDT0000 storage-MDT0000_UUID 12
+> ? 7 UP mdd storage-MDD0000 storage-MDD0000_UUID 3
+> ? 8 UP qmt storage-QMT0000 storage-QMT0000_UUID 3
+> ? 9 UP osp storage-MDT0001-osp-MDT0000 storage-MDT0000-mdtlov_UUID 4
+> ?10 UP osp storage-OST0000-osc-MDT0000 storage-MDT0000-mdtlov_UUID 4
+> ?11 UP osp storage-OST0001-osc-MDT0000 storage-MDT0000-mdtlov_UUID 4
+> ?12 UP lwp storage-MDT0000-lwp-MDT0000 storage-MDT0000-lwp-MDT0000_UUID 4
+> ?13 UP osd-zfs storage-OST0000-osd storage-OST0000-osd_UUID 4
+> ?14 UP ost OSS OSS_uuid 2
+> ?15 UP obdfilter storage-OST0000 storage-OST0000_UUID 6
+> ?16 UP lwp storage-MDT0000-lwp-OST0000 storage-MDT0000-lwp-OST0000_UUID 4
+> ?17 UP lwp storage-MDT0001-lwp-OST0000 storage-MDT0001-lwp-OST0000_UUID 4
+>
+> On io01 I see repeating errors mentioning a network error:
+>
+> [65922.582578] LustreError: 20017:0:(ldlm_lib.c:3540:target_bulk_io()) 
+> Skipped 11 previous similar messages
+> [66494.575431] LNetError: 
+> 20017:0:(o2iblnd.c:1880:kiblnd_fmr_pool_map()) Failed to map mr 1/8 
+> elements
+> [66494.575442] LNetError: 
+> 20017:0:(o2iblnd.c:1880:kiblnd_fmr_pool_map()) Skipped 11 previous 
+> similar messages
+> [66494.575446] LNetError: 
+> 20017:0:(o2iblnd_cb.c:613:kiblnd_fmr_map_tx()) Can't map 32768 bytes 
+> (8/8)s: -22
+> [66494.575448] LNetError: 
+> 20017:0:(o2iblnd_cb.c:613:kiblnd_fmr_map_tx()) Skipped 11 previous 
+> similar messages
+> [66494.575452] LNetError: 20017:0:(o2iblnd_cb.c:1725:kiblnd_send()) 
+> Can't setup PUT src for 10.31.7.62 at o2ib: -22
+> [66494.575454] LNetError: 20017:0:(o2iblnd_cb.c:1725:kiblnd_send()) 
+> Skipped 11 previous similar messages
+> [66494.575458] LustreError: 
+> 20017:0:(events.c:477:server_bulk_callback()) event type 5, status -5, 
+> desc 00000000cdd4e797
+> [66494.575460] LustreError: 
+> 20017:0:(events.c:477:server_bulk_callback()) Skipped 11 previous 
+> similar messages
+> [66546.574314] LustreError: 20017:0:(ldlm_lib.c:3540:target_bulk_io()) 
+> @@@ network error on bulk WRITE? req at 0000000070b8f1ab 
+> x1740960836990720/t0(0) 
+> o1000->storage-MDT0001-mdtlov_UUID at 10.31.7.62@o2ib:522/0 lens 
+> 336/33016 e 0 to 0 dl 1660376137 ref 1 fl Interpret:/0/0 rc 0/0 job:''
+>
+> On io02 I see repeating errors mentioning a bad log:
+>
+> [66582.856444] LustreError: 
+> 14905:0:(llog_osd.c:264:llog_osd_read_header()) 
+> storage-MDT0000-osp-MDT0001: bad log? [0x200000401:0x1:0x0] header 
+> magic: 0x0 (expected 0x10645539)
+> [66582.856450] LustreError: 
+> 14905:0:(llog_osd.c:264:llog_osd_read_header()) Skipped 11 previous 
+> similar messages
+>
+> I can't make sense of these error messages. How can I recover?
+>
+> (I have the full dmesg/lctl dk log, but they are too big to attach, is 
+> it ok to upload them somewhere and put a link in a reply?)
+>
+> Thank you and best regards,
+> Stepan
+>
+>
+>
+> ------------------------------------------------------------------------------------------------
+> ------------------------------------------------------------------------------------------------
+> Forschungszentrum Juelich GmbH
+> 52425 Juelich
+> Sitz der Gesellschaft: Juelich
+> Eingetragen im Handelsregister des Amtsgerichts Dueren Nr. HR B 3498
+> Vorsitzender des Aufsichtsrats: MinDir Volker Rieke
+> Geschaeftsfuehrung: Prof. Dr.-Ing. Wolfgang Marquardt (Vorsitzender),
+> Karsten Beneke (stellv. Vorsitzender), Prof. Dr. Astrid Lambrecht,
+> Prof. Dr. Frauke Melchior
+> ------------------------------------------------------------------------------------------------
+> ------------------------------------------------------------------------------------------------
+>
+>
+> Neugierige sind herzlich willkommen am Sonntag, den 21. August 2022, 
+> von 10:00 bis 17:00 Uhr. Mehr unter: https://www.tagderneugier.de
+>
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20220816/b1b3b1f1/attachment.htm>
+
+From s.nassyr at fz-juelich.de  Sat Aug 13 01:00:29 2022
+From: s.nassyr at fz-juelich.de (Stepan Nassyr)
+Date: Sat, 13 Aug 2022 10:00:29 +0200
+Subject: [lustre-discuss] network error on bulk WRITE/bad log
+Message-ID: <e4a3173e-e51e-7756-ed41-d3ac655e5719@fz-juelich.de>
+
+Hi all,
+
+In May I had a failure on a small cluster and asked here (http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/2022-May/018073.html). Due to time constraints I just recreated the filesystem back then.
+
+Now the failure happened again, this time I have more time and can investigate and haven't done anything destructive yet.
+
+I use the following versions:
+
+  *   lustre 2.14.56
+  *   zfs 2.0.7 (previously used 2.1.2, but got told that 2.1.x is not tested well with lustre)
+  *   Nodes are running Rocky Linux 8.6
+  *   uname -r: 4.18.0-372.19.1.el8_6.aarch64
+
+There are 2 IO nodes (io01 and io02), both of them are MDS and OSS and one of them is MGS. Here are the devices:
+
+[snassyr at io02 ~]$ sudo lctl dl
+  0 UP osd-zfs storage-MDT0001-osd storage-MDT0001-osd_UUID 8
+  1 UP mgc MGC10.31.7.61 at o2ib a087e05e-d57c-4561-ad75-6827d4428f54 4
+  2 UP mds MDS MDS_uuid 2
+  3 UP lod storage-MDT0001-mdtlov storage-MDT0001-mdtlov_UUID 3
+  4 UP mdt storage-MDT0001 storage-MDT0001_UUID 8
+  5 UP mdd storage-MDD0001 storage-MDD0001_UUID 3
+  6 UP osp storage-MDT0000-osp-MDT0001 storage-MDT0001-mdtlov_UUID 4
+  7 UP osp storage-OST0000-osc-MDT0001 storage-MDT0001-mdtlov_UUID 4
+  8 UP osp storage-OST0001-osc-MDT0001 storage-MDT0001-mdtlov_UUID 4
+  9 UP lwp storage-MDT0000-lwp-MDT0001 storage-MDT0000-lwp-MDT0001_UUID 4
+ 10 UP osd-zfs storage-OST0001-osd storage-OST0001-osd_UUID 4
+ 11 UP ost OSS OSS_uuid 2
+ 12 UP obdfilter storage-OST0001 storage-OST0001_UUID 6
+ 13 UP lwp storage-MDT0000-lwp-OST0001 storage-MDT0000-lwp-OST0001_UUID 4
+ 14 UP lwp storage-MDT0001-lwp-OST0001 storage-MDT0001-lwp-OST0001_UUID 4
+
+[snassyr at io01 ~]$ sudo lctl dl
+  0 UP osd-zfs MGS-osd MGS-osd_UUID 4
+  1 UP mgs MGS MGS 6
+  2 UP mgc MGC10.31.7.61 at o2ib 9f351a51-0232-4306-a66d-cecee8629329 4
+  3 UP osd-zfs storage-MDT0000-osd storage-MDT0000-osd_UUID 9
+  4 UP mds MDS MDS_uuid 2
+  5 UP lod storage-MDT0000-mdtlov storage-MDT0000-mdtlov_UUID 3
+  6 UP mdt storage-MDT0000 storage-MDT0000_UUID 12
+  7 UP mdd storage-MDD0000 storage-MDD0000_UUID 3
+  8 UP qmt storage-QMT0000 storage-QMT0000_UUID 3
+  9 UP osp storage-MDT0001-osp-MDT0000 storage-MDT0000-mdtlov_UUID 4
+ 10 UP osp storage-OST0000-osc-MDT0000 storage-MDT0000-mdtlov_UUID 4
+ 11 UP osp storage-OST0001-osc-MDT0000 storage-MDT0000-mdtlov_UUID 4
+ 12 UP lwp storage-MDT0000-lwp-MDT0000 storage-MDT0000-lwp-MDT0000_UUID 4
+ 13 UP osd-zfs storage-OST0000-osd storage-OST0000-osd_UUID 4
+ 14 UP ost OSS OSS_uuid 2
+ 15 UP obdfilter storage-OST0000 storage-OST0000_UUID 6
+ 16 UP lwp storage-MDT0000-lwp-OST0000 storage-MDT0000-lwp-OST0000_UUID 4
+ 17 UP lwp storage-MDT0001-lwp-OST0000 storage-MDT0001-lwp-OST0000_UUID 4
+
+On io01 I see repeating errors mentioning a network error:
+
+[65922.582578] LustreError: 20017:0:(ldlm_lib.c:3540:target_bulk_io()) Skipped 11 previous similar messages
+[66494.575431] LNetError: 20017:0:(o2iblnd.c:1880:kiblnd_fmr_pool_map()) Failed to map mr 1/8 elements
+[66494.575442] LNetError: 20017:0:(o2iblnd.c:1880:kiblnd_fmr_pool_map()) Skipped 11 previous similar messages
+[66494.575446] LNetError: 20017:0:(o2iblnd_cb.c:613:kiblnd_fmr_map_tx()) Can't map 32768 bytes (8/8)s: -22
+[66494.575448] LNetError: 20017:0:(o2iblnd_cb.c:613:kiblnd_fmr_map_tx()) Skipped 11 previous similar messages
+[66494.575452] LNetError: 20017:0:(o2iblnd_cb.c:1725:kiblnd_send()) Can't setup PUT src for 10.31.7.62 at o2ib: -22
+[66494.575454] LNetError: 20017:0:(o2iblnd_cb.c:1725:kiblnd_send()) Skipped 11 previous similar messages
+[66494.575458] LustreError: 20017:0:(events.c:477:server_bulk_callback()) event type 5, status -5, desc 00000000cdd4e797
+[66494.575460] LustreError: 20017:0:(events.c:477:server_bulk_callback()) Skipped 11 previous similar messages
+[66546.574314] LustreError: 20017:0:(ldlm_lib.c:3540:target_bulk_io()) @@@ network error on bulk WRITE  req at 0000000070b8f1ab x1740960836990720/t0(0) o1000->storage-MDT0001-mdtlov_UUID at 10.31.7.62@o2ib:522/0<mailto:storage-MDT0001-mdtlov_UUID at 10.31.7.62@o2ib:522/0> lens 336/33016 e 0 to 0 dl 1660376137 ref 1 fl Interpret:/0/0 rc 0/0 job:''
+
+On io02 I see repeating errors mentioning a bad log:
+
+[66582.856444] LustreError: 14905:0:(llog_osd.c:264:llog_osd_read_header()) storage-MDT0000-osp-MDT0001: bad log  [0x200000401:0x1:0x0] header magic: 0x0 (expected 0x10645539)
+[66582.856450] LustreError: 14905:0:(llog_osd.c:264:llog_osd_read_header()) Skipped 11 previous similar messages
+
+I can't make sense of these error messages. How can I recover? I'm attaching the full dmesg/lctl dk logs for the nodes.
+
+Thank you and best regards,
+Stepan
+
+
+
+------------------------------------------------------------------------------------------------
+------------------------------------------------------------------------------------------------
+Forschungszentrum Juelich GmbH
+52425 Juelich
+Sitz der Gesellschaft: Juelich
+Eingetragen im Handelsregister des Amtsgerichts Dueren Nr. HR B 3498
+Vorsitzender des Aufsichtsrats: MinDir Volker Rieke
+Geschaeftsfuehrung: Prof. Dr.-Ing. Wolfgang Marquardt (Vorsitzender),
+Karsten Beneke (stellv. Vorsitzender), Prof. Dr. Astrid Lambrecht,
+Prof. Dr. Frauke Melchior
+------------------------------------------------------------------------------------------------
+------------------------------------------------------------------------------------------------
+
+
+Neugierige sind herzlich willkommen am Sonntag, den 21. August 2022, von 10:00 bis 17:00 Uhr. Mehr unter: https://www.tagderneugier.de
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20220813/a9bcaf78/attachment-0001.htm>
+-------------- next part --------------
+A non-text attachment was scrubbed...
+Name: io02-dmesg.log
+Type: text/x-log
+Size: 187082 bytes
+Desc: not available
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20220813/a9bcaf78/attachment-0004.bin>
+-------------- next part --------------
+A non-text attachment was scrubbed...
+Name: io02-dk.log
+Type: text/x-log
+Size: 2505241 bytes
+Desc: not available
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20220813/a9bcaf78/attachment-0005.bin>
+-------------- next part --------------
+A non-text attachment was scrubbed...
+Name: io01-dmesg.log
+Type: text/x-log
+Size: 261227 bytes
+Desc: not available
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20220813/a9bcaf78/attachment-0006.bin>
+-------------- next part --------------
+A non-text attachment was scrubbed...
+Name: io01-dk.log
+Type: text/x-log
+Size: 1946900 bytes
+Desc: not available
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20220813/a9bcaf78/attachment-0007.bin>
+
+From javaclinic at gmail.com  Wed Aug 17 03:26:41 2022
+From: javaclinic at gmail.com (Zeeshan Ali Shah)
+Date: Wed, 17 Aug 2022 13:26:41 +0300
+Subject: [lustre-discuss] Old IP of OSS still appearing in client
+Message-ID: <CAJSm=nvpu-cGQbqY7e2atTeRY4ZyMYQJfKx7P06YCMW46A4ROg@mail.gmail.com>
+
+Dear All , i am getting strange issue the old OSS is decommissioned and all
+of its OST moved to new OSS to new IP . suddenly in client side we are
+getting following error ..
+
+below 172.100.7.18 is OLD dead OSS .
+
+126704:0:(o2iblnd_cb.c:2923:kiblnd_rejected()) 172.100.7.18 at o2ib rejected:
+consumer defined fatal error
+
+Is there a way to clear OLD OSS IP from OSTs or from MDS ?
+
+Br
+
+Zee
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20220817/8e8231f2/attachment.htm>
+
+From cfaber at gmail.com  Wed Aug 17 07:25:47 2022
+From: cfaber at gmail.com (Colin Faber)
+Date: Wed, 17 Aug 2022 08:25:47 -0600
+Subject: [lustre-discuss] Old IP of OSS still appearing in client
+In-Reply-To: <CAJSm=nvpu-cGQbqY7e2atTeRY4ZyMYQJfKx7P06YCMW46A4ROg@mail.gmail.com>
+References: <CAJSm=nvpu-cGQbqY7e2atTeRY4ZyMYQJfKx7P06YCMW46A4ROg@mail.gmail.com>
+Message-ID: <CAJcXmB=1MY=7x8AcWb4wjbD+QK+7GeN2WCQXQEdwZAER_LBJbQ@mail.gmail.com>
+
+See: https://manpages.org/tunefslustre/8
+
+On Wed, Aug 17, 2022 at 4:27 AM Zeeshan Ali Shah via lustre-discuss <
+lustre-discuss at lists.lustre.org> wrote:
+
+> Dear All , i am getting strange issue the old OSS is decommissioned and
+> all of its OST moved to new OSS to new IP . suddenly in client side we are
+> getting following error ..
+>
+> below 172.100.7.18 is OLD dead OSS .
+>
+> 126704:0:(o2iblnd_cb.c:2923:kiblnd_rejected()) 172.100.7.18 at o2ib
+> rejected: consumer defined fatal error
+>
+> Is there a way to clear OLD OSS IP from OSTs or from MDS ?
+>
+> Br
+>
+> Zee
+> _______________________________________________
+> lustre-discuss mailing list
+> lustre-discuss at lists.lustre.org
+> http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org
+>
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20220817/8e96c648/attachment.htm>
+
+From chris.horn at hpe.com  Wed Aug 17 07:28:11 2022
+From: chris.horn at hpe.com (Horn, Chris)
+Date: Wed, 17 Aug 2022 14:28:11 +0000
+Subject: [lustre-discuss] network error on bulk WRITE/bad log
+In-Reply-To: <7c838e70-1d88-31ca-fef8-ccd91bcb0bd2@fz-juelich.de>
+References: <6be3ebb7-7eb3-13a4-f789-8112dde65b33@fz-juelich.de>
+ <3285C33F-8905-4244-9C69-79384C8A4B36@ddn.com>
+ <7c838e70-1d88-31ca-fef8-ccd91bcb0bd2@fz-juelich.de>
+Message-ID: <MW4PR84MB14441E2E56F58B7F948607DF9E6A9@MW4PR84MB1444.NAMPRD84.PROD.OUTLOOK.COM>
+
+[66494.575431] LNetError: 20017:0:(o2iblnd.c:1880:kiblnd_fmr_pool_map()) Failed to map mr 1/8 elements
+[66494.575446] LNetError: 20017:0:(o2iblnd_cb.c:613:kiblnd_fmr_map_tx()) Can't map 32768 bytes (8/8)s: -22
+These errors originate from a call to ib_map_mr_sg() which is part of the kernel verbs API.
+
+                                n = ib_map_mr_sg(mr, tx->tx_frags,
+                                                 rd->rd_nfrags, NULL, PAGE_SIZE);
+
+                                if (unlikely(n != rd->rd_nfrags)) {
+                                        CERROR("Failed to map mr %d/%d elements\n",
+                                               n, rd->rd_nfrags);
+                                        return n < 0 ? n : -EINVAL;
+                                }
+
+Your errors mean that we wanted to map 8 fragments to the memory region, but we were only able to map one of them.
+
+As a first step, I would recommend ensuring that you have the latest firmware for your network cards, and if you?re using an external driver distribution (like mlnx-ofa_kernel) then upgrade to the latest version. There could be some bug in the o2iblnd driver code but it is best to first rule out any issue with firmware/drivers.
+
+Chris Horn
+
+From: lustre-discuss <lustre-discuss-bounces at lists.lustre.org> on behalf of Stepan Nassyr via lustre-discuss <lustre-discuss at lists.lustre.org>
+Date: Tuesday, August 16, 2022 at 8:26 AM
+To: Peter Jones <pjones at whamcloud.com>, lustre-discuss at lists.lustre.org <lustre-discuss at lists.lustre.org>
+Subject: Re: [lustre-discuss] network error on bulk WRITE/bad log
+
+Hello Peter,
+
+Thank you for the reply. I have upgraded lustre to 2.15.1 . The errors persist, however - now I am also seeing a new error on io02:
+
+[ 1749.396942] LustreError: 9216:0:(mdt_handler.c:7499:mdt_iocontrol()) storage-MDT0001: Not supported cmd = 1074292357, rc = -95
+
+I'm not entirely sure how to look up the cmd code and rc -95 seems to just be EOPNOTSUPP, so no additional information here.
+
+Is there a way to look up what the cmd value means?
+On 15.08.22 14:50, Peter Jones wrote:
+Stepan
+
+2.14.56 is not a version of Lustre ? it is an interim dev build. Even if it does not resolve this specific issue, I would strongly recommend switching to the recently released Lustre 2.15.1 release
+
+Peter
+
+From: lustre-discuss <lustre-discuss-bounces at lists.lustre.org><mailto:lustre-discuss-bounces at lists.lustre.org> on behalf of Stepan Nassyr via lustre-discuss <lustre-discuss at lists.lustre.org><mailto:lustre-discuss at lists.lustre.org>
+Reply-To: Stepan Nassyr <s.nassyr at fz-juelich.de><mailto:s.nassyr at fz-juelich.de>
+Date: Monday, August 15, 2022 at 1:35 AM
+To: "lustre-discuss at lists.lustre.org"<mailto:lustre-discuss at lists.lustre.org> <lustre-discuss at lists.lustre.org><mailto:lustre-discuss at lists.lustre.org>
+Subject: [lustre-discuss] network error on bulk WRITE/bad log
+
+
+Hi all,
+
+In May I had a failure on a small cluster and asked here (http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/2022-May/018073.html<http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/2022-May/018073.html>). Due to time constraints I just recreated the filesystem back then.
+
+Now the failure happened again, this time I have more time and can investigate and haven't done anything destructive yet.
+
+I use the following versions:
+
+  1.  lustre 2.14.56
+  2.  zfs 2.0.7 (previously used 2.1.2, but got told that 2.1.x is not tested well with lustre)
+  3.  Nodes are running Rocky Linux 8.6
+  4.  uname -r: 4.18.0-372.19.1.el8_6.aarch64
+
+There are 2 IO nodes (io01 and io02), both of them are MDS and OSS and one of them is MGS. Here are the devices:
+
+[snassyr at io02 ~]$ sudo lctl dl
+  0 UP osd-zfs storage-MDT0001-osd storage-MDT0001-osd_UUID 8
+  1 UP mgc MGC10.31.7.61 at o2ib a087e05e-d57c-4561-ad75-6827d4428f54 4
+  2 UP mds MDS MDS_uuid 2
+  3 UP lod storage-MDT0001-mdtlov storage-MDT0001-mdtlov_UUID 3
+  4 UP mdt storage-MDT0001 storage-MDT0001_UUID 8
+  5 UP mdd storage-MDD0001 storage-MDD0001_UUID 3
+  6 UP osp storage-MDT0000-osp-MDT0001 storage-MDT0001-mdtlov_UUID 4
+  7 UP osp storage-OST0000-osc-MDT0001 storage-MDT0001-mdtlov_UUID 4
+  8 UP osp storage-OST0001-osc-MDT0001 storage-MDT0001-mdtlov_UUID 4
+  9 UP lwp storage-MDT0000-lwp-MDT0001 storage-MDT0000-lwp-MDT0001_UUID 4
+ 10 UP osd-zfs storage-OST0001-osd storage-OST0001-osd_UUID 4
+ 11 UP ost OSS OSS_uuid 2
+ 12 UP obdfilter storage-OST0001 storage-OST0001_UUID 6
+ 13 UP lwp storage-MDT0000-lwp-OST0001 storage-MDT0000-lwp-OST0001_UUID 4
+ 14 UP lwp storage-MDT0001-lwp-OST0001 storage-MDT0001-lwp-OST0001_UUID 4
+
+[snassyr at io01 ~]$ sudo lctl dl
+  0 UP osd-zfs MGS-osd MGS-osd_UUID 4
+  1 UP mgs MGS MGS 6
+  2 UP mgc MGC10.31.7.61 at o2ib 9f351a51-0232-4306-a66d-cecee8629329 4
+  3 UP osd-zfs storage-MDT0000-osd storage-MDT0000-osd_UUID 9
+  4 UP mds MDS MDS_uuid 2
+  5 UP lod storage-MDT0000-mdtlov storage-MDT0000-mdtlov_UUID 3
+  6 UP mdt storage-MDT0000 storage-MDT0000_UUID 12
+  7 UP mdd storage-MDD0000 storage-MDD0000_UUID 3
+  8 UP qmt storage-QMT0000 storage-QMT0000_UUID 3
+  9 UP osp storage-MDT0001-osp-MDT0000 storage-MDT0000-mdtlov_UUID 4
+ 10 UP osp storage-OST0000-osc-MDT0000 storage-MDT0000-mdtlov_UUID 4
+ 11 UP osp storage-OST0001-osc-MDT0000 storage-MDT0000-mdtlov_UUID 4
+ 12 UP lwp storage-MDT0000-lwp-MDT0000 storage-MDT0000-lwp-MDT0000_UUID 4
+ 13 UP osd-zfs storage-OST0000-osd storage-OST0000-osd_UUID 4
+ 14 UP ost OSS OSS_uuid 2
+ 15 UP obdfilter storage-OST0000 storage-OST0000_UUID 6
+ 16 UP lwp storage-MDT0000-lwp-OST0000 storage-MDT0000-lwp-OST0000_UUID 4
+ 17 UP lwp storage-MDT0001-lwp-OST0000 storage-MDT0001-lwp-OST0000_UUID 4
+
+On io01 I see repeating errors mentioning a network error:
+
+[65922.582578] LustreError: 20017:0:(ldlm_lib.c:3540:target_bulk_io()) Skipped 11 previous similar messages
+[66494.575431] LNetError: 20017:0:(o2iblnd.c:1880:kiblnd_fmr_pool_map()) Failed to map mr 1/8 elements
+[66494.575442] LNetError: 20017:0:(o2iblnd.c:1880:kiblnd_fmr_pool_map()) Skipped 11 previous similar messages
+[66494.575446] LNetError: 20017:0:(o2iblnd_cb.c:613:kiblnd_fmr_map_tx()) Can't map 32768 bytes (8/8)s: -22
+[66494.575448] LNetError: 20017:0:(o2iblnd_cb.c:613:kiblnd_fmr_map_tx()) Skipped 11 previous similar messages
+[66494.575452] LNetError: 20017:0:(o2iblnd_cb.c:1725:kiblnd_send()) Can't setup PUT src for 10.31.7.62 at o2ib: -22
+[66494.575454] LNetError: 20017:0:(o2iblnd_cb.c:1725:kiblnd_send()) Skipped 11 previous similar messages
+[66494.575458] LustreError: 20017:0:(events.c:477:server_bulk_callback()) event type 5, status -5, desc 00000000cdd4e797
+[66494.575460] LustreError: 20017:0:(events.c:477:server_bulk_callback()) Skipped 11 previous similar messages
+[66546.574314] LustreError: 20017:0:(ldlm_lib.c:3540:target_bulk_io()) @@@ network error on bulk WRITE  req at 0000000070b8f1ab x1740960836990720/t0(0) o1000->storage-MDT0001-mdtlov_UUID at 10.31.7.62@o2ib:522/0<mailto:storage-MDT0001-mdtlov_UUID at 10.31.7.62@o2ib:522/0> lens 336/33016 e 0 to 0 dl 1660376137 ref 1 fl Interpret:/0/0 rc 0/0 job:''
+
+On io02 I see repeating errors mentioning a bad log:
+
+[66582.856444] LustreError: 14905:0:(llog_osd.c:264:llog_osd_read_header()) storage-MDT0000-osp-MDT0001: bad log  [0x200000401:0x1:0x0] header magic: 0x0 (expected 0x10645539)
+[66582.856450] LustreError: 14905:0:(llog_osd.c:264:llog_osd_read_header()) Skipped 11 previous similar messages
+
+I can't make sense of these error messages. How can I recover?
+
+(I have the full dmesg/lctl dk log, but they are too big to attach, is it ok to upload them somewhere and put a link in a reply?)
+
+Thank you and best regards,
+Stepan
+
+
+
+
+------------------------------------------------------------------------------------------------
+------------------------------------------------------------------------------------------------
+Forschungszentrum Juelich GmbH
+52425 Juelich
+Sitz der Gesellschaft: Juelich
+Eingetragen im Handelsregister des Amtsgerichts Dueren Nr. HR B 3498
+Vorsitzender des Aufsichtsrats: MinDir Volker Rieke
+Geschaeftsfuehrung: Prof. Dr.-Ing. Wolfgang Marquardt (Vorsitzender),
+Karsten Beneke (stellv. Vorsitzender), Prof. Dr. Astrid Lambrecht,
+Prof. Dr. Frauke Melchior
+------------------------------------------------------------------------------------------------
+------------------------------------------------------------------------------------------------
+
+
+Neugierige sind herzlich willkommen am Sonntag, den 21. August 2022, von 10:00 bis 17:00 Uhr. Mehr unter: https://www.tagderneugier.de<https://www.tagderneugier.de>
+
+
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20220817/47cca88d/attachment-0001.htm>
+
+From javaclinic at gmail.com  Thu Aug 18 00:54:55 2022
+From: javaclinic at gmail.com (Zeeshan Ali Shah)
+Date: Thu, 18 Aug 2022 10:54:55 +0300
+Subject: [lustre-discuss] Old IP of OSS still appearing in client
+In-Reply-To: <CAJcXmB=1MY=7x8AcWb4wjbD+QK+7GeN2WCQXQEdwZAER_LBJbQ@mail.gmail.com>
+References: <CAJSm=nvpu-cGQbqY7e2atTeRY4ZyMYQJfKx7P06YCMW46A4ROg@mail.gmail.com>
+ <CAJcXmB=1MY=7x8AcWb4wjbD+QK+7GeN2WCQXQEdwZAER_LBJbQ@mail.gmail.com>
+Message-ID: <CAJSm=ntD3GcwnQE13RZQRmYP_ysYjwQb8mX+exbZFkTfHecFFg@mail.gmail.com>
+
+Thanks Colin , but how to get the current param of OSS or OST ? i wan to
+know which failovernode ip or servicenode IP used .
+
+On Wed, Aug 17, 2022 at 5:26 PM Colin Faber <cfaber at gmail.com> wrote:
+
+> See: https://manpages.org/tunefslustre/8
+>
+> On Wed, Aug 17, 2022 at 4:27 AM Zeeshan Ali Shah via lustre-discuss <
+> lustre-discuss at lists.lustre.org> wrote:
+>
+>> Dear All , i am getting strange issue the old OSS is decommissioned and
+>> all of its OST moved to new OSS to new IP . suddenly in client side we are
+>> getting following error ..
+>>
+>> below 172.100.7.18 is OLD dead OSS .
+>>
+>> 126704:0:(o2iblnd_cb.c:2923:kiblnd_rejected()) 172.100.7.18 at o2ib
+>> rejected: consumer defined fatal error
+>>
+>> Is there a way to clear OLD OSS IP from OSTs or from MDS ?
+>>
+>> Br
+>>
+>> Zee
+>> _______________________________________________
+>> lustre-discuss mailing list
+>> lustre-discuss at lists.lustre.org
+>> http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org
+>>
+>
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20220818/d80ebafc/attachment.htm>
+
+From s.nassyr at fz-juelich.de  Thu Aug 18 02:46:11 2022
+From: s.nassyr at fz-juelich.de (Stepan Nassyr)
+Date: Thu, 18 Aug 2022 11:46:11 +0200
+Subject: [lustre-discuss] network error on bulk WRITE/bad log
+In-Reply-To: <MW4PR84MB14441E2E56F58B7F948607DF9E6A9@MW4PR84MB1444.NAMPRD84.PROD.OUTLOOK.COM>
+References: <6be3ebb7-7eb3-13a4-f789-8112dde65b33@fz-juelich.de>
+ <3285C33F-8905-4244-9C69-79384C8A4B36@ddn.com>
+ <7c838e70-1d88-31ca-fef8-ccd91bcb0bd2@fz-juelich.de>
+ <MW4PR84MB14441E2E56F58B7F948607DF9E6A9@MW4PR84MB1444.NAMPRD84.PROD.OUTLOOK.COM>
+Message-ID: <d925ed4f-3d3e-887b-7f56-aa336e176fa0@fz-juelich.de>
+
+Hello Chris,
+
+Thank you for the insight. I have in fact already updated the firmware 
+on the Infiniband adapters. The cards are ConnectX-5 VPI MCX555A-ECAT 
+and the firmware version:
+
+[snassyr at io01 ~]$ sudo mstflint -d 81:00.0 q
+Image type:??????????? FS4
+FW Version:??????????? 16.34.1002
+FW Release Date:?????? 26.7.2022
+Product Version:?????? 16.34.1002
+Rom Info:????????????? type=UEFI version=14.27.14 cpu=AMD64
+ ?????????????????????? type=PXE version=3.6.700 cpu=AMD64
+Description:?????????? UID??????????????? GuidsNumber
+Base GUID:???????????? 0c42a1030054820a??????? 4
+Base MAC:????????????? 0c42a154820a??????????? 4
+Image VSD:???????????? N/A
+Device VSD:??????????? N/A
+PSID:????????????????? MT_0000000010
+Security Attributes:?? N/A
+
+Which is the latest firmware release from NVIDIA/Mellanox, dated 2022-08-02.
+
+I am not using an external driver distribution and the system packages 
+are up-to-date.
+
+Best regards,
+Stepan
+
+On 17.08.22 16:28, Horn, Chris wrote:
+>
+> [66494.575431] LNetError: 
+> 20017:0:(o2iblnd.c:1880:kiblnd_fmr_pool_map()) Failed to map mr 1/8 
+> elements
+> [66494.575446] LNetError: 
+> 20017:0:(o2iblnd_cb.c:613:kiblnd_fmr_map_tx()) Can't map 32768 bytes 
+> (8/8)s: -22
+>
+> These errors originate from a call to ib_map_mr_sg() which is part of 
+> the kernel verbs API.
+>
+> ??????????????????????????????? n = ib_map_mr_sg(mr, tx->tx_frags,
+>
+> rd->rd_nfrags, NULL, PAGE_SIZE);
+>
+> ??????????????????????????????? if (unlikely(n != rd->rd_nfrags)) {
+>
+> ????????????????????????????????CERROR("Failed to map mr %d/%d 
+> elements\n",
+>
+> n, rd->rd_nfrags);
+>
+> return n < 0 ? n : -EINVAL;
+>
+> ??????????????????????????????? }
+>
+> Your errors mean that we wanted to map 8 fragments to the memory 
+> region, but we were only able to map one of them.
+>
+> As a first step, I would recommend ensuring that you have the latest 
+> firmware for your network cards, and if you?re using an external 
+> driver distribution (like mlnx-ofa_kernel) then upgrade to the latest 
+> version. There could be some bug in the o2iblnd driver code but it is 
+> best to first rule out any issue with firmware/drivers.
+>
+> Chris Horn
+>
+> *From: *lustre-discuss <lustre-discuss-bounces at lists.lustre.org> on 
+> behalf of Stepan Nassyr via lustre-discuss 
+> <lustre-discuss at lists.lustre.org>
+> *Date: *Tuesday, August 16, 2022 at 8:26 AM
+> *To: *Peter Jones <pjones at whamcloud.com>, 
+> lustre-discuss at lists.lustre.org <lustre-discuss at lists.lustre.org>
+> *Subject: *Re: [lustre-discuss] network error on bulk WRITE/bad log
+>
+> Hello Peter,
+>
+> Thank you for the reply. I have upgraded lustre to 2.15.1 . The errors 
+> persist, however - now I am also seeing a new error on io02:
+>
+> [ 1749.396942] LustreError: 
+> 9216:0:(mdt_handler.c:7499:mdt_iocontrol()) storage-MDT0001: Not 
+> supported cmd = 1074292357, rc = -95
+>
+> I'm not entirely sure how to look up the cmd code and rc -95 seems to 
+> just be EOPNOTSUPP, so no additional information here.
+>
+> Is there a way to look up what the cmd value means?
+>
+> On 15.08.22 14:50, Peter Jones wrote:
+>
+>     Stepan
+>
+>     2.14.56 is not a version of Lustre ? it is an interim dev build.
+>     Even if it does not resolve this specific issue, I would strongly
+>     recommend switching to the recently released Lustre 2.15.1 release
+>
+>     Peter
+>
+>     *From: *lustre-discuss <lustre-discuss-bounces at lists.lustre.org>
+>     <mailto:lustre-discuss-bounces at lists.lustre.org> on behalf of
+>     Stepan Nassyr via lustre-discuss <lustre-discuss at lists.lustre.org>
+>     <mailto:lustre-discuss at lists.lustre.org>
+>     *Reply-To: *Stepan Nassyr <s.nassyr at fz-juelich.de>
+>     <mailto:s.nassyr at fz-juelich.de>
+>     *Date: *Monday, August 15, 2022 at 1:35 AM
+>     *To: *"lustre-discuss at lists.lustre.org"
+>     <mailto:lustre-discuss at lists.lustre.org>
+>     <lustre-discuss at lists.lustre.org>
+>     <mailto:lustre-discuss at lists.lustre.org>
+>     *Subject: *[lustre-discuss] network error on bulk WRITE/bad log
+>
+>     Hi all,
+>
+>     In May I had a failure on a small cluster and asked here
+>     (http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/2022-May/018073.html).
+>     Due to time constraints I just recreated the filesystem back then.
+>
+>     Now the failure happened again, this time I have more time and can
+>     investigate and haven't done anything destructive yet.
+>
+>     I use the following versions:
+>
+>      1. lustre 2.14.56
+>      2. zfs 2.0.7 (previously used 2.1.2, but got told that 2.1.x is
+>         not tested well with lustre)
+>      3. Nodes are running Rocky Linux 8.6
+>      4. uname -r: 4.18.0-372.19.1.el8_6.aarch64
+>
+>     There are 2 IO nodes (io01 and io02), both of them are MDS and OSS
+>     and one of them is MGS. Here are the devices:
+>
+>     [snassyr at io02 ~]$ sudo lctl dl
+>     ? 0 UP osd-zfs storage-MDT0001-osd storage-MDT0001-osd_UUID 8
+>     ? 1 UP mgc MGC10.31.7.61 at o2ib a087e05e-d57c-4561-ad75-6827d4428f54 4
+>     ? 2 UP mds MDS MDS_uuid 2
+>     ? 3 UP lod storage-MDT0001-mdtlov storage-MDT0001-mdtlov_UUID 3
+>     ? 4 UP mdt storage-MDT0001 storage-MDT0001_UUID 8
+>     ? 5 UP mdd storage-MDD0001 storage-MDD0001_UUID 3
+>     ? 6 UP osp storage-MDT0000-osp-MDT0001 storage-MDT0001-mdtlov_UUID 4
+>     ? 7 UP osp storage-OST0000-osc-MDT0001 storage-MDT0001-mdtlov_UUID 4
+>     ? 8 UP osp storage-OST0001-osc-MDT0001 storage-MDT0001-mdtlov_UUID 4
+>     ? 9 UP lwp storage-MDT0000-lwp-MDT0001
+>     storage-MDT0000-lwp-MDT0001_UUID 4
+>     ?10 UP osd-zfs storage-OST0001-osd storage-OST0001-osd_UUID 4
+>     ?11 UP ost OSS OSS_uuid 2
+>     ?12 UP obdfilter storage-OST0001 storage-OST0001_UUID 6
+>     ?13 UP lwp storage-MDT0000-lwp-OST0001
+>     storage-MDT0000-lwp-OST0001_UUID 4
+>     ?14 UP lwp storage-MDT0001-lwp-OST0001
+>     storage-MDT0001-lwp-OST0001_UUID 4
+>
+>     [snassyr at io01 ~]$ sudo lctl dl
+>     ? 0 UP osd-zfs MGS-osd MGS-osd_UUID 4
+>     ? 1 UP mgs MGS MGS 6
+>     ? 2 UP mgc MGC10.31.7.61 at o2ib 9f351a51-0232-4306-a66d-cecee8629329 4
+>     ? 3 UP osd-zfs storage-MDT0000-osd storage-MDT0000-osd_UUID 9
+>     ? 4 UP mds MDS MDS_uuid 2
+>     ? 5 UP lod storage-MDT0000-mdtlov storage-MDT0000-mdtlov_UUID 3
+>     ? 6 UP mdt storage-MDT0000 storage-MDT0000_UUID 12
+>     ? 7 UP mdd storage-MDD0000 storage-MDD0000_UUID 3
+>     ? 8 UP qmt storage-QMT0000 storage-QMT0000_UUID 3
+>     ? 9 UP osp storage-MDT0001-osp-MDT0000 storage-MDT0000-mdtlov_UUID 4
+>     ?10 UP osp storage-OST0000-osc-MDT0000 storage-MDT0000-mdtlov_UUID 4
+>     ?11 UP osp storage-OST0001-osc-MDT0000 storage-MDT0000-mdtlov_UUID 4
+>     ?12 UP lwp storage-MDT0000-lwp-MDT0000
+>     storage-MDT0000-lwp-MDT0000_UUID 4
+>     ?13 UP osd-zfs storage-OST0000-osd storage-OST0000-osd_UUID 4
+>     ?14 UP ost OSS OSS_uuid 2
+>     ?15 UP obdfilter storage-OST0000 storage-OST0000_UUID 6
+>     ?16 UP lwp storage-MDT0000-lwp-OST0000
+>     storage-MDT0000-lwp-OST0000_UUID 4
+>     ?17 UP lwp storage-MDT0001-lwp-OST0000
+>     storage-MDT0001-lwp-OST0000_UUID 4
+>
+>     On io01 I see repeating errors mentioning a network error:
+>
+>     [65922.582578] LustreError:
+>     20017:0:(ldlm_lib.c:3540:target_bulk_io()) Skipped 11 previous
+>     similar messages
+>     [66494.575431] LNetError:
+>     20017:0:(o2iblnd.c:1880:kiblnd_fmr_pool_map()) Failed to map mr
+>     1/8 elements
+>     [66494.575442] LNetError:
+>     20017:0:(o2iblnd.c:1880:kiblnd_fmr_pool_map()) Skipped 11 previous
+>     similar messages
+>     [66494.575446] LNetError:
+>     20017:0:(o2iblnd_cb.c:613:kiblnd_fmr_map_tx()) Can't map 32768
+>     bytes (8/8)s: -22
+>     [66494.575448] LNetError:
+>     20017:0:(o2iblnd_cb.c:613:kiblnd_fmr_map_tx()) Skipped 11 previous
+>     similar messages
+>     [66494.575452] LNetError:
+>     20017:0:(o2iblnd_cb.c:1725:kiblnd_send()) Can't setup PUT src for
+>     10.31.7.62 at o2ib: -22
+>     [66494.575454] LNetError:
+>     20017:0:(o2iblnd_cb.c:1725:kiblnd_send()) Skipped 11 previous
+>     similar messages
+>     [66494.575458] LustreError:
+>     20017:0:(events.c:477:server_bulk_callback()) event type 5, status
+>     -5, desc 00000000cdd4e797
+>     [66494.575460] LustreError:
+>     20017:0:(events.c:477:server_bulk_callback()) Skipped 11 previous
+>     similar messages
+>     [66546.574314] LustreError:
+>     20017:0:(ldlm_lib.c:3540:target_bulk_io()) @@@ network error on
+>     bulk WRITE? req at 0000000070b8f1ab x1740960836990720/t0(0)
+>     o1000->storage-MDT0001-mdtlov_UUID at 10.31.7.62@o2ib:522/0 lens
+>     336/33016 e 0 to 0 dl 1660376137 ref 1 fl Interpret:/0/0 rc 0/0 job:''
+>
+>     On io02 I see repeating errors mentioning a bad log:
+>
+>     [66582.856444] LustreError:
+>     14905:0:(llog_osd.c:264:llog_osd_read_header())
+>     storage-MDT0000-osp-MDT0001: bad log [0x200000401:0x1:0x0] header
+>     magic: 0x0 (expected 0x10645539)
+>     [66582.856450] LustreError:
+>     14905:0:(llog_osd.c:264:llog_osd_read_header()) Skipped 11
+>     previous similar messages
+>
+>     I can't make sense of these error messages. How can I recover?
+>
+>     (I have the full dmesg/lctl dk log, but they are too big to
+>     attach, is it ok to upload them somewhere and put a link in a reply?)
+>
+>     Thank you and best regards,
+>     Stepan
+>
+>
+>
+>     ------------------------------------------------------------------------------------------------
+>     ------------------------------------------------------------------------------------------------
+>     Forschungszentrum Juelich GmbH
+>     52425 Juelich
+>     Sitz der Gesellschaft: Juelich
+>     Eingetragen im Handelsregister des Amtsgerichts Dueren Nr. HR B 3498
+>     Vorsitzender des Aufsichtsrats: MinDir Volker Rieke
+>     Geschaeftsfuehrung: Prof. Dr.-Ing. Wolfgang Marquardt (Vorsitzender),
+>     Karsten Beneke (stellv. Vorsitzender), Prof. Dr. Astrid Lambrecht,
+>     Prof. Dr. Frauke Melchior
+>     ------------------------------------------------------------------------------------------------
+>     ------------------------------------------------------------------------------------------------
+>
+>
+>     Neugierige sind herzlich willkommen am Sonntag, den 21. August
+>     2022, von 10:00 bis 17:00 Uhr. Mehr unter:
+>     https://www.tagderneugier.de
+>
+>
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20220818/5b148ba1/attachment-0001.htm>
+
+From bauerj at iodoctors.com  Thu Aug 18 05:27:03 2022
+From: bauerj at iodoctors.com (John Bauer)
+Date: Thu, 18 Aug 2022 07:27:03 -0500
+Subject: [lustre-discuss] fiemap
+Message-ID: <8b0e759a-d348-82a3-9655-65dccacb474e@iodoctors.com>
+
+Hi all,
+
+I am trying to get my llfie program (which uses fiemap) going again, but 
+now the struct fiemap_extent structures I get back from the ioctl call, 
+all have fe_device=0.? The output from lfs getstripe indicates that the 
+devices are not all 0.? The sum of the fe_length members adds up to the 
+file size, so that is working.? The fe_physical members look reasonable 
+also.? Has something changed?? This used to work.
+
+Thanks, John
+
+pfe27.jbauer2 300> llfie /nobackupp17/jbauer2/dd.dat
+LustreStripeInfo_get() lum->lmm_magic=0xbd30bd0
+listExtents() fe_physical=30643484360704 fe_device=0 fe_length=16777216
+listExtents() fe_physical=30646084829184 fe_device=0 fe_length=2097152
+listExtents() fe_physical=5705226518528 fe_device=0 fe_length=16777216
+listExtents() fe_physical=5710209351680 fe_device=0 fe_length=2097152
+listExtents() fe_physical=30621271326720 fe_device=0 fe_length=16777216
+listExtents() fe_physical=31761568366592 fe_device=0 fe_length=16777216
+listExtents() fe_physical=24757567225856 fe_device=0 fe_length=16777216
+listExtents() fe_physical=14196460748800 fe_device=0 fe_length=16777216
+listExtents() nMapped=8 byteCount=104857600
+
+
+pfe27.jbauer2 301> lfs getstripe /nobackupp17/jbauer2/dd.dat
+/nobackupp17/jbauer2/dd.dat
+lmm_stripe_count:  6
+lmm_stripe_size:   2097152
+lmm_pattern:       raid0
+lmm_layout_gen:    0
+lmm_stripe_offset: 126
+lmm_pool:          ssd-pool
+	obdidx		 objid		 objid		 group
+	   126	      13930025	     0xd48e29	             0
+	   113	      13115889	     0xc821f1	             0
+	   120	      14003176	     0xd5abe8	             0
+	   109	      12785483	     0xc3174b	             0
+	   102	      13811117	     0xd2bdad	             0
+	   116	      13377285	     0xcc1f05	             0
+
+
+From cfaber at gmail.com  Thu Aug 18 09:30:56 2022
+From: cfaber at gmail.com (Colin Faber)
+Date: Thu, 18 Aug 2022 10:30:56 -0600
+Subject: [lustre-discuss] Old IP of OSS still appearing in client
+In-Reply-To: <CAJSm=ntD3GcwnQE13RZQRmYP_ysYjwQb8mX+exbZFkTfHecFFg@mail.gmail.com>
+References: <CAJSm=nvpu-cGQbqY7e2atTeRY4ZyMYQJfKx7P06YCMW46A4ROg@mail.gmail.com>
+ <CAJcXmB=1MY=7x8AcWb4wjbD+QK+7GeN2WCQXQEdwZAER_LBJbQ@mail.gmail.com>
+ <CAJSm=ntD3GcwnQE13RZQRmYP_ysYjwQb8mX+exbZFkTfHecFFg@mail.gmail.com>
+Message-ID: <CAJcXmB=_fHA4sTu55R3whKAy16dQxxhF6vTbBq7fm5pOqHDAPA@mail.gmail.com>
+
+Running the command with no arguments against the targets will dump all
+configuration info you need
+
+On Thu, Aug 18, 2022, 1:55 AM Zeeshan Ali Shah <javaclinic at gmail.com> wrote:
+
+> Thanks Colin , but how to get the current param of OSS or OST ? i wan to
+> know which failovernode ip or servicenode IP used .
+>
+> On Wed, Aug 17, 2022 at 5:26 PM Colin Faber <cfaber at gmail.com> wrote:
+>
+>> See: https://manpages.org/tunefslustre/8
+>>
+>> On Wed, Aug 17, 2022 at 4:27 AM Zeeshan Ali Shah via lustre-discuss <
+>> lustre-discuss at lists.lustre.org> wrote:
+>>
+>>> Dear All , i am getting strange issue the old OSS is decommissioned and
+>>> all of its OST moved to new OSS to new IP . suddenly in client side we are
+>>> getting following error ..
+>>>
+>>> below 172.100.7.18 is OLD dead OSS .
+>>>
+>>> 126704:0:(o2iblnd_cb.c:2923:kiblnd_rejected()) 172.100.7.18 at o2ib
+>>> rejected: consumer defined fatal error
+>>>
+>>> Is there a way to clear OLD OSS IP from OSTs or from MDS ?
+>>>
+>>> Br
+>>>
+>>> Zee
+>>> _______________________________________________
+>>> lustre-discuss mailing list
+>>> lustre-discuss at lists.lustre.org
+>>> http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org
+>>>
+>>
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20220818/83f8f3de/attachment.htm>
+
+From adilger at whamcloud.com  Thu Aug 18 12:57:49 2022
+From: adilger at whamcloud.com (Andreas Dilger)
+Date: Thu, 18 Aug 2022 19:57:49 +0000
+Subject: [lustre-discuss] fiemap
+In-Reply-To: <8b0e759a-d348-82a3-9655-65dccacb474e@iodoctors.com>
+References: <8b0e759a-d348-82a3-9655-65dccacb474e@iodoctors.com>
+Message-ID: <E166F2A4-5F6B-43CC-8E8E-055B25B9A97C@whamcloud.com>
+
+What version of Lustre are you using?  Does "filefrag -v" from a newer Lustre e2fsprogs (1.45.6.wc3+) work properly?
+
+There was a small change to the Lustre FIEMAP handling in order to handle overstriped files and PFL/FLR files with many stripes and multiple components, since the FIEMAP "restart" mechanism was broken for files that had multiple objects on the same OST index.  See LU-11484 for details.  That change was included in the 2.14.0 release.
+
+In essence, the fe_device field now encodes the absolute file stripe number in the high 16 bits of fe_device, and the device number in the low 16 bits (as it did before).   Since "filefrag -v" prints fe_device in hex and would show as "0x<stripe><device>" instead of "0x0000<device>", this was considered an acceptable tradeoff compared to other "less compatible" changes that would have been needed to implement PFL/FLR handling.
+
+That said, I would have expected this change to result in your tool reporting very large values for fe_device (e.g. OST index + N * 65536), so returning all-zero values is somewhat unexpected.
+
+Cheers, Andreas
+
+On Aug 18, 2022, at 06:27, John Bauer <bauerj at iodoctors.com<mailto:bauerj at iodoctors.com>> wrote:
+
+Hi all,
+
+I am trying to get my llfie program (which uses fiemap) going again, but now the struct fiemap_extent structures I get back from the ioctl call, all have fe_device=0.  The output from lfs getstripe indicates that the devices are not all 0.  The sum of the fe_length members adds up to the file size, so that is working.  The fe_physical members look reasonable also.  Has something changed?  This used to work.
+
+Thanks, John
+
+pfe27.jbauer2 300> llfie /nobackupp17/jbauer2/dd.dat
+LustreStripeInfo_get() lum->lmm_magic=0xbd30bd0
+listExtents() fe_physical=30643484360704 fe_device=0 fe_length=16777216
+listExtents() fe_physical=30646084829184 fe_device=0 fe_length=2097152
+listExtents() fe_physical=5705226518528 fe_device=0 fe_length=16777216
+listExtents() fe_physical=5710209351680 fe_device=0 fe_length=2097152
+listExtents() fe_physical=30621271326720 fe_device=0 fe_length=16777216
+listExtents() fe_physical=31761568366592 fe_device=0 fe_length=16777216
+listExtents() fe_physical=24757567225856 fe_device=0 fe_length=16777216
+listExtents() fe_physical=14196460748800 fe_device=0 fe_length=16777216
+listExtents() nMapped=8 byteCount=104857600
+
+
+pfe27.jbauer2 301> lfs getstripe /nobackupp17/jbauer2/dd.dat
+/nobackupp17/jbauer2/dd.dat
+lmm_stripe_count:  6
+lmm_stripe_size:   2097152
+lmm_pattern:       raid0
+lmm_layout_gen:    0
+lmm_stripe_offset: 126
+lmm_pool:          ssd-pool
+obdidx objid objid group
+  126      13930025     0xd48e29             0
+  113      13115889     0xc821f1             0
+  120      14003176     0xd5abe8             0
+  109      12785483     0xc3174b             0
+  102      13811117     0xd2bdad             0
+  116      13377285     0xcc1f05             0
+
+_______________________________________________
+lustre-discuss mailing list
+lustre-discuss at lists.lustre.org<mailto:lustre-discuss at lists.lustre.org>
+http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org
+
+Cheers, Andreas
+--
+Andreas Dilger
+Lustre Principal Architect
+Whamcloud
+
+
+
+
+
+
+
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20220818/3df8b3e4/attachment-0001.htm>
+
+From bauerj at iodoctors.com  Thu Aug 18 13:28:15 2022
+From: bauerj at iodoctors.com (John Bauer)
+Date: Thu, 18 Aug 2022 15:28:15 -0500
+Subject: [lustre-discuss] fiemap
+In-Reply-To: <E166F2A4-5F6B-43CC-8E8E-055B25B9A97C@whamcloud.com>
+References: <8b0e759a-d348-82a3-9655-65dccacb474e@iodoctors.com>
+ <E166F2A4-5F6B-43CC-8E8E-055B25B9A97C@whamcloud.com>
+Message-ID: <be72dcbb-fb0c-972e-0a8b-ae77357ff009@iodoctors.com>
+
+Andreas,
+
+Thanks for the reply.? I don't think I'm accessing the Lustre filefrag ( 
+see below ).? Where would I normally find that installed? I downloaded 
+the lustre-release git repository and can't find filefrag stuff to build 
+my own.? Is that somewhere else? More info:
+
+pfe27.jbauer2 334> cat /sys/fs/lustre/version
+2.12.8_ddn12
+
+pfe27.jbauer2 335> filefrag -v /nobackupp17/jbauer2/dd.dat
+Filesystem type is: bd00bd0
+File size of /nobackupp17/jbauer2/dd.dat is 104857600 (25600 blocks of 4096 bytes)
+/nobackupp17/jbauer2/dd.dat: FIBMAP unsupported
+
+pfe27.jbauer2 336> which filefrag
+/usr/sbin/filefrag
+
+
+John
+
+On 8/18/22 14:57, Andreas Dilger wrote:
+> What version of Lustre are you using? ?Does "filefrag -v" from a newer 
+> Lustre e2fsprogs (1.45.6.wc3+) work properly?
+>
+> There was a small change to the Lustre FIEMAP handling in order to 
+> handle overstriped files and PFL/FLR files with many stripes and 
+> multiple components, since the FIEMAP "restart" mechanism was broken 
+> for files that had multiple objects on the same OST index. ?See 
+> LU-11484 for details. ?That change was included in the 2.14.0 release.
+>
+> In essence, the fe_device field now encodes the absolute file stripe 
+> number in the high 16 bits of fe_device, and the device number in the 
+> low 16 bits (as it did before). Since "filefrag -v" prints fe_device 
+> in hex and would show as "0x<stripe><device>" instead of 
+> "0x0000<device>", this was considered an acceptable tradeoff compared 
+> to other "less compatible" changes that would have been needed to 
+> implement PFL/FLR handling.
+>
+> That said, I would have expected this change to result in your tool 
+> reporting very large values for fe_device (e.g. OST index + N * 
+> 65536), so returning all-zero values is somewhat unexpected.
+>
+> Cheers, Andreas
+>
+>> On Aug 18, 2022, at 06:27, John Bauer <bauerj at iodoctors.com> wrote:
+>>
+>> Hi all,
+>>
+>> I am trying to get my llfie program (which uses fiemap) going again, 
+>> but now the struct fiemap_extent structures I get back from the ioctl 
+>> call, all have fe_device=0. The output from lfs getstripe indicates 
+>> that the devices are not all 0.? The sum of the fe_length members 
+>> adds up to the file size, so that is working.? The fe_physical 
+>> members look reasonable also.? Has something changed? This used to work.
+>>
+>> Thanks, John
+>>
+>> pfe27.jbauer2 300> llfie /nobackupp17/jbauer2/dd.dat
+>> LustreStripeInfo_get() lum->lmm_magic=0xbd30bd0
+>> listExtents() fe_physical=30643484360704 fe_device=0 fe_length=16777216
+>> listExtents() fe_physical=30646084829184 fe_device=0 fe_length=2097152
+>> listExtents() fe_physical=5705226518528 fe_device=0 fe_length=16777216
+>> listExtents() fe_physical=5710209351680 fe_device=0 fe_length=2097152
+>> listExtents() fe_physical=30621271326720 fe_device=0 fe_length=16777216
+>> listExtents() fe_physical=31761568366592 fe_device=0 fe_length=16777216
+>> listExtents() fe_physical=24757567225856 fe_device=0 fe_length=16777216
+>> listExtents() fe_physical=14196460748800 fe_device=0 fe_length=16777216
+>> listExtents() nMapped=8 byteCount=104857600
+>>
+>>
+>> pfe27.jbauer2 301> lfs getstripe /nobackupp17/jbauer2/dd.dat
+>> /nobackupp17/jbauer2/dd.dat
+>> lmm_stripe_count: ?6
+>> lmm_stripe_size: ??2097152
+>> lmm_pattern: ??????raid0
+>> lmm_layout_gen: ???0
+>> lmm_stripe_offset: 126
+>> lmm_pool: ?????????ssd-pool
+>> obdidxobjidobjidgroup
+>> ??126?????13930025????0xd48e29????????????0
+>> ??113?????13115889????0xc821f1????????????0
+>> ??120?????14003176????0xd5abe8????????????0
+>> ??109?????12785483????0xc3174b????????????0
+>> ??102?????13811117????0xd2bdad????????????0
+>> ??116?????13377285????0xcc1f05????????????0
+>>
+>> _______________________________________________
+>> lustre-discuss mailing list
+>> lustre-discuss at lists.lustre.org
+>> http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org
+>
+> Cheers, Andreas
+> --
+> Andreas Dilger
+> Lustre?Principal Architect
+> Whamcloud
+>
+>
+>
+>
+>
+>
+>
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20220818/1f337222/attachment.htm>
+
+From adilger at whamcloud.com  Thu Aug 18 14:11:58 2022
+From: adilger at whamcloud.com (Andreas Dilger)
+Date: Thu, 18 Aug 2022 21:11:58 +0000
+Subject: [lustre-discuss] fiemap
+In-Reply-To: <be72dcbb-fb0c-972e-0a8b-ae77357ff009@iodoctors.com>
+References: <8b0e759a-d348-82a3-9655-65dccacb474e@iodoctors.com>
+ <E166F2A4-5F6B-43CC-8E8E-055B25B9A97C@whamcloud.com>
+ <be72dcbb-fb0c-972e-0a8b-ae77357ff009@iodoctors.com>
+Message-ID: <17DE058E-FEF9-43FD-B39B-3A8BE7583B8F@whamcloud.com>
+
+On Aug 18, 2022, at 14:28, John Bauer <bauerj at iodoctors.com<mailto:bauerj at iodoctors.com>> wrote:
+
+
+Andreas,
+
+Thanks for the reply.  I don't think I'm accessing the Lustre filefrag ( see below ).  Where would I normally find that installed? I downloaded the lustre-release git repository and can't find filefrag stuff to build my own.  Is that somewhere else?
+
+filefrag is part of the e2fsprogs package ("rpm -qf $(which filefrag)"), so you need to download and install the Lustre-patched e2fsprogs from https://downloads.whamcloud.com/public/e2fsprogs/latest/
+
+
+More info:
+
+pfe27.jbauer2 334> cat /sys/fs/lustre/version
+2.12.8_ddn12
+
+
+You should really use "lctl get_param version", since the Lustre /proc and /sys files move around on occasion.
+
+The PFL/FLR change for FIEMAP is not included in this version, but it _should_ be irrelevant because the file you are testing is using a plain layout, not PFL or FLR.
+
+
+pfe27.jbauer2 335> filefrag -v /nobackupp17/jbauer2/dd.dat
+Filesystem type is: bd00bd0
+File size of /nobackupp17/jbauer2/dd.dat is 104857600 (25600 blocks of 4096 bytes)
+/nobackupp17/jbauer2/dd.dat: FIBMAP unsupported
+
+pfe27.jbauer2 336> which filefrag
+/usr/sbin/filefrag
+
+
+
+
+John
+
+On 8/18/22 14:57, Andreas Dilger wrote:
+What version of Lustre are you using?  Does "filefrag -v" from a newer Lustre e2fsprogs (1.45.6.wc3+) work properly?
+
+There was a small change to the Lustre FIEMAP handling in order to handle overstriped files and PFL/FLR files with many stripes and multiple components, since the FIEMAP "restart" mechanism was broken for files that had multiple objects on the same OST index.  See LU-11484 for details.  That change was included in the 2.14.0 release.
+
+In essence, the fe_device field now encodes the absolute file stripe number in the high 16 bits of fe_device, and the device number in the low 16 bits (as it did before).   Since "filefrag -v" prints fe_device in hex and would show as "0x<stripe><device>" instead of "0x0000<device>", this was considered an acceptable tradeoff compared to other "less compatible" changes that would have been needed to implement PFL/FLR handling.
+
+That said, I would have expected this change to result in your tool reporting very large values for fe_device (e.g. OST index + N * 65536), so returning all-zero values is somewhat unexpected.
+
+Cheers, Andreas
+
+On Aug 18, 2022, at 06:27, John Bauer <bauerj at iodoctors.com<mailto:bauerj at iodoctors.com>> wrote:
+
+Hi all,
+
+I am trying to get my llfie program (which uses fiemap) going again, but now the struct fiemap_extent structures I get back from the ioctl call, all have fe_device=0.  The output from lfs getstripe indicates that the devices are not all 0.  The sum of the fe_length members adds up to the file size, so that is working.  The fe_physical members look reasonable also.  Has something changed?  This used to work.
+
+Thanks, John
+
+pfe27.jbauer2 300> llfie /nobackupp17/jbauer2/dd.dat
+LustreStripeInfo_get() lum->lmm_magic=0xbd30bd0
+listExtents() fe_physical=30643484360704 fe_device=0 fe_length=16777216
+listExtents() fe_physical=30646084829184 fe_device=0 fe_length=2097152
+listExtents() fe_physical=5705226518528 fe_device=0 fe_length=16777216
+listExtents() fe_physical=5710209351680 fe_device=0 fe_length=2097152
+listExtents() fe_physical=30621271326720 fe_device=0 fe_length=16777216
+listExtents() fe_physical=31761568366592 fe_device=0 fe_length=16777216
+listExtents() fe_physical=24757567225856 fe_device=0 fe_length=16777216
+listExtents() fe_physical=14196460748800 fe_device=0 fe_length=16777216
+listExtents() nMapped=8 byteCount=104857600
+
+
+pfe27.jbauer2 301> lfs getstripe /nobackupp17/jbauer2/dd.dat
+/nobackupp17/jbauer2/dd.dat
+lmm_stripe_count:  6
+lmm_stripe_size:   2097152
+lmm_pattern:       raid0
+lmm_layout_gen:    0
+lmm_stripe_offset: 126
+lmm_pool:          ssd-pool
+obdidx objid objid group
+  126      13930025     0xd48e29             0
+  113      13115889     0xc821f1             0
+  120      14003176     0xd5abe8             0
+  109      12785483     0xc3174b             0
+  102      13811117     0xd2bdad             0
+  116      13377285     0xcc1f05             0
+
+_______________________________________________
+lustre-discuss mailing list
+lustre-discuss at lists.lustre.org<mailto:lustre-discuss at lists.lustre.org>
+http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org
+
+Cheers, Andreas
+--
+Andreas Dilger
+Lustre Principal Architect
+Whamcloud
+
+
+
+
+
+
+
+
+Cheers, Andreas
+--
+Andreas Dilger
+Lustre Principal Architect
+Whamcloud
+
+
+
+
+
+
+
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20220818/10730816/attachment-0001.htm>
+
+From bauerj at iodoctors.com  Thu Aug 18 14:59:46 2022
+From: bauerj at iodoctors.com (John Bauer)
+Date: Thu, 18 Aug 2022 16:59:46 -0500
+Subject: [lustre-discuss] fiemap
+In-Reply-To: <17DE058E-FEF9-43FD-B39B-3A8BE7583B8F@whamcloud.com>
+References: <8b0e759a-d348-82a3-9655-65dccacb474e@iodoctors.com>
+ <E166F2A4-5F6B-43CC-8E8E-055B25B9A97C@whamcloud.com>
+ <be72dcbb-fb0c-972e-0a8b-ae77357ff009@iodoctors.com>
+ <17DE058E-FEF9-43FD-B39B-3A8BE7583B8F@whamcloud.com>
+Message-ID: <da149c1f-74ec-d03a-c9dd-84e04f7837ed@iodoctors.com>
+
+Andreas,
+
+Well, that works.? I got the devices I would expect.? The ioctl() calls 
+look identical.? The lengths are identical ( allowing for 1024 factor 
+).? But my devices are 0.? Thanks for getting me going with the correct 
+filefrag.? I'll report back when I sort out my problem.
+
+John
+
+pfe27.jbauer2 390> strace -o filefrag.strace ./misc/filefrag -v /nobackupp17/jbauer2/dd.dat
+Filesystem type is: bd00bd0
+File size of /nobackupp17/jbauer2/dd.dat is 104857600 (102400 blocks of 1024 bytes)
+  ext:     device_logical:            physical_offset: length:  dev: flags:
+    0:        0..   13311:  33431977984.. 33431991295:  13312: 0008: net
+    1:        0..   13311: 164044554240..164044567551:  13312: 0009: net
+    2:        0..   13311: 539103838208..539103851519:  13312: 000a: net
+    3:        0..   13311:  48145154048.. 48145167359:  13312: 000b: net
+    4:        0..   12287: 168782233600..168782245887:  12288: 000c: net
+    5:        0..   12287: 168137900032..168137912319:  12288: 000d: net
+    6:        0..   12287:  18729435136.. 18729447423:  12288: 000e: net
+    7:        0..   12287: 163376496640..163376508927:  12288: 000f: last,net
+/nobackupp17/jbauer2/dd.dat: 8 extents found
+
+strace lines of interest for filefrag
+
+ioctl(3,FS_IOC_FIEMAP,{fm_start=0, fm_length=18446744073709551615, fm_flags=0x40000000  /* FIEMAP_FLAG_??? */, fm_extent_count=292}  =>{fm_flags=0x40000000  /* FIEMAP_FLAG_??? */, fm_mapped_extents=8, ...})  =  0
+write(1," ext: device_logical: "...,75)  =  75
+write(1," 0: 0.. 13311: 33431"...,72)  =  72
+write(1," 1: 0.. 13311: 164044"...,72)  =  72
+
+strace lines of interest for llfie
+
+ioctl(3,FS_IOC_FIEMAP,{fm_start=0, fm_length=18446744073709551615, fm_flags=0x40000000  /* FIEMAP_FLAG_??? */, fm_extent_count=1024}  =>{fm_flags=0x40000000  /* FIEMAP_FLAG_??? */, fm_mapped_extents=8, ...})  =  0
+write(2,"listExtents() fe_physical=342343"...,72)  =  72
+write(2,"listExtents() fe_physical=167981"...,73)  =  73
+write(2,"listExtents() fe_physical=552042"...,73)  =  73
+write(2,"listExtents() fe_physical=493006"...,72)  =  72
+write(2,"listExtents() fe_physical=172833"...,73)  =  73
+
+On 8/18/22 16:11, Andreas Dilger wrote:
+> On Aug 18, 2022, at 14:28, John Bauer <bauerj at iodoctors.com> wrote:
+>>
+>> Andreas,
+>>
+>> Thanks for the reply.? I don't think I'm accessing the Lustre 
+>> filefrag ( see below ).? Where would I normally find that installed? 
+>> I downloaded the lustre-release git repository and can't find 
+>> filefrag stuff to build my own.? Is that somewhere else?
+>>
+> filefrag is part of the e2fsprogs package ("rpm -qf $(which 
+> filefrag)"), so you need to download and install the Lustre-patched 
+> e2fsprogs from _https://downloads.whamcloud.com/public/e2fsprogs/latest/_
+>
+>> More info:
+>>
+>> pfe27.jbauer2 334> cat /sys/fs/lustre/version
+>> 2.12.8_ddn12
+>
+> You should really use "lctl get_param version", since the Lustre /proc 
+> and /sys files move around on occasion.
+>
+> The PFL/FLR change for FIEMAP is not included in this version, but it 
+> _should_ be irrelevant because the file you are testing is using a 
+> plain layout, not PFL or FLR.
+>> pfe27.jbauer2 335> filefrag -v /nobackupp17/jbauer2/dd.dat
+>> Filesystem type is: bd00bd0
+>> File size of /nobackupp17/jbauer2/dd.dat is 104857600 (25600 blocks of 4096 bytes)
+>> /nobackupp17/jbauer2/dd.dat: FIBMAP unsupported
+>>
+>> pfe27.jbauer2 336> which filefrag
+>> /usr/sbin/filefrag
+>>
+>>
+>> John
+>>
+>> On 8/18/22 14:57, Andreas Dilger wrote:
+>>> What version of Lustre are you using? ?Does "filefrag -v" from a 
+>>> newer Lustre e2fsprogs (1.45.6.wc3+) work properly?
+>>>
+>>> There was a small change to the Lustre FIEMAP handling in order to 
+>>> handle overstriped files and PFL/FLR files with many stripes and 
+>>> multiple components, since the FIEMAP "restart" mechanism was broken 
+>>> for files that had multiple objects on the same OST index. ?See 
+>>> LU-11484 for details. ?That change was included in the 2.14.0 release.
+>>>
+>>> In essence, the fe_device field now encodes the absolute file stripe 
+>>> number in the high 16 bits of fe_device, and the device number in 
+>>> the low 16 bits (as it did before). ? Since "filefrag -v" prints 
+>>> fe_device in hex and would show as "0x<stripe><device>" instead of 
+>>> "0x0000<device>", this was considered an acceptable tradeoff 
+>>> compared to other "less compatible" changes that would have been 
+>>> needed to implement PFL/FLR handling.
+>>>
+>>> That said, I would have expected this change to result in your tool 
+>>> reporting very large values for fe_device (e.g. OST index + N * 
+>>> 65536), so returning all-zero values is somewhat unexpected.
+>>>
+>>> Cheers, Andreas
+>>>
+>>>> On Aug 18, 2022, at 06:27, John Bauer <bauerj at iodoctors.com> wrote:
+>>>>
+>>>> Hi all,
+>>>>
+>>>> I am trying to get my llfie program (which uses fiemap) going 
+>>>> again, but now the struct fiemap_extent structures I get back from 
+>>>> the ioctl call, all have fe_device=0.? The output from lfs 
+>>>> getstripe indicates that the devices are not all 0.? The sum of the 
+>>>> fe_length members adds up to the file size, so that is working.? 
+>>>> The fe_physical members look reasonable also.? Has something 
+>>>> changed?? This used to work.
+>>>>
+>>>> Thanks, John
+>>>>
+>>>> pfe27.jbauer2 300> llfie /nobackupp17/jbauer2/dd.dat
+>>>> LustreStripeInfo_get() lum->lmm_magic=0xbd30bd0
+>>>> listExtents() fe_physical=30643484360704 fe_device=0 fe_length=16777216
+>>>> listExtents() fe_physical=30646084829184 fe_device=0 fe_length=2097152
+>>>> listExtents() fe_physical=5705226518528 fe_device=0 fe_length=16777216
+>>>> listExtents() fe_physical=5710209351680 fe_device=0 fe_length=2097152
+>>>> listExtents() fe_physical=30621271326720 fe_device=0 fe_length=16777216
+>>>> listExtents() fe_physical=31761568366592 fe_device=0 fe_length=16777216
+>>>> listExtents() fe_physical=24757567225856 fe_device=0 fe_length=16777216
+>>>> listExtents() fe_physical=14196460748800 fe_device=0 fe_length=16777216
+>>>> listExtents() nMapped=8 byteCount=104857600
+>>>>
+>>>>
+>>>> pfe27.jbauer2 301> lfs getstripe /nobackupp17/jbauer2/dd.dat
+>>>> /nobackupp17/jbauer2/dd.dat
+>>>> lmm_stripe_count: ?6
+>>>> lmm_stripe_size: ??2097152
+>>>> lmm_pattern: ??????raid0
+>>>> lmm_layout_gen: ???0
+>>>> lmm_stripe_offset: 126
+>>>> lmm_pool: ?????????ssd-pool
+>>>> obdidxobjidobjidgroup
+>>>> ??126?????13930025????0xd48e29????????????0
+>>>> ??113?????13115889????0xc821f1????????????0
+>>>> ??120?????14003176????0xd5abe8????????????0
+>>>> ??109?????12785483????0xc3174b????????????0
+>>>> ??102?????13811117????0xd2bdad????????????0
+>>>> ??116?????13377285????0xcc1f05????????????0
+>>>>
+>>>> _______________________________________________
+>>>> lustre-discuss mailing list
+>>>> lustre-discuss at lists.lustre.org
+>>>> http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org
+>>>
+>>> Cheers, Andreas
+>>> --
+>>> Andreas Dilger
+>>> Lustre?Principal Architect
+>>> Whamcloud
+>>>
+>>>
+>>>
+>>>
+>>>
+>>>
+>>>
+>
+> Cheers, Andreas
+> --
+> Andreas Dilger
+> Lustre?Principal Architect
+> Whamcloud
+>
+>
+>
+>
+>
+>
+>
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20220818/b10c3588/attachment.htm>
+
+From Landau.D at xinnor.io  Fri Aug 19 07:21:38 2022
+From: Landau.D at xinnor.io (Landau Daniil)
+Date: Fri, 19 Aug 2022 14:21:38 +0000
+Subject: [lustre-discuss] DIO/AIO performance at Lustre 2.15
+Message-ID: <AM0PR10MB3700CA97A910FAE8668EC911876C9@AM0PR10MB3700.EURPRD10.PROD.OUTLOOK.COM>
+
+Dear all,
+
+I had a chance to try the Lustre DIO/AIO improvements appeared at 2.15 version (described here https://jira.whamcloud.com/browse/LU-13798 and here https://jira.whamcloud.com/browse/LU-13799 ). But It seems to me, that it does not fully work or I don?t understand how it should work.
+
+I?ve two servers as OSSs with one RAID-on-NVMe-based OST on each and a client. MDS and MGT work at another server. All servers and client are interconnected with Infiniband HDR. All the settings during the filesystem creation and mount were default.
+The test command is:
+
+ior -w -r -t 256M -b 64G -e  -o /<dirpath>/iorfile --posix.odirect
+
+I also applied the following tunning at the client:
+
+lctl set_param osc.*.max_pages_per_rpc=4M osc.*.checksums=0 osc.*.max_rpcs_in_flight=16
+
+So, when I run a test without any striping settings (and the test file appears only on one OST) the results are about:
+
+Max Write: 4008.78 MiB/sec (4203.51 MB/sec)
+Max Read:  7061.42 MiB/sec (7404.44 MB/sec)
+
+When I set striping to ?-S 2M -c 2? the results are about:
+
+Max Write: 8796.89 MiB/sec (9224.21 MB/sec)
+Max Read:  19043.23 MiB/sec (19968.27 MB/sec)
+
+But when I disable caching at both OSSs with the following commands
+
+/usr/sbin/lctl set_param osd-ldiskfs.*.read_cache_enable=0
+/usr/sbin/lctl set_param osd-ldiskfs.*.writethrough_cache_enable=0
+
+the striping results became about:
+
+Max Write: 13054.52 MiB/sec (13688.65 MB/sec)
+Max Read:  18323.93 MiB/sec (19214.03 MB/sec)
+
+It looks like read and write caching on the OSS side works even if the test is launched with --posix.odirect flag, unless caching is manually disabled at OSS side. And cache logic calculations slow down the overall performance for writing (which is an expected behavior in case of NVMe-based storage). It looks strange for me, since as I got from some docs, when operations come with O_DIRECT flag, it should avoid any caching on both sides ? on client side and on server side too. So, from my point of view, DIO just does not work or works incorrectly.
+
+May I ask dear all enlighten me in this question: maybe my point of view is incorrect, or I missed some settings during the filesystem creation and mounting needed to let DIO work properly.
+
+Thank you!
+
+Daniel
+
+
+
+
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20220819/877f0d5c/attachment-0001.htm>
+
+From bauerj at iodoctors.com  Fri Aug 19 12:58:02 2022
+From: bauerj at iodoctors.com (John Bauer)
+Date: Fri, 19 Aug 2022 14:58:02 -0500
+Subject: [lustre-discuss] fiemap, final chapter.
+In-Reply-To: <F46BFD2B-476D-4216-BD2B-5586EAEF5026@whamcloud.com>
+References: <8b0e759a-d348-82a3-9655-65dccacb474e@iodoctors.com>
+ <E166F2A4-5F6B-43CC-8E8E-055B25B9A97C@whamcloud.com>
+ <be72dcbb-fb0c-972e-0a8b-ae77357ff009@iodoctors.com>
+ <17DE058E-FEF9-43FD-B39B-3A8BE7583B8F@whamcloud.com>
+ <4fc217f1-c4bb-74eb-9d9b-4bfe6f9c9665@iodoctors.com>
+ <F46BFD2B-476D-4216-BD2B-5586EAEF5026@whamcloud.com>
+Message-ID: <49d5fb61-a462-ddc9-e489-8bacea7db3d0@iodoctors.com>
+
+Andreas,
+
+As I mentioned in an earlier email, this had been working for a long 
+time.? I think that using an old header file is at the root of the 
+issue.? On my development platform, which doesn't have Lustre installed, 
+nor did I have e2fsprogs installed, I had simply copied the Lustre files 
+I needed from the site I was working with.? The fiemap.h file I was 
+using , the top of which is shown below ( I see you mentioned ) has 
+fe_device explicitly in the structure.? Was it this way before the 
+#define fe_device was implemented?? The #define was using the 
+fe_reserved[0], which always had a 0 value.? What puzzles me is why this 
+ever worked at all.? That will have to wait for a rainy day to mess 
+with.? What started me down this path at this time was getting my lustre 
+extents plotting program working with PFL.
+
+Again, thanks much for your excellent/quick assistance in tracking this 
+down.
+
+John
+
+/*
+* FS_IOC_FIEMAP ioctl infrastructure.
+*
+* Some portions copyright (C) 2007 Cluster File Systems, Inc
+*
+* Authors: Mark Fasheh <mfasheh at suse.com>
+* Kalpak Shah <kalpak.shah at sun.com>
+* Andreas Dilger <adilger at sun.com>
+*/
+
+#ifndef _LINUX_FIEMAP_H
+#define _LINUX_FIEMAP_H
+
+struct  fiemap_extent {
+         __u64 fe_logical;/* logical offset in bytes for the start of
+* the extent from the beginning of the file */
+         __u64 fe_physical;/* physical offset in bytes for the start
+* of the extent from the beginning of the disk */
+         __u64 fe_length;/* length in bytes for this extent */
+         __u64 fe_reserved64[2];
+         __u32 fe_flags;/* FIEMAP_EXTENT_* flags for this extent */
+         __u32 fe_device;/* device number (fs-specific if FIEMAP_EXTENT_NET)*/
+         __u32 fe_reserved[2];
+};
+
+On 8/18/22 23:44, Andreas Dilger wrote:
+> The "fe_device" field is actually Lustre-specific, so it is a macro 
+> that overlays on fe_reserved[0]:
+>
+> ?#define fe_device?? ? ??fe_reserved[0]
+>
+> but that shouldn't affect compiler alignment. ?On my system, "pahole 
+> lustre/llite/lustre.ko" reports:
+>
+> struct?fiemap_extent {
+> ? ? ? ??__u64? ? ? ? ? ? ? ? ? ? ??fe_logical;?? ? ? ? ??/* ??0?? ??8?*/
+> ? ? ? ??__u64? ? ? ? ? ? ? ? ? ? ??fe_physical;? ? ? ? ??/* ??8?? ??8?*/
+> ? ? ? ??__u64? ? ? ? ? ? ? ? ? ? ??fe_length;? ? ? ? ? ??/* ??16?? ??8?*/
+> ? ? ? ??__u64? ? ? ? ? ? ? ? ? ? ??fe_reserved64[2];?? ??/* ??24? ??16?*/
+> ? ? ? ??__u32? ? ? ? ? ? ? ? ? ? ??fe_flags;?? ? ? ? ? ??/* ??40?? ??4?*/
+> ? ? ? ??__u32? ? ? ? ? ? ? ? ? ? ??fe_reserved[3];?? ? ??/* ??44? ??12?*/
+>
+> ? ? ? ??/* size: 56, cachelines: 1, members: 6 */
+> ? ? ? ??/* last cacheline: 56 bytes */
+> };
+>
+> So there is definitely something going wrong with the struct alignment 
+> for fe_reserved, even though there doesn't need to be (all of the 
+> fields have "natural" alignment on their 4/8-byte sizes.
+>
+> The other thing that is strange is that you show only 2 fe_reserved[] 
+> fields, when I have 3. ?Is there some other field added to your 
+> version of struct fiemap_extent after fe_flags? ?I don't see anything 
+> in the upstream kernel, nor in the Lustre headers.
+>
+> You could try adding "__attribute__((packed))" at the end of the 
+> struct definition to see if that fixes the problem.
+>
+> Cheers, Andreas
+>
+>> On Aug 18, 2022, at 21:54, John Bauer <bauerj at iodoctors.com> wrote:
+>>
+>> Andreas,
+>>
+>> This is no longer Lustre related, but I hope you can shed some light 
+>> on this.? It appears that my compilier, gcc 8.5.0, which I upgraded 
+>> to recently when I upgraded my build system to Centos 8, is not 
+>> padding the struct fiemap_extent correctly.? I put the following 
+>> prints in to see whats going on.? The sizeof the structure is good at 
+>> 56, but notice that both fe_device and fe_reserved[0] have an offset 
+>> of 48 bytes into the structure.? Odd that the sizeof fe_flags is 4, 
+>> but fe_device is 8 bytes away from it. I traced the compile to ensure 
+>> that I am getting the lustre_include/ext2fs/fiemap.h and there is 
+>> nothing odd in the fiemap.h ( it's the one I've been using for years 
+>> ).? Any thoughts on how to remedy this?
+>>
+>> John
+>>
+>> fprintf(stderr,"%s() logical  %d %ld\n", __func__, sizeof(fm_ext->fe_logical ), (char *)&fm_ext->fe_logical  -(char *)fm_ext);
+>> fprintf(stderr,"%s() physical %d %ld\n", __func__, sizeof(fm_ext->fe_physical), (char *)&fm_ext->fe_physical -(char *)fm_ext);
+>> fprintf(stderr,"%s() length   %d %ld\n", __func__, sizeof(fm_ext->fe_length  ), (char *)&fm_ext->fe_length -  (char *)fm_ext);
+>> fprintf(stderr,"%s() res64[0] %d %ld\n", __func__, sizeof(fm_ext->fe_reserved64[0]), (char *)&fm_ext->fe_reserved64[0] -  (char *)fm_ext);
+>> fprintf(stderr,"%s() res64[1] %d %ld\n", __func__, sizeof(fm_ext->fe_reserved64[1]), (char *)&fm_ext->fe_reserved64[1] -  (char *)fm_ext);
+>> fprintf(stderr,"%s() flags    %d %ld\n", __func__, sizeof(fm_ext->fe_flags   ), (char *)&fm_ext->fe_flags    -(char *)fm_ext);
+>> fprintf(stderr,"%s() device   %d %ld\n", __func__, sizeof(fm_ext->fe_device  ), (char *)&fm_ext->fe_device   -(char *)fm_ext);
+>> fprintf(stderr,"%s() res32[0] %d %ld\n", __func__, sizeof(fm_ext->fe_reserved[0]), (char *)&fm_ext->fe_reserved[0] -  (char *)fm_ext);
+>> fprintf(stderr,"%s() res32[1] %d %ld\n", __func__, sizeof(fm_ext->fe_reserved[1]), (char *)&fm_ext->fe_reserved[1] -  (char *)fm_ext);
+>> StripeChunks_get() fm_ext->fe_device=0 fe_logical=0 sizeof(struct fiemap_extent)56
+>> StripeChunks_get() logical  8 0
+>> StripeChunks_get() physical 8 8
+>> StripeChunks_get() length   8 16
+>> StripeChunks_get() res64[0] 8 24
+>> StripeChunks_get() res64[1] 8 32
+>> StripeChunks_get() flags    4 40
+>> StripeChunks_get() device   4 48
+>> StripeChunks_get() res32[0] 4 48
+>> StripeChunks_get() res32[1] 4 52
+>>
+>>
+>>
+>> On 8/18/22 16:11, Andreas Dilger wrote:
+>>> On Aug 18, 2022, at 14:28, John Bauer <bauerj at iodoctors.com> wrote:
+>>>>
+>>>> Andreas,
+>>>>
+>>>> Thanks for the reply.? I don't think I'm accessing the Lustre 
+>>>> filefrag ( see below ).? Where would I normally find that 
+>>>> installed? I downloaded the lustre-release git repository and can't 
+>>>> find filefrag stuff to build my own.? Is that somewhere else?
+>>>>
+>>> filefrag is part of the e2fsprogs package ("rpm -qf $(which 
+>>> filefrag)"), so you need to download and install the Lustre-patched 
+>>> e2fsprogs from 
+>>> _https://downloads.whamcloud.com/public/e2fsprogs/latest/_
+>>>
+>>>> More info:
+>>>>
+>>>> pfe27.jbauer2 334> cat /sys/fs/lustre/version
+>>>> 2.12.8_ddn12
+>>>
+>>> You should really use "lctl get_param version", since the Lustre 
+>>> /proc and /sys files move around on occasion.
+>>>
+>>> The PFL/FLR change for FIEMAP is not included in this version, but 
+>>> it _should_ be irrelevant because the file you are testing is using 
+>>> a plain layout, not PFL or FLR.
+>>>> pfe27.jbauer2 335> filefrag -v /nobackupp17/jbauer2/dd.dat
+>>>> Filesystem type is: bd00bd0
+>>>> File size of /nobackupp17/jbauer2/dd.dat is 104857600 (25600 blocks of 4096 bytes)
+>>>> /nobackupp17/jbauer2/dd.dat: FIBMAP unsupported
+>>>>
+>>>> pfe27.jbauer2 336> which filefrag
+>>>> /usr/sbin/filefrag
+>>>>
+>>>>
+>>>> John
+>>>>
+>>>> On 8/18/22 14:57, Andreas Dilger wrote:
+>>>>> What version of Lustre are you using? ?Does "filefrag -v" from a 
+>>>>> newer Lustre e2fsprogs (1.45.6.wc3+) work properly?
+>>>>>
+>>>>> There was a small change to the Lustre FIEMAP handling in order to 
+>>>>> handle overstriped files and PFL/FLR files with many stripes and 
+>>>>> multiple components, since the FIEMAP "restart" mechanism was 
+>>>>> broken for files that had multiple objects on the same OST index. 
+>>>>> ?See LU-11484 for details. ?That change was included in the 2.14.0 
+>>>>> release.
+>>>>>
+>>>>> In essence, the fe_device field now encodes the absolute file 
+>>>>> stripe number in the high 16 bits of fe_device, and the device 
+>>>>> number in the low 16 bits (as it did before). ? Since "filefrag 
+>>>>> -v" prints fe_device in hex and would show as "0x<stripe><device>" 
+>>>>> instead of "0x0000<device>", this was considered an acceptable 
+>>>>> tradeoff compared to other "less compatible" changes that would 
+>>>>> have been needed to implement PFL/FLR handling.
+>>>>>
+>>>>> That said, I would have expected this change to result in your 
+>>>>> tool reporting very large values for fe_device (e.g. OST index + N 
+>>>>> * 65536), so returning all-zero values is somewhat unexpected.
+>>>>>
+>>>>> Cheers, Andreas
+>>>>>
+>>>>>> On Aug 18, 2022, at 06:27, John Bauer <bauerj at iodoctors.com> wrote:
+>>>>>>
+>>>>>> Hi all,
+>>>>>>
+>>>>>> I am trying to get my llfie program (which uses fiemap) going 
+>>>>>> again, but now the struct fiemap_extent structures I get back 
+>>>>>> from the ioctl call, all have fe_device=0.? The output from lfs 
+>>>>>> getstripe indicates that the devices are not all 0.? The sum of 
+>>>>>> the fe_length members adds up to the file size, so that is 
+>>>>>> working.? The fe_physical members look reasonable also.? Has 
+>>>>>> something changed?? This used to work.
+>>>>>>
+>>>>>> Thanks, John
+>>>>>>
+>>>>>> pfe27.jbauer2 300> llfie /nobackupp17/jbauer2/dd.dat
+>>>>>> LustreStripeInfo_get() lum->lmm_magic=0xbd30bd0
+>>>>>> listExtents() fe_physical=30643484360704 fe_device=0 
+>>>>>> fe_length=16777216
+>>>>>> listExtents() fe_physical=30646084829184 fe_device=0 
+>>>>>> fe_length=2097152
+>>>>>> listExtents() fe_physical=5705226518528 fe_device=0 
+>>>>>> fe_length=16777216
+>>>>>> listExtents() fe_physical=5710209351680 fe_device=0 fe_length=2097152
+>>>>>> listExtents() fe_physical=30621271326720 fe_device=0 
+>>>>>> fe_length=16777216
+>>>>>> listExtents() fe_physical=31761568366592 fe_device=0 
+>>>>>> fe_length=16777216
+>>>>>> listExtents() fe_physical=24757567225856 fe_device=0 
+>>>>>> fe_length=16777216
+>>>>>> listExtents() fe_physical=14196460748800 fe_device=0 
+>>>>>> fe_length=16777216
+>>>>>> listExtents() nMapped=8 byteCount=104857600
+>>>>>>
+>>>>>>
+>>>>>> pfe27.jbauer2 301> lfs getstripe /nobackupp17/jbauer2/dd.dat
+>>>>>> /nobackupp17/jbauer2/dd.dat
+>>>>>> lmm_stripe_count: ?6
+>>>>>> lmm_stripe_size: ??2097152
+>>>>>> lmm_pattern: ??????raid0
+>>>>>> lmm_layout_gen: ???0
+>>>>>> lmm_stripe_offset: 126
+>>>>>> lmm_pool: ?????????ssd-pool
+>>>>>> obdidxobjidobjidgroup
+>>>>>> ??126?????13930025????0xd48e29????????????0
+>>>>>> ??113?????13115889????0xc821f1????????????0
+>>>>>> ??120?????14003176????0xd5abe8????????????0
+>>>>>> ??109?????12785483????0xc3174b????????????0
+>>>>>> ??102?????13811117????0xd2bdad????????????0
+>>>>>> ??116?????13377285????0xcc1f05????????????0
+>>>>>>
+>>>>>> _______________________________________________
+>>>>>> lustre-discuss mailing list
+>>>>>> lustre-discuss at lists.lustre.org
+>>>>>> http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org
+>>>>>
+>>>>> Cheers, Andreas
+>>>>> --
+>>>>> Andreas Dilger
+>>>>> Lustre?Principal Architect
+>>>>> Whamcloud
+>>>>>
+>>>>>
+>>>>>
+>>>>>
+>>>>>
+>>>>>
+>>>>>
+>>>
+>>> Cheers, Andreas
+>>> --
+>>> Andreas Dilger
+>>> Lustre?Principal Architect
+>>> Whamcloud
+>>>
+>>>
+>>>
+>>>
+>>>
+>>>
+>>>
+>
+> Cheers, Andreas
+> --
+> Andreas Dilger
+> Lustre?Principal Architect
+> Whamcloud
+>
+>
+>
+>
+>
+>
+>
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20220819/c1817b79/attachment-0001.htm>
+
+From adilger at whamcloud.com  Fri Aug 19 13:28:10 2022
+From: adilger at whamcloud.com (Andreas Dilger)
+Date: Fri, 19 Aug 2022 20:28:10 +0000
+Subject: [lustre-discuss] fiemap, final chapter.
+In-Reply-To: <49d5fb61-a462-ddc9-e489-8bacea7db3d0@iodoctors.com>
+References: <8b0e759a-d348-82a3-9655-65dccacb474e@iodoctors.com>
+ <E166F2A4-5F6B-43CC-8E8E-055B25B9A97C@whamcloud.com>
+ <be72dcbb-fb0c-972e-0a8b-ae77357ff009@iodoctors.com>
+ <17DE058E-FEF9-43FD-B39B-3A8BE7583B8F@whamcloud.com>
+ <4fc217f1-c4bb-74eb-9d9b-4bfe6f9c9665@iodoctors.com>
+ <F46BFD2B-476D-4216-BD2B-5586EAEF5026@whamcloud.com>
+ <49d5fb61-a462-ddc9-e489-8bacea7db3d0@iodoctors.com>
+Message-ID: <B24C0EAD-A24C-42E7-AB42-10FED565431B@whamcloud.com>
+
+On Aug 19, 2022, at 13:58, John Bauer <bauerj at iodoctors.com<mailto:bauerj at iodoctors.com>> wrote:
+
+
+Andreas,
+
+As I mentioned in an earlier email, this had been working for a long time.  I think that using an old header file is at the root of the issue.  On my development platform, which doesn't have Lustre installed, nor did I have e2fsprogs installed, I had simply copied the Lustre files I needed from the site I was working with.  The fiemap.h file I was using , the top of which is shown below ( I see you mentioned ) has fe_device explicitly in the structure.  Was it this way before the #define fe_device was implemented?
+
+Yes, we used to patch the fiemap.h header to add fe_device ourselves, but changed to the #define mechanism to reduce the changes to the core kernel.
+
+Cheers, Andreas
+
+  The #define was using the fe_reserved[0], which always had a 0 value.  What puzzles me is why this ever worked at all.  That will have to wait for a rainy day to mess with.  What started me down this path at this time was getting my lustre extents plotting program working with PFL.
+
+Again, thanks much for your excellent/quick assistance in tracking this down.
+
+John
+
+/*
+ * FS_IOC_FIEMAP ioctl infrastructure.
+ *
+ * Some portions copyright (C) 2007 Cluster File Systems, Inc
+ *
+ * Authors: Mark Fasheh <mfasheh at suse.com><mailto:mfasheh at suse.com>
+ *          Kalpak Shah <kalpak.shah at sun.com><mailto:kalpak.shah at sun.com>
+ *          Andreas Dilger <adilger at sun.com><mailto:adilger at sun.com>
+ */
+
+#ifndef _LINUX_FIEMAP_H
+#define _LINUX_FIEMAP_H
+
+struct fiemap_extent {
+        __u64 fe_logical;  /* logical offset in bytes for the start of
+                            * the extent from the beginning of the file */
+        __u64 fe_physical; /* physical offset in bytes for the start
+                            * of the extent from the beginning of the disk */
+        __u64 fe_length;   /* length in bytes for this extent */
+        __u64 fe_reserved64[2];
+        __u32 fe_flags;    /* FIEMAP_EXTENT_* flags for this extent */
+        __u32 fe_device;   /* device number (fs-specific if FIEMAP_EXTENT_NET)*/
+        __u32 fe_reserved[2];
+};
+
+
+On 8/18/22 23:44, Andreas Dilger wrote:
+The "fe_device" field is actually Lustre-specific, so it is a macro that overlays on fe_reserved[0]:
+
+ #define fe_device       fe_reserved[0]
+
+but that shouldn't affect compiler alignment.  On my system, "pahole lustre/llite/lustre.ko" reports:
+
+struct fiemap_extent {
+        __u64                      fe_logical;           /*     0     8 */
+        __u64                      fe_physical;          /*     8     8 */
+        __u64                      fe_length;            /*    16     8 */
+        __u64                      fe_reserved64[2];     /*    24    16 */
+        __u32                      fe_flags;             /*    40     4 */
+        __u32                      fe_reserved[3];       /*    44    12 */
+
+        /* size: 56, cachelines: 1, members: 6 */
+        /* last cacheline: 56 bytes */
+};
+
+So there is definitely something going wrong with the struct alignment for fe_reserved, even though there doesn't need to be (all of the fields have "natural" alignment on their 4/8-byte sizes.
+
+The other thing that is strange is that you show only 2 fe_reserved[] fields, when I have 3.  Is there some other field added to your version of struct fiemap_extent after fe_flags?  I don't see anything in the upstream kernel, nor in the Lustre headers.
+
+You could try adding "__attribute__((packed))" at the end of the struct definition to see if that fixes the problem.
+
+Cheers, Andreas
+
+On Aug 18, 2022, at 21:54, John Bauer <bauerj at iodoctors.com<mailto:bauerj at iodoctors.com>> wrote:
+
+
+Andreas,
+
+This is no longer Lustre related, but I hope you can shed some light on this.  It appears that my compilier, gcc 8.5.0, which I upgraded to recently when I upgraded my build system to Centos 8, is not padding the struct fiemap_extent correctly.  I put the following prints in to see whats going on.  The sizeof the structure is good at 56, but notice that both fe_device and fe_reserved[0] have an offset of 48 bytes into the structure.  Odd that the sizeof fe_flags is 4, but fe_device is 8 bytes away from it.  I traced the compile to ensure that I am getting the lustre_include/ext2fs/fiemap.h and there is nothing odd in the fiemap.h ( it's the one I've been using for years ).  Any thoughts on how to remedy this?
+
+John
+
+fprintf(stderr,"%s() logical  %d %ld\n", __func__, sizeof(fm_ext->fe_logical ), (char *)&fm_ext->fe_logical  -(char *)fm_ext);
+fprintf(stderr,"%s() physical %d %ld\n", __func__, sizeof(fm_ext->fe_physical), (char *)&fm_ext->fe_physical -(char *)fm_ext);
+fprintf(stderr,"%s() length   %d %ld\n", __func__, sizeof(fm_ext->fe_length  ), (char *)&fm_ext->fe_length -  (char *)fm_ext);
+fprintf(stderr,"%s() res64[0] %d %ld\n", __func__, sizeof(fm_ext->fe_reserved64[0]), (char *)&fm_ext->fe_reserved64[0] -  (char *)fm_ext);
+fprintf(stderr,"%s() res64[1] %d %ld\n", __func__, sizeof(fm_ext->fe_reserved64[1]), (char *)&fm_ext->fe_reserved64[1] -  (char *)fm_ext);
+fprintf(stderr,"%s() flags    %d %ld\n", __func__, sizeof(fm_ext->fe_flags   ), (char *)&fm_ext->fe_flags    -(char *)fm_ext);
+fprintf(stderr,"%s() device   %d %ld\n", __func__, sizeof(fm_ext->fe_device  ), (char *)&fm_ext->fe_device   -(char *)fm_ext);
+fprintf(stderr,"%s() res32[0] %d %ld\n", __func__, sizeof(fm_ext->fe_reserved[0]), (char *)&fm_ext->fe_reserved[0] -  (char *)fm_ext);
+fprintf(stderr,"%s() res32[1] %d %ld\n", __func__, sizeof(fm_ext->fe_reserved[1]), (char *)&fm_ext->fe_reserved[1] -  (char *)fm_ext);
+
+
+StripeChunks_get() fm_ext->fe_device=0 fe_logical=0 sizeof(struct fiemap_extent)56
+StripeChunks_get() logical  8 0
+StripeChunks_get() physical 8 8
+StripeChunks_get() length   8 16
+StripeChunks_get() res64[0] 8 24
+StripeChunks_get() res64[1] 8 32
+StripeChunks_get() flags    4 40
+StripeChunks_get() device   4 48
+StripeChunks_get() res32[0] 4 48
+StripeChunks_get() res32[1] 4 52
+
+
+
+
+
+On 8/18/22 16:11, Andreas Dilger wrote:
+On Aug 18, 2022, at 14:28, John Bauer <bauerj at iodoctors.com<mailto:bauerj at iodoctors.com>> wrote:
+
+
+Andreas,
+
+Thanks for the reply.  I don't think I'm accessing the Lustre filefrag ( see below ).  Where would I normally find that installed? I downloaded the lustre-release git repository and can't find filefrag stuff to build my own.  Is that somewhere else?
+
+filefrag is part of the e2fsprogs package ("rpm -qf $(which filefrag)"), so you need to download and install the Lustre-patched e2fsprogs from https://downloads.whamcloud.com/public/e2fsprogs/latest/
+
+
+More info:
+
+pfe27.jbauer2 334> cat /sys/fs/lustre/version
+2.12.8_ddn12
+
+
+You should really use "lctl get_param version", since the Lustre /proc and /sys files move around on occasion.
+
+The PFL/FLR change for FIEMAP is not included in this version, but it _should_ be irrelevant because the file you are testing is using a plain layout, not PFL or FLR.
+
+pfe27.jbauer2 335> filefrag -v /nobackupp17/jbauer2/dd.dat
+Filesystem type is: bd00bd0
+File size of /nobackupp17/jbauer2/dd.dat is 104857600 (25600 blocks of 4096 bytes)
+/nobackupp17/jbauer2/dd.dat: FIBMAP unsupported
+
+pfe27.jbauer2 336> which filefrag
+/usr/sbin/filefrag
+
+
+
+
+John
+
+On 8/18/22 14:57, Andreas Dilger wrote:
+What version of Lustre are you using?  Does "filefrag -v" from a newer Lustre e2fsprogs (1.45.6.wc3+) work properly?
+
+There was a small change to the Lustre FIEMAP handling in order to handle overstriped files and PFL/FLR files with many stripes and multiple components, since the FIEMAP "restart" mechanism was broken for files that had multiple objects on the same OST index.  See LU-11484 for details.  That change was included in the 2.14.0 release.
+
+In essence, the fe_device field now encodes the absolute file stripe number in the high 16 bits of fe_device, and the device number in the low 16 bits (as it did before).   Since "filefrag -v" prints fe_device in hex and would show as "0x<stripe><device>" instead of "0x0000<device>", this was considered an acceptable tradeoff compared to other "less compatible" changes that would have been needed to implement PFL/FLR handling.
+
+That said, I would have expected this change to result in your tool reporting very large values for fe_device (e.g. OST index + N * 65536), so returning all-zero values is somewhat unexpected.
+
+Cheers, Andreas
+
+On Aug 18, 2022, at 06:27, John Bauer <bauerj at iodoctors.com<mailto:bauerj at iodoctors.com>> wrote:
+
+Hi all,
+
+I am trying to get my llfie program (which uses fiemap) going again, but now the struct fiemap_extent structures I get back from the ioctl call, all have fe_device=0.  The output from lfs getstripe indicates that the devices are not all 0.  The sum of the fe_length members adds up to the file size, so that is working.  The fe_physical members look reasonable also.  Has something changed?  This used to work.
+
+Thanks, John
+
+pfe27.jbauer2 300> llfie /nobackupp17/jbauer2/dd.dat
+LustreStripeInfo_get() lum->lmm_magic=0xbd30bd0
+listExtents() fe_physical=30643484360704 fe_device=0 fe_length=16777216
+listExtents() fe_physical=30646084829184 fe_device=0 fe_length=2097152
+listExtents() fe_physical=5705226518528 fe_device=0 fe_length=16777216
+listExtents() fe_physical=5710209351680 fe_device=0 fe_length=2097152
+listExtents() fe_physical=30621271326720 fe_device=0 fe_length=16777216
+listExtents() fe_physical=31761568366592 fe_device=0 fe_length=16777216
+listExtents() fe_physical=24757567225856 fe_device=0 fe_length=16777216
+listExtents() fe_physical=14196460748800 fe_device=0 fe_length=16777216
+listExtents() nMapped=8 byteCount=104857600
+
+
+pfe27.jbauer2 301> lfs getstripe /nobackupp17/jbauer2/dd.dat
+/nobackupp17/jbauer2/dd.dat
+lmm_stripe_count:  6
+lmm_stripe_size:   2097152
+lmm_pattern:       raid0
+lmm_layout_gen:    0
+lmm_stripe_offset: 126
+lmm_pool:          ssd-pool
+obdidx objid objid group
+  126      13930025     0xd48e29             0
+  113      13115889     0xc821f1             0
+  120      14003176     0xd5abe8             0
+  109      12785483     0xc3174b             0
+  102      13811117     0xd2bdad             0
+  116      13377285     0xcc1f05             0
+
+_______________________________________________
+lustre-discuss mailing list
+lustre-discuss at lists.lustre.org<mailto:lustre-discuss at lists.lustre.org>
+http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org
+
+Cheers, Andreas
+--
+Andreas Dilger
+Lustre Principal Architect
+Whamcloud
+
+
+
+
+
+
+
+
+Cheers, Andreas
+--
+Andreas Dilger
+Lustre Principal Architect
+Whamcloud
+
+
+
+
+
+
+
+
+Cheers, Andreas
+--
+Andreas Dilger
+Lustre Principal Architect
+Whamcloud
+
+
+
+
+
+
+
+
+Cheers, Andreas
+--
+Andreas Dilger
+Lustre Principal Architect
+Whamcloud
+
+
+
+
+
+
+
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20220819/e047de7d/attachment-0001.htm>
+
+From jesse.stroik at ssec.wisc.edu  Tue Aug 23 14:34:05 2022
+From: jesse.stroik at ssec.wisc.edu (Jesse Stroik)
+Date: Tue, 23 Aug 2022 21:34:05 +0000
+Subject: [lustre-discuss] lustre 2.15 installation on Centos 8.5.2111
+In-Reply-To: <55cd5ddb-8988-f27e-6eb2-eab8f62c08f7@gsi.de>
+References: <3f9d0a67-2a33-36e8-ef2a-560b0842b263@ira.inaf.it>
+ <PH0PR06MB77218F69AAB2184F210449E6DA869@PH0PR06MB7721.namprd06.prod.outlook.com>
+ <55cd5ddb-8988-f27e-6eb2-eab8f62c08f7@gsi.de>
+Message-ID: <PH0PR06MB772120F0AB0EBE8BCCB8FA6EDA709@PH0PR06MB7721.namprd06.prod.outlook.com>
+
+We can't (or perhaps shan't) use --nodeps. Our lustre is installed as part of a normal configuration management system and not manually on systems and hacking in an exec with --nodeps isn't something we want to do to our lustre server class. The RPMs just need to be correct.
+
+Building the RPMs and having kmod-zfs works if you need the dependencies to line up. It's not too much trouble, so that's our preferred route.
+
+Best,
+Jesse
+
+________________________________________
+From: lustre-discuss <lustre-discuss-bounces at lists.lustre.org> on behalf of Thomas Roth via lustre-discuss <lustre-discuss at lists.lustre.org>
+Sent: Friday, July 15, 2022 1:28 PM
+To: lustre-discuss at lists.lustre.org
+Subject: Re: [lustre-discuss] lustre 2.15 installation on Centos 8.5.2111
+
+In addition, you might need to use the "--nodeps" to install your self-compiled packages, cf.
+https://jira.whamcloud.com/browse/LU-15976
+
+Cheers
+Thomas
+
+On 7/12/22 19:02, Jesse Stroik via lustre-discuss wrote:
+> Hi Fran,
+>
+> I suspect the issue is a missing kmod-zfs RPM which provides those symbols. It might be the case that it was inadvertently excluded from the whamcloud repo.
+>
+> You could build your own RPMs on a centos system with the group 'Development Tools' installed. I'd recommend doing it as an unprivileged user and however you setup your normal build environment.
+>
+> Start by installing the kernel RPMs they provide, boot into that new kernel, verify that is the newest kernel you have installed, then build zfs & lustre from source.
+>
+> Here is an example I tested on a rocky 8.5 system, but it'll probably work similarly on a centos 8.5 system.
+>
+> $ git clone https://github.com/zfsonlinux/zfs.git
+> $ cd zfs
+> $ git checkout zfs-2.0.7
+> $ sh autogen.sh
+> $ ./configure --with-spec=redhat
+> $ make rpms
+>
+> At that point, you should have a set of ZFS RPMs built. Install them:
+>
+> $ dnf localinstall kmod-zfs-2.0.7-1.el8.x86_64.rpm kmod-zfs-devel-2.0.7-1.el8.x86_64.rpm libnvpair3-2.0.7-1.el8.x86_64.rpm libuutil3-2.0.7-1.el8.x86_64.rpm libzfs4-2.0.7-1.el8.x86_64.rpm libzfs4-devel-2.0.7-1.el8.x86_64.rpm libzpool4-2.0.7-1.el8.x86_64.rpm zfs-2.0.7-1.el8.x86_64.rpm
+>
+> At this point if you've built for the correct kernel, the zfs module should be loadable. Then fetch and build lustre 2.15.0. This worked for me:
+>
+> $ git clone git://git.whamcloud.com/fs/lustre-release.git
+> $ cd lustre-release
+> $ git checkout v2_15_0
+> $ sh autogen.sh
+> $  ## in this example it will build with zfs support only
+> $ ./configure --enable-server --disable-ldiskfs
+> $ make rpms
+>
+> If everything succeeds, install the RPMs. I believe this would be the minimum set you might need:
+>
+> $ dnf localinstall kmod-lustre-2.15.0-1.el8.x86_64.rpm kmod-lustre-osd-zfs-2.15.0-1.el8.x86_64.rpm lustre-2.15.0-1.el8.x86_64.rpm lustre-osd-zfs-mount-2.15.0-1.el8.x86_64.rpm
+>
+> Adjust as needed. I hope you find this useful.
+>
+> Best,
+> Jesse
+>
+>
+>
+>
+> ________________________________________
+> From: lustre-discuss <lustre-discuss-bounces at lists.lustre.org> on behalf of Bedosti Francesco <bedosti at ira.inaf.it>
+> Sent: Monday, July 11, 2022 11:17 AM
+> To: lustre-discuss at lists.lustre.org
+> Subject: [lustre-discuss] lustre 2.15 installation on Centos 8.5.2111
+>
+> Hi
+> i'm installing lustre 2.15 with ZFS backend from repository https://downloads.whamcloud.com/public/lustre/lustre-2.15.0/el8.5/server/ on a Centos 8.5
+>
+> I added zfs from lustre repository without problems, but when i try to install lustre it gives me this error:
+>
+> yum install lustre
+> Last metadata expiration check: 0:07:45 ago on Mon Jul 11 18:05:51 2022.
+> Error:
+>    Problem: package lustre-2.15.0-1.el8.x86_64 requires lustre-osd-mount, but none of the providers can be installed
+>     - package lustre-osd-zfs-mount-2.15.0-1.el8.x86_64 requires kmod-lustre-osd-zfs, but none of the providers can be installed
+>     - conflicting requests
+>     - nothing provides ksym(__cv_broadcast) = 0x03cebd8a needed by kmod-lustre-osd-zfs-2.15.0-1.el8.x86_64
+>     - nothing provides ksym(arc_add_prune_callback) = 0x1363912f needed by kmod-lustre-osd-zfs-2.15.0-1.el8.x86_64
+>     - nothing provides ksym(arc_buf_size) = 0x115a75cf needed by kmod-lustre-osd-zfs-2.15.0-1.el8.x86_64
+>     - nothing provides ksym(arc_remove_prune_callback) = 0x1ab2d851 needed by kmod-lustre-osd-zfs-2.15.0-1.el8.x86_64
+>     - nothing provides ksym(dbuf_create_bonus) = 0x7beafc97 needed by kmod-lustre-osd-zfs-2.15.0-1.el8.x86_64
+>     - nothing provides ksym(dbuf_read) = 0xa12ed106 needed by kmod-lustre-osd-zfs-2.15.0-1.el8.x86_64
+>     - nothing provides ksym(dmu_assign_arcbuf_by_dbuf) = 0x26d78f55 needed by kmod-lustre-osd-zfs-2.15.0-1.el8.x86_64
+>     - nothing provides ksym(dmu_bonus_hold) = 0x8d7deb8a needed by kmod-lustre-osd-zfs-2.15.0-1.el8.x86_64
+>     - nothing provides ksym(dmu_buf_hold_array_by_bonus) = 0x878059c5 needed by kmod-lustre-osd-zfs-2.15.0-1.el8.x86_64
+>     - nothing provides ksym(dmu_buf_rele) = 0x9205359f needed by kmod-lustre-osd-zfs-2.15.0-1.el8.x86_64
+>     - nothing provides ksym(dmu_buf_rele_array) = 0x33363fa0 needed by kmod-lustre-osd-zfs-2.15.0-1.el8.x86_64
+>     - nothing provides ksym(dmu_free_long_range) = 0x329676ab needed by kmod-lustre-osd-zfs-2.15.0-1.el8.x86_64
+>     - nothing provides ksym(dmu_free_range) = 0x356042ae needed by kmod-lustre-osd-zfs-2.15.0-1.el8.x86_64
+>     - nothing provides ksym(dmu_object_alloc_dnsize) = 0x72ae6b8e needed by kmod-lustre-osd-zfs-2.15.0-1.el8.x86_64
+>     - nothing provides ksym(dmu_object_free) = 0x01514575 needed by kmod-lustre-osd-zfs-2.15.0-1.el8.x86_64
+>     - nothing provides ksym(dmu_object_next) = 0x989708be needed by kmod-lustre-osd-zfs-2.15.0-1.el8.x86_64
+>     - nothing provides ksym(dmu_object_set_blocksize) = 0xdbdf5ea0 needed by kmod-lustre-osd-zfs-2.15.0-1.el8.x86_64
+>     - nothing provides ksym(dmu_objset_disown) = 0xac0fbfc0 needed by kmod-lustre-osd-zfs-2.15.0-1.el8.x86_64
+>     - nothing provides ksym(dmu_objset_dnodesize) = 0x880db256 needed by kmod-lustre-osd-zfs-2.15.0-1.el8.x86_64
+>     - nothing provides ksym(dmu_objset_ds) = 0x5e094e28 needed by kmod-lustre-osd-zfs-2.15.0-1.el8.x86_64
+>     - nothing provides ksym(dmu_objset_own) = 0xd1bc953d needed by kmod-lustre-osd-zfs-2.15.0-1.el8.x86_64
+>     - nothing provides ksym(dmu_objset_pool) = 0x316efb55 needed by kmod-lustre-osd-zfs-2.15.0-1.el8.x86_64
+>     - nothing provides ksym(dmu_objset_projectquota_enabled) = 0x7cf4ae3c needed by kmod-lustre-osd-zfs-2.15.0-1.el8.x86_64
+>     - nothing provides ksym(dmu_objset_spa) = 0x74df2efe needed by kmod-lustre-osd-zfs-2.15.0-1.el8.x86_64
+>     - nothing provides ksym(dmu_objset_space) = 0xd74d78f4 needed by kmod-lustre-osd-zfs-2.15.0-1.el8.x86_64
+>     - nothing provides ksym(dmu_objset_userobjspace_present) = 0x138579aa needed by kmod-lustre-osd-zfs-2.15.0-1.el8.x86_64
+>     - nothing provides ksym(dmu_objset_userused_enabled) = 0xcd8a237b needed by kmod-lustre-osd-zfs-2.15.0-1.el8.x86_64
+>     - nothing provides ksym(dmu_prefetch) = 0xc222e936 needed by kmod-lustre-osd-zfs-2.15.0-1.el8.x86_64
+>     - nothing provides ksym(dmu_read) = 0xeeafabff needed by kmod-lustre-osd-zfs-2.15.0-1.el8.x86_64
+>     - nothing provides ksym(dmu_read_by_dnode) = 0xc4f6da68 needed by kmod-lustre-osd-zfs-2.15.0-1.el8.x86_64
+>     - nothing provides ksym(dmu_request_arcbuf) = 0xca969ecf needed by kmod-lustre-osd-zfs-2.15.0-1.el8.x86_64
+>     - nothing provides ksym(dmu_return_arcbuf) = 0x32f9dfac needed by kmod-lustre-osd-zfs-2.15.0-1.el8.x86_64
+>     - nothing provides ksym(dmu_tx_abort) = 0xa9691ccd needed by kmod-lustre-osd-zfs-2.15.0-1.el8.x86_64
+>     - nothing provides ksym(dmu_tx_assign) = 0x6bc84ffe needed by kmod-lustre-osd-zfs-2.15.0-1.el8.x86_64
+>     - nothing provides ksym(dmu_tx_callback_register) = 0xab06fb1e needed by kmod-lustre-osd-zfs-2.15.0-1.el8.x86_64
+>     - nothing provides ksym(dmu_tx_commit) = 0xcbba81b1 needed by kmod-lustre-osd-zfs-2.15.0-1.el8.x86_64
+>     - nothing provides ksym(dmu_tx_create) = 0x86931c7a needed by kmod-lustre-osd-zfs-2.15.0-1.el8.x86_64
+>     - nothing provides ksym(dmu_tx_get_txg) = 0xc8357211 needed by kmod-lustre-osd-zfs-2.15.0-1.el8.x86_64
+>     - nothing provides ksym(dmu_tx_hold_bonus) = 0x97c61436 needed by kmod-lustre-osd-zfs-2.15.0-1.el8.x86_64
+>     - nothing provides ksym(dmu_tx_hold_free) = 0x360baac3 needed by kmod-lustre-osd-zfs-2.15.0-1.el8.x86_64
+>     - nothing provides ksym(dmu_tx_hold_sa) = 0xb106205d needed by kmod-lustre-osd-zfs-2.15.0-1.el8.x86_64
+>     - nothing provides ksym(dmu_tx_hold_sa_create) = 0x99a9a6e2 needed by kmod-lustre-osd-zfs-2.15.0-1.el8.x86_64
+>     - nothing provides ksym(dmu_tx_hold_spill) = 0x14545569 needed by kmod-lustre-osd-zfs-2.15.0-1.el8.x86_64
+>     - nothing provides ksym(dmu_tx_hold_write) = 0x752aa2d4 needed by kmod-lustre-osd-zfs-2.15.0-1.el8.x86_64
+>     - nothing provides ksym(dmu_tx_hold_write_by_dnode) = 0x24c9e18f needed by kmod-lustre-osd-zfs-2.15.0-1.el8.x86_64
+>     - nothing provides ksym(dmu_tx_hold_zap) = 0xdea9d23c needed by kmod-lustre-osd-zfs-2.15.0-1.el8.x86_64
+>     - nothing provides ksym(dmu_tx_hold_zap_by_dnode) = 0x64adadf4 needed by kmod-lustre-osd-zfs-2.15.0-1.el8.x86_64
+>     - nothing provides ksym(dmu_tx_mark_netfree) = 0xdff68d46 needed by kmod-lustre-osd-zfs-2.15.0-1.el8.x86_64
+>     - nothing provides ksym(dmu_write) = 0x062ec89b needed by kmod-lustre-osd-zfs-2.15.0-1.el8.x86_64
+>     - nothing provides ksym(dmu_write_by_dnode) = 0x36a2ea0a needed by kmod-lustre-osd-zfs-2.15.0-1.el8.x86_64
+>     - nothing provides ksym(dsl_pool_config_enter) = 0x14d29692 needed by kmod-lustre-osd-zfs-2.15.0-1.el8.x86_64
+>     - nothing provides ksym(dsl_pool_config_exit) = 0x5c919184 needed by kmod-lustre-osd-zfs-2.15.0-1.el8.x86_64
+>     - nothing provides ksym(dsl_prop_register) = 0x00e13baf needed by kmod-lustre-osd-zfs-2.15.0-1.el8.x86_64
+>     - nothing provides ksym(dsl_prop_unregister) = 0x2daa653d needed by kmod-lustre-osd-zfs-2.15.0-1.el8.x86_64
+>     - nothing provides ksym(nvlist_add_byte_array) = 0x4e7a9a72 needed by kmod-lustre-osd-zfs-2.15.0-1.el8.x86_64
+>     - nothing provides ksym(nvlist_alloc) = 0x8b696b3c needed by kmod-lustre-osd-zfs-2.15.0-1.el8.x86_64
+>     - nothing provides ksym(nvlist_free) = 0x1eb6b2e6 needed by kmod-lustre-osd-zfs-2.15.0-1.el8.x86_64
+>     - nothing provides ksym(nvlist_lookup_byte_array) = 0xb23a79b9 needed by kmod-lustre-osd-zfs-2.15.0-1.el8.x86_64
+>     - nothing provides ksym(nvlist_next_nvpair) = 0x12b7c9d9 needed by kmod-lustre-osd-zfs-2.15.0-1.el8.x86_64
+>     - nothing provides ksym(nvlist_pack) = 0x2765fde3 needed by kmod-lustre-osd-zfs-2.15.0-1.el8.x86_64
+>     - nothing provides ksym(nvlist_remove) = 0x0fe970b7 needed by kmod-lustre-osd-zfs-2.15.0-1.el8.x86_64
+>     - nothing provides ksym(nvlist_size) = 0xb7a0e36b needed by kmod-lustre-osd-zfs-2.15.0-1.el8.x86_64
+>     - nothing provides ksym(nvlist_unpack) = 0xc625bb30 needed by kmod-lustre-osd-zfs-2.15.0-1.el8.x86_64
+>     - nothing provides ksym(nvpair_name) = 0x73de28f8 needed by kmod-lustre-osd-zfs-2.15.0-1.el8.x86_64
+>     - nothing provides ksym(sa_bulk_lookup) = 0x33aaf400 needed by kmod-lustre-osd-zfs-2.15.0-1.el8.x86_64
+>     - nothing provides ksym(sa_bulk_update) = 0x403de1c2 needed by kmod-lustre-osd-zfs-2.15.0-1.el8.x86_64
+>     - nothing provides ksym(sa_handle_destroy) = 0x179e9758 needed by kmod-lustre-osd-zfs-2.15.0-1.el8.x86_64
+>     - nothing provides ksym(sa_handle_get) = 0xaf939683 needed by kmod-lustre-osd-zfs-2.15.0-1.el8.x86_64
+>     - nothing provides ksym(sa_handle_get_from_db) = 0xd75b5123 needed by kmod-lustre-osd-zfs-2.15.0-1.el8.x86_64
+>     - nothing provides ksym(sa_lookup) = 0xad56a10b needed by kmod-lustre-osd-zfs-2.15.0-1.el8.x86_64
+>     - nothing provides ksym(sa_object_size) = 0x16d92b02 needed by kmod-lustre-osd-zfs-2.15.0-1.el8.x86_64
+>     - nothing provides ksym(sa_replace_all_by_template) = 0x379eacb8 needed by kmod-lustre-osd-zfs-2.15.0-1.el8.x86_64
+>     - nothing provides ksym(sa_setup) = 0xa19ff31f needed by kmod-lustre-osd-zfs-2.15.0-1.el8.x86_64
+>     - nothing provides ksym(sa_size) = 0xd8ad4cd7 needed by kmod-lustre-osd-zfs-2.15.0-1.el8.x86_64
+>     - nothing provides ksym(sa_spill_rele) = 0x64815b44 needed by kmod-lustre-osd-zfs-2.15.0-1.el8.x86_64
+>     - nothing provides ksym(sa_update) = 0x64a15ec5 needed by kmod-lustre-osd-zfs-2.15.0-1.el8.x86_64
+>     - nothing provides ksym(spa_freeze) = 0x125115d5 needed by kmod-lustre-osd-zfs-2.15.0-1.el8.x86_64
+>     - nothing provides ksym(spa_get_dsl) = 0xef44809d needed by kmod-lustre-osd-zfs-2.15.0-1.el8.x86_64
+>     - nothing provides ksym(spa_maxblocksize) = 0xda598cd2 needed by kmod-lustre-osd-zfs-2.15.0-1.el8.x86_64
+>     - nothing provides ksym(spa_writeable) = 0x6a075800 needed by kmod-lustre-osd-zfs-2.15.0-1.el8.x86_64
+>     - nothing provides ksym(spl_panic) = 0xbc32eee7 needed by kmod-lustre-osd-zfs-2.15.0-1.el8.x86_64
+>     - nothing provides ksym(txg_wait_callbacks) = 0x61743d6b needed by kmod-lustre-osd-zfs-2.15.0-1.el8.x86_64
+>     - nothing provides ksym(txg_wait_synced) = 0xcc76bc4d needed by kmod-lustre-osd-zfs-2.15.0-1.el8.x86_64
+>     - nothing provides ksym(zap_add) = 0x64b73098 needed by kmod-lustre-osd-zfs-2.15.0-1.el8.x86_64
+>     - nothing provides ksym(zap_add_by_dnode) = 0xed480b96 needed by kmod-lustre-osd-zfs-2.15.0-1.el8.x86_64
+>     - nothing provides ksym(zap_add_uint64) = 0x9919a21a needed by kmod-lustre-osd-zfs-2.15.0-1.el8.x86_64
+>     - nothing provides ksym(zap_count) = 0x659ff127 needed by kmod-lustre-osd-zfs-2.15.0-1.el8.x86_64
+>     - nothing provides ksym(zap_create_flags_dnsize) = 0x9b7f3b23 needed by kmod-lustre-osd-zfs-2.15.0-1.el8.x86_64
+>     - nothing provides ksym(zap_cursor_advance) = 0x110ee212 needed by kmod-lustre-osd-zfs-2.15.0-1.el8.x86_64
+>     - nothing provides ksym(zap_cursor_fini) = 0x2c0791ff needed by kmod-lustre-osd-zfs-2.15.0-1.el8.x86_64
+>     - nothing provides ksym(zap_cursor_init) = 0xccc464cd needed by kmod-lustre-osd-zfs-2.15.0-1.el8.x86_64
+>     - nothing provides ksym(zap_cursor_init_serialized) = 0x91e513c3 needed by kmod-lustre-osd-zfs-2.15.0-1.el8.x86_64
+>     - nothing provides ksym(zap_cursor_retrieve) = 0x8576d59c needed by kmod-lustre-osd-zfs-2.15.0-1.el8.x86_64
+>     - nothing provides ksym(zap_cursor_serialize) = 0x44866197 needed by kmod-lustre-osd-zfs-2.15.0-1.el8.x86_64
+>     - nothing provides ksym(zap_lookup) = 0x67af93f3 needed by kmod-lustre-osd-zfs-2.15.0-1.el8.x86_64
+>     - nothing provides ksym(zap_lookup_by_dnode) = 0xaf832009 needed by kmod-lustre-osd-zfs-2.15.0-1.el8.x86_64
+>     - nothing provides ksym(zap_lookup_uint64) = 0x5b2d1778 needed by kmod-lustre-osd-zfs-2.15.0-1.el8.x86_64
+>     - nothing provides ksym(zap_remove) = 0xc8e9807e needed by kmod-lustre-osd-zfs-2.15.0-1.el8.x86_64
+>     - nothing provides ksym(zap_remove_by_dnode) = 0xc59ada49 needed by kmod-lustre-osd-zfs-2.15.0-1.el8.x86_64
+>     - nothing provides ksym(zap_remove_uint64) = 0x797c2660 needed by kmod-lustre-osd-zfs-2.15.0-1.el8.x86_64
+>     - nothing provides ksym(zap_update) = 0xd43444d9 needed by kmod-lustre-osd-zfs-2.15.0-1.el8.x86_64
+>     - nothing provides ksym(zfs_attr_table) = 0xfbf319ac needed by kmod-lustre-osd-zfs-2.15.0-1.el8.x86_64
+>     - nothing provides ksym(zfs_prop_to_name) = 0x5adabedf needed by kmod-lustre-osd-zfs-2.15.0-1.el8.x86_64
+>     - nothing provides ksym(zio_buf_alloc) = 0x0c211976 needed by kmod-lustre-osd-zfs-2.15.0-1.el8.x86_64
+>     - nothing provides ksym(zio_buf_free) = 0x6e7a7166 needed by kmod-lustre-osd-zfs-2.15.0-1.el8.x86_64
+>     - nothing provides ksym(zrl_add_impl) = 0x71517bab needed by kmod-lustre-osd-zfs-2.15.0-1.el8.x86_64
+>     - nothing provides ksym(zrl_remove) = 0x6a251b8b needed by kmod-lustre-osd-zfs-2.15.0-1.el8.x86_64
+>     - nothing provides ldiskfsprogs >= 1.45.6.wc1 needed by lustre-osd-ldiskfs-mount-2.15.0-1.el8.x86_64
+> (try to add '--skip-broken' to skip uninstallable packages or '--nobest' to use not only best candidate packages)
+>
+> Is Centos still supported? I remember it doing well with lustre 2.14. am I doing something wrong?
+>
+> many thanks
+> Fran
+> _______________________________________________
+> lustre-discuss mailing list
+> lustre-discuss at lists.lustre.org
+> http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org
+> _______________________________________________
+> lustre-discuss mailing list
+> lustre-discuss at lists.lustre.org
+> http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org
+_______________________________________________
+lustre-discuss mailing list
+lustre-discuss at lists.lustre.org
+http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org
+
+From elliswilson at microsoft.com  Wed Aug 24 13:50:00 2022
+From: elliswilson at microsoft.com (Ellis Wilson)
+Date: Wed, 24 Aug 2022 20:50:00 +0000
+Subject: [lustre-discuss] lproc stats changed snapshot_time from unix-epoch
+ to uptime/monotonic in 2.15
+Message-ID: <IA1PR21MB35710682FFDAB18193A8C7BABE739@IA1PR21MB3571.namprd21.prod.outlook.com>
+
+Hi all,
+
+One of my colleagues noticed that in testing 2.15.1 out the stats returned include snapshot_time showing up in a different fashion than before.  Previously, ktime_get_real_ts64 was used to get the current timestamp and that was presented when stats were printed, whereas now uptime is used as returned by ktime_get.  Is there a monotonic requirement to snapshot_time that I'm not thinking about that makes ktime_get more useful?  The previous behavior of getting the current time alongside the stats so you could reason about when they were gotten made more sense to me.  But perhaps Andreas had a different vision for use of snapshot_time given that he was the one who revised it?
+
+I'm glad to open a bug and propose a patch if this was just a mistake, but figured I'd ask first.
+
+Best,
+
+ellis
+
+From adilger at whamcloud.com  Wed Aug 24 17:47:07 2022
+From: adilger at whamcloud.com (Andreas Dilger)
+Date: Thu, 25 Aug 2022 00:47:07 +0000
+Subject: [lustre-discuss] lproc stats changed snapshot_time from
+ unix-epoch to uptime/monotonic in 2.15
+In-Reply-To: <IA1PR21MB35710682FFDAB18193A8C7BABE739@IA1PR21MB3571.namprd21.prod.outlook.com>
+References: <IA1PR21MB35710682FFDAB18193A8C7BABE739@IA1PR21MB3571.namprd21.prod.outlook.com>
+Message-ID: <C371B34E-C83C-453C-929A-452148291770@whamcloud.com>
+
+Ellis, thanks for reporting this.  This looks like it was a mistake. 
+
+The timestamps should definitely be in wallclock time, but this looks to have been changed unintentionally to reduce overhead, and use a u64 instead of dealing with timespec64 math, while losing the original intent (there are many different ktime_get variants, all alike).
+
+I think many monitoring tools will be unaffected because they use the delta between successive timestamps, but having timestamps that are relative to boot time is problematic since they may repeat or go backward after a reboot, and some tools may use this timestamp when inserting into a tsdb to avoid processing lag. 
+
+Please file a ticket, and ideally if you can submit a patch that converts ktime_get() to ktime_get_real_ns() for the places that are changed in the patch (with a "Fixes:" line to track it against the original patch, which was commit ea2cd3af7b).
+
+Cheers, Andreas
+
+> On Aug 24, 2022, at 14:50, Ellis Wilson via lustre-discuss <lustre-discuss at lists.lustre.org> wrote:
+> 
+> ?Hi all,
+> 
+> One of my colleagues noticed that in testing 2.15.1 out the stats returned include snapshot_time showing up in a different fashion than before.  Previously, ktime_get_real_ts64 was used to get the current timestamp and that was presented when stats were printed, whereas now uptime is used as returned by ktime_get.  Is there a monotonic requirement to snapshot_time that I'm not thinking about that makes ktime_get more useful?  The previous behavior of getting the current time alongside the stats so you could reason about when they were gotten made more sense to me.  But perhaps Andreas had a different vision for use of snapshot_time given that he was the one who revised it?
+> 
+> I'm glad to open a bug and propose a patch if this was just a mistake, but figured I'd ask first.
+> 
+> Best,
+> 
+> ellis
+> _______________________________________________
+> lustre-discuss mailing list
+> lustre-discuss at lists.lustre.org
+> http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org
+
+From elliswilson at microsoft.com  Thu Aug 25 06:20:53 2022
+From: elliswilson at microsoft.com (Ellis Wilson)
+Date: Thu, 25 Aug 2022 13:20:53 +0000
+Subject: [lustre-discuss] lproc stats changed snapshot_time from
+ unix-epoch to uptime/monotonic in 2.15
+In-Reply-To: <C371B34E-C83C-453C-929A-452148291770@whamcloud.com>
+References: <IA1PR21MB35710682FFDAB18193A8C7BABE739@IA1PR21MB3571.namprd21.prod.outlook.com>
+ <C371B34E-C83C-453C-929A-452148291770@whamcloud.com>
+Message-ID: <IA1PR21MB357168543E8BC21CF93A32C3BE729@IA1PR21MB3571.namprd21.prod.outlook.com>
+
+Thanks for confirming Andreas, and will do!
+
+-----Original Message-----
+From: Andreas Dilger <adilger at whamcloud.com> 
+Sent: Wednesday, August 24, 2022 8:47 PM
+To: Ellis Wilson <elliswilson at microsoft.com>
+Cc: lustre-discuss at lists.lustre.org
+Subject: [EXTERNAL] Re: [lustre-discuss] lproc stats changed snapshot_time from unix-epoch to uptime/monotonic in 2.15
+
+Ellis, thanks for reporting this.  This looks like it was a mistake. 
+
+The timestamps should definitely be in wallclock time, but this looks to have been changed unintentionally to reduce overhead, and use a u64 instead of dealing with timespec64 math, while losing the original intent (there are many different ktime_get variants, all alike).
+
+I think many monitoring tools will be unaffected because they use the delta between successive timestamps, but having timestamps that are relative to boot time is problematic since they may repeat or go backward after a reboot, and some tools may use this timestamp when inserting into a tsdb to avoid processing lag. 
+
+Please file a ticket, and ideally if you can submit a patch that converts ktime_get() to ktime_get_real_ns() for the places that are changed in the patch (with a "Fixes:" line to track it against the original patch, which was commit ea2cd3af7b).
+
+Cheers, Andreas
+
+> On Aug 24, 2022, at 14:50, Ellis Wilson via lustre-discuss <lustre-discuss at lists.lustre.org> wrote:
+> 
+> ?Hi all,
+> 
+> One of my colleagues noticed that in testing 2.15.1 out the stats returned include snapshot_time showing up in a different fashion than before.  Previously, ktime_get_real_ts64 was used to get the current timestamp and that was presented when stats were printed, whereas now uptime is used as returned by ktime_get.  Is there a monotonic requirement to snapshot_time that I'm not thinking about that makes ktime_get more useful?  The previous behavior of getting the current time alongside the stats so you could reason about when they were gotten made more sense to me.  But perhaps Andreas had a different vision for use of snapshot_time given that he was the one who revised it?
+> 
+> I'm glad to open a bug and propose a patch if this was just a mistake, but figured I'd ask first.
+> 
+> Best,
+> 
+> ellis
+> _______________________________________________
+> lustre-discuss mailing list
+> lustre-discuss at lists.lustre.org
+> https://nam06.safelinks.protection.outlook.com/?url=http%3A%2F%2Flists.lustre.org%2Flistinfo.cgi%2Flustre-discuss-lustre.org&amp;data=05%7C01%7Celliswilson%40microsoft.com%7C211612b72e78476e056008da8633576a%7C72f988bf86f141af91ab2d7cd011db47%7C1%7C0%7C637969852332016835%7CUnknown%7CTWFpbGZsb3d8eyJWIjoiMC4wLjAwMDAiLCJQIjoiV2luMzIiLCJBTiI6Ik1haWwiLCJXVCI6Mn0%3D%7C3000%7C%7C%7C&amp;sdata=Ycw4J8CUQ1WC9c96G2B0ko1gwPO1A4sj9ThFz3xuxuQ%3D&amp;reserved=0
+
+From bauerj at iodoctors.com  Thu Aug 25 10:29:03 2022
+From: bauerj at iodoctors.com (John Bauer)
+Date: Thu, 25 Aug 2022 12:29:03 -0500
+Subject: [lustre-discuss] fio and lustre performance
+Message-ID: <88a91dc7-75cd-61a9-9466-8e10989e0306@iodoctors.com>
+
+Hi all,
+
+I'm trying to figure out an odd behavior when running an fio ( 
+https://git.kernel.dk/cgit/fio/ <https://git.kernel.dk/cgit/fio/> ) 
+benchmark on a Lustre file system.
+
+fio--randrepeat=1  \
+     --ioengine=posixaio  \
+     --buffered=1  \
+     --gtod_reduce=1  \
+     --name=test  \
+     --filename=${fileName}  \
+     --bs=1M  \
+     --iodepth=64  \
+     --size=40G  \
+     --readwrite=randwrite
+
+In short, the application queues 40,000 random aio_write64(nbyte=1M) to 
+a maximum depth of 64, doing aio_suspend64 followed by aio_write to keep 
+64 outstanding aio requests.? My I/O library that processes the aio 
+requests does so with 4 pthreads removing aio requests from the queue 
+and doing the I/Os as pwrite64()s.? The odd behavior is the intermittent 
+pauses that can been seen in the first plot below.? The X-axis is wall 
+clock time, in seconds, and the left Y-axis is file postition. The 
+horizontal blue lines indicate the amount of time each of the pwrite64 
+is active and where in the file the I/O is occurring. The right Y-axis 
+is the cumulative cpu times for both the process and kernel during the 
+run.? There is minimal user cpu time, for either the process or kernel.? 
+The cumulative system cpu time attributable to the process ( the red 
+line ) runs at a slope of ~4 system cpu seconds per wall clock second.? 
+Makes sense since there are 4 pthreads at work in the user process.? The 
+cumulative system cpu time for the kernel as a whole ( the green line ) 
+is ~12 system cpu seconds per wall clock second.? Note that during the 
+pauses the system cpu accumulation drops to near zero ( zero slope ).
+
+This is run on a dedicated ivybridge node with 40 cores Intel(R) Xeon(R) 
+CPU E5-2680 v2 @ 2.80GHz
+
+The node has 64G of memory.
+
+The file is striped single component PFL, 8x1M.? Lustre version *2.12.8 
+ddn12*
+
+Does anyone have any ideas what is causing the pauses?? Is there 
+something else I could be looking at in the /proc file system to gain 
+insight?
+
+For comparison, the 2nd plot below is when run on /tmp.? Note that there 
+are some pwrite64() that take a long time, but a single pwrite64() 
+taking a long time does not stop all the other pwrite64() active during 
+the same time period.? Elapsed time for /tmp is 13 seconds. Lustre is 28 
+seconds.? Both are essentially memory resident.
+
+Just for completeness I have added a 3rd plot which is the amount of 
+memory each of the OSC clients is consuming over the course of the 
+Lustre run.? Nothing unusual there.? The memory consumption rate slows 
+down during the pauses as one would expect.
+
+I don't think the instrumentation is the issue, as there is not much 
+more instrumentation occurring in the Lustre run versus /tmp, and they 
+are both less than 6MB each in total.
+
+John
+
+In case the images got stripped here are some URLs to dropbox
+
+plot1 : https://www.dropbox.com/s/ey217o053gdyse5/plot1.png?dl=0
+
+plot2 : https://www.dropbox.com/s/vk23vmufa388l7h/plot2.png?dl=0
+
+plot3 : https://www.dropbox.com/s/vk23vmufa388l7h/plot2.png?dl=0
+
+
+
+
+
+
+From adilger at whamcloud.com  Thu Aug 25 16:37:09 2022
+From: adilger at whamcloud.com (Andreas Dilger)
+Date: Thu, 25 Aug 2022 23:37:09 +0000
+Subject: [lustre-discuss] fio and lustre performance
+In-Reply-To: <88a91dc7-75cd-61a9-9466-8e10989e0306@iodoctors.com>
+References: <88a91dc7-75cd-61a9-9466-8e10989e0306@iodoctors.com>
+Message-ID: <D8D6837D-0F4E-4C17-8F07-F0B202E38664@ddn.com>
+
+No comment on the actual performance issue, but we normally test fio using the libaio interface (which is handled in the kernel) instead of posixaio (which is handled by threads in userspace, AFAIK), and also use DirectIO to avoid memory copies (OK if there are enough IO requests in flight).  it should be a relatively easy change to see if that improves the behaviour.
+
+Other things to check - osc.*.max_dirty_mb and llite.*.max_cached_mb are not hitting limits and throttling IO until the data is flushed, and osc.*.max_rpcs_in_flight across the OSCs are *at least* 64 to keep up with the input generation.
+
+When you consider that Lustre (distributed coherent persistent network filesystem) is "only half" of the performance (28s vs 13s) of a local ephemeral RAM-based filesystem, it isn't doing too badly...
+
+Cheers, Andreas
+
+On Aug 25, 2022, at 11:29, John Bauer <bauerj at iodoctors.com<mailto:bauerj at iodoctors.com>> wrote:
+
+Hi all,
+
+I'm trying to figure out an odd behavior when running an fio ( https://git.kernel.dk/cgit/fio/ <https://git.kernel.dk/cgit/fio/> ) benchmark on a Lustre file system.
+
+fio--randrepeat=1  \
+   --ioengine=posixaio  \
+   --buffered=1  \
+   --gtod_reduce=1  \
+   --name=test  \
+   --filename=${fileName}  \
+   --bs=1M  \
+   --iodepth=64  \
+   --size=40G  \
+   --readwrite=randwrite
+
+In short, the application queues 40,000 random aio_write64(nbyte=1M) to a maximum depth of 64, doing aio_suspend64 followed by aio_write to keep 64 outstanding aio requests.  My I/O library that processes the aio requests does so with 4 pthreads removing aio requests from the queue and doing the I/Os as pwrite64()s.  The odd behavior is the intermittent pauses that can been seen in the first plot below.  The X-axis is wall clock time, in seconds, and the left Y-axis is file postition. The horizontal blue lines indicate the amount of time each of the pwrite64 is active and where in the file the I/O is occurring. The right Y-axis is the cumulative cpu times for both the process and kernel during the run.  There is minimal user cpu time, for either the process or kernel.  The cumulative system cpu time attributable to the process ( the red line ) runs at a slope of ~4 system cpu seconds per wall clock second.  Makes sense since there are 4 pthreads at work in the user process.  The cumulative system cpu time for the kernel as a whole ( the green line ) is ~12 system cpu seconds per wall clock second.  Note that during the pauses the system cpu accumulation drops to near zero ( zero slope ).
+
+This is run on a dedicated ivybridge node with 40 cores Intel(R) Xeon(R) CPU E5-2680 v2 @ 2.80GHz
+
+The node has 64G of memory.
+
+The file is striped single component PFL, 8x1M.  Lustre version *2.12.8 ddn12*
+
+Does anyone have any ideas what is causing the pauses?  Is there something else I could be looking at in the /proc file system to gain insight?
+
+For comparison, the 2nd plot below is when run on /tmp.  Note that there are some pwrite64() that take a long time, but a single pwrite64() taking a long time does not stop all the other pwrite64() active during the same time period.  Elapsed time for /tmp is 13 seconds. Lustre is 28 seconds.  Both are essentially memory resident.
+
+Just for completeness I have added a 3rd plot which is the amount of memory each of the OSC clients is consuming over the course of the Lustre run.  Nothing unusual there.  The memory consumption rate slows down during the pauses as one would expect.
+
+I don't think the instrumentation is the issue, as there is not much more instrumentation occurring in the Lustre run versus /tmp, and they are both less than 6MB each in total.
+
+John
+
+In case the images got stripped here are some URLs to dropbox
+
+plot1 : https://www.dropbox.com/s/ey217o053gdyse5/plot1.png?dl=0
+
+plot2 : https://www.dropbox.com/s/vk23vmufa388l7h/plot2.png?dl=0
+
+plot3 : https://www.dropbox.com/s/vk23vmufa388l7h/plot2.png?dl=0
+
+
+
+
+
+_______________________________________________
+lustre-discuss mailing list
+lustre-discuss at lists.lustre.org<mailto:lustre-discuss at lists.lustre.org>
+http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org
+
+Cheers, Andreas
+--
+Andreas Dilger
+Lustre Principal Architect
+Whamcloud
+
+
+
+
+
+
+
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20220825/ce0656d6/attachment.htm>
+
+From bauerj at iodoctors.com  Fri Aug 26 07:26:53 2022
+From: bauerj at iodoctors.com (John Bauer)
+Date: Fri, 26 Aug 2022 09:26:53 -0500
+Subject: [lustre-discuss] fio and lustre performance
+In-Reply-To: <D8D6837D-0F4E-4C17-8F07-F0B202E38664@ddn.com>
+References: <88a91dc7-75cd-61a9-9466-8e10989e0306@iodoctors.com>
+ <D8D6837D-0F4E-4C17-8F07-F0B202E38664@ddn.com>
+Message-ID: <4e4bccfc-dea2-af1a-4422-d1ae5dc4e314@iodoctors.com>
+
+I reran the job, changing only --ioengine=posixaio to 
+--ioengine=libaio.? Since I don't intercept the functions in libaio I 
+don't see much for application calls except for the open and close.? But 
+the plot of osc cache usage versus time gives a good feel for what is 
+going on.? The first plot below is the osc cache usage when using 
+libaio.? The second plot below is the osc cache usage when using the 
+pthread aio handler (paio).? I should point out that the pthread aio 
+handler I'm using is not the one in librt.so, but rather one that I 
+wrote. (My apologies on the previous email for my having pasted the 
+wrong URL for plot 3 which is the second plot in this email ).? Note 
+that the libaio run took 50 seconds, and the pthread aio handler took 28 
+seconds.
+
+This time, for completeness, I ran the job using --ioengine=posixaio, 
+but using the aio calls in librt.so.? The third plot below is the osc 
+cache usage for this run.? The I/O phase here took 48 seconds.? The 
+fourth plot below is the file position activity for this run.? Note that 
+again there are the pauses that seem to stop all progress.? Perhaps 
+since the job is running considerably slower, the write behind is 
+keeping up with the dirty data being generated and we see fewer pauses 
+than the initial run.? I will investigate the max_dirty_mb and 
+max_rpcs_in_flight angle and send an update later.
+
+I have no complaints about the performance in general when using my 
+pthread aio handler.? I am mostly curious about the source of the 
+pauses.? They always show up, but not in any regular pattern. Sometimes 
+the long pauses have very few aio requests between them, sometimes not.
+
+John
+
+libaio.osc_cached : 
+https://www.dropbox.com/s/7z8taqr2u9g139l/libaio.osc_cached.png?dl=0
+
+https://www.dropbox.com/s/7z8taqr2u9g139l/libaio.osc_cached.png?dl=0
+
+
+paio.osc_cached : 
+https://www.dropbox.com/s/l6bq8rpz6ij7vdo/paio.osc_cached.png?dl=0
+
+https://www.dropbox.com/s/l6bq8rpz6ij7vdo/paio.osc_cached.png?dl=0
+
+
+librt.osc_cached : 
+https://www.dropbox.com/s/4lh0dz9b286ci2l/librt.osc_cached.png?dl=0
+
+https://www.dropbox.com/s/4lh0dz9b286ci2l/librt.osc_cached.png?dl=0
+
+librt.fpa : https://www.dropbox.com/s/5sy67ol3gdl49rg/librt.fpa.png?dl=0
+
+https://www.dropbox.com/s/5sy67ol3gdl49rg/librt.fpa.png?dl=0
+On 8/25/22 18:37, Andreas Dilger wrote:
+> No comment on the actual performance issue, but we normally test fio 
+> using the libaio interface (which is handled in the kernel) instead of 
+> posixaio (which is handled by threads in userspace, AFAIK), and also 
+> use DirectIO to avoid memory copies (OK if there are enough IO 
+> requests in flight). ?it should be a relatively easy change to see if 
+> that improves the behaviour.
+>
+> Other things to check - osc.*.max_dirty_mb and llite.*.max_cached_mb 
+> are not hitting limits and throttling IO until the data is flushed, 
+> and osc.*.max_rpcs_in_flight across the OSCs are *at least* 64 to keep 
+> up with the input generation.
+>
+> When you consider that Lustre (distributed coherent persistent network 
+> filesystem) is "only half" of the performance (28s vs 13s) of a local 
+> ephemeral RAM-based filesystem, it isn't doing too badly...
+>
+> Cheers, Andreas
+>
+>> On Aug 25, 2022, at 11:29, John Bauer <bauerj at iodoctors.com> wrote:
+>>
+>> Hi all,
+>>
+>> I'm trying to figure out an odd behavior when running an fio ( 
+>> https://git.kernel.dk/cgit/fio/ <https://git.kernel.dk/cgit/fio/> ) 
+>> benchmark on a Lustre file system.
+>>
+>> fio--randrepeat=1 ?\
+>> ???--ioengine=posixaio ?\
+>> ???--buffered=1 ?\
+>> ???--gtod_reduce=1 ?\
+>> ???--name=test ?\
+>> ???--filename=${fileName} ?\
+>> ???--bs=1M ?\
+>> ???--iodepth=64 ?\
+>> ???--size=40G ?\
+>> ???--readwrite=randwrite
+>>
+>> In short, the application queues 40,000 random aio_write64(nbyte=1M) 
+>> to a maximum depth of 64, doing aio_suspend64 followed by aio_write 
+>> to keep 64 outstanding aio requests.? My I/O library that processes 
+>> the aio requests does so with 4 pthreads removing aio requests from 
+>> the queue and doing the I/Os as pwrite64()s.? The odd behavior is the 
+>> intermittent pauses that can been seen in the first plot below.? The 
+>> X-axis is wall clock time, in seconds, and the left Y-axis is file 
+>> postition. The horizontal blue lines indicate the amount of time each 
+>> of the pwrite64 is active and where in the file the I/O is occurring. 
+>> The right Y-axis is the cumulative cpu times for both the process and 
+>> kernel during the run.? There is minimal user cpu time, for either 
+>> the process or kernel.? The cumulative system cpu time attributable 
+>> to the process ( the red line ) runs at a slope of ~4 system cpu 
+>> seconds per wall clock second.? Makes sense since there are 4 
+>> pthreads at work in the user process.? The cumulative system cpu time 
+>> for the kernel as a whole ( the green line ) is ~12 system cpu 
+>> seconds per wall clock second. Note that during the pauses the system 
+>> cpu accumulation drops to near zero ( zero slope ).
+>>
+>> This is run on a dedicated ivybridge node with 40 cores Intel(R) 
+>> Xeon(R) CPU E5-2680 v2 @ 2.80GHz
+>>
+>> The node has 64G of memory.
+>>
+>> The file is striped single component PFL, 8x1M.? Lustre version 
+>> *2.12.8 ddn12*
+>>
+>> Does anyone have any ideas what is causing the pauses? Is there 
+>> something else I could be looking at in the /proc file system to gain 
+>> insight?
+>>
+>> For comparison, the 2nd plot below is when run on /tmp. Note that 
+>> there are some pwrite64() that take a long time, but a single 
+>> pwrite64() taking a long time does not stop all the other pwrite64() 
+>> active during the same time period.? Elapsed time for /tmp is 13 
+>> seconds. Lustre is 28 seconds.? Both are essentially memory resident.
+>>
+>> Just for completeness I have added a 3rd plot which is the amount of 
+>> memory each of the OSC clients is consuming over the course of the 
+>> Lustre run.? Nothing unusual there.? The memory consumption rate 
+>> slows down during the pauses as one would expect.
+>>
+>> I don't think the instrumentation is the issue, as there is not much 
+>> more instrumentation occurring in the Lustre run versus /tmp, and 
+>> they are both less than 6MB each in total.
+>>
+>> John
+>>
+>> In case the images got stripped here are some URLs to dropbox
+>>
+>> plot1 : https://www.dropbox.com/s/ey217o053gdyse5/plot1.png?dl=0
+>>
+>> plot2 : https://www.dropbox.com/s/vk23vmufa388l7h/plot2.png?dl=0
+>>
+>> plot3 : https://www.dropbox.com/s/vk23vmufa388l7h/plot2.png?dl=0
+>>
+>>
+>>
+>>
+>>
+>> _______________________________________________
+>> lustre-discuss mailing list
+>> lustre-discuss at lists.lustre.org
+>> http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org
+>
+> Cheers, Andreas
+> --
+> Andreas Dilger
+> Lustre?Principal Architect
+> Whamcloud
+>
+>
+>
+>
+>
+>
+>
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20220826/2ba0d6ac/attachment-0001.htm>
+-------------- next part --------------
+A non-text attachment was scrubbed...
+Name: libaio.osc_cached.png
+Type: image/png
+Size: 15900 bytes
+Desc: not available
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20220826/2ba0d6ac/attachment-0004.png>
+-------------- next part --------------
+A non-text attachment was scrubbed...
+Name: paio.osc_cached.png
+Type: image/png
+Size: 16285 bytes
+Desc: not available
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20220826/2ba0d6ac/attachment-0005.png>
+-------------- next part --------------
+A non-text attachment was scrubbed...
+Name: librt.osc_cached.png
+Type: image/png
+Size: 15905 bytes
+Desc: not available
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20220826/2ba0d6ac/attachment-0006.png>
+-------------- next part --------------
+A non-text attachment was scrubbed...
+Name: librt.fpa.png
+Type: image/png
+Size: 58050 bytes
+Desc: not available
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20220826/2ba0d6ac/attachment-0007.png>
+
+From peter at bojanic.ca  Fri Aug 26 10:57:18 2022
+From: peter at bojanic.ca (Peter Bojanic)
+Date: Fri, 26 Aug 2022 14:57:18 -0300
+Subject: [lustre-discuss] Lustre filter for logstash/ELK
+Message-ID: <CAJKEUg_2yXtCwRR1V7g55YboXoswKWa0=k+9pNdY3CeaLk_kvw@mail.gmail.com>
+
+Hi folks,
+
+Has anyone else been doing work with Lustre filters for logstash for
+analysis using the ELK stack?
+
+I found this but it's a bit dated:
+https://gist.github.com/joshuar/c37f310249d387aef530
+
+I've had some success with parsing timestamps, originating hostname, etc.
+I'd like to pull out client IP address for relevant log messages, etc.
+
+Cheers,
+Bojanic
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20220826/70434757/attachment.htm>
+

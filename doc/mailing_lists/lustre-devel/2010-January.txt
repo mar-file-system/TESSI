@@ -1,0 +1,1935 @@
+From eeb at sun.com  Tue Jan  5 10:01:42 2010
+From: eeb at sun.com (Eric Barton)
+Date: Tue, 05 Jan 2010 18:01:42 +0000
+Subject: [Lustre-devel] SOM questions
+Message-ID: <078f01ca8e31$22ff9f80$68fede80$@com>
+
+Vitaly,
+
+1. Clients must replay opens on the MDS if "done writing" is still
+   pending to notify the new MDS that this file is volatile.  Does it
+   matter whether the client already sent "close" to the previous MDS
+   instance?  Does it have to send "close" again?
+
+2. I assume "done writing" is only sent after stripe updates have been
+   committed, not just executed so that cached SOM attributes are not
+   dependent on the client still being around to participate in
+   recovery if an OST fails.  Is this correct?
+
+-- 
+
+        Cheers,
+                   Eric
+
+
+
+From eeb at sun.com  Tue Jan  5 10:39:40 2010
+From: eeb at sun.com (Eric Barton)
+Date: Tue, 05 Jan 2010 18:39:40 +0000
+Subject: [Lustre-devel] SOM safety
+Message-ID: <079601ca8e36$70c5f480$5251dd80$@com>
+
+Some thoughts on SOM safety...
+
+The MDS must guarantee that any SOM attributes it provides to its
+clients are valid at the moment they are requested - i.e. that no file
+stripes were updated while the SOM attributes were computed and
+cached.  This guarantee must hold in the presence of all possible
+failures.
+
+Clients notify the MDS before they could possibly update any stripe of
+a file (e.g. on OPEN) so that the MDS can invalidate any cached SOM
+attributes.  Clients also notify the MDS with "done writing" when all
+their stripe updates have committed so that the MDS can determine when
+it may resume caching SOM attributes.
+
+This protocol breaks down when the MDS evicts a client which is
+updating files.  The client may not be aware of the eviction and can
+continue to update the file's stripes.  Since it is not safe to cache
+SOM attributes for this file again until we can guarantee that all
+stripe updates by the evicted client have ceased, we must...
+
+R1: Invalidate SOM attributes cached on the MDS
+
+and/or 
+
+R2: Prevent further stripe updates by the evicted client
+
+...until the client has reconnected to the MDS and the protocol is
+back in synch.
+
+R3: R1 and R2 must hold irrespective of any server (MDS or OSS) crash
+    or restart.
+
+The following requirements are also needed for performance...
+
+R4. The MDS must avoid doing a synchronous disk I/O when receiving
+    notification of possible stripe updates.
+
+R5. O(# files * # clients) persistent state must be avoided (e.g. it's
+    not OK to keep a persistent list of open files for each client).
+
+This means the MDS can't track which files are vulnerable to stripe
+updates if it crashes and then restarts or fails over.  A client that
+had files open for update before the crash could fail to reconnect,
+and since the OST logs only tell the MDS which files have been updated
+already, files previously opened for update but not yet actually
+updated by this client are not accounted.
+
+Therefore without (R2), SOM attribute caching cannot be re-enabled for
+_any_ files on a restarted MDS while any clients remain evicted.
+
+Here are some alternative proposals to implement (R2)...
+
+1. Timeouts
+
+   A timeout can be use to guarantee (R2) by ensuring clients discover
+   they have been evicted by the MDS and cease updates within a
+   bounded interval.  This relies on...
+
+   a. Clients and the MDS agree on the timeout.
+
+   b. Clients detect they have been evicted by the MDS and stop
+      sending stripe updates to any OST until the they have
+      reconnected to the MDS.
+
+   Note...
+
+   1. Configuration errors could invalidate the timeout agreement
+      unless it is confirmed by explicit message passing.
+
+   2. Guaranteeing all in-flight stripe updates have completed within
+      the timeout is tricky.  It requires a maximum latency bound
+      either from LNET or ptlrpc.
+
+   3. Clients will have to ping the MDS regularly in the absence of
+      other traffic to bound the time it takes to detect eviction.
+      Shorter timeouts will lead to shorter ping intervals and a
+      corresponding increase in MDS load.
+
+   4. On startup, the MDS cannot enable SOM attributes until the
+      timeout has expired to ensure all clients have detected the
+      restart.
+
+   5. A buggy or malicious client can disregard the timeout.
+
+2. OST eviction
+
+   An alternative to timeouts is to evict clients from the OSTs when
+   they are evicted from the MDS.  This prevents clients from
+   performing further stripe updates after eviction from the MDS and
+   notifies them to reconnect.
+
+   Note however that this requires client connection/eviction to
+   proceed in lockstep across all servers to ensure that stripe
+   updates arriving at any OST were sent in the context of the current
+   client/MDS connection and not an earlier one.
+
+3. Ordered Keys
+
+   Using ordered keys to verify stripe updates eliminates the lockstep
+   requirement on OST eviction.  The MDS and OSTs maintain a key for
+   every client which uniquely identifies a particular client/MDS
+   connection instance and can be compared with other keys for the
+   same client/MDS connection to determine which one is older.
+   Clients receive this key when they connect to the MDS and pass it
+   on every stripe update.  OSTs check the key and reject updates with
+   an "old" key, which forces the client to reconnect to the MDS to
+   obtain a new key.
+
+   Note...
+
+   1. The only requirement on keys is that they increase monotonically
+      for a given client.  The same key can be in use by many
+      different clients so a single clock could be used to generate
+      keys for all clients provided it never goes backwards
+      (persistently) and an individual client is not permitted to
+      reconnect before the clock ticks.
+
+   2. When a client is evicted, the MDS must continue to disable SOM
+      attribute caching for the client's writeable files until the new
+      key has been sent to all OSTs backing those files.  This can be
+      done individually for each file.
+
+      Clients may reconnect and continue with stripe updates before
+      all OSTs have received their new key since OSTs only reject old
+      keys.  This allows OST notification to be relatively lazy -
+      i.e. the MDS can buffer pending client/key updates for all OSTs
+      and send them periodically.  Increasing this period only
+      increases the time that SOM attribute caching must remain
+      disabled for affected files.
+
+   3. When the MDS restarts or fails over, it must resynchronise with
+      all OSTs - i.e.  install keys to limit stripe updates to
+      actively connected clients and read the OST logs to discover
+      files that were updated without persistently invalidating SOM
+      attributes cached on the MDS.  Since it only needs a single key
+      for all clients at this time, resynchronisation should be cheap.
+
+   4. When an OST restarts or fails over, it must recover its
+      client/key state from the MDS before it can continue with normal
+      operation to ensure that it continues to reject stripe updates
+      that the MDS had already disabled with the previous OST
+      instance.  For a long-running MDS, this client/key state could
+      be 1 key for every client which might best be sent as bulk data.
+
+      Alternatively, key state could be stored persistently on the
+      OST so that recovery could use existing code to replay
+      uncommitted key updates from the MDS.
+
+      It seems safe to allow client replay to proceed concurrently
+      with key state recovery since clients should only replay updates
+      that were not rejected the first time round.  Also the MDS knows
+      which files are volatile through an OST restart if clients only
+      send "done writing" when all updates have committed.
+
+-- 
+
+        Cheers,
+                   Eric
+
+
+
+From adilger at sun.com  Tue Jan  5 13:50:51 2010
+From: adilger at sun.com (Andreas Dilger)
+Date: Tue, 05 Jan 2010 14:50:51 -0700
+Subject: [Lustre-devel] SOM safety
+In-Reply-To: <079601ca8e36$70c5f480$5251dd80$@com>
+References: <079601ca8e36$70c5f480$5251dd80$@com>
+Message-ID: <FCF9512F-B081-4307-AA58-9A161790073D@sun.com>
+
+On 2010-01-05, at 11:39, Eric Barton wrote:
+> The MDS must guarantee that any SOM attributes it provides to its
+> clients are valid at the moment they are requested - i.e. that no file
+> stripes were updated while the SOM attributes were computed and
+> cached.  This guarantee must hold in the presence of all possible
+> failures.
+>
+> Clients notify the MDS before they could possibly update any stripe of
+> a file (e.g. on OPEN) so that the MDS can invalidate any cached SOM
+> attributes.  Clients also notify the MDS with "done writing" when all
+> their stripe updates have committed so that the MDS can determine when
+> it may resume caching SOM attributes.
+
+This brings up an interesting question.  When the client does a lookup  
+on a file, or first opens it, the client gets the cached size from the  
+MDS (assuming SOM cache is valid).  However, after this initial  
+update, what guarantee does the client have that the size is still  
+valid?  Must it do further MDS getattr or OST glimpse operations in  
+order to revalidate the size?  I don't recall any lock bit that the  
+MDS gives the client that tells the client that the file size it has  
+is still valid.
+
+In this regard, it seems that SOM would only provide an improvement on  
+the initial "ls -l" operation, and subsequent "ls -l" operations would  
+be slower than the current "readdir + statahead + DLM lock  
+cache" (which would not need to do any RPCs for the second "ls -l").
+
+> This protocol breaks down when the MDS evicts a client which is
+> updating files.  The client may not be aware of the eviction and can
+> continue to update the file's stripes.  Since it is not safe to cache
+> SOM attributes for this file again until we can guarantee that all
+> stripe updates by the evicted client have ceased, we must...
+>
+> R1: Invalidate SOM attributes cached on the MDS
+>
+> and/or
+>
+> R2: Prevent further stripe updates by the evicted client
+>
+> ...until the client has reconnected to the MDS and the protocol is
+> back in synch.
+>
+> R3: R1 and R2 must hold irrespective of any server (MDS or OSS) crash
+>    or restart.
+>
+> The following requirements are also needed for performance...
+>
+> R4. The MDS must avoid doing a synchronous disk I/O when receiving
+>    notification of possible stripe updates.
+>
+> R5. O(# files * # clients) persistent state must be avoided (e.g. it's
+>    not OK to keep a persistent list of open files for each client).
+>
+> This means the MDS can't track which files are vulnerable to stripe
+> updates if it crashes and then restarts or fails over.  A client that
+> had files open for update before the crash could fail to reconnect,
+> and since the OST logs only tell the MDS which files have been updated
+> already, files previously opened for update but not yet actually
+> updated by this client are not accounted.
+>
+> Therefore without (R2), SOM attribute caching cannot be re-enabled for
+> _any_ files on a restarted MDS while any clients remain evicted.
+>
+> Here are some alternative proposals to implement (R2)...
+>
+> 1. Timeouts
+>
+>   A timeout can be use to guarantee (R2) by ensuring clients discover
+>   they have been evicted by the MDS and cease updates within a
+>   bounded interval.  This relies on...
+>
+>   a. Clients and the MDS agree on the timeout.
+>
+>   b. Clients detect they have been evicted by the MDS and stop
+>      sending stripe updates to any OST until the they have
+>      reconnected to the MDS.
+>
+>   Note...
+>
+>   1. Configuration errors could invalidate the timeout agreement
+>      unless it is confirmed by explicit message passing.
+>
+>   2. Guaranteeing all in-flight stripe updates have completed within
+>      the timeout is tricky.  It requires a maximum latency bound
+>      either from LNET or ptlrpc.
+>
+>   3. Clients will have to ping the MDS regularly in the absence of
+>      other traffic to bound the time it takes to detect eviction.
+>      Shorter timeouts will lead to shorter ping intervals and a
+>      corresponding increase in MDS load.
+>
+>   4. On startup, the MDS cannot enable SOM attributes until the
+>      timeout has expired to ensure all clients have detected the
+>      restart.
+>
+>   5. A buggy or malicious client can disregard the timeout.
+>
+> 2. OST eviction
+>
+>   An alternative to timeouts is to evict clients from the OSTs when
+>   they are evicted from the MDS.  This prevents clients from
+>   performing further stripe updates after eviction from the MDS and
+>   notifies them to reconnect.
+>
+>   Note however that this requires client connection/eviction to
+>   proceed in lockstep across all servers to ensure that stripe
+>   updates arriving at any OST were sent in the context of the current
+>   client/MDS connection and not an earlier one.
+>
+> 3. Ordered Keys
+>
+>   Using ordered keys to verify stripe updates eliminates the lockstep
+>   requirement on OST eviction.  The MDS and OSTs maintain a key for
+>   every client which uniquely identifies a particular client/MDS
+>   connection instance and can be compared with other keys for the
+>   same client/MDS connection to determine which one is older.
+>   Clients receive this key when they connect to the MDS and pass it
+>   on every stripe update.  OSTs check the key and reject updates with
+>   an "old" key, which forces the client to reconnect to the MDS to
+>   obtain a new key.
+>
+>   Note...
+>
+>   1. The only requirement on keys is that they increase monotonically
+>      for a given client.  The same key can be in use by many
+>      different clients so a single clock could be used to generate
+>      keys for all clients provided it never goes backwards
+>      (persistently) and an individual client is not permitted to
+>      reconnect before the clock ticks.
+>
+>   2. When a client is evicted, the MDS must continue to disable SOM
+>      attribute caching for the client's writeable files until the new
+>      key has been sent to all OSTs backing those files.  This can be
+>      done individually for each file.
+>
+>      Clients may reconnect and continue with stripe updates before
+>      all OSTs have received their new key since OSTs only reject old
+>      keys.  This allows OST notification to be relatively lazy -
+>      i.e. the MDS can buffer pending client/key updates for all OSTs
+>      and send them periodically.  Increasing this period only
+>      increases the time that SOM attribute caching must remain
+>      disabled for affected files.
+>
+>   3. When the MDS restarts or fails over, it must resynchronise with
+>      all OSTs - i.e.  install keys to limit stripe updates to
+>      actively connected clients and read the OST logs to discover
+>      files that were updated without persistently invalidating SOM
+>      attributes cached on the MDS.  Since it only needs a single key
+>      for all clients at this time, resynchronisation should be cheap.
+>
+>   4. When an OST restarts or fails over, it must recover its
+>      client/key state from the MDS before it can continue with normal
+>      operation to ensure that it continues to reject stripe updates
+>      that the MDS had already disabled with the previous OST
+>      instance.  For a long-running MDS, this client/key state could
+>      be 1 key for every client which might best be sent as bulk data.
+>
+>      Alternatively, key state could be stored persistently on the
+>      OST so that recovery could use existing code to replay
+>      uncommitted key updates from the MDS.
+>
+>      It seems safe to allow client replay to proceed concurrently
+>      with key state recovery since clients should only replay updates
+>      that were not rejected the first time round.  Also the MDS knows
+>      which files are volatile through an OST restart if clients only
+>      send "done writing" when all updates have committed.
+>
+> -- 
+>
+>        Cheers,
+>                   Eric
+>
+> _______________________________________________
+> Lustre-devel mailing list
+> Lustre-devel at lists.lustre.org
+> http://lists.lustre.org/mailman/listinfo/lustre-devel
+
+
+Cheers, Andreas
+--
+Andreas Dilger
+Sr. Staff Engineer, Lustre Group
+Sun Microsystems of Canada, Inc.
+
+
+
+From Nicolas.Williams at sun.com  Tue Jan  5 13:55:12 2010
+From: Nicolas.Williams at sun.com (Nicolas Williams)
+Date: Tue, 5 Jan 2010 15:55:12 -0600
+Subject: [Lustre-devel] SOM safety
+In-Reply-To: <FCF9512F-B081-4307-AA58-9A161790073D@sun.com>
+References: <079601ca8e36$70c5f480$5251dd80$@com>
+	<FCF9512F-B081-4307-AA58-9A161790073D@sun.com>
+Message-ID: <20100105215512.GB1516@Sun.COM>
+
+On Tue, Jan 05, 2010 at 02:50:51PM -0700, Andreas Dilger wrote:
+> On 2010-01-05, at 11:39, Eric Barton wrote:
+> > The MDS must guarantee that any SOM attributes it provides to its
+> > clients are valid at the moment they are requested - i.e. that no file
+> > stripes were updated while the SOM attributes were computed and
+> > cached.  This guarantee must hold in the presence of all possible
+> > failures.
+> >
+> > Clients notify the MDS before they could possibly update any stripe of
+> > a file (e.g. on OPEN) so that the MDS can invalidate any cached SOM
+> > attributes.  Clients also notify the MDS with "done writing" when all
+> > their stripe updates have committed so that the MDS can determine when
+> > it may resume caching SOM attributes.
+> 
+> This brings up an interesting question.  When the client does a lookup  
+> on a file, or first opens it, the client gets the cached size from the  
+> MDS (assuming SOM cache is valid).  However, after this initial  
+> update, what guarantee does the client have that the size is still  
+> valid?  Must it do further MDS getattr or OST glimpse operations in  
+> order to revalidate the size?  I don't recall any lock bit that the  
+> MDS gives the client that tells the client that the file size it has  
+> is still valid.
+
+Well, the guarantee should be from the time the MDS responds to the
+client until the stat() call returns to the application.  After all,
+POSIX talks about system calls, not client/server messaging.  That means
+that the client effectively holds a lock on the cached attributes for a
+bit.
+
+> In this regard, it seems that SOM would only provide an improvement on  
+> the initial "ls -l" operation, and subsequent "ls -l" operations would  
+> be slower than the current "readdir + statahead + DLM lock  
+> cache" (which would not need to do any RPCs for the second "ls -l").
+
+If the client can hold that lock for as long as no one is writing, then
+the client can cache that information for that long.
+
+Nico
+-- 
+
+
+From Oleg.Drokin at sun.com  Tue Jan  5 14:25:41 2010
+From: Oleg.Drokin at sun.com (Oleg Drokin)
+Date: Tue, 5 Jan 2010 17:25:41 -0500
+Subject: [Lustre-devel] SOM safety
+In-Reply-To: <FCF9512F-B081-4307-AA58-9A161790073D@sun.com>
+References: <079601ca8e36$70c5f480$5251dd80$@com>
+	<FCF9512F-B081-4307-AA58-9A161790073D@sun.com>
+Message-ID: <C3EFBF69-2AD8-4492-81AD-5C2E133CE210@sun.com>
+
+Hello!
+
+On Jan 5, 2010, at 4:50 PM, Andreas Dilger wrote:
+
+> On 2010-01-05, at 11:39, Eric Barton wrote:
+>> The MDS must guarantee that any SOM attributes it provides to its
+>> clients are valid at the moment they are requested - i.e. that no file
+>> stripes were updated while the SOM attributes were computed and
+>> cached.  This guarantee must hold in the presence of all possible
+>> failures.
+>> 
+>> Clients notify the MDS before they could possibly update any stripe of
+>> a file (e.g. on OPEN) so that the MDS can invalidate any cached SOM
+>> attributes.  Clients also notify the MDS with "done writing" when all
+>> their stripe updates have committed so that the MDS can determine when
+>> it may resume caching SOM attributes.
+> This brings up an interesting question.  When the client does a lookup  
+> on a file, or first opens it, the client gets the cached size from the  
+> MDS (assuming SOM cache is valid).  However, after this initial  
+> update, what guarantee does the client have that the size is still  
+> valid?  Must it do further MDS getattr or OST glimpse operations in  
+> order to revalidate the size?  I don't recall any lock bit that the  
+> MDS gives the client that tells the client that the file size it has  
+> is still valid.
+
+Actually when I was discussed this with Vitaly it was obvious that
+once size on MDS becomes invalid the server will revoke UPDATE lock
+on the inode. Subsequent stat will refetch attributes (with missing
+size this time).
+I am not sure if this is actually implemented and I do not see anything
+about it in the latest TOI.
+But in the simplest case any open for write (or presence of such open at
+the time of getattr rpc) would drop get the lock (or cause us not to return it).
+How that (additional lock taking on a server) would impact the cpu utilization
+on the server is unknown, though.
+
+Bye,
+    Oleg
+
+From Aleksandr.Guzovskiy at Sun.COM  Wed Jan  6 08:51:48 2010
+From: Aleksandr.Guzovskiy at Sun.COM (Aleksandr Guzovskiy)
+Date: Wed, 06 Jan 2010 11:51:48 -0500
+Subject: [Lustre-devel] SOM questions
+In-Reply-To: <078f01ca8e31$22ff9f80$68fede80$@com>
+References: <078f01ca8e31$22ff9f80$68fede80$@com>
+Message-ID: <4B44BFA4.3070603@sun.com>
+
+Eric Barton wrote:
+> Vitaly,
+> 
+> 1. Clients must replay opens on the MDS if "done writing" is still
+>    pending to notify the new MDS that this file is volatile.  Does it
+>    matter whether the client already sent "close" to the previous MDS
+>    instance?  Does it have to send "close" again?
+> 
+> 2. I assume "done writing" is only sent after stripe updates have been
+>    committed, not just executed so that cached SOM attributes are not
+>    dependent on the client still being around to participate in
+>    recovery if an OST fails.  Is this correct?
+
+And this has the interaction with async data commit feature I brought up 
+  during SC09 meetings i.e. client can't assume anymore OST IO is 
+synchronous.
+
+-Alex
+
+> 
+
+
+
+From Aleksandr.Guzovskiy at Sun.COM  Wed Jan  6 09:09:41 2010
+From: Aleksandr.Guzovskiy at Sun.COM (Aleksandr Guzovskiy)
+Date: Wed, 06 Jan 2010 12:09:41 -0500
+Subject: [Lustre-devel] SOM safety
+In-Reply-To: <079601ca8e36$70c5f480$5251dd80$@com>
+References: <079601ca8e36$70c5f480$5251dd80$@com>
+Message-ID: <4B44C3D5.8060701@sun.com>
+
+Eric Barton wrote:
+> Some thoughts on SOM safety...
+> 
+> The MDS must guarantee that any SOM attributes it provides to its
+> clients are valid at the moment they are requested - i.e. that no file
+> stripes were updated while the SOM attributes were computed and
+> cached.  This guarantee must hold in the presence of all possible
+> failures.
+> 
+> Clients notify the MDS before they could possibly update any stripe of
+> a file (e.g. on OPEN) so that the MDS can invalidate any cached SOM
+> attributes.  Clients also notify the MDS with "done writing" when all
+> their stripe updates have committed so that the MDS can determine when
+> it may resume caching SOM attributes.
+> 
+> This protocol breaks down when the MDS evicts a client which is
+> updating files.  The client may not be aware of the eviction and can
+> continue to update the file's stripes.  Since it is not safe to cache
+> SOM attributes for this file again until we can guarantee that all
+> stripe updates by the evicted client have ceased, we must...
+> 
+> R1: Invalidate SOM attributes cached on the MDS
+> 
+> and/or 
+> 
+> R2: Prevent further stripe updates by the evicted client
+> 
+> ...until the client has reconnected to the MDS and the protocol is
+> back in synch.
+> 
+> R3: R1 and R2 must hold irrespective of any server (MDS or OSS) crash
+>     or restart.
+> 
+> The following requirements are also needed for performance...
+> 
+> R4. The MDS must avoid doing a synchronous disk I/O when receiving
+>     notification of possible stripe updates.
+> 
+> R5. O(# files * # clients) persistent state must be avoided (e.g. it's
+>     not OK to keep a persistent list of open files for each client).
+> 
+> This means the MDS can't track which files are vulnerable to stripe
+> updates if it crashes and then restarts or fails over.  A client that
+> had files open for update before the crash could fail to reconnect,
+> and since the OST logs only tell the MDS which files have been updated
+> already, files previously opened for update but not yet actually
+> updated by this client are not accounted.
+> 
+> Therefore without (R2), SOM attribute caching cannot be re-enabled for
+> _any_ files on a restarted MDS while any clients remain evicted.
+> 
+> Here are some alternative proposals to implement (R2)...
+> 
+> 1. Timeouts
+> 
+>    A timeout can be use to guarantee (R2) by ensuring clients discover
+>    they have been evicted by the MDS and cease updates within a
+>    bounded interval.  This relies on...
+> 
+>    a. Clients and the MDS agree on the timeout.
+> 
+>    b. Clients detect they have been evicted by the MDS and stop
+>       sending stripe updates to any OST until the they have
+>       reconnected to the MDS.
+> 
+>    Note...
+> 
+>    1. Configuration errors could invalidate the timeout agreement
+>       unless it is confirmed by explicit message passing.
+> 
+>    2. Guaranteeing all in-flight stripe updates have completed within
+>       the timeout is tricky.  It requires a maximum latency bound
+>       either from LNET or ptlrpc.
+> 
+>    3. Clients will have to ping the MDS regularly in the absence of
+>       other traffic to bound the time it takes to detect eviction.
+>       Shorter timeouts will lead to shorter ping intervals and a
+>       corresponding increase in MDS load.
+> 
+>    4. On startup, the MDS cannot enable SOM attributes until the
+>       timeout has expired to ensure all clients have detected the
+>       restart.
+> 
+>    5. A buggy or malicious client can disregard the timeout.
+> 
+> 2. OST eviction
+> 
+>    An alternative to timeouts is to evict clients from the OSTs when
+>    they are evicted from the MDS.
+
+This would be a step towards adding a notion of cluster membership to 
+Lustre. Wouldn't there be other benefits from that in solving other 
+races when client is evicted from one of the servers but is not evicted 
+from others?
+
+-Alex
+
+
+>  This prevents clients from
+>    performing further stripe updates after eviction from the MDS and
+>    notifies them to reconnect.
+> 
+>    Note however that this requires client connection/eviction to
+>    proceed in lockstep across all servers to ensure that stripe
+>    updates arriving at any OST were sent in the context of the current
+>    client/MDS connection and not an earlier one.
+> 
+> 3. Ordered Keys
+> 
+>    Using ordered keys to verify stripe updates eliminates the lockstep
+>    requirement on OST eviction.  The MDS and OSTs maintain a key for
+>    every client which uniquely identifies a particular client/MDS
+>    connection instance and can be compared with other keys for the
+>    same client/MDS connection to determine which one is older.
+>    Clients receive this key when they connect to the MDS and pass it
+>    on every stripe update.  OSTs check the key and reject updates with
+>    an "old" key, which forces the client to reconnect to the MDS to
+>    obtain a new key.
+> 
+>    Note...
+> 
+>    1. The only requirement on keys is that they increase monotonically
+>       for a given client.  The same key can be in use by many
+>       different clients so a single clock could be used to generate
+>       keys for all clients provided it never goes backwards
+>       (persistently) and an individual client is not permitted to
+>       reconnect before the clock ticks.
+> 
+>    2. When a client is evicted, the MDS must continue to disable SOM
+>       attribute caching for the client's writeable files until the new
+>       key has been sent to all OSTs backing those files.  This can be
+>       done individually for each file.
+> 
+>       Clients may reconnect and continue with stripe updates before
+>       all OSTs have received their new key since OSTs only reject old
+>       keys.  This allows OST notification to be relatively lazy -
+>       i.e. the MDS can buffer pending client/key updates for all OSTs
+>       and send them periodically.  Increasing this period only
+>       increases the time that SOM attribute caching must remain
+>       disabled for affected files.
+> 
+>    3. When the MDS restarts or fails over, it must resynchronise with
+>       all OSTs - i.e.  install keys to limit stripe updates to
+>       actively connected clients and read the OST logs to discover
+>       files that were updated without persistently invalidating SOM
+>       attributes cached on the MDS.  Since it only needs a single key
+>       for all clients at this time, resynchronisation should be cheap.
+> 
+>    4. When an OST restarts or fails over, it must recover its
+>       client/key state from the MDS before it can continue with normal
+>       operation to ensure that it continues to reject stripe updates
+>       that the MDS had already disabled with the previous OST
+>       instance.  For a long-running MDS, this client/key state could
+>       be 1 key for every client which might best be sent as bulk data.
+> 
+>       Alternatively, key state could be stored persistently on the
+>       OST so that recovery could use existing code to replay
+>       uncommitted key updates from the MDS.
+> 
+>       It seems safe to allow client replay to proceed concurrently
+>       with key state recovery since clients should only replay updates
+>       that were not rejected the first time round.  Also the MDS knows
+>       which files are volatile through an OST restart if clients only
+>       send "done writing" when all updates have committed.
+> 
+
+
+
+From Nicolas.Williams at sun.com  Wed Jan  6 09:28:13 2010
+From: Nicolas.Williams at sun.com (Nicolas Williams)
+Date: Wed, 6 Jan 2010 11:28:13 -0600
+Subject: [Lustre-devel] SOM safety
+In-Reply-To: <4B44C3D5.8060701@sun.com>
+References: <079601ca8e36$70c5f480$5251dd80$@com> <4B44C3D5.8060701@sun.com>
+Message-ID: <20100106172812.GO1516@Sun.COM>
+
+On Wed, Jan 06, 2010 at 12:09:41PM -0500, Aleksandr Guzovskiy wrote:
+> Eric Barton wrote:
+> > 2. OST eviction
+> > 
+> >    An alternative to timeouts is to evict clients from the OSTs when
+> >    they are evicted from the MDS.
+> 
+> This would be a step towards adding a notion of cluster membership to 
+> Lustre. Wouldn't there be other benefits from that in solving other 
+> races when client is evicted from one of the servers but is not evicted 
+> from others?
+
+The health network will allow for eviction notices to be spread around
+the cluster quickly.
+
+I think we'll need a separate cluster membership capability for reasons
+having to do with optimizing the health network: if you see a peer C
+that's got a membership capability issued at time T_a and you're a
+server S_n that's been in the cluster since before T_a and you've not
+heard any eviction notices for C, then C is still a member of the
+cluster.  Without a cluster membership capability we'd need to ask the
+health network if C is a member, and while that can happen quickly, in a
+mostly-stateless health network (the current design) having every server
+ask about the membership/liveness status of every peer client could
+result in a load spike.
+
+Nico
+-- 
+
+
+From Dmitri.Zoguine at Sun.COM  Wed Jan  6 10:10:40 2010
+From: Dmitri.Zoguine at Sun.COM (dzogin)
+Date: Wed, 06 Jan 2010 13:10:40 -0500
+Subject: [Lustre-devel] SOM safety
+In-Reply-To: <20100106172812.GO1516@Sun.COM>
+References: <079601ca8e36$70c5f480$5251dd80$@com> <4B44C3D5.8060701@sun.com>
+	<20100106172812.GO1516@Sun.COM>
+Message-ID: <4B44D220.7070906@sun.com>
+
+Nicolas Williams wrote:
+> The health network will allow for eviction notices to be spread around
+> the cluster quickly.
+>
+> I think we'll need a separate cluster membership capability for reasons
+> having to do with optimizing the health network: if you see a peer C
+> that's got a membership capability issued at time T_a and you're a
+> server S_n that's been in the cluster since before T_a and you've not
+> heard any eviction notices for C, then C is still a member of the
+> cluster.  Without a cluster membership capability we'd need to ask the
+> health network if C is a member, and while that can happen quickly, in a
+> mostly-stateless health network (the current design) having every server
+> ask about the membership/liveness status of every peer client could
+> result in a load spike.
+>   
+I think this can be easily implemented as a bitmap on every server (both 
+OSS and MDS) that keeps track of the alive and evicted clients. Once you 
+have processed all the amount of work that needs to be done for the 
+client that has been evicted, that bit in the evicted clients map is 
+cleared. Instead of sending the information about every client, servers 
+can exchange the bitmaps, and doing XOR on bitmaps would allow you to 
+easily see the discrepancies in client evictions.
+
+I think the same idea of bitmaps can be implemented for objects, if we 
+want to track which client is updating the object/stripe.
+
+Dmitry
+
+
+From David.Wang at Sun.COM  Thu Jan  7 19:11:26 2010
+From: David.Wang at Sun.COM (David.Wang at Sun.COM)
+Date: Fri, 08 Jan 2010 11:11:26 +0800
+Subject: [Lustre-devel] lustre 1.6.7.2 support RHEL 4.7 client?
+Message-ID: <4B46A25E.1010606@Sun.COM>
+
+hi folks,
+
+can you please confirm if RHEL 4.7
+works well  as lustre 1.6.7.2 client?
+
+i checked support matrix,
+
+http://wiki.lustre.org/index.php/Lustre_Release_Information#Lustre_Support_Matrix
+
+it tells *Kernel / Version  2.6.9-78.0.22.EL * is ok for RHEL 4.  any 
+detail info about
+RHEL 4.7?
+
+thanks and regards,
+david
+
+
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20100108/7a1222bd/attachment.htm>
+
+From Vitaly.Fertman at Sun.COM  Mon Jan 11 06:10:19 2010
+From: Vitaly.Fertman at Sun.COM (Vitaly Fertman)
+Date: Mon, 11 Jan 2010 17:10:19 +0300
+Subject: [Lustre-devel] SOM questions
+In-Reply-To: <078f01ca8e31$22ff9f80$68fede80$@com>
+References: <078f01ca8e31$22ff9f80$68fede80$@com>
+Message-ID: <05A3FFE9-1549-4B97-A9C3-4B82113E56AE@Sun.COM>
+
+On Jan 5, 2010, at 9:01 PM, Eric Barton wrote:
+
+> Vitaly,
+>
+> 1. Clients must replay opens on the MDS if "done writing" is still
+>   pending to notify the new MDS that this file is volatile.  Does it
+>   matter whether the client already sent "close" to the previous MDS
+>   instance?  Does it have to send "close" again?
+
+the idea was to get rid of these long chains of requests on replay
+(open-close-DW-setattr), DW and setattr are replayed independently
+not requiring committed open to be replayed.
+
+due to 3633, we do not even replay committed open if close is already  
+sent.
+requiring open to be replayed due to pending DW will bring this  
+problem back.
+
+MDS in its turn just ignores DW and setattr for not re-opened files and
+relies on synchronisation with OSTs -- once file is closed, data are
+under extent lock and under control here. thus we can invalidate SOM
+attributes on MDS by llog record and the following SOM recovery will
+ensure in some way data are flushed and committed on OST (alternatively
+we can just ask the clients to flush and OST to commit before the
+synchronisation).
+
+SOM recovery may try to happen late enough so that data would be already
+committed on OST with some checks they are really committed; or will  
+have
+to take conflicting extent lock and wait for commit by itself.
+
+> 2. I assume "done writing" is only sent after stripe updates have been
+>   committed, not just executed so that cached SOM attributes are not
+>   dependent on the client still being around to participate in
+>   recovery if an OST fails.  Is this correct?
+
+
+it is correct, DW can be postponed until commit.
+
+however, as we cannot get the proper attribute update (in particular
+i_blocks) right in DW, there was an idea to separate SOM invalidation
+from SOM revalidation mechanism, i.e. to not try to rebuild the SOM
+cache on MDS immediately once the file has been modified.
+
+In this case DW can just indicate that this client is not going to
+modify the file anymore and probably we do not have to wait until  
+commit,
+the revalidation will occur late enough so that the commit would have
+occured (again with some checks it really occured).
+
+In the case of OST failure, while OST is down or not re-synchronised  
+with
+MDS, SOM is disabled; the SOM re-validation will occur late enough after
+MDS-OST synchronisation completes...
+
+--
+Vitaly
+
+
+From Alex.Zhuravlev at Sun.COM  Mon Jan 11 07:47:13 2010
+From: Alex.Zhuravlev at Sun.COM (Alex Zhuravlev)
+Date: Mon, 11 Jan 2010 18:47:13 +0300
+Subject: [Lustre-devel] SOM questions
+In-Reply-To: <05A3FFE9-1549-4B97-A9C3-4B82113E56AE@Sun.COM>
+References: <078f01ca8e31$22ff9f80$68fede80$@com>
+	<05A3FFE9-1549-4B97-A9C3-4B82113E56AE@Sun.COM>
+Message-ID: <4B4B4801.7070509@sun.com>
+
+I'd say we don't need DW at all.
+
+it's OST who knows whether attributes are stable (no pw locks and
+flush/commit is done, so i_blocks won't change till next open/write).
+
+I think in general the procedure to refresh SOM attributes could
+look like the following:
+
+1) MDS gets GETATTR and finds the file hasn't been open for a period
+    it set special flag in GETATTR reply - say, REFRESH_SOM
+2) client does regular enqueue/glimpse to get attributes from OST
+3) if OST finds inode is stable (VBR version >= last_committed)
+    it set another special flag in reply - say, ATTR_STABLE
+4) now, if client has REFRESH_SOME, ATTR_STABLE for all objects
+    *and* locks granted, then it can send aggregated attributes to
+    MDS to refresh SOM  attributes
+5) if the file hasn't been open since that REFRESH SOM, attributes
+    can be set
+
+it looks quite simple and with very minimal changes to existing protocol
+logic. I also think that following this we don't need dedicated IO epoch
+notion and can use regular VBR version increasing on each open.
+
+thanks, Alex
+
+
+On 1/11/10 5:10 PM, Vitaly Fertman wrote:
+> On Jan 5, 2010, at 9:01 PM, Eric Barton wrote:
+>
+>> Vitaly,
+>>
+>> 1. Clients must replay opens on the MDS if "done writing" is still
+>>    pending to notify the new MDS that this file is volatile.  Does it
+>>    matter whether the client already sent "close" to the previous MDS
+>>    instance?  Does it have to send "close" again?
+>
+> the idea was to get rid of these long chains of requests on replay
+> (open-close-DW-setattr), DW and setattr are replayed independently
+> not requiring committed open to be replayed.
+>
+> due to 3633, we do not even replay committed open if close is already
+> sent.
+> requiring open to be replayed due to pending DW will bring this
+> problem back.
+>
+> MDS in its turn just ignores DW and setattr for not re-opened files and
+> relies on synchronisation with OSTs -- once file is closed, data are
+> under extent lock and under control here. thus we can invalidate SOM
+> attributes on MDS by llog record and the following SOM recovery will
+> ensure in some way data are flushed and committed on OST (alternatively
+> we can just ask the clients to flush and OST to commit before the
+> synchronisation).
+>
+> SOM recovery may try to happen late enough so that data would be already
+> committed on OST with some checks they are really committed; or will
+> have
+> to take conflicting extent lock and wait for commit by itself.
+>
+>> 2. I assume "done writing" is only sent after stripe updates have been
+>>    committed, not just executed so that cached SOM attributes are not
+>>    dependent on the client still being around to participate in
+>>    recovery if an OST fails.  Is this correct?
+>
+>
+> it is correct, DW can be postponed until commit.
+>
+> however, as we cannot get the proper attribute update (in particular
+> i_blocks) right in DW, there was an idea to separate SOM invalidation
+> from SOM revalidation mechanism, i.e. to not try to rebuild the SOM
+> cache on MDS immediately once the file has been modified.
+>
+> In this case DW can just indicate that this client is not going to
+> modify the file anymore and probably we do not have to wait until
+> commit,
+> the revalidation will occur late enough so that the commit would have
+> occured (again with some checks it really occured).
+>
+> In the case of OST failure, while OST is down or not re-synchronised
+> with
+> MDS, SOM is disabled; the SOM re-validation will occur late enough after
+> MDS-OST synchronisation completes...
+>
+> --
+> Vitaly
+> _______________________________________________
+> Lustre-devel mailing list
+> Lustre-devel at lists.lustre.org
+> http://lists.lustre.org/mailman/listinfo/lustre-devel
+
+
+
+From Alex.Zhuravlev at Sun.COM  Mon Jan 11 08:44:38 2010
+From: Alex.Zhuravlev at Sun.COM (Alex Zhuravlev)
+Date: Mon, 11 Jan 2010 19:44:38 +0300
+Subject: [Lustre-devel] SOM questions
+In-Reply-To: <4B4B4801.7070509@sun.com>
+References: <078f01ca8e31$22ff9f80$68fede80$@com>
+	<05A3FFE9-1549-4B97-A9C3-4B82113E56AE@Sun.COM>
+	<4B4B4801.7070509@sun.com>
+Message-ID: <4B4B5576.2090405@sun.com>
+
+On 1/11/10 6:47 PM, Alex Zhuravlev wrote:
+> it looks quite simple and with very minimal changes to existing protocol
+> logic. I also think that following this we don't need dedicated IO epoch
+> notion and can use regular VBR version increasing on each open.
+
+sorry, I forgot to add that all this essentially means no SOM-specific
+in-core state on MDS at all and no need to maintain in-core state over
+reboots.
+
+thanks, Alex
+
+
+From Vitaly.Fertman at Sun.COM  Mon Jan 11 09:05:22 2010
+From: Vitaly.Fertman at Sun.COM (Vitaly Fertman)
+Date: Mon, 11 Jan 2010 20:05:22 +0300
+Subject: [Lustre-devel] SOM safety
+In-Reply-To: <FCF9512F-B081-4307-AA58-9A161790073D@sun.com>
+References: <079601ca8e36$70c5f480$5251dd80$@com>
+	<FCF9512F-B081-4307-AA58-9A161790073D@sun.com>
+Message-ID: <5C3E1B93-49A2-4DE5-A099-C297FABAA623@Sun.COM>
+
+On Jan 6, 2010, at 12:50 AM, Andreas Dilger wrote:
+
+> This brings up an interesting question.  When the client does a lookup
+> on a file, or first opens it, the client gets the cached size from the
+> MDS (assuming SOM cache is valid).  However, after this initial
+> update, what guarantee does the client have that the size is still
+> valid?  Must it do further MDS getattr or OST glimpse operations in
+> order to revalidate the size?  I don't recall any lock bit that the
+> MDS gives the client that tells the client that the file size it has
+> is still valid.
+
+MDS returns size to client if it gives the client the UPDATE lock
+and SOM cache is valid (file is not opened, SOM cache is rebuilt).
+If file is opened for write, MDS revokes UPDATE lock given to clients,
+if SOM cache is valid by the time of open (thus 2nd open will not
+revoke it).
+If client gets size from MDS, it considers it valid as long as the
+current UPDATE lock is cached on the client.
+If client gets no size from MDS (i.e. for next getattr when file is
+already opened for write) it has to go to OST for its part of  
+attributes.
+
+> In this regard, it seems that SOM would only provide an improvement on
+> the initial "ls -l" operation, and subsequent "ls -l" operations would
+> be slower than the current "readdir + statahead + DLM lock
+> cache" (which would not need to do any RPCs for the second "ls -l").
+
+
+subsequent "ls -l" operations will be faster because we do not need
+to re-obtain attributes from MDS if we have UPDATE lock. As SOM cancels
+this lock on open for write and on attribute update, an extra RPC will
+be sent only on the very 1st getattr after any of these 2 cases occur,
+subsequent "ls -l" within enabled or disabled SOM cache have no extra  
+RPC.
+
+--
+Vitaly
+
+
+From Vitaly.Fertman at Sun.COM  Mon Jan 11 13:41:29 2010
+From: Vitaly.Fertman at Sun.COM (Vitaly Fertman)
+Date: Tue, 12 Jan 2010 00:41:29 +0300
+Subject: [Lustre-devel] SOM safety
+In-Reply-To: <079601ca8e36$70c5f480$5251dd80$@com>
+References: <079601ca8e36$70c5f480$5251dd80$@com>
+Message-ID: <9015F026-CB34-4310-B7D4-0D9716FDD049@Sun.COM>
+
+On Jan 5, 2010, at 9:39 PM, Eric Barton wrote:
+
+> Some thoughts on SOM safety...
+>
+> The MDS must guarantee that any SOM attributes it provides to its
+> clients are valid at the moment they are requested - i.e. that no file
+> stripes were updated while the SOM attributes were computed and
+> cached.  This guarantee must hold in the presence of all possible
+> failures.
+>
+> Clients notify the MDS before they could possibly update any stripe of
+> a file (e.g. on OPEN) so that the MDS can invalidate any cached SOM
+> attributes.  Clients also notify the MDS with "done writing" when all
+> their stripe updates have committed so that the MDS can determine when
+> it may resume caching SOM attributes.
+>
+> This protocol breaks down when the MDS evicts a client which is
+> updating files.  The client may not be aware of the eviction and can
+> continue to update the file's stripes.  Since it is not safe to cache
+> SOM attributes for this file again until we can guarantee that all
+> stripe updates by the evicted client have ceased, we must...
+>
+> R1: Invalidate SOM attributes cached on the MDS
+>
+> and/or
+>
+> R2: Prevent further stripe updates by the evicted client
+>
+> ...until the client has reconnected to the MDS and the protocol is
+> back in synch.
+>
+> R3: R1 and R2 must hold irrespective of any server (MDS or OSS) crash
+>    or restart.
+>
+> The following requirements are also needed for performance...
+>
+> R4. The MDS must avoid doing a synchronous disk I/O when receiving
+>    notification of possible stripe updates.
+>
+> R5. O(# files * # clients) persistent state must be avoided (e.g. it's
+>    not OK to keep a persistent list of open files for each client).
+>
+> This means the MDS can't track which files are vulnerable to stripe
+> updates if it crashes and then restarts or fails over.  A client that
+> had files open for update before the crash could fail to reconnect,
+> and since the OST logs only tell the MDS which files have been updated
+> already, files previously opened for update but not yet actually
+> updated by this client are not accounted.
+>
+> Therefore without (R2), SOM attribute caching cannot be re-enabled for
+> _any_ files on a restarted MDS while any clients remain evicted.
+>
+> Here are some alternative proposals to implement (R2)...
+>
+> 1. Timeouts
+>
+>   A timeout can be use to guarantee (R2) by ensuring clients discover
+>   they have been evicted by the MDS and cease updates within a
+>   bounded interval.  This relies on...
+>
+>   a. Clients and the MDS agree on the timeout.
+>
+>   b. Clients detect they have been evicted by the MDS and stop
+>      sending stripe updates to any OST until the they have
+>      reconnected to the MDS.
+>
+>   Note...
+>
+>   1. Configuration errors could invalidate the timeout agreement
+>      unless it is confirmed by explicit message passing.
+>
+>   2. Guaranteeing all in-flight stripe updates have completed within
+>      the timeout is tricky.  It requires a maximum latency bound
+>      either from LNET or ptlrpc.
+
+it requires a time synchronisation between nodes to check RPC has been
+too long in-flight, this is not mandatory yet AFAIK and it looks pure
+controllable...
+
+>   3. Clients will have to ping the MDS regularly in the absence of
+>      other traffic to bound the time it takes to detect eviction.
+>      Shorter timeouts will lead to shorter ping intervals and a
+>      corresponding increase in MDS load.
+>
+>   4. On startup, the MDS cannot enable SOM attributes until the
+>      timeout has expired to ensure all clients have detected the
+>      restart.
+>
+>   5. A buggy or malicious client can disregard the timeout.
+>
+> 2. OST eviction
+>
+>   An alternative to timeouts is to evict clients from the OSTs when
+>   they are evicted from the MDS.  This prevents clients from
+>   performing further stripe updates after eviction from the MDS and
+>   notifies them to reconnect.
+>
+>   Note however that this requires client connection/eviction to
+>   proceed in lockstep across all servers to ensure that stripe
+>   updates arriving at any OST were sent in the context of the current
+>   client/MDS connection and not an earlier one.
+>
+> 3. Ordered Keys
+>
+>   Using ordered keys to verify stripe updates eliminates the lockstep
+>   requirement on OST eviction.  The MDS and OSTs maintain a key for
+>   every client which uniquely identifies a particular client/MDS
+>   connection instance and can be compared with other keys for the
+>   same client/MDS connection to determine which one is older.
+>   Clients receive this key when they connect to the MDS and pass it
+>   on every stripe update.  OSTs check the key and reject updates with
+>   an "old" key, which forces the client to reconnect to the MDS to
+>   obtain a new key.
+>
+>   Note...
+>
+>   1. The only requirement on keys is that they increase monotonically
+>      for a given client.  The same key can be in use by many
+>      different clients so a single clock could be used to generate
+>      keys for all clients provided it never goes backwards
+>      (persistently) and an individual client is not permitted to
+>      reconnect before the clock ticks.
+>
+>   2. When a client is evicted, the MDS must continue to disable SOM
+>      attribute caching for the client's writeable files until the new
+>      key has been sent to all OSTs backing those files.  This can be
+>      done individually for each file.
+>
+>      Clients may reconnect and continue with stripe updates before
+>      all OSTs have received their new key since OSTs only reject old
+>      keys.  This allows OST notification to be relatively lazy -
+>      i.e. the MDS can buffer pending client/key updates for all OSTs
+>      and send them periodically.  Increasing this period only
+>      increases the time that SOM attribute caching must remain
+>      disabled for affected files.
+>
+>   3. When the MDS restarts or fails over, it must resynchronise with
+>      all OSTs - i.e.  install keys to limit stripe updates to
+>      actively connected clients and read the OST logs to discover
+>      files that were updated without persistently invalidating SOM
+>      attributes cached on the MDS.  Since it only needs a single key
+>      for all clients at this time, resynchronisation should be cheap.
+>
+>   4. When an OST restarts or fails over, it must recover its
+>      client/key state from the MDS before it can continue with normal
+>      operation to ensure that it continues to reject stripe updates
+>      that the MDS had already disabled with the previous OST
+>      instance.  For a long-running MDS, this client/key state could
+>      be 1 key for every client which might best be sent as bulk data.
+>
+>      Alternatively, key state could be stored persistently on the
+>      OST so that recovery could use existing code to replay
+>      uncommitted key updates from the MDS.
+
+we will need to give OST fresh identifiers because OST could be down
+long enough and they have succeeded to change.
+
+>      It seems safe to allow client replay to proceed concurrently
+>      with key state recovery since clients should only replay updates
+>      that were not rejected the first time round.  Also the MDS knows
+>      which files are volatile through an OST restart if clients only
+>      send "done writing" when all updates have committed.
+
+another possibility is not to try to get a common solution for MDS  
+failover
+and client eviction if it becomes complex but instead to get 2 separate
+simple solutions for them. thus for MDS failover it could be as simple  
+as:
+
+1.1. you described in ordered keys;
+1.2. I described in SC09 persentation with IOEpoch delimiter;
+1.3. it could be just an MDS mountid;
+
+this unique identifier is propagated to OST on MDS-OST synchronisation  
+and
+OST compares it with id packed into IO from clients;
+
+for client eviction it could be resolved through incrementing some per- 
+file
+identified in OST objects, stored in EA; it could be:
+
+2.1 IOEpoch, MDS can send notifications to OST in stripeset by itself
+(batched to save on RPC amount); we will have:
+- extra load for MDS, but in client eviction case only;
+- extra write on OST, but in client eviction case only;
+- extra RPC between MDS & OST, could be batched so not a problem;
+- separate mechanisms for MDS failover & client eviction;
+
+2.2 IOEpoch, client may do it for us on obd_getattr when MDS asks it  
+to rebuild
+the cache, client will have to wait until IOEpoch will commit to EA  
+and send
+setattr to MDS (batched to save on RPC amount); we will have:
+- extra write on OST, but in client eviction case only;
+- extra RPC between client & MDS, could be batched so not a problem;
+- separate mechanisms for MDS failover & client eviction;
++ client anyway need to gather attributes and merge them, it is natural
+   solution to send them to MDS as well;
+
+Note: this could be a common solution for MDS failover as well, but  
+there
+will be no way to distinguish between SOM-disabled and SOM-recovery  
+inodes,
+i.e. for each inode with disabled SOM we will propagate IOEpoch to OST  
+on
+getattr and write it to EA, in this case:
+- extra write on OST, 1 per file stripe; does it look dangerous?
+- extra RPC between client & MDS, could be batched so not a problem;
++ common mechanisms for MDS failover & client eviction;
++ client anyway need to gather attributes and merge them, it is natural
+   solution to send them to MDS as well;
+
+2.3. Layout generation
+Can we re-use Layout Lock mechanism here, blocking IO from previous  
+generations?
+If so, this way seems cheap.
+- extra load for MDS, but in client eviction case only;
+- extra write on OST, but in client eviction case only;
+- extra RPC between MDS & OST, could be batched so not a problem;
++ common solution for layout lock & client eviction;
++ layout lock is done for HSM so it is cheapest solution, isn't it?
+
+2.4. Client-MDS connection ID (suggested above by Eric)
+- extra load for MDS, but in client eviction and OST failover cases  
+only;
+- extra RPC between MDS & OST, could be batched so not a problem;
++ common mechanisms for MDS failover & client eviction;
+
+--
+Vitaly
+
+
+From Vitaly.Fertman at Sun.COM  Mon Jan 11 13:59:49 2010
+From: Vitaly.Fertman at Sun.COM (Vitaly Fertman)
+Date: Tue, 12 Jan 2010 00:59:49 +0300
+Subject: [Lustre-devel] SOM questions
+In-Reply-To: <4B4B4801.7070509@sun.com>
+References: <078f01ca8e31$22ff9f80$68fede80$@com>
+	<05A3FFE9-1549-4B97-A9C3-4B82113E56AE@Sun.COM>
+	<4B4B4801.7070509@sun.com>
+Message-ID: <AC682480-691F-46C8-906D-8818A1C8FC18@Sun.COM>
+
+On Jan 11, 2010, at 6:47 PM, Alex Zhuravlev wrote:
+
+> I'd say we don't need DW at all.
+>
+> it's OST who knows whether attributes are stable (no pw locks and
+> flush/commit is done, so i_blocks won't change till next open/write).
+
+what do you mean stable? If you mean they are not going to change,
+this is exactly what OST doesn't know because it doesn't know if file
+is opened.
+
+> I think in general the procedure to refresh SOM attributes could
+> look like the following:
+>
+> 1) MDS gets GETATTR and finds the file hasn't been open for a period
+>   it set special flag in GETATTR reply - say, REFRESH_SOM
+> 2) client does regular enqueue/glimpse to get attributes from OST
+> 3) if OST finds inode is stable (VBR version >= last_committed)
+>   it set another special flag in reply - say, ATTR_STABLE
+> 4) now, if client has REFRESH_SOME, ATTR_STABLE for all objects
+>   *and* locks granted, then it can send aggregated attributes to
+>   MDS to refresh SOM  attributes
+> 5) if the file hasn't been open since that REFRESH SOM, attributes
+>   can be set
+>
+> it looks quite simple and with very minimal changes to existing  
+> protocol
+> logic. I also think that following this we don't need dedicated IO  
+> epoch
+> notion and can use regular VBR version increasing on each open.
+
+could you clarify how you can block IO from "lost" clients without
+writing some id (VBR id?) to OST objects and not waiting for this
+change to commit before updating MDS with new attributes?
+
+--
+Vitaly
+
+
+From Alex.Zhuravlev at Sun.COM  Mon Jan 11 19:42:38 2010
+From: Alex.Zhuravlev at Sun.COM (Alex Zhuravlev)
+Date: Tue, 12 Jan 2010 06:42:38 +0300
+Subject: [Lustre-devel] SOM questions
+In-Reply-To: <AC682480-691F-46C8-906D-8818A1C8FC18@Sun.COM>
+References: <078f01ca8e31$22ff9f80$68fede80$@com>
+	<05A3FFE9-1549-4B97-A9C3-4B82113E56AE@Sun.COM>
+	<4B4B4801.7070509@sun.com>
+	<AC682480-691F-46C8-906D-8818A1C8FC18@Sun.COM>
+Message-ID: <4B4BEFAE.7030907@sun.com>
+
+On 1/12/10 12:59 AM, Vitaly Fertman wrote:
+> what do you mean stable? If you mean they are not going to change,
+> this is exactly what OST doesn't know because it doesn't know if file
+> is opened.
+
+let me rephrase it: stable means there is no pending (cached) IO on
+the clients and all locally cached (on OST) changes are committed to disk.
+
+> could you clarify how you can block IO from "lost" clients without
+> writing some id (VBR id?) to OST objects and not waiting for this
+> change to commit before updating MDS with new attributes?
+
+this is related but different issue discussed in "SOM safety" :) we
+consider at least 3 options for that.
+
+thanks, Alex
+
+
+
+From Jinshan.Xiong at Sun.COM  Wed Jan 20 04:37:27 2010
+From: Jinshan.Xiong at Sun.COM (jay)
+Date: Wed, 20 Jan 2010 20:37:27 +0800
+Subject: [Lustre-devel] proposal on implementing a new readahead in clio
+Message-ID: <4B56F907.3090308@sun.com>
+
+Hello,
+
+We have discussed the implementation of new readahead in CLIO. Here I 
+just send the design document out to ask for comments.
+
+We have already had several inputs from Z(aka bzzz) and other engineers. 
+I'm not going to copy those ideas here directly, because I'm afraid to 
+distort something, so please reply this email to show your ideas - 
+thanks in advance.
+
+Jay
+
+-- 
+Good good study, day day up
+
+-------------- next part --------------
+A non-text attachment was scrubbed...
+Name: ra.tar
+Type: application/x-tar
+Size: 194560 bytes
+Desc: not available
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20100120/d07ce14d/attachment.tar>
+
+From Jinshan.Xiong at Sun.COM  Fri Jan 22 02:53:04 2010
+From: Jinshan.Xiong at Sun.COM (jay)
+Date: Fri, 22 Jan 2010 18:53:04 +0800
+Subject: [Lustre-devel] proposal on implementing a new readahead in clio
+In-Reply-To: <4B56F907.3090308@sun.com>
+References: <4B56F907.3090308@sun.com>
+Message-ID: <4B598390.5030504@sun.com>
+
+
+UP!!
+
+Here is a pdf version of design document. Also I'm attaching a picture 
+because the pictures in pdf is not clear.
+
+Thanks,
+Jay
+
+jay wrote:
+> Hello,
+>
+> We have discussed the implementation of new readahead in CLIO. Here I 
+> just send the design document out to ask for comments.
+>
+> We have already had several inputs from Z(aka bzzz) and other 
+> engineers. I'm not going to copy those ideas here directly, because 
+> I'm afraid to distort something, so please reply this email to show 
+> your ideas - thanks in advance.
+>
+> Jay
+>
+> ------------------------------------------------------------------------
+>
+> _______________________________________________
+> Lustre-devel mailing list
+> Lustre-devel at lists.lustre.org
+> http://lists.lustre.org/mailman/listinfo/lustre-devel
+
+
+-- 
+Good good study, day day up
+
+-------------- next part --------------
+A non-text attachment was scrubbed...
+Name: readahead.pdf
+Type: application/pdf
+Size: 198695 bytes
+Desc: not available
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20100122/9c461a12/attachment.pdf>
+-------------- next part --------------
+A non-text attachment was scrubbed...
+Name: lazy-readahead-1.jpg
+Type: image/jpeg
+Size: 142721 bytes
+Desc: not available
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20100122/9c461a12/attachment.jpg>
+
+From alexey.lyashkov at clusterstor.com  Fri Jan 22 23:09:26 2010
+From: alexey.lyashkov at clusterstor.com (Alexey Lyashkov)
+Date: Sat, 23 Jan 2010 09:09:26 +0200
+Subject: [Lustre-devel] proposal on implementing a new readahead in clio
+In-Reply-To: <4B598390.5030504@sun.com>
+References: <4B56F907.3090308@sun.com>  <4B598390.5030504@sun.com>
+Message-ID: <1264230566.11892.62.camel@berloga.shadowland>
+
+>>
+We have an idea to spawn a per file readahead thread for each process,
+and this thread can be used to issue the readahead RPC async.
+>>
+I correctly understand: you suggest a spawn one new thread per open
+file?
+so if client have 10 processes, and each process is open 100 files, you
+need spawn 1000 new threads?
+
+
+On Fri, 2010-01-22 at 18:53 +0800, jay wrote:
+> UP!!
+> 
+> Here is a pdf version of design document. Also I'm attaching a picture 
+> because the pictures in pdf is not clear.
+> 
+> Thanks,
+> Jay
+> 
+> jay wrote:
+> > Hello,
+
+
+-- 
+Alexey Lyashkov <alexey.lyashkov at clusterstor.com>
+ClusterStor
+
+
+
+From Jinshan.Xiong at Sun.COM  Sat Jan 23 17:01:46 2010
+From: Jinshan.Xiong at Sun.COM (jay)
+Date: Sun, 24 Jan 2010 09:01:46 +0800
+Subject: [Lustre-devel] proposal on implementing a new readahead in clio
+In-Reply-To: <1264230566.11892.62.camel@berloga.shadowland>
+References: <4B56F907.3090308@sun.com> <4B598390.5030504@sun.com>
+	<1264230566.11892.62.camel@berloga.shadowland>
+Message-ID: <4B5B9BFA.9080301@sun.com>
+
+Alexey Lyashkov wrote:
+> We have an idea to spawn a per file readahead thread for each process,
+> and this thread can be used to issue the readahead RPC async.
+>   
+> I correctly understand: you suggest a spawn one new thread per open
+> file?
+> so if client have 10 processes, and each process is open 100 files, you
+> need spawn 1000 new threads?
+>   
+No, per process readahead, or some system readahead thread pool, this is 
+because most of those threads are sleeping, and it consumes little time 
+to issue readahead requests. The idea behind the scheme is to issue 
+readahead rpcs async.
+
+BTW, I'm not going to implement what you mentioned in linux, because I 
+don't think this is a good idea, as what I said in design doc. However, 
+we HAVE to have an async thread pool to implement readahead for windows. 
+Windows doesn't have an interface of issuing async read request, lack of 
+a mechanism to have page lock or similar things - what a pity!
+
+Jay
+>
+> On Fri, 2010-01-22 at 18:53 +0800, jay wrote:
+>   
+>> UP!!
+>>
+>> Here is a pdf version of design document. Also I'm attaching a picture 
+>> because the pictures in pdf is not clear.
+>>
+>> Thanks,
+>> Jay
+>>
+>> jay wrote:
+>>     
+>>> Hello,
+>>>       
+>
+>
+>   
+
+
+-- 
+Good good study, day day up
+
+
+
+From alexey.lyashkov at clusterstor.com  Sun Jan 24 01:18:46 2010
+From: alexey.lyashkov at clusterstor.com (Alexey Lyashkov)
+Date: Sun, 24 Jan 2010 11:18:46 +0200
+Subject: [Lustre-devel] proposal on implementing a new readahead in clio
+In-Reply-To: <4B5B9BFA.9080301@sun.com>
+References: <4B56F907.3090308@sun.com> <4B598390.5030504@sun.com>
+	<1264230566.11892.62.camel@berloga.shadowland>
+	<4B5B9BFA.9080301@sun.com>
+Message-ID: <1264324726.11892.76.camel@berloga.shadowland>
+
+On Sun, 2010-01-24 at 09:01 +0800, jay wrote:
+> Alexey Lyashkov wrote:
+> > We have an idea to spawn a per file readahead thread for each process,
+> > and this thread can be used to issue the readahead RPC async.
+> >   
+> > I correctly understand: you suggest a spawn one new thread per open
+> > file?
+> > so if client have 10 processes, and each process is open 100 files, you
+> > need spawn 1000 new threads?
+> >   
+> No, per process readahead, or some system readahead thread pool, this is 
+> because most of those threads are sleeping, and it consumes little time 
+> to issue readahead requests. The idea behind the scheme is to issue 
+> readahead rpcs async.
+first case is same as i say (i think) - 10 processes reading from own
+files, so will be spawn 1000 new threads.
+in second case you will be lost readahead requests on hardloaded client.
+
+> 
+> BTW, I'm not going to implement what you mentioned in linux, because I 
+> don't think this is a good idea, as what I said in design doc. However, 
+> we HAVE to have an async thread pool to implement readahead for windows. 
+> Windows doesn't have an interface of issuing async read request, lack of 
+> a mechanism to have page lock or similar things - what a pity!
+hm.. looks i don't understand problem. Currently linux client is using
+->readpage() to generate OST_READ RPC and sending via ptlrpcd-io.
+Why isn't generate this RPC directly for Windows? Or you mean about
+update asynchronous update VM cache ?
+
+
+-- 
+Alexey Lyashkov <alexey.lyashkov at clusterstor.com>
+ClusterStor
+
+
+
+From Nicolas.Williams at sun.com  Sun Jan 24 20:05:16 2010
+From: Nicolas.Williams at sun.com (Nicolas Williams)
+Date: Sun, 24 Jan 2010 22:05:16 -0600
+Subject: [Lustre-devel] proposal on implementing a new readahead in clio
+In-Reply-To: <4B5B9BFA.9080301@sun.com>
+References: <4B56F907.3090308@sun.com> <4B598390.5030504@sun.com>
+	<1264230566.11892.62.camel@berloga.shadowland>
+	<4B5B9BFA.9080301@sun.com>
+Message-ID: <20100125040516.GC1061@Sun.COM>
+
+On Sun, Jan 24, 2010 at 09:01:46AM +0800, jay wrote:
+> Alexey Lyashkov wrote:
+> > I correctly understand: you suggest a spawn one new thread per open
+> > file?
+> > so if client have 10 processes, and each process is open 100 files, you
+> > need spawn 1000 new threads?
+> >   
+> No, per process readahead, or some system readahead thread pool, this is 
+> because most of those threads are sleeping, and it consumes little time 
+> to issue readahead requests. The idea behind the scheme is to issue 
+> readahead rpcs async.
+
+Sleeping threads do consume memory resources, and context switches
+between them do add cache pressure.  The read ahead work should all be
+async, in which case you need no more readahead threads than you have
+CPUs.
+
+> BTW, I'm not going to implement what you mentioned in linux, because I 
+> don't think this is a good idea, as what I said in design doc. However, 
+> we HAVE to have an async thread pool to implement readahead for windows. 
+> Windows doesn't have an interface of issuing async read request, lack of 
+> a mechanism to have page lock or similar things - what a pity!
+
+But surely you can still do the readaheads asynchronously.  Say you
+think that block N of some file will be needed soon: so you issue the
+read ahead of time.  You'll need to place the data somewhere, and
+hopefully that will be somewhere that the host OS's VFS sub-system
+(Windows in your case) can either provide or accept -- if not you'll
+need to do a copy later, but you're still able to send the read request,
+and process the reply, asynchronously.
+
+Nico
+-- 
+
+
+From Jinshan.Xiong at Sun.COM  Sun Jan 24 22:17:13 2010
+From: Jinshan.Xiong at Sun.COM (jay)
+Date: Mon, 25 Jan 2010 14:17:13 +0800
+Subject: [Lustre-devel] proposal on implementing a new readahead in clio
+In-Reply-To: <1264324726.11892.76.camel@berloga.shadowland>
+References: <4B56F907.3090308@sun.com> <4B598390.5030504@sun.com>
+	<1264230566.11892.62.camel@berloga.shadowland>
+	<4B5B9BFA.9080301@sun.com>
+	<1264324726.11892.76.camel@berloga.shadowland>
+Message-ID: <4B5D3769.9040703@sun.com>
+
+
+Nico and shadow,
+
+Since you have the same question about windows, I just replied them in 
+one email. Also I got Matt involved - he is a windows expert.
+
+
+Alexey Lyashkov wrote:
+> On Sun, 2010-01-24 at 09:01 +0800, jay wrote:
+>   
+>> Alexey Lyashkov wrote:
+>>     
+>>> We have an idea to spawn a per file readahead thread for each process,
+>>> and this thread can be used to issue the readahead RPC async.
+>>>   
+>>> I correctly understand: you suggest a spawn one new thread per open
+>>> file?
+>>> so if client have 10 processes, and each process is open 100 files, you
+>>> need spawn 1000 new threads?
+>>>   
+>>>       
+>> No, per process readahead, or some system readahead thread pool, this is 
+>> because most of those threads are sleeping, and it consumes little time 
+>> to issue readahead requests. The idea behind the scheme is to issue 
+>> readahead rpcs async.
+>>     
+> first case is same as i say (i think) - 10 processes reading from own
+> files, so will be spawn 1000 new threads.
+> in second case you will be lost readahead requests on hardloaded client.
+>   
+Nod - that's why I'm not going to do it in linux - as the design doc 
+said - don't you see section 8.1? :-)
+>   
+>> BTW, I'm not going to implement what you mentioned in linux, because I 
+>> don't think this is a good idea, as what I said in design doc. However, 
+>> we HAVE to have an async thread pool to implement readahead for windows. 
+>> Windows doesn't have an interface of issuing async read request, lack of 
+>> a mechanism to have page lock or similar things - what a pity!
+>>     
+> hm.. looks i don't understand problem. Currently linux client is using
+> ->readpage() to generate OST_READ RPC and sending via ptlrpcd-io.
+> Why isn't generate this RPC directly for Windows? Or you mean about
+> update asynchronous update VM cache ?
+>   
+
+The problem is that we have to wait for the RPC(which may just contain 
+readahead pages) to be finished before we can return to user space. You 
+may ask why we can't do this, the answer is that we should pipeline the 
+readahead request, instead of reading a chunk of data to support readahead.
+
+The problem of windows is that it's lack of interfaces to manipulate 
+pages. I'm not a windows expert - please ask matt if you have windows 
+specific questions.
+
+>
+>   
+
+
+-- 
+Good good study, day day up
+
+
+
+From Qiang.Wu at Sun.COM  Sun Jan 24 22:55:09 2010
+From: Qiang.Wu at Sun.COM (Matt Wu)
+Date: Mon, 25 Jan 2010 14:55:09 +0800
+Subject: [Lustre-devel] proposal on implementing a new readahead in clio
+In-Reply-To: <20100125040516.GC1061@Sun.COM>
+References: <4B56F907.3090308@sun.com> <4B598390.5030504@sun.com>
+	<1264230566.11892.62.camel@berloga.shadowland>
+	<4B5B9BFA.9080301@sun.com> <20100125040516.GC1061@Sun.COM>
+Message-ID: <4B5D404D.605@Sun.COM>
+
+We need do readahead asynchronously, but Windows kernel doesn't give us an 
+easy solution. Here are the issues for Windows readahead:
+
+1, Windows kenrel (VM) doesn't provide kernel drivers an equivalent 
+grab_cache_page_nowait_gfp() to allocate an empty/invalid page. So in 
+ll_readpage(), it's too late for WNC to grab more pages for readahead.
+
+2, The routines provided by Windows kernel to allocate page cache are 
+synchronous and they won't return until the requested pages are fetched.
+
+So we plan to start a thread pool, and dispatch the readahead requests to 
+these threads instead of blocking user thread.
+
+We can group the threads by several ways:
+1, request per random thread, without any specify order. we just start a 
+fixed number of threads and queue the readahead request to any thread of 
+the thread pool.
+    this is the decision we made during WNC readahead meeting last week.
+2, thread per file (file) or thread per open instance (fd)
+3, thread per ost, we need divide the readahead request to several which 
+are stripe boundary aligned.
+
+
+regards,
+matt
+
+On 2010/1/25 12:05, Nicolas Williams wrote:
+> On Sun, Jan 24, 2010 at 09:01:46AM +0800, jay wrote:
+>> Alexey Lyashkov wrote:
+>>> I correctly understand: you suggest a spawn one new thread per open
+>>> file?
+>>> so if client have 10 processes, and each process is open 100 files, you
+>>> need spawn 1000 new threads?
+>>>
+>> No, per process readahead, or some system readahead thread pool, this is
+>> because most of those threads are sleeping, and it consumes little time
+>> to issue readahead requests. The idea behind the scheme is to issue
+>> readahead rpcs async.
+>
+> Sleeping threads do consume memory resources, and context switches
+> between them do add cache pressure.  The read ahead work should all be
+> async, in which case you need no more readahead threads than you have
+> CPUs.
+>
+>> BTW, I'm not going to implement what you mentioned in linux, because I
+>> don't think this is a good idea, as what I said in design doc. However,
+>> we HAVE to have an async thread pool to implement readahead for windows.
+>> Windows doesn't have an interface of issuing async read request, lack of
+>> a mechanism to have page lock or similar things - what a pity!
+>
+> But surely you can still do the readaheads asynchronously.  Say you
+> think that block N of some file will be needed soon: so you issue the
+> read ahead of time.  You'll need to place the data somewhere, and
+> hopefully that will be somewhere that the host OS's VFS sub-system
+> (Windows in your case) can either provide or accept -- if not you'll
+> need to do a copy later, but you're still able to send the read request,
+> and process the reply, asynchronously.
+>
+> Nico
+
+
+
+From adilger at sun.com  Sun Jan 24 23:23:03 2010
+From: adilger at sun.com (Andreas Dilger)
+Date: Mon, 25 Jan 2010 00:23:03 -0700
+Subject: [Lustre-devel] proposal on implementing a new readahead in clio
+In-Reply-To: <4B5D404D.605@Sun.COM>
+References: <4B56F907.3090308@sun.com> <4B598390.5030504@sun.com>
+	<1264230566.11892.62.camel@berloga.shadowland>
+	<4B5B9BFA.9080301@sun.com>
+	<20100125040516.GC1061@Sun.COM> <4B5D404D.605@Sun.COM>
+Message-ID: <D37DCC00-CF98-4FDB-829B-3AEDE51AE58F@sun.com>
+
+On 2010-01-24, at 23:55, Matt Wu wrote:
+> We can group the threads by several ways:
+> 1, request per random thread, without any specify order. we just  
+> start a
+> fixed number of threads and queue the readahead request to any  
+> thread of
+> the thread pool.
+>    this is the decision we made during WNC readahead meeting last  
+> week.
+> 2, thread per file (file) or thread per open instance (fd)
+> 3, thread per ost, we need divide the readahead request to several  
+> which
+> are stripe boundary aligned.
+
+In order to keep the readahead pages local to the NUMA node that the  
+userspace thread is running on, I'd recommend at most a single  
+readahead thread per core.  That way, when the readahead thread is  
+allocating pages they will be on the right NUMA node.
+
+> On 2010/1/25 12:05, Nicolas Williams wrote:
+>> On Sun, Jan 24, 2010 at 09:01:46AM +0800, jay wrote:
+>>> Alexey Lyashkov wrote:
+>>>> I correctly understand: you suggest a spawn one new thread per open
+>>>> file?
+>>>> so if client have 10 processes, and each process is open 100  
+>>>> files, you
+>>>> need spawn 1000 new threads?
+>>>>
+>>> No, per process readahead, or some system readahead thread pool,  
+>>> this is
+>>> because most of those threads are sleeping, and it consumes little  
+>>> time
+>>> to issue readahead requests. The idea behind the scheme is to issue
+>>> readahead rpcs async.
+>>
+>> Sleeping threads do consume memory resources, and context switches
+>> between them do add cache pressure.  The read ahead work should all  
+>> be
+>> async, in which case you need no more readahead threads than you have
+>> CPUs.
+>>
+>>> BTW, I'm not going to implement what you mentioned in linux,  
+>>> because I
+>>> don't think this is a good idea, as what I said in design doc.  
+>>> However,
+>>> we HAVE to have an async thread pool to implement readahead for  
+>>> windows.
+>>> Windows doesn't have an interface of issuing async read request,  
+>>> lack of
+>>> a mechanism to have page lock or similar things - what a pity!
+>>
+>> But surely you can still do the readaheads asynchronously.  Say you
+>> think that block N of some file will be needed soon: so you issue the
+>> read ahead of time.  You'll need to place the data somewhere, and
+>> hopefully that will be somewhere that the host OS's VFS sub-system
+>> (Windows in your case) can either provide or accept -- if not you'll
+>> need to do a copy later, but you're still able to send the read  
+>> request,
+>> and process the reply, asynchronously.
+>>
+>> Nico
+>
+> _______________________________________________
+> Lustre-devel mailing list
+> Lustre-devel at lists.lustre.org
+> http://lists.lustre.org/mailman/listinfo/lustre-devel
+
+
+Cheers, Andreas
+--
+Andreas Dilger
+Sr. Staff Engineer, Lustre Group
+Sun Microsystems of Canada, Inc.
+
+
+
+From Nicolas.Williams at sun.com  Mon Jan 25 07:34:26 2010
+From: Nicolas.Williams at sun.com (Nicolas Williams)
+Date: Mon, 25 Jan 2010 09:34:26 -0600
+Subject: [Lustre-devel] proposal on implementing a new readahead in clio
+In-Reply-To: <D37DCC00-CF98-4FDB-829B-3AEDE51AE58F@sun.com>
+References: <4B56F907.3090308@sun.com> <4B598390.5030504@sun.com>
+	<1264230566.11892.62.camel@berloga.shadowland>
+	<4B5B9BFA.9080301@sun.com> <20100125040516.GC1061@Sun.COM>
+	<4B5D404D.605@Sun.COM>
+	<D37DCC00-CF98-4FDB-829B-3AEDE51AE58F@sun.com>
+Message-ID: <20100125153426.GE1061@Sun.COM>
+
+On Mon, Jan 25, 2010 at 12:23:03AM -0700, Andreas Dilger wrote:
+> On 2010-01-24, at 23:55, Matt Wu wrote:
+> >We can group the threads by several ways:
+> >1, request per random thread, without any specify order. we just
+> >start a fixed number of threads and queue the readahead request to
+> >any  thread of the thread pool.  this is the decision we made during
+> >WNC readahead meeting last  week.
+> >2, thread per file (file) or thread per open instance (fd)
+> >3, thread per ost, we need divide the readahead request to several
+> >which are stripe boundary aligned.
+> 
+> In order to keep the readahead pages local to the NUMA node that the  
+> userspace thread is running on, I'd recommend at most a single  
+> readahead thread per core.  That way, when the readahead thread is  
+> allocating pages they will be on the right NUMA node.
+
+That was my recommendation as well, but if I understand Matt correctly,
+the Windows VFS makes it impossible to do readahead asynchronously,
+which is why Matt suggests having many threads.  I have no clue as to
+the relevant Windows kernel APIs, but if Matt's right about Windows,
+then color me surprised.  Assuming that's correct and that there's no
+reasonable way around the problem, then I'd recommend having a pool with
+some number of threads (say, 3 * CPUs), with readaheads done only when
+there are threads available in the pool.
+
+Nico
+-- 
+
+
+From Alex.Zhuravlev at Sun.COM  Tue Jan 26 02:02:32 2010
+From: Alex.Zhuravlev at Sun.COM (Alex Zhuravlev)
+Date: Tue, 26 Jan 2010 13:02:32 +0300
+Subject: [Lustre-devel] proposal on implementing a new readahead in clio
+In-Reply-To: <4B56F907.3090308@sun.com>
+References: <4B56F907.3090308@sun.com>
+Message-ID: <4B5EBDB8.1030303@sun.com>
+
+Hi,
+
+I think we could help a lot if you restructure the proposal a bit:
+
+first of all, describe the algorithm w/o implementation details,
+probably using notion of event: read event extending window, io to
+get data ahead, read-ahead io completion, hit/miss, etc.
+
+then map these events to specific code paths? explain what kind of
+information/mechanism layers miss to implement the algorithm?
+
+z.
+
+On 1/20/10 3:37 PM, jay wrote:
+> Hello,
+>
+> We have discussed the implementation of new readahead in CLIO. Here I
+> just send the design document out to ask for comments.
+>
+> We have already had several inputs from Z(aka bzzz) and other engineers.
+> I'm not going to copy those ideas here directly, because I'm afraid to
+> distort something, so please reply this email to show your ideas -
+> thanks in advance.
+>
+> Jay
+>
+>
+>
+> _______________________________________________
+> Lustre-devel mailing list
+> Lustre-devel at lists.lustre.org
+> http://lists.lustre.org/mailman/listinfo/lustre-devel
+
+
+

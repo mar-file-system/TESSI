@@ -1,0 +1,3537 @@
+From Vitaly.Fertman at Sun.COM  Sun Feb  1 06:45:41 2009
+From: Vitaly.Fertman at Sun.COM (Vitaly Fertman)
+Date: Sun, 01 Feb 2009 17:45:41 +0300
+Subject: [Lustre-devel] SOM Recovery of open files
+In-Reply-To: <63CF2DAF-59F7-4124-8AE9-188927051AAB@sun.com>
+References: <20090130233253.GK3652@webber.adilger.int>
+	<63CF2DAF-59F7-4124-8AE9-188927051AAB@sun.com>
+Message-ID: <C68908D1-8287-4870-903E-DDCDED6E31D0@Sun.COM>
+
+On Jan 31, 2009, at 3:51 AM, Oleg Drokin wrote:
+
+> Hello!
+>
+> On Jan 30, 2009, at 6:32 PM, Andreas Dilger wrote:
+>
+>> Vitaly Fertman wrote:
+>>> Oleg told me yesterday about one feature which seems destroying the
+>>> SOM completely.  If a client is evicted and re-connects, we do not
+>>> re-open files so that client thinks files are opened, whereas MDS
+>>> thinks they are closed.
+>> Right.  This issue has been around for a long time.  There is bug 971
+>> dealing with this issue, about changing open file recovery to work by
+>> generating new "open file" requests instead of saving the RPCs and
+>> handling it at the ptlrpc level.  This is (AFAIK) being done for the
+>> simplified interoperability fixes already.
+>
+> But the problem is client might be evicted before such command is  
+> issued
+> and a knowledge about this system would disappear from MDS (but not  
+> from
+> OST where it is still connected).
+
+right, besides that the problem exists even without the interoperability
+involved, i.e. if mds does not even reboot, when only eviction happens.
+
+>>> Thus MDS has no control over opened files, whereas clients may write
+>>> to them.  To fix this we need at least to disable the file  
+>>> modification
+>>> on clients until files are re-opened.
+>> This is also going to be handled by the LOV EA lock that CEA is  
+>> working
+>> on for HSM and migration.  If the client is evicted from the MDS it  
+>> will
+>> have the LOV EA lock cancelled, and all IO will block until a new  
+>> LOV EA
+>> lock is gotten.
+>
+> LOV EA lock won't help. It does not prevent (with current design,  
+> anyway)
+> dirty data flush from client cache, only new writes would be not  
+> possible.
+> Even then since there is no reopen when obtaining EA lock, MDS would  
+> still
+> have no idea there is an open file handle somewhere.
+
+the dirty cache existent on client is not such a big problem for SOM.
+first of all, the client eviction leads to closing the files on MDS,  
+when MDS
+removes the SOM cache.
+
+besides that, if MDS failover happens, during the MDS-OST  
+synchronization
+OST may ask the clients to flush their data and tell the MDS about the  
+existent
+llog record -- thus MDS will be able to clean the SOM cache as well.
+
+Once MDS wants to get the SOM cache again and sees the cache did not  
+exist,
+it asks a client to gather attributes under extent locks forcing other  
+clients to
+flush their data on OST.
+
+thus the only problem here is a stale fh on a client which may let the  
+client
+to write to the file after the SOM cache will be re-obtained on MDS,  
+which
+consists of 2 parts:
+
+- an ability of a client to write to an opened file without a  
+connection to MDS;
+- an absence of file re-opening on re-connection.
+
+>>> The re-opening itself could be done by application or by us.  In the
+>>> later case, the recovery mechanism is involved...
+>> This is definitely not an application-level problem, it needs to be
+>> fixed within Lustre.
+>
+> Right. But there is no straightforward fix. It is not going to be easy
+> to reopen a file after eviction. Of course we can just invalidate
+> local fd, so that the app will start to get something like ESTALE,
+> but this approach is also not very desirable.
+>
+>>> it was missed for the recovery, but it is a problem for  
+>>> interoperability
+>>> as well. I remember Eric said that we will evict clients on  
+>>> downgrade
+>>> and he said therefore all the files get closed. however, it seems it
+>>> is not for clients unless we do some extra actions.
+>> Even on upgrade, simplified interoperability will now have the server
+>> requesting that all clients flush their state before the server is  
+>> shut
+>> down, so that the amount of interoperability needed is minimal.   
+>> The only
+>> state that a client cannot completely remove is the open file  
+>> handles,
+
+the only state needed for SOM ;)
+IIRC, what was discussed in Beijing was the failover for upgrade and all
+the client evictions for downgrade. the failover is not a problem here
+as opens will be merely replayed. but eviction is.
+
+>> so the "replay" of file open will now be driven by the file handles
+>> themselves instead of the "saved RPC" mechanism we use today.
+
+hopefully not for replay only, but for the re-connection as well.
+
+> Except in this case the client is evicted from e.g. MDS, so it does  
+> not
+> participate in recovery anyway.
+
+right.
+
+--
+Vitaly
+
+
+From Vitaly.Fertman at Sun.COM  Sun Feb  1 09:24:41 2009
+From: Vitaly.Fertman at Sun.COM (Vitaly Fertman)
+Date: Sun, 01 Feb 2009 20:24:41 +0300
+Subject: [Lustre-devel] SOM Recovery of open files
+In-Reply-To: <C68908D1-8287-4870-903E-DDCDED6E31D0@Sun.COM>
+References: <20090130233253.GK3652@webber.adilger.int>
+	<63CF2DAF-59F7-4124-8AE9-188927051AAB@sun.com>
+	<C68908D1-8287-4870-903E-DDCDED6E31D0@Sun.COM>
+Message-ID: <5882C1BC-E01E-42FF-A728-08885E997075@sun.com>
+
+On Feb 1, 2009, at 5:45 PM, Vitaly Fertman wrote:
+
+> thus the only problem here is a stale fh on a client which may let  
+> the client
+> to write to the file after the SOM cache will be re-obtained on MDS,  
+> which
+> consists of 2 parts:
+>
+> - an ability of a client to write to an opened file without a  
+> connection to MDS;
+> - an absence of file re-opening on re-connection.
+
+I forgot to mention about truncate (locked & lockless) and lockless IO.
+
+MDS must be aware about opened IOEpoch for truncate as well, otherwise
+obd_punches must be blocked. The situation is pretty rare as we do not
+cache punches on clients and they go away right md_setattr completes,
+but I think what if at the time of the client eviction from MDS, the  
+connection
+between this client and an OST is unstable so that punches will hang  
+in the
+re-send list for a while, enough for another client to modify the file  
+--
+MDS gets a new SOM cache, and later punch will modify the file.
+
+The same for lockless IO.
+
+The locked truncate is involved as it could hang in the re-send list  
+with
+the lock enqueue, so that enqueue+punch will happen after MDS re- 
+validates
+SOM cache.
+
+Thus:
+- block truncate and lockless IO;
+- "re-open" truncate on re-connection as well as regularly opened files.
+
+This must happen even if SOM is disabled but the client already  
+supports it
+(clients are upgraded first). Otherwise, the interoperability will be  
+broken.
+
+--
+Vitaly
+
+
+From Harriet.Coverston at Sun.COM  Sun Feb  1 20:00:22 2009
+From: Harriet.Coverston at Sun.COM (Harriet G. Coverston)
+Date: Sun, 01 Feb 2009 22:00:22 -0600
+Subject: [Lustre-devel] SAM-QFS, ADM, and Lustre HSM
+In-Reply-To: <4983998D.1030601@sun.com>
+References: <3DF0F4AF-F4D6-476E-98F7-CD912C49FC18@Sun.COM>
+	<2734A30F-2C76-4725-9F3A-29AD4245B7E8@Sun.COM>
+	<496FCA67.6000500@sun.com>
+	<48D329C0-242E-4A5A-94C1-DF493BB25C2F@Sun.COM>
+	<496FE8D4.2090908@sun.com>
+	<BEB67402-7AFE-4BE1-A59C-050823AFC8E5@Sun.COM>
+	<4977647D.5010503@sun.com>
+	<4977E5BD.7000706@sun.com> <4978DB1E.30507@sun.com>
+	<497A144C.4000408@Sun.COM>
+	<20090126193548.GF3652@webber.adilger.int> <497E35A3.3080603@sun.com>
+	<DEB5E509-4641-40B6-86CA-972D885975D3@Sun.COM>
+	<4983998D.1030601@sun.com>
+Message-ID: <8585251D-41D7-4B42-99F9-BDBFA2CF88C1@Sun.COM>
+
+Nathan,
+
+On Jan 30, 2009, at 6:21 PM, Nathaniel Rutman wrote:
+
+> LEIBOVICI Thomas wrote:
+>> At CEA, we are using our own copytool that directly uses HPSS API.  
+>> This already exists and is in production for years.
+>> I think there will be few modifications to adapt it to Lustre-HSM  
+>> purpose
+>> (basically, add fid <-> HSM id mapping and backup of attributes,  
+>> path, stripe...)
+> So then the QFS copytool will indeed be a new tool, and should be  
+> scheduled accordingly.
+> Features:
+> 1. "cp --preserve" like functionality (include metadata attributes  
+> in cp)
+> 2. add EA's (create mini-tarball)
+> 3. implement FID hash to subdivide namespace
+> 4. periodic status reporting (via ioctl on file)
+>
+>
+> Harriet G. Coverston wrote:
+>>> There is a mechanism to get the current full pathname for a given  
+>>> fid from userspace, so an HSM-specific copytool could find it out,  
+>>> but a central tenet of the design here is that as far as the HSM  
+>>> is concerned, the entire Lustre FS is a flat namespace of FIDs.
+>>
+>> Be careful here. We are a file system. We don't have a limit on #  
+>> of files in one directory, but we don't recommend more than 500,000  
+>> files in one single directory or you will start to see some  
+>> performance problems. You will have to create a tree, not use a  
+>> flat namespace.
+> Yes, a tree based on a hash of the fid.
+> The other option is to use the actual filename for storage, but from  
+> Lustre's point of view this gets extremely tricky.  For example:
+> Send /foo/bar to archive.  Client A opens /foo/bar.  Client B  
+> renames /foo/bar to /abc/xyz, but this change hasn't propagated to  
+> the archive yet.  Client A now tries to read its open file handle,  
+> which tells Lustre to read the offline file FID 123, which it  
+> translates to /abc/xyz currently, which the archive doesn't know  
+> about yet.  Not just xyz, but renames on any ancestor path element  
+> cause similar misses.  Since the FID remains constant throughout the  
+> life of a file, we don't have to worry about any namespace changes  
+> (file or parents).  If there was an alternate way of bypassing the  
+> archive's namespace to directly access a file, we could conceivably  
+> store e.g. an archive-specific identifier within the Lustre stripe  
+> EA, and pass this down to the copytool when reading an offline file,  
+> but this presupposes that such a thing exists, is of reasonable  
+> size, has a userspace method to access it, etc.
+
+Yes, we have a FID like concept in SAM-QFS. It is called the file ID.  
+It is 64 bits and consists of the inode/generation number. It is  
+unique. You can store it. You can issue an ioctl to open the ID. You
+can issue an ioctl to do an ID stat, etc. It is much more efficient  
+than using the filename (expensive lookup). This means if you store  
+and use the ID, you can cover the rename window and still be  
+guaranteed that you will get the right file. Note, we don't rearchive  
+on a rename.
+
+I really think a replicated namespace will be much more intuitive and  
+solves restore. If you prefer
+to build a tar container, that is OK, too. The tar file can have a  
+suffix and then you know it is tar and
+you can tar it back.
+>
+>
+>>
+>>> You can get a full pathname if you want to for catastrophe  
+>>> recovery, but Lustre itself will only speak to the HSM with FIDs.
+>>> As I said in the other email, although SAM-QFS can do name-based  
+>>> policies, the "name" as far as QFS is concerned is just the FID,  
+>>> so  name-based policies at the copytool level are worthless.    
+>>> Unless we a.) add the path/filename back to the file (EA, or use a  
+>>> tarball wrapper), and b.) modify the SAM policy engine to use the  
+>>> "real" path/filename instead of the FID.
+>>
+>> Currently, we don't support policy using EA (extended attributes  
+>> are in 5.0). We have had lots of requests for this, especially from  
+>> our digital preservation customers.
+> Ah, policy based on EAs would be the general case, yes.
+Yes, this would be a nice feature for us.
+
+    - Harriet
+
+Harriet G. Coverston
+Solaris, Storage Software			 |  Email: harriet.coverston at sun.com
+Sun Microsystems, Inc.                     	 |  AT&T:  651-554-1515
+1270 Eagan Industrial Rd., Suite 160       |  Fax:   651-554-1540
+Eagan, MN 55121-1231
+
+
+
+
+
+
+From Colin.Ngam at Sun.COM  Mon Feb  2 06:56:15 2009
+From: Colin.Ngam at Sun.COM (Colin Ngam)
+Date: Mon, 02 Feb 2009 08:56:15 -0600
+Subject: [Lustre-devel] SAM-QFS, ADM, and Lustre HSM
+In-Reply-To: <8585251D-41D7-4B42-99F9-BDBFA2CF88C1@Sun.COM>
+References: <3DF0F4AF-F4D6-476E-98F7-CD912C49FC18@Sun.COM>
+	<2734A30F-2C76-4725-9F3A-29AD4245B7E8@Sun.COM>
+	<496FCA67.6000500@sun.com>
+	<48D329C0-242E-4A5A-94C1-DF493BB25C2F@Sun.COM>
+	<496FE8D4.2090908@sun.com>
+	<BEB67402-7AFE-4BE1-A59C-050823AFC8E5@Sun.COM>
+	<4977647D.5010503@sun.com>
+	<4977E5BD.7000706@sun.com> <4978DB1E.30507@sun.com>
+	<497A144C.4000408@Sun.COM>
+	<20090126193548.GF3652@webber.adilger.int> <497E35A3.3080603@sun.com>
+	<DEB5E509-4641-40B6-86CA-972D885975D3@Sun.COM>
+	<4983998D.1030601@sun.com>
+	<8585251D-41D7-4B42-99F9-BDBFA2CF88C1@Sun.COM>
+Message-ID: <4987098F.402@Sun.COM>
+
+Harriet G. Coverston wrote:
+
+Hi,
+> Nathan,
+>
+> On Jan 30, 2009, at 6:21 PM, Nathaniel Rutman wrote:
+>
+>> LEIBOVICI Thomas wrote:
+>>> At CEA, we are using our own copytool that directly uses HPSS API. 
+>>> This already exists and is in production for years.
+>>> I think there will be few modifications to adapt it to Lustre-HSM 
+>>> purpose
+>>> (basically, add fid <-> HSM id mapping and backup of attributes, 
+>>> path, stripe...)
+>> So then the QFS copytool will indeed be a new tool, and should be 
+>> scheduled accordingly.
+>> Features:
+>> 1. "cp --preserve" like functionality (include metadata attributes in 
+>> cp)
+>> 2. add EA's (create mini-tarball)
+>> 3. implement FID hash to subdivide namespace
+>> 4. periodic status reporting (via ioctl on file)
+>>
+>>
+>> Harriet G. Coverston wrote:
+>>>> There is a mechanism to get the current full pathname for a given 
+>>>> fid from userspace, so an HSM-specific copytool could find it out, 
+>>>> but a central tenet of the design here is that as far as the HSM is 
+>>>> concerned, the entire Lustre FS is a flat namespace of FIDs.
+>>>
+>>> Be careful here. We are a file system. We don't have a limit on # of 
+>>> files in one directory, but we don't recommend more than 500,000 
+>>> files in one single directory or you will start to see some 
+>>> performance problems. You will have to create a tree, not use a flat 
+>>> namespace.
+>> Yes, a tree based on a hash of the fid.
+>> The other option is to use the actual filename for storage, but from 
+>> Lustre's point of view this gets extremely tricky.  For example:
+>> Send /foo/bar to archive.  Client A opens /foo/bar.  Client B renames 
+>> /foo/bar to /abc/xyz, but this change hasn't propagated to the 
+>> archive yet.  Client A now tries to read its open file handle, which 
+>> tells Lustre to read the offline file FID 123, which it translates to 
+>> /abc/xyz currently, which the archive doesn't know about yet.  Not 
+>> just xyz, but renames on any ancestor path element cause similar 
+>> misses.  Since the FID remains constant throughout the life of a 
+>> file, we don't have to worry about any namespace changes (file or 
+>> parents).  If there was an alternate way of bypassing the archive's 
+>> namespace to directly access a file, we could conceivably store e.g. 
+>> an archive-specific identifier within the Lustre stripe EA, and pass 
+>> this down to the copytool when reading an offline file, but this 
+>> presupposes that such a thing exists, is of reasonable size, has a 
+>> userspace method to access it, etc.
+>
+> Yes, we have a FID like concept in SAM-QFS. It is called the file ID. 
+> It is 64 bits and consists of the inode/generation number. It is 
+> unique. You can store it. You can issue an ioctl to open the ID. You
+> can issue an ioctl to do an ID stat, etc. It is much more efficient 
+> than using the filename (expensive lookup). This means if you store 
+> and use the ID, you can cover the rename window and still be 
+> guaranteed that you will get the right file. Note, we don't rearchive 
+> on a rename.
+I believe this facility only exist on the Meta Data Server Node and not 
+on the Linux/Solaris clients.  Am I correct?
+
+Thanks.
+
+colin
+>
+> I really think a replicated namespace will be much more intuitive and 
+> solves restore. If you prefer
+> to build a tar container, that is OK, too. The tar file can have a 
+> suffix and then you know it is tar and
+> you can tar it back.
+>>
+>>
+>>>
+>>>> You can get a full pathname if you want to for catastrophe 
+>>>> recovery, but Lustre itself will only speak to the HSM with FIDs.
+>>>> As I said in the other email, although SAM-QFS can do name-based 
+>>>> policies, the "name" as far as QFS is concerned is just the FID, 
+>>>> so  name-based policies at the copytool level are worthless.   
+>>>> Unless we a.) add the path/filename back to the file (EA, or use a 
+>>>> tarball wrapper), and b.) modify the SAM policy engine to use the 
+>>>> "real" path/filename instead of the FID.
+>>>
+>>> Currently, we don't support policy using EA (extended attributes are 
+>>> in 5.0). We have had lots of requests for this, especially from our 
+>>> digital preservation customers.
+>> Ah, policy based on EAs would be the general case, yes.
+> Yes, this would be a nice feature for us.
+>
+>    - Harriet
+>
+> Harriet G. Coverston
+> Solaris, Storage Software             |  Email: harriet.coverston at sun.com
+> Sun Microsystems, Inc.                          |  AT&T:  651-554-1515
+> 1270 Eagan Industrial Rd., Suite 160       |  Fax:   651-554-1540
+> Eagan, MN 55121-1231
+>
+>
+>
+>
+
+
+
+From Harriet.Coverston at Sun.COM  Mon Feb  2 07:07:54 2009
+From: Harriet.Coverston at Sun.COM (Harriet G. Coverston)
+Date: Mon, 02 Feb 2009 09:07:54 -0600
+Subject: [Lustre-devel] SAM-QFS, ADM, and Lustre HSM
+In-Reply-To: <4987098F.402@Sun.COM>
+References: <3DF0F4AF-F4D6-476E-98F7-CD912C49FC18@Sun.COM>
+	<2734A30F-2C76-4725-9F3A-29AD4245B7E8@Sun.COM>
+	<496FCA67.6000500@sun.com>
+	<48D329C0-242E-4A5A-94C1-DF493BB25C2F@Sun.COM>
+	<496FE8D4.2090908@sun.com>
+	<BEB67402-7AFE-4BE1-A59C-050823AFC8E5@Sun.COM>
+	<4977647D.5010503@sun.com>
+	<4977E5BD.7000706@sun.com> <4978DB1E.30507@sun.com>
+	<497A144C.4000408@Sun.COM>
+	<20090126193548.GF3652@webber.adilger.int> <497E35A3.3080603@sun.com>
+	<DEB5E509-4641-40B6-86CA-972D885975D3@Sun.COM>
+	<4983998D.1030601@sun.com>
+	<8585251D-41D7-4B42-99F9-BDBFA2CF88C1@Sun.COM> <4987098F.402@Sun.COM>
+Message-ID: <367E32B4-A759-45AD-9D2C-48C051FE1D62@Sun.COM>
+
+Colin,
+
+On Feb 2, 2009, at 8:56 AM, Colin Ngam wrote:
+
+>>>
+>>>
+>>> Harriet G. Coverston wrote:
+>>>>> There is a mechanism to get the current full pathname for a  
+>>>>> given fid from userspace, so an HSM-specific copytool could find  
+>>>>> it out, but a central tenet of the design here is that as far as  
+>>>>> the HSM is concerned, the entire Lustre FS is a flat namespace  
+>>>>> of FIDs.
+>>>>
+>>>> Be careful here. We are a file system. We don't have a limit on #  
+>>>> of files in one directory, but we don't recommend more than  
+>>>> 500,000 files in one single directory or you will start to see  
+>>>> some performance problems. You will have to create a tree, not  
+>>>> use a flat namespace.
+>>> Yes, a tree based on a hash of the fid.
+>>> The other option is to use the actual filename for storage, but  
+>>> from Lustre's point of view this gets extremely tricky.  For  
+>>> example:
+>>> Send /foo/bar to archive.  Client A opens /foo/bar.  Client B  
+>>> renames /foo/bar to /abc/xyz, but this change hasn't propagated to  
+>>> the archive yet.  Client A now tries to read its open file handle,  
+>>> which tells Lustre to read the offline file FID 123, which it  
+>>> translates to /abc/xyz currently, which the archive doesn't know  
+>>> about yet.  Not just xyz, but renames on any ancestor path element  
+>>> cause similar misses.  Since the FID remains constant throughout  
+>>> the life of a file, we don't have to worry about any namespace  
+>>> changes (file or parents).  If there was an alternate way of  
+>>> bypassing the archive's namespace to directly access a file, we  
+>>> could conceivably store e.g. an archive-specific identifier within  
+>>> the Lustre stripe EA, and pass this down to the copytool when  
+>>> reading an offline file, but this presupposes that such a thing  
+>>> exists, is of reasonable size, has a userspace method to access  
+>>> it, etc.
+>>
+>> Yes, we have a FID like concept in SAM-QFS. It is called the file  
+>> ID. It is 64 bits and consists of the inode/generation number. It  
+>> is unique. You can store it. You can issue an ioctl to open the ID.  
+>> You
+>> can issue an ioctl to do an ID stat, etc. It is much more efficient  
+>> than using the filename (expensive lookup). This means if you store  
+>> and use the ID, you can cover the rename window and still be  
+>> guaranteed that you will get the right file. Note, we don't  
+>> rearchive on a rename.
+> I believe this facility only exist on the Meta Data Server Node and  
+> not on the Linux/Solaris clients.  Am I correct?
+It is supported on the MDS and the Solaris client nodes, but currently  
+not on Linux.
+
+I thought about this a bit. After we do a samfsrestore (reload the  
+metadata after a crash of the SAM-QFS disk cache), the ID is not the  
+same. Therefore, you would not be able to use this after a SAM restore  
+unless
+the ID that you are storing is updated. We really need to think about  
+this.
+
+- Harriet
+>
+>
+> Thanks.
+>
+> colin
+>>
+>> I really think a replicated namespace will be much more intuitive  
+>> and solves restore. If you prefer
+>> to build a tar container, that is OK, too. The tar file can have a  
+>> suffix and then you know it is tar and
+>> you can tar it back.
+>>>
+>>>
+>>>>
+>>>>> You can get a full pathname if you want to for catastrophe  
+>>>>> recovery, but Lustre itself will only speak to the HSM with FIDs.
+>>>>> As I said in the other email, although SAM-QFS can do name-based  
+>>>>> policies, the "name" as far as QFS is concerned is just the FID,  
+>>>>> so  name-based policies at the copytool level are worthless.    
+>>>>> Unless we a.) add the path/filename back to the file (EA, or use  
+>>>>> a tarball wrapper), and b.) modify the SAM policy engine to use  
+>>>>> the "real" path/filename instead of the FID.
+>>>>
+>>>> Currently, we don't support policy using EA (extended attributes  
+>>>> are in 5.0). We have had lots of requests for this, especially  
+>>>> from our digital preservation customers.
+>>> Ah, policy based on EAs would be the general case, yes.
+>> Yes, this would be a nice feature for us.
+>>
+>>   - Harriet
+>>
+>> Harriet G. Coverston
+>> Solaris, Storage Software             |  Email: harriet.coverston at sun.com
+>> Sun Microsystems, Inc.                          |  AT&T:   
+>> 651-554-1515
+>> 1270 Eagan Industrial Rd., Suite 160       |  Fax:   651-554-1540
+>> Eagan, MN 55121-1231
+>>
+>>
+>>
+>>
+>
+
+    - Harriet
+
+Harriet G. Coverston
+Solaris, Storage Software			 |  Email: harriet.coverston at sun.com
+Sun Microsystems, Inc.                     	 |  AT&T:  651-554-1515
+1270 Eagan Industrial Rd., Suite 160       |  Fax:   651-554-1540
+Eagan, MN 55121-1231
+
+
+
+
+
+
+From Colin.Ngam at Sun.COM  Mon Feb  2 09:25:47 2009
+From: Colin.Ngam at Sun.COM (Colin Ngam)
+Date: Mon, 02 Feb 2009 11:25:47 -0600
+Subject: [Lustre-devel] Lustre HSM - some talking points.
+In-Reply-To: <367E32B4-A759-45AD-9D2C-48C051FE1D62@Sun.COM>
+References: <3DF0F4AF-F4D6-476E-98F7-CD912C49FC18@Sun.COM>
+	<2734A30F-2C76-4725-9F3A-29AD4245B7E8@Sun.COM>
+	<496FCA67.6000500@sun.com>
+	<48D329C0-242E-4A5A-94C1-DF493BB25C2F@Sun.COM>
+	<496FE8D4.2090908@sun.com>
+	<BEB67402-7AFE-4BE1-A59C-050823AFC8E5@Sun.COM>
+	<4977647D.5010503@sun.com>
+	<4977E5BD.7000706@sun.com> <4978DB1E.30507@sun.com>
+	<497A144C.4000408@Sun.COM>
+	<20090126193548.GF3652@webber.adilger.int> <497E35A3.3080603@sun.com>
+	<DEB5E509-4641-40B6-86CA-972D885975D3@Sun.COM>
+	<4983998D.1030601@sun.com>
+	<8585251D-41D7-4B42-99F9-BDBFA2CF88C1@Sun.COM> <4987098F.402@Sun.COM>
+	<367E32B4-A759-45AD-9D2C-48C051FE1D62@Sun.COM>
+Message-ID: <49872C9B.7060708@Sun.COM>
+
+
+
+Hi Nathan,
+
+I wrote up what I think can be done in SAMQFS to support Lustre HSM 
+effort.  They are talking points that will help us to move forward 
+quickly.  It needs to be sanitized ...
+
+Thanks.
+
+colin
+
+
+-------------- next part --------------
+An embedded and charset-unspecified text was scrubbed...
+Name: Osam-proposal
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20090202/03d17db7/attachment.txt>
+
+From Colin.Ngam at Sun.COM  Mon Feb  2 11:25:17 2009
+From: Colin.Ngam at Sun.COM (Colin Ngam)
+Date: Mon, 02 Feb 2009 13:25:17 -0600
+Subject: [Lustre-devel] Lustre HSM - some talking points.
+In-Reply-To: <498734AA.7010704@ornl.gov>
+References: <3DF0F4AF-F4D6-476E-98F7-CD912C49FC18@Sun.COM>
+	<2734A30F-2C76-4725-9F3A-29AD4245B7E8@Sun.COM>
+	<496FCA67.6000500@sun.com>
+	<48D329C0-242E-4A5A-94C1-DF493BB25C2F@Sun.COM>
+	<496FE8D4.2090908@sun.com>
+	<BEB67402-7AFE-4BE1-A59C-050823AFC8E5@Sun.COM>
+	<4977647D.5010503@sun.com>
+	<4977E5BD.7000706@sun.com> <4978DB1E.30507@sun.com>
+	<497A144C.4000408@Sun.COM>
+	<20090126193548.GF3652@webber.adilger.int> <497E35A3.3080603@sun.com>
+	<DEB5E509-4641-40B6-86CA-972D885975D3@Sun.COM>
+	<4983998D.1030601@sun.com>
+	<8585251D-41D7-4B42-99F9-BDBFA2CF88C1@Sun.COM> <4987098F.402@Sun.COM>
+	<367E32B4-A759-45AD-9D2C-48C051FE1D62@Sun.COM>
+	<49872C9B.7060708@Sun.COM> <498734AA.7010704@ornl.gov>
+Message-ID: <4987489D.4050909@Sun.COM>
+
+Vicky White wrote:
+>
+>> 6.  No namepace.  No namespace.  Lustre pathnames can be stored as 
+>> Extended
+>> Attributes.
+>
+>
+> I realize you are talking about SAMQFS, but do we want to keep the 
+> design consistent with what we do for hpss?
+>
+> HPSS will support Extended Attributes in release 7.2, to be available 
+> September 2009, but it will be expensive to use these EAs for 
+> pathnames, though it can be done.   The current design is to specify 
+> EAs in XML, and for the most efficient storage of the EA in the 
+> database, the containing XML document needs to be 512 bytes or fewer 
+> so that it can be stored inline.  Larger XML objects will have to be 
+> stored externally as LOBs (large objects), which will make queries 
+> cost more.
+>
+> So we need to think about what that cost will be when we are 
+> considering repositories with millions or billions of files.
+>
+> Vicky
+
+Hi Vicky,
+
+I do not see why we need to query these EAs in normal operation.  These 
+EAs will only be accessed when we need to perform Ultimate Disaster 
+Recovery - when you have lost all data on disks and all you have are tapes.
+
+I was thinking about XML - but it is "opaque" to Object SAMQFS so, it is 
+up to the Lustre side.  Whatever it is, the Applications - 
+Lustre-Restore for example, is the one that has to understand the 
+format.  I am not a Tar Header expert - but I assume that these EAs can 
+go with the file in the tar ball.  I do not expect to keep any of it on 
+line on disk cache, on the SAMFS side.  I see no reason.
+
+With respect to whether it should be consistent with HPSS - I would say 
+if that is all we need and it is sufficient - why not.  Otherwise, let's 
+make it better than HPSS.  It must be in SUN's best interest to sell SAMQFS?
+
+I do apologize Vicky, are you a SUN employee?
+
+Thanks.
+
+colin
+
+
+
+From vyw at ornl.gov  Mon Feb  2 09:46:03 2009
+From: vyw at ornl.gov (Vicky White)
+Date: Mon, 02 Feb 2009 12:46:03 -0500
+Subject: [Lustre-devel] Lustre HSM - some talking points.
+In-Reply-To: <49872C9B.7060708@Sun.COM>
+References: <3DF0F4AF-F4D6-476E-98F7-CD912C49FC18@Sun.COM>
+	<2734A30F-2C76-4725-9F3A-29AD4245B7E8@Sun.COM>
+	<496FCA67.6000500@sun.com>
+	<48D329C0-242E-4A5A-94C1-DF493BB25C2F@Sun.COM>
+	<496FE8D4.2090908@sun.com>
+	<BEB67402-7AFE-4BE1-A59C-050823AFC8E5@Sun.COM>
+	<4977647D.5010503@sun.com>
+	<4977E5BD.7000706@sun.com> <4978DB1E.30507@sun.com>
+	<497A144C.4000408@Sun.COM>
+	<20090126193548.GF3652@webber.adilger.int> <497E35A3.3080603@sun.com>
+	<DEB5E509-4641-40B6-86CA-972D885975D3@Sun.COM>
+	<4983998D.1030601@sun.com>
+	<8585251D-41D7-4B42-99F9-BDBFA2CF88C1@Sun.COM> <4987098F.402@Sun.COM>
+	<367E32B4-A759-45AD-9D2C-48C051FE1D62@Sun.COM>
+	<49872C9B.7060708@Sun.COM>
+Message-ID: <4987315B.50202@ornl.gov>
+
+Colin Ngam wrote:
+
+> Before I forget - can someone point me to HPSS API??
+
+
+See http://www.hpss-collaboration.org/hpss/users/user_doc.jsp.  You 
+would want the most recent (6.2) version of the HPSS Programmer's 
+Reference Guide, Volume 1.   The 7.1 version should be out very soon.
+
+
+Vicky
+
+
+From vyw at ornl.gov  Mon Feb  2 10:00:10 2009
+From: vyw at ornl.gov (Vicky White)
+Date: Mon, 02 Feb 2009 13:00:10 -0500
+Subject: [Lustre-devel] Lustre HSM - some talking points.
+In-Reply-To: <49872C9B.7060708@Sun.COM>
+References: <3DF0F4AF-F4D6-476E-98F7-CD912C49FC18@Sun.COM>
+	<2734A30F-2C76-4725-9F3A-29AD4245B7E8@Sun.COM>
+	<496FCA67.6000500@sun.com>
+	<48D329C0-242E-4A5A-94C1-DF493BB25C2F@Sun.COM>
+	<496FE8D4.2090908@sun.com>
+	<BEB67402-7AFE-4BE1-A59C-050823AFC8E5@Sun.COM>
+	<4977647D.5010503@sun.com>
+	<4977E5BD.7000706@sun.com> <4978DB1E.30507@sun.com>
+	<497A144C.4000408@Sun.COM>
+	<20090126193548.GF3652@webber.adilger.int> <497E35A3.3080603@sun.com>
+	<DEB5E509-4641-40B6-86CA-972D885975D3@Sun.COM>
+	<4983998D.1030601@sun.com>
+	<8585251D-41D7-4B42-99F9-BDBFA2CF88C1@Sun.COM> <4987098F.402@Sun.COM>
+	<367E32B4-A759-45AD-9D2C-48C051FE1D62@Sun.COM>
+	<49872C9B.7060708@Sun.COM>
+Message-ID: <498734AA.7010704@ornl.gov>
+
+
+> 6.  No namepace.  No namespace.  Lustre pathnames can be stored as Extended
+> Attributes.
+
+
+I realize you are talking about SAMQFS, but do we want to keep the 
+design consistent with what we do for hpss?
+
+HPSS will support Extended Attributes in release 7.2, to be available 
+September 2009, but it will be expensive to use these EAs for pathnames, 
+though it can be done.   The current design is to specify EAs in XML, 
+and for the most efficient storage of the EA in the database, the 
+containing XML document needs to be 512 bytes or fewer so that it can be 
+stored inline.  Larger XML objects will have to be stored externally as 
+LOBs (large objects), which will make queries cost more.
+
+So we need to think about what that cost will be when we are considering 
+repositories with millions or billions of files.
+
+Vicky
+
+
+From Colin.Ngam at Sun.COM  Mon Feb  2 12:42:36 2009
+From: Colin.Ngam at Sun.COM (Colin Ngam)
+Date: Mon, 02 Feb 2009 14:42:36 -0600
+Subject: [Lustre-devel] Lustre HSM - some talking points.
+In-Reply-To: <49874F5E.6030203@ornl.gov>
+References: <3DF0F4AF-F4D6-476E-98F7-CD912C49FC18@Sun.COM>
+	<2734A30F-2C76-4725-9F3A-29AD4245B7E8@Sun.COM>
+	<496FCA67.6000500@sun.com>
+	<48D329C0-242E-4A5A-94C1-DF493BB25C2F@Sun.COM>
+	<496FE8D4.2090908@sun.com>
+	<BEB67402-7AFE-4BE1-A59C-050823AFC8E5@Sun.COM>
+	<4977647D.5010503@sun.com>
+	<4977E5BD.7000706@sun.com> <4978DB1E.30507@sun.com>
+	<497A144C.4000408@Sun.COM>
+	<20090126193548.GF3652@webber.adilger.int> <497E35A3.3080603@sun.com>
+	<DEB5E509-4641-40B6-86CA-972D885975D3@Sun.COM>
+	<4983998D.1030601@sun.com>
+	<8585251D-41D7-4B42-99F9-BDBFA2CF88C1@Sun.COM> <4987098F.402@Sun.COM>
+	<367E32B4-A759-45AD-9D2C-48C051FE1D62@Sun.COM>
+	<49872C9B.7060708@Sun.COM>
+	<498734AA.7010704@ornl.gov> <4987489D.4050909@Sun.COM>
+	<49874F5E.6030203@ornl.gov>
+Message-ID: <49875ABC.8000400@Sun.COM>
+
+Vicky White wrote:
+
+Hi Vicky,
+> Colin Ngam wrote:
+>> I do not see why we need to query these EAs in normal operation.  
+>> These EAs will only be accessed when we need to perform Ultimate 
+>> Disaster Recovery - when you have lost all data on disks and all you 
+>> have are tapes.
+>
+>
+> That would help.  I don't know what it would cost to store the EA in a 
+> separate object to begin with, though, and that would be incurred on 
+> every file.   Plus you have to consider the space it takes up.
+>
+>
+>> I was thinking about XML - but it is "opaque" to Object SAMQFS so, it 
+>> is up to the Lustre side.  Whatever it is, the Applications - 
+>> Lustre-Restore for example, is the one that has to understand the 
+>> format.  I am not a Tar Header expert - but I assume that these EAs 
+>> can go with the file in the tar ball.
+>
+>
+> I think what you put in the tar ball is up to you.   Putting the EAs 
+> in there regardless of what the hsm was might simplify the design, so 
+> you wouldn't have to extract the EA in a different way for each hsm.
+>
+> I was just trying to keep the hpss EA design in front of folks so that 
+> if we were considering using that, we knew all the tradeoffs.
+Good point.  I guess EA can be anywhere in the tar file, but, best if 
+somehow it is put together for fast access.  But then, we do not need it 
+unless it is for Ultimate Disaster Recovery .. that should never happen :-))
+
+With respect to space - how about compression?  The problem is, I always 
+thought space is cheap.  Does HPSS ever scrub/recycle?  Policy driven?
+
+If EAs are going to be in a Database, I can see it can be a problem.
+
+Path name does not need to be in the EA.  It is needed for the tar 
+header only.  I guess the EA will consist of everything that Lustre 
+needs to restore a file, completely.
+>
+>
+>> I do not expect to keep any of it on line on disk cache, on the SAMFS 
+>> side.  I see no reason.
+>>
+>> With respect to whether it should be consistent with HPSS - I would 
+>> say if that is all we need and it is sufficient - why not.  
+>> Otherwise, let's make it better than HPSS.  It must be in SUN's best 
+>> interest to sell SAMQFS?
+>
+>
+> Oh, I'm sure it is.
+>
+>
+>> I do apologize Vicky, are you a SUN employee?
+>
+>
+> No.   Were you going to feel sorry for me if I worked for Sun? ;)
+No, it's kind of fun to design with .. and I want to say competitor, but 
+I guess you do not really fall into that category.  Say hi to Kim K. or 
+Dave W(Cray folks) for me if they cross your path.
+>
+>
+> Vicky
+>
+PS-The programmer's reference is close to 400 pages!  Perhaps I should 
+start with User's Guide.
+
+
+From adilger at sun.com  Mon Feb  2 14:50:44 2009
+From: adilger at sun.com (Andreas Dilger)
+Date: Mon, 02 Feb 2009 15:50:44 -0700
+Subject: [Lustre-devel] Sub Tree lock ideas.
+In-Reply-To: <5EF2479C-CFC4-4CD5-95E8-50368A7D5083@Sun.COM>
+References: <7D9ABF96-6BD8-4F7A-A5AE-F08BF04854B2@sun.com>
+	<20090126100856.GD3652@webber.adilger.int>
+	<5EF2479C-CFC4-4CD5-95E8-50368A7D5083@Sun.COM>
+Message-ID: <20090202225044.GL28818@webber.adilger.int>
+
+On Jan 27, 2009  23:39 -0500, Oleg Drokin wrote:
+> On Jan 26, 2009, at 5:08 AM, Andreas Dilger wrote:
+>> A few comments that I have from the later discussions:
+>> - you previously mentioned that only a single client would be able to
+>>  hold a subtree lock.  I think it is critical that multiple clients be
+>>  able to get read subtree locks on the same directory.  This would be
+>>  very important for uses like many clients and a shared read-mostly
+>>  directory like /usr/bin or /usr/lib.
+>
+> In fact I see zero benefit for read-only subtree lock except memory
+> conservation, which should not be such a big issue. Much more important
+> is to reduce amount of RPCs, esp. synchronous ones.
+
+Memory conservation on the server is very important.  If there are 100k
+clients and a DLM lock is 2kB in size then we are looking at 200MB for
+each lock given to all clients.  With an MDS having, say, 32GB of RAM and
+we would consume all of the server RAM with only 160 locks/client.
+
+>> - Alex (I think) suggested that the STL locks would only be on a  
+>> single
+>>  directory and its contents, instead of being on an arbitrary depth
+>>  sub-tree.  While it seems somewhat appealing to have a single lock
+>>  that covers an entire subtree, the complexity of having to locate
+>>  and manage arbitrary-depth locks on the MDS might be too high.
+>
+> That's right.
+>
+>>  Having only a single-level of subtree lock would avoid the need to
+>>  pass cookies to the MDS for anything other than the directory in
+>>  which names are being looked up.
+>
+> I had a lengthly call with Eric today and at the end we came to a
+> conclusion that perhaps STL at the moment is a total overkill.
+>
+> What we need is ability to reduce metadata RPCs traffic.
+
+And to reduce memory usage for read locks on the server.  Having READ
+STL for cases like read-mostly directories (/usr/bin, /usr/lib, ~/bin)
+can avoid many thousands/millions of locks and their RPCs.
+
+> We can start with implementation of just allowing WRITE locks on a
+> directory that would be only responsible for this directory and its
+> content (HELPS: by allowing to aggregate creates into bunches before
+> sending) + a special "entire file lock" (perhaps implemented by just
+> WRITE lock on a file) metadata lock that would guard all file data
+> without obtaining any locks from OSTs (would be revoked by open from
+> another client, perhaps would need to support glimpses too).
+
+Well, if the client will generate the layout on the newly-created
+files, or will request the layout (LOV EA) lock on the files it wants
+exclusive access to this is essentially the "entire file lock" you need.
+For existing files the client holding the layout lock needs to cancel
+the OST extent locks first, to ensure they flush their cache.
+
+> The WRITE directory lock only helps us to aggregate metadata RPCs if we
+> just created the empty directory OR if we have entire list of entries in
+> that directory. If we do not have entire directory content, we must  
+> issue synchronous create RPC to avoid cases where we locally create a file  
+> that already exists in that dir, for example. So perhaps in a lot of cases
+> obtaining a write lock on a dir would need to be followed by some sort  
+> of bulk directory read (readdir+ of sorts). This is also not always  
+> feasible, as I can imagine there could be directories much bigger than
+> what we would like to cache, in which case we would need to resort to
+> one-by-one creates.
+
+
+> Another important thing we would need is lock conversion (downconversion 
+> and try-up conversion) so that we do not lose our entire cached directory  
+> content after conflicting ls came in and we wrote it out. (we do not care
+> all that much about writing out entire content of the dirty metadata cache
+> at this point, since we still achieve the aggregation and asynchronous
+> creation, even just asynchronous creation would help).
+
+We also want to have lock conversion for regular files (write->read) and
+for the layout lock bit (so clients can drop the LOV EA lock without
+dropping the LOOKUP or UPDATE bits).
+
+> Perhaps another useful addition would be to deliver multiple blocking  
+> and glimpse callbacks from server to the client in a single RPC (as a
+> result of a readdir+ sort of operation inside a dir where many files have  
+> "entire file lock") (we already have aggregated cancels in the other
+> direction).
+
+Well, I'm not sure how much batching we will get from this, since it will
+be completely non-deterministic whether multiple independent client
+requests can be grouped into a single RPC.
+
+> This WRITE metadata lock is in fact a reduced subset of STL lock without 
+> any of its advanced features, but perhaps easier to implement because of  
+> that.
+
+Cheers, Andreas
+--
+Andreas Dilger
+Sr. Staff Engineer, Lustre Group
+Sun Microsystems of Canada, Inc.
+
+
+
+From Oleg.Drokin at Sun.COM  Mon Feb  2 22:24:32 2009
+From: Oleg.Drokin at Sun.COM (Oleg Drokin)
+Date: Tue, 03 Feb 2009 01:24:32 -0500
+Subject: [Lustre-devel] Sub Tree lock ideas.
+In-Reply-To: <20090202225044.GL28818@webber.adilger.int>
+References: <7D9ABF96-6BD8-4F7A-A5AE-F08BF04854B2@sun.com>
+	<20090126100856.GD3652@webber.adilger.int>
+	<5EF2479C-CFC4-4CD5-95E8-50368A7D5083@Sun.COM>
+	<20090202225044.GL28818@webber.adilger.int>
+Message-ID: <75012621-B9AB-4093-AC23-E6E2E28D774F@Sun.COM>
+
+Hello!
+
+On Feb 2, 2009, at 5:50 PM, Andreas Dilger wrote:
+
+> On Jan 27, 2009  23:39 -0500, Oleg Drokin wrote:
+>> On Jan 26, 2009, at 5:08 AM, Andreas Dilger wrote:
+>>> A few comments that I have from the later discussions:
+>>> - you previously mentioned that only a single client would be able  
+>>> to
+>>> hold a subtree lock.  I think it is critical that multiple clients  
+>>> be
+>>> able to get read subtree locks on the same directory.  This would be
+>>> very important for uses like many clients and a shared read-mostly
+>>> directory like /usr/bin or /usr/lib.
+>> In fact I see zero benefit for read-only subtree lock except memory
+>> conservation, which should not be such a big issue. Much more  
+>> important
+>> is to reduce amount of RPCs, esp. synchronous ones.
+> Memory conservation on the server is very important.  If there are  
+> 100k
+> clients and a DLM lock is 2kB in size then we are looking at 200MB for
+> each lock given to all clients.  With an MDS having, say, 32GB of  
+> RAM and
+> we would consume all of the server RAM with only 160 locks/client.
+
+Well. You are of course right and ad certain scale we indeed need to
+consider the memory conservation effect as well.
+
+>> We can start with implementation of just allowing WRITE locks on a
+>> directory that would be only responsible for this directory and its
+>> content (HELPS: by allowing to aggregate creates into bunches before
+>> sending) + a special "entire file lock" (perhaps implemented by just
+>> WRITE lock on a file) metadata lock that would guard all file data
+>> without obtaining any locks from OSTs (would be revoked by open from
+>> another client, perhaps would need to support glimpses too).
+> Well, if the client will generate the layout on the newly-created
+> files, or will request the layout (LOV EA) lock on the files it wants
+> exclusive access to this is essentially the "entire file lock" you  
+> need.
+> For existing files the client holding the layout lock needs to cancel
+> the OST extent locks first, to ensure they flush their cache.
+
+This is fine as one of teh idea, but would not work all that nicely in  
+all
+possible usecases. Suppose we would want read-only lock like this too,
+for example.
+
+>> Another important thing we would need is lock conversion  
+>> (downconversion
+>> and try-up conversion) so that we do not lose our entire cached  
+>> directory
+>> content after conflicting ls came in and we wrote it out. (we do  
+>> not care
+>> all that much about writing out entire content of the dirty  
+>> metadata cache
+>> at this point, since we still achieve the aggregation and  
+>> asynchronous
+>> creation, even just asynchronous creation would help).
+> We also want to have lock conversion for regular files (write->read)  
+> and
+> for the layout lock bit (so clients can drop the LOV EA lock without
+> dropping the LOOKUP or UPDATE bits).
+
+Yes, absolutely.
+
+>> Perhaps another useful addition would be to deliver multiple blocking
+>> and glimpse callbacks from server to the client in a single RPC (as a
+>> result of a readdir+ sort of operation inside a dir where many  
+>> files have
+>> "entire file lock") (we already have aggregated cancels in the other
+>> direction).
+> Well, I'm not sure how much batching we will get from this, since it  
+> will
+> be completely non-deterministic whether multiple independent client
+> requests can be grouped into a single RPC.
+
+It would be a lot of batching in many common usecases like "untar a  
+file",
+"Create a working files for applications, all in same dir/dir tree".
+
+ From the above my conclusion is we do not necessarily need SubTree  
+locks
+for efficient metadata write cache, but we do need it for other  
+scenarios
+(memory conservation). There are some similarities in the  
+functionality too,
+but also some differences.
+
+One particular complexity I see with multiple read-only STLs is every
+modifying metadata operation would need to traverse the metadata tree  
+all
+the way back to the root of the fs in order to notify all possible  
+clients
+holding STL locks about the change about to be made.
+
+Bye,
+     Oleg
+
+
+From adilger at sun.com  Tue Feb  3 01:04:09 2009
+From: adilger at sun.com (Andreas Dilger)
+Date: Tue, 03 Feb 2009 02:04:09 -0700
+Subject: [Lustre-devel] Sub Tree lock ideas.
+In-Reply-To: <75012621-B9AB-4093-AC23-E6E2E28D774F@Sun.COM>
+References: <7D9ABF96-6BD8-4F7A-A5AE-F08BF04854B2@sun.com>
+	<20090126100856.GD3652@webber.adilger.int>
+	<5EF2479C-CFC4-4CD5-95E8-50368A7D5083@Sun.COM>
+	<20090202225044.GL28818@webber.adilger.int>
+	<75012621-B9AB-4093-AC23-E6E2E28D774F@Sun.COM>
+Message-ID: <20090203090409.GT28818@webber.adilger.int>
+
+On Feb 03, 2009  01:24 -0500, Oleg Drokin wrote:
+>>> Perhaps another useful addition would be to deliver multiple blocking
+>>> and glimpse callbacks from server to the client in a single RPC (as a
+>>> result of a readdir+ sort of operation inside a dir where many files 
+>>> have "entire file lock") (we already have aggregated cancels in the
+>>> other direction).
+>>
+>> Well, I'm not sure how much batching we will get from this, since it  
+>> will be completely non-deterministic whether multiple independent
+>> client requests can be grouped into a single RPC.
+>
+> It would be a lot of batching in many common usecases like "untar a  
+> file", "Create a working files for applications, all in same dir/dir tree".
+
+Maybe I misunderstand, but all of this batching is in the case of a single
+client that is doing operations to send to the MDS.  What I was thinking
+would be a rare case is batching from the server to the client when e.g.
+a bunch of clients independently open a bunch of files that are in a
+directory for which a client holds a STL.
+
+In the latter case, since all of the RPCs are coming from different clients,
+it is much harder for the server to group them together into a single RPC
+to send to the STL client.
+
+> From the above my conclusion is we do not necessarily need SubTree locks
+> for efficient metadata write cache, but we do need it for other  
+> scenarios (memory conservation). There are some similarities in the
+> functionality too, but also some differences.
+>
+> One particular complexity I see with multiple read-only STLs is every
+> modifying metadata operation would need to traverse the metadata tree  
+> all the way back to the root of the fs in order to notify all possible  
+> clients holding STL locks about the change about to be made.
+
+Sorry, I was only considering the case of a 1-deep STL (e.g. a DIR lock,
+not the arbitrary-depth STL you originally described).  In that case,
+there is no requirement for more than a single level of STL to be
+checked/cancelled if a client is doing some modifying operation therein.
+This is no different than e.g. if a bunch of clients are holding the
+LOOKUP lock on a directory that has a new entry in it.
+
+Eric also had a proposal that the DIR lock would be a "hash extent" lock
+instead of a single bit, so that it would be possible (via lock conversion)
+to avoid cancelling all of the entries cached on a client when a single
+new file is being added.  Only the hash range of the entry being added
+would need to be removed from the lock, either via a 3-piece lock split
+(middle extent being cancelled) or via a 2-piece lock split (smallest
+extent being cancelled).
+
+Cheers, Andreas
+--
+Andreas Dilger
+Sr. Staff Engineer, Lustre Group
+Sun Microsystems of Canada, Inc.
+
+
+
+From Oleg.Drokin at Sun.COM  Tue Feb  3 01:39:59 2009
+From: Oleg.Drokin at Sun.COM (Oleg Drokin)
+Date: Tue, 03 Feb 2009 04:39:59 -0500
+Subject: [Lustre-devel] Sub Tree lock ideas.
+In-Reply-To: <20090203090409.GT28818@webber.adilger.int>
+References: <7D9ABF96-6BD8-4F7A-A5AE-F08BF04854B2@sun.com>
+	<20090126100856.GD3652@webber.adilger.int>
+	<5EF2479C-CFC4-4CD5-95E8-50368A7D5083@Sun.COM>
+	<20090202225044.GL28818@webber.adilger.int>
+	<75012621-B9AB-4093-AC23-E6E2E28D774F@Sun.COM>
+	<20090203090409.GT28818@webber.adilger.int>
+Message-ID: <7AE74BBB-7DE0-4D15-AB62-A004A74F55E3@Sun.COM>
+
+Hello!
+
+On Feb 3, 2009, at 4:04 AM, Andreas Dilger wrote:
+>> It would be a lot of batching in many common usecases like "untar a
+>> file", "Create a working files for applications, all in same dir/ 
+>> dir tree".
+> Maybe I misunderstand, but all of this batching is in the case of a  
+> single
+> client that is doing operations to send to the MDS.  What I was  
+> thinking
+> would be a rare case is batching from the server to the client when  
+> e.g.
+> a bunch of clients independently open a bunch of files that are in a
+> directory for which a client holds a STL.
+
+Right. I am speaking about aggregation at client level to send batched  
+RPCs
+to the server. (e.g. tons of creates).
+
+> In the latter case, since all of the RPCs are coming from different  
+> clients,
+> it is much harder for the server to group them together into a  
+> single RPC
+> to send to the STL client.
+
+Indeed, this is much harder. (but still possible if it is just one  
+client that
+does readdir+ and we do a batched glimpse to a client holding some  
+locks on
+files in that dir).
+
+>> From the above my conclusion is we do not necessarily need SubTree  
+>> locks
+>> for efficient metadata write cache, but we do need it for other
+>> scenarios (memory conservation). There are some similarities in the
+>> functionality too, but also some differences.
+>>
+>> One particular complexity I see with multiple read-only STLs is every
+>> modifying metadata operation would need to traverse the metadata tree
+>> all the way back to the root of the fs in order to notify all  
+>> possible
+>> clients holding STL locks about the change about to be made.
+> Sorry, I was only considering the case of a 1-deep STL (e.g. a DIR  
+> lock,
+> not the arbitrary-depth STL you originally described).  In that case,
+> there is no requirement for more than a single level of STL to be
+> checked/cancelled if a client is doing some modifying operation  
+> therein.
+> This is no different than e.g. if a bunch of clients are holding the
+> LOOKUP lock on a directory that has a new entry in it.
+
+The problem in this case then becomes that if we operate within a tree
+16 entries deep, we have consumed 10% of our lock capacity (getting a  
+lock
+on every subdir in process). If we have several apps going on, then  
+even more.
+
+
+> Eric also had a proposal that the DIR lock would be a "hash extent"  
+> lock
+> instead of a single bit, so that it would be possible (via lock  
+> conversion)
+> to avoid cancelling all of the entries cached on a client when a  
+> single
+> new file is being added.  Only the hash range of the entry being added
+> would need to be removed from the lock, either via a 3-piece lock  
+> split
+> (middle extent being cancelled) or via a 2-piece lock split (smallest
+> extent being cancelled).
+
+Yes, this is also possible and would be beneficial even with WRITE  
+lock on a dir.
+But this really is completely orthogonal issue.
+
+Bye,
+     Oleg
+
+
+From eeb at sun.com  Tue Feb  3 06:09:15 2009
+From: eeb at sun.com (Eric Barton)
+Date: Tue, 03 Feb 2009 14:09:15 +0000
+Subject: [Lustre-devel] Disk rebuild
+Message-ID: <0da001c98608$ff6e5150$fe4af3f0$@com>
+
+Andreas,
+
+When we have some estimate of the overall HPCS filesystem size and shape,
+can we do some calculations to show how frequently we expect drives to
+fail and get our heads round the rebuild performance / 2nd failure
+vulnerability tradeoff.  This obviously begs the question whether RAID 6
+changes this tradeoff significantly by allowing rebuild to be so slow
+performance isn't impacted, and if so, whether it's viable with a DMU
+backend.
+
+    Cheers,
+              Eric
+
+
+
+
+
+From vyw at ornl.gov  Mon Feb  2 11:54:06 2009
+From: vyw at ornl.gov (Vicky White)
+Date: Mon, 02 Feb 2009 14:54:06 -0500
+Subject: [Lustre-devel] Lustre HSM - some talking points.
+In-Reply-To: <4987489D.4050909@Sun.COM>
+References: <3DF0F4AF-F4D6-476E-98F7-CD912C49FC18@Sun.COM>
+	<2734A30F-2C76-4725-9F3A-29AD4245B7E8@Sun.COM>
+	<496FCA67.6000500@sun.com>
+	<48D329C0-242E-4A5A-94C1-DF493BB25C2F@Sun.COM>
+	<496FE8D4.2090908@sun.com>
+	<BEB67402-7AFE-4BE1-A59C-050823AFC8E5@Sun.COM>
+	<4977647D.5010503@sun.com>
+	<4977E5BD.7000706@sun.com> <4978DB1E.30507@sun.com>
+	<497A144C.4000408@Sun.COM>
+	<20090126193548.GF3652@webber.adilger.int> <497E35A3.3080603@sun.com>
+	<DEB5E509-4641-40B6-86CA-972D885975D3@Sun.COM>
+	<4983998D.1030601@sun.com>
+	<8585251D-41D7-4B42-99F9-BDBFA2CF88C1@Sun.COM> <4987098F.402@Sun.COM>
+	<367E32B4-A759-45AD-9D2C-48C051FE1D62@Sun.COM>
+	<49872C9B.7060708@Sun.COM>
+	<498734AA.7010704@ornl.gov> <4987489D.4050909@Sun.COM>
+Message-ID: <49874F5E.6030203@ornl.gov>
+
+Colin Ngam wrote:
+> I do not see why we need to query these EAs in normal operation.  
+> These EAs will only be accessed when we need to perform Ultimate 
+> Disaster Recovery - when you have lost all data on disks and all you 
+> have are tapes.
+
+
+That would help.  I don't know what it would cost to store the EA in a 
+separate object to begin with, though, and that would be incurred on 
+every file.   Plus you have to consider the space it takes up.
+
+
+> I was thinking about XML - but it is "opaque" to Object SAMQFS so, it 
+> is up to the Lustre side.  Whatever it is, the Applications - 
+> Lustre-Restore for example, is the one that has to understand the 
+> format.  I am not a Tar Header expert - but I assume that these EAs 
+> can go with the file in the tar ball.
+
+
+I think what you put in the tar ball is up to you.   Putting the EAs in 
+there regardless of what the hsm was might simplify the design, so you 
+wouldn't have to extract the EA in a different way for each hsm.
+
+I was just trying to keep the hpss EA design in front of folks so that 
+if we were considering using that, we knew all the tradeoffs.
+
+
+> I do not expect to keep any of it on line on disk cache, on the SAMFS 
+> side.  I see no reason.
+>
+> With respect to whether it should be consistent with HPSS - I would 
+> say if that is all we need and it is sufficient - why not.  Otherwise, 
+> let's make it better than HPSS.  It must be in SUN's best interest to 
+> sell SAMQFS?
+
+
+Oh, I'm sure it is.
+
+
+> I do apologize Vicky, are you a SUN employee?
+
+
+No.   Were you going to feel sorry for me if I worked for Sun? ;)
+
+
+Vicky
+
+
+
+From vyw at ornl.gov  Mon Feb  2 13:02:46 2009
+From: vyw at ornl.gov (Vicky White)
+Date: Mon, 02 Feb 2009 16:02:46 -0500
+Subject: [Lustre-devel] Lustre HSM - some talking points.
+In-Reply-To: <49875ABC.8000400@Sun.COM>
+References: <3DF0F4AF-F4D6-476E-98F7-CD912C49FC18@Sun.COM>
+	<2734A30F-2C76-4725-9F3A-29AD4245B7E8@Sun.COM>
+	<496FCA67.6000500@sun.com>
+	<48D329C0-242E-4A5A-94C1-DF493BB25C2F@Sun.COM>
+	<496FE8D4.2090908@sun.com>
+	<BEB67402-7AFE-4BE1-A59C-050823AFC8E5@Sun.COM>
+	<4977647D.5010503@sun.com>
+	<4977E5BD.7000706@sun.com> <4978DB1E.30507@sun.com>
+	<497A144C.4000408@Sun.COM>
+	<20090126193548.GF3652@webber.adilger.int> <497E35A3.3080603@sun.com>
+	<DEB5E509-4641-40B6-86CA-972D885975D3@Sun.COM>
+	<4983998D.1030601@sun.com>
+	<8585251D-41D7-4B42-99F9-BDBFA2CF88C1@Sun.COM> <4987098F.402@Sun.COM>
+	<367E32B4-A759-45AD-9D2C-48C051FE1D62@Sun.COM>
+	<49872C9B.7060708@Sun.COM>
+	<498734AA.7010704@ornl.gov> <4987489D.4050909@Sun.COM>
+	<49874F5E.6030203@ornl.gov> <49875ABC.8000400@Sun.COM>
+Message-ID: <49875F76.303@ornl.gov>
+
+
+
+> PS-The programmer's reference is close to 400 pages!  
+
+Alas, yes.
+
+Take two steps backward from it.   Think of chapter 2 as "posix on 
+hpss", because that's basically what it is - a client api interface to 
+map all the posix calls into corresponding hpss calls.   The first half 
+of the chapter describes the functions and the second half the relevant 
+data structures.
+
+The other chapters are gravy - additional kinds of features you can use 
+but wouldn't have to right off the bat, and some of which you'd never use.
+
+Funny...I thought there used to be some programming examples in the 
+back, but maybe that was in another book.
+
+
+> Perhaps I should start with User's Guide.
+
+
+I always think of that as just an explanation of the standard user 
+interfaces like ftp and vfs, but you're right, it does talk about some 
+hpss concepts that would be a useful intro.
+
+
+Vicky
+
+
+From scjody at sun.com  Tue Feb  3 08:41:44 2009
+From: scjody at sun.com (Jody McIntyre)
+Date: Tue, 03 Feb 2009 11:41:44 -0500
+Subject: [Lustre-devel] Fwd: Disk rebuild
+In-Reply-To: <6BAB26C7-8230-4D93-B41D-37B8AE31D7FF@sun.com>
+References: <0da001c98608$ff6e5150$fe4af3f0$@com>
+	<6BAB26C7-8230-4D93-B41D-37B8AE31D7FF@sun.com>
+Message-ID: <20090203164144.GF14852@clouds>
+
+Hi Eric,
+
+>> When we have some estimate of the overall HPCS filesystem size and
+>> shape, can we do some calculations to show how frequently we expect
+>> drives to fail and get our heads round the rebuild performance / 2nd
+>> failure vulnerability tradeoff.  This obviously begs the question
+>> whether RAID 6 changes this tradeoff significantly by allowing
+>> rebuild to be so slow performance isn't impacted, and if so, whether
+>> it's viable with a DMU backend.
+
+Bryon asked me to clarify the RAID 6 vulnerability situation in resync
+vs. recovery.  First some definitions, since I don't know how widely
+accepted these terms are outside the Linux software RAID community:
+
+recovery: This occurs when a disk fails and is replaced.  The entire
+array must be read so that the new disk can be reconstructed from the
+data and parity blocks on the existing disks.  Recovery is also done on
+new arrays, because it's faster than resync.
+
+resync: When a system crashes during a write, resync must be done to
+repair the parity blocks.  All data blocks and parity blocks must be
+read, and if the parity blocks are incorrect they must be rewritten.
+
+With RAID 6, we are not vulnerable to a disk failure during recovery.
+If a second disk fails while the first disk is being recovered, we can
+replace it as well - recovery can reconstruct the data and parity blocks
+on both new disks.
+
+Unfortunately, we are vulnerable to _even one_ disk failing during
+resync.  When a machine crashes during a write the parity could be
+completely wrong and unsuitable for recovery.
+
+It is possible to significantly reduce resync (but not recovery) times
+using bitmaps, but these have been shown to hurt performance
+significantly.  Another approach, journal-guided resynchronization, was
+studied in a 2005 paper but has never been merged into the kernel.  The
+paper shows improvements in resync times from 254 seconds to 0.21
+seconds (for a 1 GB test array) with under 5% performance impact.  This
+is an option if we're willing to develop and maintain the patches to do
+it.
+
+Cheers,
+Jody
+
+
+From Nikita.Danilov at Sun.COM  Tue Feb  3 07:01:58 2009
+From: Nikita.Danilov at Sun.COM (Nikita Danilov)
+Date: Tue, 03 Feb 2009 18:01:58 +0300
+Subject: [Lustre-devel] Sub Tree lock ideas.
+In-Reply-To: <7D9ABF96-6BD8-4F7A-A5AE-F08BF04854B2@sun.com>
+References: <7D9ABF96-6BD8-4F7A-A5AE-F08BF04854B2@sun.com>
+Message-ID: <18824.23654.85292.845625@gargle.gargle.HOWL>
+
+Oleg Drokin writes:
+ > Hello!
+ > 
+ >     We discussed a bit of this in Beijing last week, but decided to  
+ > continue the discussion via email.
+ > 
+ >     So, I think it is a given we do not want to revoke a subtree lock  
+ > every time somebody steps through it, because that will be too costly  
+ > in a lot of cases.
+ > 
+ >     Anyway here is what I have in mind.
+ > 
+ >     STL locks could be granted by server regardless if they were  
+ > requested by the client or not.
+ > 
+ >     We would require clients to provide a lock "cookie" with every  
+ > operation they perform, in normal case that would be a handle they  
+ > have on a parent directory.
+ >     This cookie should allow a way to find out what server this cookie  
+ > originates from (needed for CMD support).
+ > 
+ >     For the case of a different client stepping into area covered by  
+ > STL lock, this client would get STL lock's cookie and will start  
+ > present it for all subsequent
+ >     operations (also a special flag meaning that the client is not  
+ > operating within STL).
+
+How is it determined that a given point in a namespace is covered by an
+STL lock? E.g., client A holds an STL on /a, and client B accesses
+/a/b/c/f (where /a/b/c is a working directory of some process on B)?
+This looks especially problematic in the CMD case.
+
+Nikita.
+
+
+From Oleg.Drokin at Sun.COM  Tue Feb  3 11:05:19 2009
+From: Oleg.Drokin at Sun.COM (Oleg Drokin)
+Date: Tue, 03 Feb 2009 14:05:19 -0500
+Subject: [Lustre-devel] Sub Tree lock ideas.
+In-Reply-To: <18824.23654.85292.845625@gargle.gargle.HOWL>
+References: <7D9ABF96-6BD8-4F7A-A5AE-F08BF04854B2@sun.com>
+	<18824.23654.85292.845625@gargle.gargle.HOWL>
+Message-ID: <E3024495-6E55-4628-A6B7-1D2617DF94AA@Sun.COM>
+
+Hello!
+
+On Feb 3, 2009, at 10:01 AM, Nikita Danilov wrote:
+>>    For the case of a different client stepping into area covered by
+>> STL lock, this client would get STL lock's cookie and will start
+>> present it for all subsequent
+>>    operations (also a special flag meaning that the client is not
+>> operating within STL).
+> How is it determined that a given point in a namespace is covered by  
+> an
+> STL lock? E.g., client A holds an STL on /a, and client B accesses
+> /a/b/c/f (where /a/b/c is a working directory of some process on B)?
+> This looks especially problematic in the CMD case.
+
+When client B looks up /a during its path traversal, it will get a  
+lock cookie
+of the STL lock and will start presenting it with further lookups.
+If /a/b/c became a working dir of process B before STL on /a was  
+granted, then
+/a/b/c has a normal lock for client B and STL does not cover that  
+subtree.
+Also see other discussion on this topic here, since in the end we  
+might end up
+not implementing entire STL idea.
+
+Bye,
+     Oleg
+
+
+From Nikita.Danilov at Sun.COM  Tue Feb  3 11:12:28 2009
+From: Nikita.Danilov at Sun.COM (Nikita Danilov)
+Date: Tue, 03 Feb 2009 22:12:28 +0300
+Subject: [Lustre-devel] Sub Tree lock ideas.
+In-Reply-To: <E3024495-6E55-4628-A6B7-1D2617DF94AA@Sun.COM>
+References: <7D9ABF96-6BD8-4F7A-A5AE-F08BF04854B2@sun.com>
+	<18824.23654.85292.845625@gargle.gargle.HOWL>
+	<E3024495-6E55-4628-A6B7-1D2617DF94AA@Sun.COM>
+Message-ID: <18824.38684.202432.406067@gargle.gargle.HOWL>
+
+Oleg Drokin writes:
+ > Hello!
+ > 
+ > On Feb 3, 2009, at 10:01 AM, Nikita Danilov wrote:
+ > >>    For the case of a different client stepping into area covered by
+ > >> STL lock, this client would get STL lock's cookie and will start
+ > >> present it for all subsequent
+ > >>    operations (also a special flag meaning that the client is not
+ > >> operating within STL).
+ > > How is it determined that a given point in a namespace is covered by  
+ > > an
+ > > STL lock? E.g., client A holds an STL on /a, and client B accesses
+ > > /a/b/c/f (where /a/b/c is a working directory of some process on B)?
+ > > This looks especially problematic in the CMD case.
+ > 
+ > When client B looks up /a during its path traversal, it will get a  
+ > lock cookie
+ > of the STL lock and will start presenting it with further lookups.
+ > If /a/b/c became a working dir of process B before STL on /a was  
+ > granted, then
+ > /a/b/c has a normal lock for client B and STL does not cover that  
+ > subtree.
+
+Yes, this is the case I meant. So we have to track (and recover) current
+directories for all client processes.
+
+ > Also see other discussion on this topic here, since in the end we  
+ > might end up
+ > not implementing entire STL idea.
+ > 
+ > Bye,
+ >      Oleg
+
+Nikita.
+
+
+From Oleg.Drokin at Sun.COM  Tue Feb  3 11:25:07 2009
+From: Oleg.Drokin at Sun.COM (Oleg Drokin)
+Date: Tue, 03 Feb 2009 14:25:07 -0500
+Subject: [Lustre-devel] Sub Tree lock ideas.
+In-Reply-To: <18824.38684.202432.406067@gargle.gargle.HOWL>
+References: <7D9ABF96-6BD8-4F7A-A5AE-F08BF04854B2@sun.com>
+	<18824.23654.85292.845625@gargle.gargle.HOWL>
+	<E3024495-6E55-4628-A6B7-1D2617DF94AA@Sun.COM>
+	<18824.38684.202432.406067@gargle.gargle.HOWL>
+Message-ID: <8BA1986C-3E6F-4E46-9ADB-DE42554B7C8E@Sun.COM>
+
+Hello!
+
+On Feb 3, 2009, at 2:12 PM, Nikita Danilov wrote:
+>> When client B looks up /a during its path traversal, it will get a
+>> lock cookie
+>> of the STL lock and will start presenting it with further lookups.
+>> If /a/b/c became a working dir of process B before STL on /a was
+>> granted, then
+>> /a/b/c has a normal lock for client B and STL does not cover that
+>> subtree.
+> Yes, this is the case I meant. So we have to track (and recover)  
+> current
+> directories for all client processes.
+
+Yes.
+We do this with locks.
+If lock is invalid, we are forced to back-traverse the path until we
+meet any client-visible lock or rot of the filesystem.
+
+Bye,
+     Oleg
+
+
+From Nathan.Rutman at Sun.COM  Tue Feb  3 16:41:18 2009
+From: Nathan.Rutman at Sun.COM (Nathaniel Rutman)
+Date: Tue, 03 Feb 2009 16:41:18 -0800
+Subject: [Lustre-devel] Lustre HSM - some talking points.
+In-Reply-To: <49872C9B.7060708@Sun.COM>
+References: <3DF0F4AF-F4D6-476E-98F7-CD912C49FC18@Sun.COM>
+	<2734A30F-2C76-4725-9F3A-29AD4245B7E8@Sun.COM>
+	<496FCA67.6000500@sun.com>
+	<48D329C0-242E-4A5A-94C1-DF493BB25C2F@Sun.COM>
+	<496FE8D4.2090908@sun.com>
+	<BEB67402-7AFE-4BE1-A59C-050823AFC8E5@Sun.COM>
+	<4977647D.5010503@sun.com>
+	<4977E5BD.7000706@sun.com> <4978DB1E.30507@sun.com>
+	<497A144C.4000408@Sun.COM>
+	<20090126193548.GF3652@webber.adilger.int> <497E35A3.3080603@sun.com>
+	<DEB5E509-4641-40B6-86CA-972D885975D3@Sun.COM>
+	<4983998D.1030601@sun.com>
+	<8585251D-41D7-4B42-99F9-BDBFA2CF88C1@Sun.COM> <4987098F.402@Sun.COM>
+	<367E32B4-A759-45AD-9D2C-48C051FE1D62@Sun.COM>
+	<49872C9B.7060708@Sun.COM>
+Message-ID: <4988E42E.2000803@sun.com>
+
+Colin Ngam wrote:
+
+Is OSAM available on Linux?
+
+Object SAMQFS - HSM for Lustre
+------------------------------
+
+0.  We re basically looking at the HSM as a Repository right?
+
+    yes
+
+
+2.  Object SAMQFS meta data(inodes) is used as a database for files that are
+archived etc.
+
+    You mean, store the Lustre metadata attributes in these inodes?  Or
+    rather that these inodes just keep track of the objects in the
+    archive (like block pointers)
+
+3.  This database can be dumped and restored really quick using normal meta
+data backup of the HSM.  The inodes are kept in 1 file.  This is not a 
+Lustre
+dump but rather a dump of Object SAMQFS.  No file data dump is 
+required.  Files
+not archived yet are irrelevent ..  Incrementals can be obtained by 
+comparing
+2 full dumps and just keeping the diffs.  Persistent Object SAMQFS file id
+can be preserved if we restore a complete version of the dump.  Otherwise,
+it can be different.  We can update Lustre with the new file id for the 
+given
+Lustre File ID.  Consider this error recovery path ..
+
+    If we're already storing archive-specific opaque data (the SamFID),
+    I see no reason why we couldn't allow the archive to modify that
+    value at will.  We'd need to put a lock around it...
+
+
+4.  Object SAMQFS should have very simple policies - archive immediate, 
+number
+of copies and when copies to be made etc..  This can actually be passed by
+Lustre and executed by Object SAMQFS.  Last thing we want to do is to 
+have to
+configure 2 Policy engines.
+
+    I was envisioning the Lustre "action list" as a list of files and
+    actions.  The actions could be semi-complex (e.g. "archive at level
+    4") which would mean something to the archive.
+
+
+5.  Lustre will store a 16 Bytes Object SAMQFS identifier.  A 8 bytes unique
+file system ID and a 8 bytes Object SAMQFS File ID.  An Object SAMQFS 
+can only
+support 32 bits number of files.  This will be less if we use inodes for
+extended attributes etc.  The file system ID will allow us to create 
+multiple
+Object SAMQFS "mat" file system - provide infinite number of files that can
+be supported.
+
+    Do separate filesystems need separate disks?  This opens up a
+    inodecount/filesize relation, or we have to create new OSAM
+    filesystems on demand (ENOSPC, create new fs, store file -- hmm, not
+    so hard).
+
+
+6.  No namepace.  Lustre pathnames can be stored as Extended
+Attributes.
+
+    No problem except for the disaster recovery scenario.  And even in
+    that case we don't need EAs if we're storing mini-tarballs already -
+    just add an empty file to the tarball with the actual filename.
+
+
+7.  Files to be archived and staged in together(associative archiving) to be
+given in a list by Lustre.  Object SAMQFS will figure out a way to link 
+these
+files together and put them on the same tarball - this is not for free.
+
+    It's actually not clear that this is useful for Lustre.  If the
+    point of Lustre HSM is to extend the filesystem space, it makes
+    little sense to bother archiving small files.  Anyhow, this can be a
+    future optimization.
+
+
+
+Basic Object SAMQFS - HSM for Lustre Archive Events
+-------------------------------------------
+
+Lustre calls with the following Information:
+
+1.  Luster FID
+2.  Luster Opaque Meta Data
+3.  Luster Tar File required Data e.g. Path Name
+4.  Luster Archiving Policy for this file - must be simple.
+
+Lustre gets back:
+
+1.  Object SAMQFS Identifier.
+
+Depending on asynchronous or synchronous archiving:
+
+1.  Lustre can status with the given "Object SAMQFS Identifier"
+
+    Sounds fine.  Lustre will always use asynchronous archiving, as far
+    as I can see.
+
+
+
+Basic Object SAMQFS - HSM for Lustre Stage In Events(bring data back)
+---------------------------------------------------------------------
+
+1.  Lustre just reads the file with the given "Object SAMQFS Identifier"
+
+
+Basic Object SAMQFS - HSM for Lustre status Events(check state)
+
+1.  Lustre perform "sls" command on Object SAMQFS Client.
+
+PS - We can have both User level command and API capabilities.
+
+    well technically, Lustre calls with the following information
+    1.  Luster FID
+    2.  Luster Opaque Meta Data
+    (BTW, that's Lustre, not Luster)
+    OSAM ignores fid and just uses OSAM identifier
+
+
+
+Basic Object SAMQFS - HSM for Lustre Delete Event
+-------------------------------------------------
+
+1.  Lustre can effectively do an "rm" on the Object SAMQFS Identifier or
+calls an API.
+
+
+Object SAMQFS Dump and Restore
+------------------------------
+
+Independent Administrative event.
+
+Lustre Dump and Restore
+-----------------------
+
+Can be an Independent Lustre event.
+However, this does have impact on when we can actually delete a file from
+tape if a Lustre Dump has a reference to this file e.g.
+1.  Archive file.
+2.  Dump Lustre.
+3.  Delete file.
+
+Now you want to restore the deleted file.
+
+    Dumping the Lustre metadata isn't something we've really talked
+    about before - or, rather, the restore part isn't :)
+    Effectively, the Lustre metadata is (all the data on) the entire MDT
+    disk.  I'm not sure it makes any sense to try to be any more
+    elaborate than that, but maybe.  It would be nice to be able to e.g.
+    dump the disk to a regular (big!) file store in OSAM, so we've got
+    everything on 1 set of tapes...
+
+
+
+Ultimate Disaster Recovery - Directly from Tapes
+------------------------------------------------
+
+Requires Tar File to be complete with Lustre Meta Data.
+Since this is a recreation of both the Lustre FS and Object SAMQFS "mat" FS
+I would be incline to believe that at a minimum, we will not require the
+Object SAMQFS identifier to be persistent from previous incantation.  I 
+am also
+incline to believe that if you take regular Object SAMQFS dumps, both 
+full and
+also incrementals and store this safely on tape - you may not need this
+procedure .. but then, that's why we call it Ultimate Recovery.
+
+    If everything is wiped out except the tapes, we would just
+    repopulate a new Lustre fs anyhow. Once the OSAM fs is regenerated,
+    we walk all the objects and create object placeholders in the new
+    Lustre fs referencing the new OSAM fids and marking everything as
+    punched.  As users start using files they are pulled back in
+    automatically.
+
+
+
+Syncing Object SAMQFS with Lustre
+---------------------------------
+
+Lustre File Identifier and Object SAMQFS Identifier can get out of sync 
+- shit
+happens.  We need syncing capabilities.
+
+    Only if we stored enough information to mismatch :)  If Lustre asks
+    for a FID, and it gets back the wrong file, it doesn't / can't
+    know.  Unless we store the FID inside the file it gets back and we
+    verify it.
+
+ 
+
+Object SAMQFS - Freeing space on tapes
+--------------------------------------
+
+We will need a way to determine with Lustre - conclusively that an 
+archive is
+no longer needed.
+
+    If Lustre policy manager says "rm", then Lustre has no way to ever
+    get that file back.  There's no time-machine like old versions of
+    directories.  Would be a cool feature though.  Maybe archive says
+    "ok" to the rm, but secretly holds on to the file for some time in a
+    special "recently deleted" dir?
+
+
+
+
+
+From Colin.Ngam at Sun.COM  Tue Feb  3 17:29:05 2009
+From: Colin.Ngam at Sun.COM (Colin Ngam)
+Date: Tue, 03 Feb 2009 19:29:05 -0600
+Subject: [Lustre-devel] Lustre HSM - some talking points.
+In-Reply-To: <4988E42E.2000803@sun.com>
+References: <3DF0F4AF-F4D6-476E-98F7-CD912C49FC18@Sun.COM>
+	<2734A30F-2C76-4725-9F3A-29AD4245B7E8@Sun.COM>
+	<496FCA67.6000500@sun.com>
+	<48D329C0-242E-4A5A-94C1-DF493BB25C2F@Sun.COM>
+	<496FE8D4.2090908@sun.com>
+	<BEB67402-7AFE-4BE1-A59C-050823AFC8E5@Sun.COM>
+	<4977647D.5010503@sun.com>
+	<4977E5BD.7000706@sun.com> <4978DB1E.30507@sun.com>
+	<497A144C.4000408@Sun.COM>
+	<20090126193548.GF3652@webber.adilger.int> <497E35A3.3080603@sun.com>
+	<DEB5E509-4641-40B6-86CA-972D885975D3@Sun.COM>
+	<4983998D.1030601@sun.com>
+	<8585251D-41D7-4B42-99F9-BDBFA2CF88C1@Sun.COM> <4987098F.402@Sun.COM>
+	<367E32B4-A759-45AD-9D2C-48C051FE1D62@Sun.COM>
+	<49872C9B.7060708@Sun.COM> <4988E42E.2000803@sun.com>
+Message-ID: <3F93D192-9058-4393-8D78-B5E775F702B1@Sun.COM>
+
+
+On Feb 3, 2009, at 6:41 PM, Nathaniel Rutman wrote:
+
+Hi,
+
+If these are all agreeable, lets start drawing up the Spec.
+
+> Colin Ngam wrote:
+>
+> Is OSAM available on Linux?
+
+Can be access from a Linux Client.   It is another file system type to  
+SAMQFS.  We have inserted software restrictions to prevent it from  
+being used as a Shared QFS file system type.  This is one of those,  
+code is there, needs testing.  I did the code so ...
+
+Keep in mind that the Meta Data Server is still only Solaris.
+
+>
+>
+> Object SAMQFS - HSM for Lustre
+> ------------------------------
+>
+> 0.  We re basically looking at the HSM as a Repository right?
+>
+>   yes
+>
+>
+> 2.  Object SAMQFS meta data(inodes) is used as a database for files  
+> that are
+> archived etc.
+>
+>   You mean, store the Lustre metadata attributes in these inodes?  Or
+>   rather that these inodes just keep track of the objects in the
+>   archive (like block pointers)
+Inodes on the OSAM nodes are for managing the files in archive and the  
+link to Lustre.  I expect to store Lustre Meta Data as EA in tar  
+file.  I am assuming that we do not need Lustre Meta data on disk  
+cache.  Lustre already has it in Lustre .. only need to access these  
+for Ultimate Disaster Recovery from tape.
+>
+>
+> 3.  This database can be dumped and restored really quick using  
+> normal meta
+> data backup of the HSM.  The inodes are kept in 1 file.  This is not  
+> a Lustre
+> dump but rather a dump of Object SAMQFS.  No file data dump is  
+> required.  Files
+> not archived yet are irrelevent ..  Incrementals can be obtained by  
+> comparing
+> 2 full dumps and just keeping the diffs.  Persistent Object SAMQFS  
+> file id
+> can be preserved if we restore a complete version of the dump.   
+> Otherwise,
+> it can be different.  We can update Lustre with the new file id for  
+> the given
+> Lustre File ID.  Consider this error recovery path ..
+>
+>   If we're already storing archive-specific opaque data (the SamFID),
+>   I see no reason why we couldn't allow the archive to modify that
+>   value at will.  We'd need to put a lock around it...
+Yes we can.  It is just a matter of how do we initiate this change  
+between the archive and Lustre.
+>
+>
+>
+> 4.  Object SAMQFS should have very simple policies - archive  
+> immediate, number
+> of copies and when copies to be made etc..  This can actually be  
+> passed by
+> Lustre and executed by Object SAMQFS.  Last thing we want to do is  
+> to have to
+> configure 2 Policy engines.
+>
+>   I was envisioning the Lustre "action list" as a list of files and
+>   actions.  The actions could be semi-complex (e.g. "archive at level
+>   4") which would mean something to the archive.
+Yes, this needs to be defined.  This should include future action like  
+"made 2nd copy after 24 hours etc.  SAMQFS has a standard set of  
+Policies .. if you want to deviate we will have to provide new code.
+
+We need to define these actions.
+>
+>
+>
+> 5.  Lustre will store a 16 Bytes Object SAMQFS identifier.  A 8  
+> bytes unique
+> file system ID and a 8 bytes Object SAMQFS File ID.  An Object  
+> SAMQFS can only
+> support 32 bits number of files.  This will be less if we use inodes  
+> for
+> extended attributes etc.  The file system ID will allow us to create  
+> multiple
+> Object SAMQFS "mat" file system - provide infinite number of files  
+> that can
+> be supported.
+>
+>   Do separate filesystems need separate disks?  This opens up a
+>   inodecount/filesize relation, or we have to create new OSAM
+>   filesystems on demand (ENOSPC, create new fs, store file -- hmm, not
+>   so hard).
+No, a file system is configured using slices/partitions.  More than 1  
+FS can reside on the same disk.  There will not be any inodecount/ 
+filesize relationship because on the SAMQFS node we will release file  
+data space as needed after the file is on Tape.  We also do the "punch".
+
+Yes FS can be created on demand.
+>
+>
+>
+> 6.  No namepace.  Lustre pathnames can be stored as Extended
+> Attributes.
+>
+>   No problem except for the disaster recovery scenario.  And even in
+>   that case we don't need EAs if we're storing mini-tarballs already -
+>   just add an empty file to the tarball with the actual filename.
+OK.
+>
+>
+>
+> 7.  Files to be archived and staged in together(associative  
+> archiving) to be
+> given in a list by Lustre.  Object SAMQFS will figure out a way to  
+> link these
+> files together and put them on the same tarball - this is not for  
+> free.
+>
+>   It's actually not clear that this is useful for Lustre.  If the
+>   point of Lustre HSM is to extend the filesystem space, it makes
+>   little sense to bother archiving small files.  Anyhow, this can be a
+>   future optimization.
+Lustre's call.
+>
+>
+>
+>
+> Basic Object SAMQFS - HSM for Lustre Archive Events
+> -------------------------------------------
+>
+> Lustre calls with the following Information:
+>
+> 1.  Luster FID
+> 2.  Luster Opaque Meta Data
+> 3.  Luster Tar File required Data e.g. Path Name
+> 4.  Luster Archiving Policy for this file - must be simple.
+>
+> Lustre gets back:
+>
+> 1.  Object SAMQFS Identifier.
+>
+> Depending on asynchronous or synchronous archiving:
+>
+> 1.  Lustre can status with the given "Object SAMQFS Identifier"
+>
+>   Sounds fine.  Lustre will always use asynchronous archiving, as far
+>   as I can see.
+Okay.
+>
+>
+>
+>
+> Basic Object SAMQFS - HSM for Lustre Stage In Events(bring data back)
+> ---------------------------------------------------------------------
+>
+> 1.  Lustre just reads the file with the given "Object SAMQFS  
+> Identifier"
+>
+>
+> Basic Object SAMQFS - HSM for Lustre status Events(check state)
+>
+> 1.  Lustre perform "sls" command on Object SAMQFS Client.
+>
+> PS - We can have both User level command and API capabilities.
+>
+>   well technically, Lustre calls with the following information
+>   1.  Luster FID
+>   2.  Luster Opaque Meta Data
+>   (BTW, that's Lustre, not Luster)
+>   OSAM ignores fid and just uses OSAM identifier
+
+Right, Fiber/Fibre :-)
+
+I am missing something here .. Stage-In is to get a file from  
+archive .. why do we need Item 2?  Or is 2 OSAM Identifier?  If so,  
+great.  I like it.
+
+In this case, we should trust Lustre FID.  The OSAM ID is for a very  
+fast search - direct index.
+
+>
+>
+>
+>
+> Basic Object SAMQFS - HSM for Lustre Delete Event
+> -------------------------------------------------
+>
+> 1.  Lustre can effectively do an "rm" on the Object SAMQFS  
+> Identifier or
+> calls an API.
+>
+>
+> Object SAMQFS Dump and Restore
+> ------------------------------
+>
+> Independent Administrative event.
+>
+> Lustre Dump and Restore
+> -----------------------
+>
+> Can be an Independent Lustre event.
+> However, this does have impact on when we can actually delete a file  
+> from
+> tape if a Lustre Dump has a reference to this file e.g.
+> 1.  Archive file.
+> 2.  Dump Lustre.
+> 3.  Delete file.
+>
+> Now you want to restore the deleted file.
+>
+>   Dumping the Lustre metadata isn't something we've really talked
+>   about before - or, rather, the restore part isn't :)
+>   Effectively, the Lustre metadata is (all the data on) the entire MDT
+>   disk.  I'm not sure it makes any sense to try to be any more
+>   elaborate than that, but maybe.  It would be nice to be able to e.g.
+>   dump the disk to a regular (big!) file store in OSAM, so we've got
+>   everything on 1 set of tapes...
+Lustre's call.
+>
+>
+>
+>
+> Ultimate Disaster Recovery - Directly from Tapes
+> ------------------------------------------------
+>
+> Requires Tar File to be complete with Lustre Meta Data.
+> Since this is a recreation of both the Lustre FS and Object SAMQFS  
+> "mat" FS
+> I would be incline to believe that at a minimum, we will not require  
+> the
+> Object SAMQFS identifier to be persistent from previous  
+> incantation.  I am also
+> incline to believe that if you take regular Object SAMQFS dumps,  
+> both full and
+> also incrementals and store this safely on tape - you may not need  
+> this
+> procedure .. but then, that's why we call it Ultimate Recovery.
+>
+>   If everything is wiped out except the tapes, we would just
+>   repopulate a new Lustre fs anyhow. Once the OSAM fs is regenerated,
+>   we walk all the objects and create object placeholders in the new
+>   Lustre fs referencing the new OSAM fids and marking everything as
+>   punched.  As users start using files they are pulled back in
+>   automatically.
+Yes.  The chances of both a Lustre and OSAM collapse at the same time  
+is not very good.
+>
+>
+>
+>
+> Syncing Object SAMQFS with Lustre
+> ---------------------------------
+>
+> Lustre File Identifier and Object SAMQFS Identifier can get out of  
+> sync - shit
+> happens.  We need syncing capabilities.
+>
+>   Only if we stored enough information to mismatch :)  If Lustre asks
+>   for a FID, and it gets back the wrong file, it doesn't / can't
+>   know.  Unless we store the FID inside the file it gets back and we
+>   verify it.
+If you always call with Lustre ID and OSAM ID, if we find that the  
+Lustre ID does not match the OSAM ID, because perhaps we have done  
+OSAM recovery and we are using a different OSAM ID to hold the Lustre  
+ID now, we can search for the inode that match the Lustre ID, fetch  
+the file and also update Lustre with the new OSAM ID.
+
+>
+>
+>
+> Object SAMQFS - Freeing space on tapes
+> --------------------------------------
+>
+> We will need a way to determine with Lustre - conclusively that an  
+> archive is
+> no longer needed.
+>
+>   If Lustre policy manager says "rm", then Lustre has no way to ever
+>   get that file back.  There's no time-machine like old versions of
+>   directories.  Would be a cool feature though.  Maybe archive says
+>   "ok" to the rm, but secretly holds on to the file for some time in a
+>   special "recently deleted" dir?
+No namespace - no dir.
+
+If Lustre removes the file, we can delay the scrub.  If Lustre can  
+come back with the Lustre ID and OSAM ID, if it has not been scrubbed,  
+you can get it back.
+
+Thanks.
+
+colin
+>
+>
+>
+>
+
+
+
+From Nikita.Danilov at Sun.COM  Wed Feb  4 06:39:06 2009
+From: Nikita.Danilov at Sun.COM (Nikita Danilov)
+Date: Wed, 04 Feb 2009 17:39:06 +0300
+Subject: [Lustre-devel] Sub Tree lock ideas.
+In-Reply-To: <8BA1986C-3E6F-4E46-9ADB-DE42554B7C8E@Sun.COM>
+References: <7D9ABF96-6BD8-4F7A-A5AE-F08BF04854B2@sun.com>
+	<18824.23654.85292.845625@gargle.gargle.HOWL>
+	<E3024495-6E55-4628-A6B7-1D2617DF94AA@Sun.COM>
+	<18824.38684.202432.406067@gargle.gargle.HOWL>
+	<8BA1986C-3E6F-4E46-9ADB-DE42554B7C8E@Sun.COM>
+Message-ID: <18825.43146.166182.680655@gargle.gargle.HOWL>
+
+Oleg Drokin writes:
+ > Hello!
+ > 
+ > On Feb 3, 2009, at 2:12 PM, Nikita Danilov wrote:
+ > >> When client B looks up /a during its path traversal, it will get a
+ > >> lock cookie
+ > >> of the STL lock and will start presenting it with further lookups.
+ > >> If /a/b/c became a working dir of process B before STL on /a was
+ > >> granted, then
+ > >> /a/b/c has a normal lock for client B and STL does not cover that
+ > >> subtree.
+ > > Yes, this is the case I meant. So we have to track (and recover)  
+ > > current
+ > > directories for all client processes.
+ > 
+ > Yes.
+ > We do this with locks.
+
+Hm.. I don't think we currently keep locks on the working directories.
+
+ > If lock is invalid, we are forced to back-traverse the path until we
+ > meet any client-visible lock or rot of the filesystem.
+
+I just thought about another interesting use case.
+
+Imagine client C0 holding a lock on /a/b/f, and C1 holding a STL lock on
+/D. Now client C2 does mv /a /D. C2 crosses STL boundary, gets notified
+about STL, gets the cookie, etc. But now C1 is having a lock on /D/a/b/f
+--- under an STL.
+
+ > 
+ > Bye,
+ >      Oleg
+
+Nikita.
+
+
+From Oleg.Drokin at Sun.COM  Thu Feb  5 09:01:19 2009
+From: Oleg.Drokin at Sun.COM (Oleg Drokin)
+Date: Thu, 05 Feb 2009 12:01:19 -0500
+Subject: [Lustre-devel] Sub Tree lock ideas.
+In-Reply-To: <18825.43146.166182.680655@gargle.gargle.HOWL>
+References: <7D9ABF96-6BD8-4F7A-A5AE-F08BF04854B2@sun.com>
+	<18824.23654.85292.845625@gargle.gargle.HOWL>
+	<E3024495-6E55-4628-A6B7-1D2617DF94AA@Sun.COM>
+	<18824.38684.202432.406067@gargle.gargle.HOWL>
+	<8BA1986C-3E6F-4E46-9ADB-DE42554B7C8E@Sun.COM>
+	<18825.43146.166182.680655@gargle.gargle.HOWL>
+Message-ID: <7504B583-5FAB-48A4-A5A3-F364AFA93483@Sun.COM>
+
+Hello!
+
+On Feb 4, 2009, at 9:39 AM, Nikita Danilov wrote:
+>> On Feb 3, 2009, at 2:12 PM, Nikita Danilov wrote:
+>>>> When client B looks up /a during its path traversal, it will get a
+>>>> lock cookie
+>>>> of the STL lock and will start presenting it with further lookups.
+>>>> If /a/b/c became a working dir of process B before STL on /a was
+>>>> granted, then
+>>>> /a/b/c has a normal lock for client B and STL does not cover that
+>>>> subtree.
+>>> Yes, this is the case I meant. So we have to track (and recover)
+>>> current
+>>> directories for all client processes.
+>> Yes.
+>> We do this with locks.
+> Hm.. I don't think we currently keep locks on the working directories.
+
+Well, we do because we get them during lookup.
+That does not mean we hold these locks permanently, of course.
+
+>> If lock is invalid, we are forced to back-traverse the path until we
+>> meet any client-visible lock or rot of the filesystem.
+> I just thought about another interesting use case.
+> Imagine client C0 holding a lock on /a/b/f, and C1 holding a STL  
+> lock on
+> /D. Now client C2 does mv /a /D. C2 crosses STL boundary, gets  
+> notified
+> about STL, gets the cookie, etc. But now C1 is having a lock on /D/a/ 
+> b/f
+> --- under an STL.
+
+That's fine.
+STL is limited by below locks.
+When STL-holding client gets a callback about modification in D (bad  
+example,
+actually, since by my idea any modifications in /D would then require  
+STL lock
+to go away, so let's suppose the rename was to D/d1/), so callback about
+modification of /D/d1, the STL holder have choices of basically :
+1. getting rid of STL - which avoids the whole problem.
+OR
+2. Flush it's own cache of /D/d1 and everything in that subtree and  
+allow
+to grant locks there to other clients.
+
+Now STL-holder knows nothing about /D/d1 anymore, and when it needs to  
+do something
+there again, it will start doing lookups there (RPCs to the server)  
+under STL
+until it reaches the lock from C2, at which point STL-reach is stopped  
+in that
+subtree.
+
+Bye,
+     Oleg
+
+
+From Oleg.Drokin at Sun.COM  Thu Feb  5 15:18:39 2009
+From: Oleg.Drokin at Sun.COM (Oleg Drokin)
+Date: Thu, 05 Feb 2009 18:18:39 -0500
+Subject: [Lustre-devel] Oleg an Eric - Supporting >512 OSTs for Striping
+In-Reply-To: <20090205223154.GG3209@webber.adilger.int>
+References: <C5B0A9CA.2F936%Daniel.Ferber@Sun.com>
+	<1B98401E-C3F3-49C2-82F6-DE842B10858A@Sun.COM>
+	<11f401c987d9$04d91b80$0e8b5280$@com>
+	<678A8BA3-13B8-42E0-9CD6-57E084293AF0@Sun.COM>
+	<20090205223154.GG3209@webber.adilger.int>
+Message-ID: <3F022A30-072C-4270-B83C-1DFBB4659D16@Sun.COM>
+
+Hello!
+
+    Adding Lustre-devel to CC.
+
+On Feb 5, 2009, at 5:31 PM, Andreas Dilger wrote:
+> it is probably worthwhile to do a code audit to see if there are  
+> many/any
+> "for each stripe" kind of operations that could be avoided for such  
+> widely
+> striped files.  Common operations like lov_merge_lvb() and  
+> lov_adjust_kms()
+> will become very expensive, and could possibly be optimized in some  
+> cases.
+
+I suspect there are enough of them.
+When I worked on slow small i/o, I noticed that we do merge_lvb pretty  
+often
+needlessly, for example. Basically, on partial page update, on  
+refresh_ap
+(sending write rpc - for every page), for every ll_readahead call (which
+means for every page read). Every time we do glimpse.
+Every time after enqueueing extent lock (even if cached).
+On every read syscall.
+
+I had a plan on how to fix it that turned out to be more complicated  
+than I thought.
+And in the end it was not the main culprit at the time.
+Basically what we need to do is to store up-to-date merged lvb in  
+inode somewhere
+and update it with after every enqueue or lock cancel.
+
+This is only relevant to b1_x codebase, I see that in HEAD with new io  
+rewrite code,
+the number of calls to merge_lvb is dramatically lower (only for  
+glimpses), though
+potentially some cpu could be saved by only merging after changes  
+actually occurred.
+
+> Similarly, we might consider to do MDS-originated object destroys for
+> such files (or all files) instead of sending huge RPC with cookies to
+> the client (~84kB reply).  These could be batched on unlink commit,  
+> and
+> would also avoid the "inodes with destroyed objects" bug previously
+> discussed.
+
+Do you only think of this as a way to cut the maximum RPC reply size  
+on MDS?
+
+Bye,
+     Oleg
+
+
+From adilger at sun.com  Thu Feb  5 16:01:28 2009
+From: adilger at sun.com (Andreas Dilger)
+Date: Thu, 05 Feb 2009 17:01:28 -0700
+Subject: [Lustre-devel] Oleg an Eric - Supporting >512 OSTs for Striping
+In-Reply-To: <3F022A30-072C-4270-B83C-1DFBB4659D16@Sun.COM>
+References: <C5B0A9CA.2F936%Daniel.Ferber@Sun.com>
+	<1B98401E-C3F3-49C2-82F6-DE842B10858A@Sun.COM>
+	<11f401c987d9$04d91b80$0e8b5280$@com>
+	<678A8BA3-13B8-42E0-9CD6-57E084293AF0@Sun.COM>
+	<20090205223154.GG3209@webber.adilger.int>
+	<3F022A30-072C-4270-B83C-1DFBB4659D16@Sun.COM>
+Message-ID: <20090206000128.GJ3209@webber.adilger.int>
+
+On Feb 05, 2009  18:18 -0500, Oleg Drokin wrote:
+> On Feb 5, 2009, at 5:31 PM, Andreas Dilger wrote:
+>> we might consider to do MDS-originated object destroys for
+>> such files (or all files) instead of sending huge RPC with cookies to
+>> the client (~84kB reply).  These could be batched on unlink commit,  
+>> and would also avoid the "inodes with destroyed objects" bug previously
+>> discussed.
+>
+> Do you only think of this as a way to cut the maximum RPC reply size on 
+> MDS?
+
+Yes, if we don't have to return cookies to the unlinking client then
+reply size will be ~ (24 * num_stripes) instead of (56 * num_stripes).
+
+With SOM it may be that the client will have to pass cookies again,
+though I'm not sure if that is for every OST in the file, or
+only OSTs that the client wrote to.
+
+Cheers, Andreas
+--
+Andreas Dilger
+Sr. Staff Engineer, Lustre Group
+Sun Microsystems of Canada, Inc.
+
+
+
+From Nathan.Rutman at sun.com  Mon Feb  9 16:48:52 2009
+From: Nathan.Rutman at sun.com (Nathaniel Rutman)
+Date: Mon, 09 Feb 2009 16:48:52 -0800
+Subject: [Lustre-devel] Lustre HSM - some talking points.
+In-Reply-To: <3F93D192-9058-4393-8D78-B5E775F702B1@Sun.COM>
+References: <3DF0F4AF-F4D6-476E-98F7-CD912C49FC18@Sun.COM>
+	<2734A30F-2C76-4725-9F3A-29AD4245B7E8@Sun.COM>
+	<496FCA67.6000500@sun.com>
+	<48D329C0-242E-4A5A-94C1-DF493BB25C2F@Sun.COM>
+	<496FE8D4.2090908@sun.com>
+	<BEB67402-7AFE-4BE1-A59C-050823AFC8E5@Sun.COM>
+	<4977647D.5010503@sun.com>
+	<4977E5BD.7000706@sun.com> <4978DB1E.30507@sun.com>
+	<497A144C.4000408@Sun.COM>
+	<20090126193548.GF3652@webber.adilger.int> <497E35A3.3080603@sun.com>
+	<DEB5E509-4641-40B6-86CA-972D885975D3@Sun.COM>
+	<4983998D.1030601@sun.com>
+	<8585251D-41D7-4B42-99F9-BDBFA2CF88C1@Sun.COM> <4987098F.402@Sun.COM>
+	<367E32B4-A759-45AD-9D2C-48C051FE1D62@Sun.COM>
+	<49872C9B.7060708@Sun.COM> <4988E42E.2000803@sun.com>
+	<3F93D192-9058-4393-8D78-B5E775F702B1@Sun.COM>
+Message-ID: <4990CEF4.7040707@sun.com>
+
+Colin Ngam wrote:
+> If these are all agreeable, lets start drawing up the Spec.
+>
+sure
+
+>> Basic Object SAMQFS - HSM for Lustre status Events(check state)
+>>
+>> 1.  Lustre perform "sls" command on Object SAMQFS Client.
+>>
+>> PS - We can have both User level command and API capabilities.
+>>
+>>   well technically, Lustre calls with the following information
+>>   1.  Luster FID
+>>   2.  Luster Opaque Meta Data
+>>   (BTW, that's Lustre, not Luster)
+>>   OSAM ignores fid and just uses OSAM identifier
+>
+> Right, Fiber/Fibre :-)
+>
+> I am missing something here .. Stage-In is to get a file from archive 
+> .. why do we need Item 2?  Or is 2 OSAM Identifier?  If so, great.  I 
+> like it.
+Yes, item 2 is archive-specific (e.g. OSAM) identifier.
+>
+> In this case, we should trust Lustre FID.  The OSAM ID is for a very 
+> fast search - direct index.
+Agreed, the Lustre FID will be the authoritative value.  OSAM would 
+internally use the OSAM identifier for the fast lookup, then verify the 
+Lustre FID matches.  If not, we would have to do a slow search for the 
+Lustre FID...
+>> Syncing Object SAMQFS with Lustre
+>> ---------------------------------
+>>
+>> Lustre File Identifier and Object SAMQFS Identifier can get out of 
+>> sync - shit
+>> happens.  We need syncing capabilities.
+>>
+>>   Only if we stored enough information to mismatch :)  If Lustre asks
+>>   for a FID, and it gets back the wrong file, it doesn't / can't
+>>   know.  Unless we store the FID inside the file it gets back and we
+>>   verify it.
+> If you always call with Lustre ID and OSAM ID, if we find that the 
+> Lustre ID does not match the OSAM ID, because perhaps we have done 
+> OSAM recovery and we are using a different OSAM ID to hold the Lustre 
+> ID now, we can search for the inode that match the Lustre ID, fetch 
+> the file and also update Lustre with the new OSAM ID.
+Perfect.  We will also need a way of modifying the Lustre FID stored in 
+the archive for the ultimate disaster recovery, which is equivalent to 
+"pre-populating" a Lustre FS with files from the archive.  We create an 
+empty file, mark it as "in archive", add the OSAM fid, and need to set 
+the archive's Lustre FID to match the new empty file.
+
+>
+>>
+>>
+>>
+>> Object SAMQFS - Freeing space on tapes
+>> --------------------------------------
+>>
+>> We will need a way to determine with Lustre - conclusively that an 
+>> archive is
+>> no longer needed.
+>>
+>>   If Lustre policy manager says "rm", then Lustre has no way to ever
+>>   get that file back.  There's no time-machine like old versions of
+>>   directories.  Would be a cool feature though.  Maybe archive says
+>>   "ok" to the rm, but secretly holds on to the file for some time in a
+>>   special "recently deleted" dir?
+> No namespace - no dir.
+>
+> If Lustre removes the file, we can delay the scrub.  If Lustre can 
+> come back with the Lustre ID and OSAM ID, if it has not been scrubbed, 
+> you can get it back.
+>
+Let's not worry about this for V1.  Once a file is rm'ed from Lustre, no 
+way to get back Lustre ID or OSAM ID.
+
+
+
+
+From Oleg.Drokin at Sun.COM  Sat Feb 14 00:47:10 2009
+From: Oleg.Drokin at Sun.COM (Oleg Drokin)
+Date: Sat, 14 Feb 2009 03:47:10 -0500
+Subject: [Lustre-devel] Some investigations on  MDS creation rate
+Message-ID: <DC147A4B-16CC-41B7-9C27-2F9BE64805FD@Sun.COM>
+
+Hello!
+
+    Few days ago a question arose (probably not the first time) how  
+quickly we can create files on MDS (ignoring OST objects creation for  
+now)
+    if we have super-low-latency i/o and super low-latency network.  
+Branch is b1_6, though I plan to run HEAD like this too.
+    I decided that perhaps fully local mount would be good enough for  
+the super-fast latency (Eric has some problems with this arguing that
+    lo lnd does local memory copy which should be somewhat expensive).
+    For super-low latency I made some loop files on tmpfs (I did not  
+want to go through real ramdisk, since I think that cuts through some of
+    the block-searching logic).
+    Also naturally debug was disabled.
+
+    The test was creation of 150000 files in a single dir on lustre  
+(not in root).
+    As expected, we are 100% cpu-bound in this scenario.
+    My somewhat dated Athlon X2 2.1Ghz achieves around 4.6k creates/ 
+sec, the problem is there is pretty big variability (easily 10% both  
+ways),
+    anyway I collected some oprofile traces and the overall picture is  
+pretty similar in there across the runs:
+    We spend 45+% time in main code, 20+% in ptlrpc+ldlm, 9% in  
+ldiskfs, 5-7% in lnet, ~3% in mds, ~3% in jbd.
+    When looking at the functions, the main offender is  
+do_gettimeofday with 12+% of total cpu time, but the callgraph implies  
+that
+    it is not called from Lustre.
+    second worst is memset_c with 4+%, what is interesting here is  
+that 79% of calls to long memsets are from init_inode, zeroing out  
+i_dquot
+    field (600+ bytes on x86_64, 440 bytes on i686), another 16% are  
+from .test.d_free and I am not sure what that means.
+    next is add_dirent_to_buf (in ldiskfs) with 2.5-3.5%
+    Somewhat surprisingly, ptlrpc_main is 2.4% of cpu as well.
+    There is also plenty of schedule-related activity (schedule,  
+try_to_wake_up, and friends) which when combined should give not so  
+small % of cpu of 5.4%
+
+    I decided to look at ptlrpc_main to see what's so bad about it and  
+sure enough, I see recent code that basically makes it to run at least  
+twice for
+    every incoming request and in different threads at that. After a  
+patch (below), create speed seemed to be better, but still was pretty  
+variable.
+    oprofile shows that scheduling activity significantly descreased  
+(and ptlrpc_main easily takes 30% less time now), but then other code  
+starts to
+    take more time at random (esp. ldiskfs related and memsets).
+    One of my suspicions is perhaps cpu-pingpong of tasks (I thought  
+that dualcore cpus do not have all that much penalty for cpu  
+switching, but might
+    be I was wrong about that), I pinned all mds threads to one cpu  
+and tried to run createmany from another, that bumped overall create  
+speed to
+    around 5k creates/sec and with ptlrpc_main patch to 5130 creates/ 
+sec.
+    Another thing I noticed is add_waitq_exclusive is adding tasks to  
+the tail of waitq with the logic of (shared waiters go to the  
+beginning since they
+    need to be woken up anyway, and we only need to wake up one  
+exclusive task). This really does not bode well with our usage  
+scenario, all of our
+    service threads are exclusive waiters, and so we are constantly  
+rotate through them throwing away ones that are hot in the cache and  
+replacing them
+    with stale old ones (well, not code, but stack and such). As an  
+experiment, I replaced the __add_wait_queue_tail with __add_wait_queue  
+in
+    add_wait_queue_exclusive() on top of all previous changes and I  
+now consistently see 5370 creates/sec.
+
+    I guess I need to run client and server on separate nodes since  
+that might cut variability, but then getting superfast network would  
+be a lot harder.
+
+    The tests were pretty simplistic in a sense that there was not a  
+lot of contention on MDS (due to single-threaded nature of creates),  
+but somewhat
+    interesting anyway.
+
+    I wonder if anyone might be has ideas about other reasons for big  
+variability in individual function times for the same workload.
+
+--- ptlrpc/service.c	11 Feb 2009 08:42:10 -0000	1.114.30.44
++++ ptlrpc/service.c	14 Feb 2009 08:43:24 -0000
+@@ -1156,7 +1156,6 @@ ptlrpc_server_handle_req_in(struct ptlrp
+          rc = ptlrpc_server_request_add(svc, req);
+          if (rc)
+                  GOTO(err_req, rc);
+-        cfs_waitq_signal(&svc->srv_waitq);
+          RETURN(1);
+
+  err_req:
+@@ -1654,14 +1653,15 @@ static int ptlrpc_main(void *arg)
+                  if (!list_empty(&svc->srv_reply_queue))
+                          ptlrpc_server_handle_reply (svc);
+
++recheck_queue:
+                  if (!list_empty(&svc->srv_req_in_queue)) {
+                          /* Process all incoming reqs before handling  
+any */
+                          ptlrpc_server_handle_req_in(svc);
+                          /* but limit ourselves in case of flood */
+                          if (counter++ < 1000)
+-                                continue;
+-                        counter = 0;
++                                goto recheck_queue;
+                  }
++                counter = 0;
+
+                  if (svc->srv_at_check)
+                          ptlrpc_at_check_timed(svc);
+
+
+Bye,
+     Oleg
+
+
+From Oleg.Drokin at Sun.COM  Sun Feb 15 16:10:39 2009
+From: Oleg.Drokin at Sun.COM (Oleg Drokin)
+Date: Sun, 15 Feb 2009 19:10:39 -0500
+Subject: [Lustre-devel] Some investigations on  MDS creation rate
+In-Reply-To: <49982E71.80902@cray.com>
+References: <DC147A4B-16CC-41B7-9C27-2F9BE64805FD@Sun.COM>
+	<49982E71.80902@cray.com>
+Message-ID: <71D10645-A30D-4D50-A79A-F08285196425@Sun.COM>
+
+Hello!
+
+On Feb 15, 2009, at 10:02 AM, Nic Henke wrote:
+> Was this all of the changes ? Why remove the cfs_waitq_signal ?
+
+Yes it was.
+We remove cfs_waitq_signal since it wakes up another thread to process  
+a message that we just moved from incoming queue to "to be processed"  
+queue.
+It helps me because I only have 1 message waiting at any one given time.
+If there is more than one message waiting, the result is not entirely  
+clear, but I think should be fine as well, essentially every incoming  
+message
+woke up one processing thread, and then they run racing to the  
+incoming message queue first, pick 1 request at a time, and put it  
+into processing queue,
+then try to see if there are more incoming messages (if the MDS is  
+lightly loaded, there is likely none, because another thread already  
+took care
+of them), and then process one request from processing queue.
+I suspect that it would be beneficial to only process one incoming  
+message and immediately start processing it to avoid processing it on  
+a potentially
+cache-cold cpu if there is no high priority handler registered. If  
+there is high priority handler registered, we can exit early on once  
+we met
+high priority message in incoming message processing.
+
+> We are having mdsrate issues on 1.6.5 as well - but so far we are  
+> not CPU bound yet. We'll be trying things like increasing the number  
+> of MDS threads and the create_count for the OSTs - If we are not CPU  
+> bound, we are waiting on something else.
+
+Are you not CPU-bound on MDS?
+How many clients do you run with mdsrate (as in separate clients  
+nodes) to how many cpu MDS?
+Have you tried eliminating object creation overhead just to see how  
+much effect that was having (mdsrate mknod option)?
+
+Bye,
+    Oleg
+
+
+From Oleg.Drokin at Sun.COM  Mon Feb 16 03:11:02 2009
+From: Oleg.Drokin at Sun.COM (Oleg Drokin)
+Date: Mon, 16 Feb 2009 06:11:02 -0500
+Subject: [Lustre-devel] Some investigations on  MDS creation rate
+In-Reply-To: <DC147A4B-16CC-41B7-9C27-2F9BE64805FD@Sun.COM>
+References: <DC147A4B-16CC-41B7-9C27-2F9BE64805FD@Sun.COM>
+Message-ID: <FE7ACA5E-C11C-41B7-BF1D-05F9A73C72DF@sun.com>
+
+Hello!
+
+   Ok, a follow up to my findings. First of all it turned out in this  
+specific (and quite useless) case of a lot of mknods we do extra  
+unneeded lookup RPC
+   where we can do without (also in somewhat more useful mkdir case  
+too). I filed a bug 18534 with a prototype fix.
+   With that fix on top of all previous changes I now see create rate  
+of ~8.8k (with peaks into 9.3k territory) creates/sec.
+   I also performed tests on HEAD and it performs significantly worse  
+(5.8k at most). Even with all the same fixes ported from b1_6.
+   The CPU remains the same and I used lock meter to verify that there  
+is no significant lock contention.
+   Looking into the oprofile results, it looks like all code just  
+became slower (judging by more hits in various areas for the same  
+workload).
+   Also some parts of the code are now more heavily loaded (ptlrpc 
++ldlm in HEAD draws more cpu time, llite portion of the code is 50%  
+more time
+   (but still from 2% to 3% total cpu time spent, not all that  
+significant)).
+   Another problem on HEAD is huge variability between runs. Easily  
+could be +/- 50% between runs for HEAD where b1_6 results are pretty  
+close together.
+   I have no idea why the variability and I do not see anything very  
+obvious that would explain sudden overall performance degradation of  
+HEAD code either yet.
+
+   I have put my oprofile results to http://linuxhacker.ru/lustre-profile 
+  the file suffixes are -calls for callgraphs, -func for cpu usage per  
+function and
+   no prefix for cpu usage per module. oprofile and oprofiled binaries  
+substracted from results.
+   There are 3 runs of b1_6 and HEAD, every time a fresh filesystem  
+was created (this is the only way to do in on HEAD now, since you  
+cannot remove 150k files from
+   same dir due to bug 17560).
+   all 3 runs of b1_6 gave out ~7.8k/sec (lower speed is due to  
+oprofile taking cpu).
+   head runs 1 and 3 gave 3.0k/sec, while run 2 produced 5.1k/sec.
+   It is interesting that in slower HEAD runs lnet takes 60% more  
+wallclock cpu time than in faster run and the faster head run has lnet  
+at the same
+   wall time as b1_6 runs. I do not know yet if that means that  
+sometimes HEAD decided to double amount of traffic for some reason or  
+if there
+   is another explanation too.
+
+   As a comparison I have run createmany with same parameters on just  
+ldiskfs, the measurements are less finegrained there, since we just  
+divide number of
+   creates performed by the time in seconds and creating 150k files on  
+ldiskfs takes only 5-6 seconds, so the rate is 25k-30k creates/sec.
+
+Bye,
+     Oleg
+
+
+From Alex.Zhuravlev at Sun.COM  Mon Feb 16 07:26:31 2009
+From: Alex.Zhuravlev at Sun.COM (Alex Zhuravlev)
+Date: Mon, 16 Feb 2009 18:26:31 +0300
+Subject: [Lustre-devel] Some investigations on  MDS creation rate
+In-Reply-To: <FE7ACA5E-C11C-41B7-BF1D-05F9A73C72DF@sun.com>
+References: <DC147A4B-16CC-41B7-9C27-2F9BE64805FD@Sun.COM>
+	<FE7ACA5E-C11C-41B7-BF1D-05F9A73C72DF@sun.com>
+Message-ID: <499985A7.7000600@sun.com>
+
+Oleg Drokin wrote:
+>    I also performed tests on HEAD and it performs significantly worse  
+> (5.8k at most). Even with all the same fixes ported from b1_6.
+>    The CPU remains the same and I used lock meter to verify that there  
+> is no significant lock contention.
+>    Looking into the oprofile results, it looks like all code just  
+> became slower (judging by more hits in various areas for the same  
+> workload).
+>    Also some parts of the code are now more heavily loaded (ptlrpc 
+> +ldlm in HEAD draws more cpu time, llite portion of the code is 50%  
+> more time
+
+notice HEAD takes two ldlm locks for each create, 1.6 takes one.
+
+>    I have no idea why the variability and I do not see anything very  
+> obvious that would explain sudden overall performance degradation of  
+> HEAD code either yet.
+
+it would  be interesting to gather L1/L2 cache hit/miss with oprofile for
+1.6 and HEAD.
+
+thanks, Alex
+
+
+From Oleg.Drokin at Sun.COM  Mon Feb 16 13:05:07 2009
+From: Oleg.Drokin at Sun.COM (Oleg Drokin)
+Date: Mon, 16 Feb 2009 16:05:07 -0500
+Subject: [Lustre-devel] Some investigations on  MDS creation rate
+In-Reply-To: <499985A7.7000600@sun.com>
+References: <DC147A4B-16CC-41B7-9C27-2F9BE64805FD@Sun.COM>
+	<FE7ACA5E-C11C-41B7-BF1D-05F9A73C72DF@sun.com>
+	<499985A7.7000600@sun.com>
+Message-ID: <CB88ADF9-B0C6-41FA-AFCE-F9CA1E2416BD@Sun.COM>
+
+Hello!
+
+On Feb 16, 2009, at 10:26 AM, Alex Zhuravlev wrote:
+
+> Oleg Drokin wrote:
+>>   I also performed tests on HEAD and it performs significantly  
+>> worse  (5.8k at most). Even with all the same fixes ported from b1_6.
+>>   The CPU remains the same and I used lock meter to verify that  
+>> there  is no significant lock contention.
+>>   Looking into the oprofile results, it looks like all code just   
+>> became slower (judging by more hits in various areas for the same   
+>> workload).
+>>   Also some parts of the code are now more heavily loaded (ptlrpc  
+>> +ldlm in HEAD draws more cpu time, llite portion of the code is  
+>> 50%  more time
+> notice HEAD takes two ldlm locks for each create, 1.6 takes one.
+
+What is the other one? I am looking at mdt_md_create and I see it  
+locks parent, but not child, just like b1_6.
+
+Bye,
+     Oleg
+
+
+From Alex.Zhuravlev at Sun.COM  Mon Feb 16 22:17:23 2009
+From: Alex.Zhuravlev at Sun.COM (Alex Zhuravlev)
+Date: Tue, 17 Feb 2009 09:17:23 +0300
+Subject: [Lustre-devel] Some investigations on  MDS creation rate
+In-Reply-To: <CB88ADF9-B0C6-41FA-AFCE-F9CA1E2416BD@Sun.COM>
+References: <DC147A4B-16CC-41B7-9C27-2F9BE64805FD@Sun.COM>
+	<FE7ACA5E-C11C-41B7-BF1D-05F9A73C72DF@sun.com>
+	<499985A7.7000600@sun.com>
+	<CB88ADF9-B0C6-41FA-AFCE-F9CA1E2416BD@Sun.COM>
+Message-ID: <499A5673.4060103@sun.com>
+
+Oleg Drokin wrote:
+>> notice HEAD takes two ldlm locks for each create, 1.6 takes one.
+> 
+> What is the other one? I am looking at mdt_md_create and I see it locks 
+> parent, but not child, just like b1_6.
+
+one lock on whole parent directory (to invalidate client's cache), another
+lock on part of parent directory with given hash. this is workaround for
+slow creates from multiple clients due to rep-ack mechanism.
+
+thanks, Alex
+
+
+From eeb at sun.com  Tue Feb 17 12:37:42 2009
+From: eeb at sun.com (Eric Barton)
+Date: Tue, 17 Feb 2009 20:37:42 +0000
+Subject: [Lustre-devel] Security configuration
+Message-ID: <014901c9913f$94f0b560$bed22020$@com>
+
+Nathan,
+
+We'd like to be able to describe a set of nodes and say that
+as far as security is concerned, they are all equivalent - i.e. if
+an MDT authorizes eeb at node1 to perform a certain action, then
+eeb at nodex is implicitly authorized provided node1 and nodex are in
+the same set.
+
+Leaving aside for now, the question of how the sets are described
+(they could be whole LNETs or whole Kerberos realms, or NID lists),
+is the MGS the right place to stash this config?
+
+
+    Cheers,
+              Eric
+
+
+
+
+
+From Nicolas.Williams at sun.com  Wed Feb 18 15:19:00 2009
+From: Nicolas.Williams at sun.com (Nicolas Williams)
+Date: Wed, 18 Feb 2009 17:19:00 -0600
+Subject: [Lustre-devel] Security configuration
+In-Reply-To: <014901c9913f$94f0b560$bed22020$@com>
+References: <014901c9913f$94f0b560$bed22020$@com>
+Message-ID: <20090218231900.GQ9992@Sun.COM>
+
+On Tue, Feb 17, 2009 at 08:37:42PM +0000, Eric Barton wrote:
+> We'd like to be able to describe a set of nodes and say that
+> as far as security is concerned, they are all equivalent - i.e. if
+> an MDT authorizes eeb at node1 to perform a certain action, then
+> eeb at nodex is implicitly authorized provided node1 and nodex are in
+> the same set.
+> 
+> Leaving aside for now, the question of how the sets are described
+> (they could be whole LNETs or whole Kerberos realms, or NID lists),
+> is the MGS the right place to stash this config?
+
+As far as Kerberos V principal names go, then the name will be eeb at REALM
+throughout.
+
+As for what happens with identities on the wire (for GET/SETATTR), this
+is where ID mapping comes in.  Here the configuration that matters will
+be local to each client (what domain name to assert) and to the MDS
+(what clients to trust).
+
+Nico
+-- 
+
+
+From Terry.Rutledge at Sun.COM  Fri Feb 20 15:31:10 2009
+From: Terry.Rutledge at Sun.COM (Terry Rutledge)
+Date: Fri, 20 Feb 2009 15:31:10 -0800
+Subject: [Lustre-devel] New tags recently added to CVS
+Message-ID: <499F3D3E.7060408@Sun.COM>
+
+Hi all,
+
+Just wanted to make you aware of a couple of new
+CVS tags that I've created.
+
+*HEAD:*
+*v1_9_160* - Biweekly build for the 2.0 Release.
+    This is not an official release, just a build
+    to be used for internal testing.
+
+*b_release_1_8_0:*
+*v1_8_0_RC2* - Second Release Candidate for the 1.8.0
+    Release.  This is not the final release, as we
+    know that we will be producing RC3 in the near
+    future.
+
+*b_release_1_6_7:*
+*v1_6_7* - This is the official release for Lustre 1.6.7.
+    Previously this was v1_6_7_RC5.
+
+
+I'll send further updates when I've created new tags.
+
+Terry
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20090220/c522fe94/attachment.htm>
+
+From adilger at sun.com  Fri Feb 20 16:21:09 2009
+From: adilger at sun.com (Andreas Dilger)
+Date: Fri, 20 Feb 2009 17:21:09 -0700
+Subject: [Lustre-devel] SOM Recovery of open files
+In-Reply-To: <5882C1BC-E01E-42FF-A728-08885E997075@sun.com>
+References: <20090130233253.GK3652@webber.adilger.int>
+	<63CF2DAF-59F7-4124-8AE9-188927051AAB@sun.com>
+	<C68908D1-8287-4870-903E-DDCDED6E31D0@Sun.COM>
+	<5882C1BC-E01E-42FF-A728-08885E997075@sun.com>
+Message-ID: <20090221002109.GA3863@webber.adilger.int>
+
+On Feb 01, 2009  20:24 +0300, Vitaly Fertman wrote:
+> On Feb 1, 2009, at 5:45 PM, Vitaly Fertman wrote:
+>> thus the only problem here is a stale fh on a client which may let the 
+>> client to write to the file after the SOM cache will be re-obtained on
+>> MDS, which consists of 2 parts:
+>>
+>> - an ability of a client to write to an opened file without a  
+>>   connection to MDS;
+
+With the layout lock this would not be possible.  The client would be
+required to have the layout lock (hence be connected to the MDS) in
+order to generate a new write.
+
+>> - an absence of file re-opening on re-connection.
+>
+> I forgot to mention about truncate (locked & lockless) and lockless IO.
+>
+> MDS must be aware about opened IOEpoch for truncate as well, otherwise
+> obd_punches must be blocked. The situation is pretty rare as we do not
+> cache punches on clients and they go away right md_setattr completes,
+> but I think what if at the time of the client eviction from MDS, the  
+> connection between this client and an OST is unstable so that punches
+> will hang in the re-send list for a while, enough for another client
+> to modify the file  
+
+I a second client is trying to modify the file while the first one is
+having OST connection problems, then the first client would either
+succeed to flush its cache, or be evicted by the OST before the second
+client can get the extent locks needed to truncate the file.
+
+The same is true whether the truncate is from a remote client (with
+client lock) or a lockless truncate (OST holds lock).
+
+> MDS gets a new SOM cache, and later punch will modify the file.
+>
+> The same for lockless IO.
+>
+> The locked truncate is involved as it could hang in the re-send list  
+> with the lock enqueue, so that enqueue+punch will happen after MDS re- 
+> validates SOM cache.
+
+In this case the client will not even begin to send the truncate RPC
+until the lock enqueue has succeeded.
+
+> Thus:
+> - block truncate and lockless IO;
+> - "re-open" truncate on re-connection as well as regularly opened files.
+>
+> This must happen even if SOM is disabled but the client already supports 
+> it (clients are upgraded first). Otherwise, the interoperability will be  
+> broken.
+
+It isn't clear to me why the done_writing RPC needs to be sent separately
+for each truncate?  The client is already sending an RPC to the MDS for
+each truncate to update the size there, if file is not open (and currently
+has no objects), and to verify file write permission (avoid truncate of
+in-use executables).
+
+Now, if this only happens on recovery I don't have a huge objection.  If
+the "done_writing" RPC needs to be sent to the MDS for every single truncate,
+then that is a major performance concern.
+
+Cheers, Andreas
+--
+Andreas Dilger
+Sr. Staff Engineer, Lustre Group
+Sun Microsystems of Canada, Inc.
+
+
+
+From nic at cray.com  Sun Feb 22 09:15:45 2009
+From: nic at cray.com (Nic Henke)
+Date: Sun, 22 Feb 2009 11:15:45 -0600
+Subject: [Lustre-devel] moving obd_fail_check to libcfs
+Message-ID: <49A18841.7030200@cray.com>
+
+Would there be any objection to a patch that'd move the current
+obdclass-centric obd_fail_check and friends to libcfs ? I'd like to be
+able to use the same logic inside LNET and our new LND without
+replicating the code.
+
+I'm thinking it would need to be renamed to CFS_FAIL_CHECK as well.
+
+Thoughts or suggestions?
+
+Nic
+
+
+From rread at sun.com  Mon Feb 23 00:11:12 2009
+From: rread at sun.com (Robert Read)
+Date: Mon, 23 Feb 2009 11:11:12 +0300
+Subject: [Lustre-devel] moving obd_fail_check to libcfs
+In-Reply-To: <49A18841.7030200@cray.com>
+References: <49A18841.7030200@cray.com>
+Message-ID: <56B06EF4-AAF5-448C-96C0-55E5E9A1AA44@sun.com>
+
+I don't think libcfs currently initializes any proc entries, so it's  
+not clear how you will set obd_fail_loc.  In theory libcfs should just  
+thin library of porting primitives, and things like logging and  
+fail_check should be in a layer just above libcfs which could have a  
+management interface.    So far we've just put some extra low-level  
+functionality into libcfs, but at some point it should be refactored.  
+I think when we need to add initialization code and an interface is  
+that point.
+
+robert
+
+
+On Feb 22, 2009, at 8:15 PM, Nic Henke wrote:
+
+> Would there be any objection to a patch that'd move the current
+> obdclass-centric obd_fail_check and friends to libcfs ? I'd like to be
+> able to use the same logic inside LNET and our new LND without
+> replicating the code.
+>
+> I'm thinking it would need to be renamed to CFS_FAIL_CHECK as well.
+>
+> Thoughts or suggestions?
+>
+> Nic
+> _______________________________________________
+> Lustre-devel mailing list
+> Lustre-devel at lists.lustre.org
+> http://lists.lustre.org/mailman/listinfo/lustre-devel
+
+
+
+From eeb at sun.com  Mon Feb 23 06:56:24 2009
+From: eeb at sun.com (Eric Barton)
+Date: Mon, 23 Feb 2009 17:56:24 +0300
+Subject: [Lustre-devel] moving obd_fail_check to libcfs
+In-Reply-To: <49A18841.7030200@cray.com>
+References: <49A18841.7030200@cray.com>
+Message-ID: <000101c995c6$e95ded80$bc19c880$@com>
+
+Seems a fine thing to do - lets see the patch...
+
+    Cheers,
+              Eric
+
+> -----Original Message-----
+> From: lustre-devel-bounces at lists.lustre.org [mailto:lustre-devel-bounces at lists.lustre.org] On Behalf Of Nic Henke
+> Sent: 22 February 2009 5:16 PM
+> To: lustre-devel at lists.lustre.org
+> Subject: [Lustre-devel] moving obd_fail_check to libcfs
+> 
+> Would there be any objection to a patch that'd move the current
+> obdclass-centric obd_fail_check and friends to libcfs ? I'd like to be
+> able to use the same logic inside LNET and our new LND without
+> replicating the code.
+> 
+> I'm thinking it would need to be renamed to CFS_FAIL_CHECK as well.
+> 
+> Thoughts or suggestions?
+> 
+> Nic
+> _______________________________________________
+> Lustre-devel mailing list
+> Lustre-devel at lists.lustre.org
+> http://lists.lustre.org/mailman/listinfo/lustre-devel
+
+
+
+From eeb at sun.com  Mon Feb 23 06:56:24 2009
+From: eeb at sun.com (Eric Barton)
+Date: Mon, 23 Feb 2009 17:56:24 +0300
+Subject: [Lustre-devel] SOM Recovery of open files
+In-Reply-To: <20090221002109.GA3863@webber.adilger.int>
+References: <20090130233253.GK3652@webber.adilger.int>
+	<63CF2DAF-59F7-4124-8AE9-188927051AAB@sun.com>
+	<C68908D1-8287-4870-903E-DDCDED6E31D0@Sun.COM>
+	<5882C1BC-E01E-42FF-A728-08885E997075@sun.com>
+	<20090221002109.GA3863@webber.adilger.int>
+Message-ID: <000d01c995c6$ebe55bb0$c3b01310$@com>
+
+Please also consider the security implication.  Can all client
+actions be checked without extra message passing?  Are any
+special capabilities required?  To what extent must clients
+be trusted?  What will go wrong if this trust is abused etc...
+
+    Cheers,
+              Eric
+
+> -----Original Message-----
+> From: lustre-devel-bounces at lists.lustre.org [mailto:lustre-devel-bounces at lists.lustre.org] On Behalf Of Andreas
+> Dilger
+> Sent: 21 February 2009 12:21 AM
+> To: Vitaly Fertman
+> Cc: Oleg Drokin; Lustre Development Mailing List
+> Subject: Re: [Lustre-devel] SOM Recovery of open files
+> 
+> On Feb 01, 2009  20:24 +0300, Vitaly Fertman wrote:
+> > On Feb 1, 2009, at 5:45 PM, Vitaly Fertman wrote:
+> >> thus the only problem here is a stale fh on a client which may let the
+> >> client to write to the file after the SOM cache will be re-obtained on
+> >> MDS, which consists of 2 parts:
+> >>
+> >> - an ability of a client to write to an opened file without a
+> >>   connection to MDS;
+> 
+> With the layout lock this would not be possible.  The client would be
+> required to have the layout lock (hence be connected to the MDS) in
+> order to generate a new write.
+> 
+> >> - an absence of file re-opening on re-connection.
+> >
+> > I forgot to mention about truncate (locked & lockless) and lockless IO.
+> >
+> > MDS must be aware about opened IOEpoch for truncate as well, otherwise
+> > obd_punches must be blocked. The situation is pretty rare as we do not
+> > cache punches on clients and they go away right md_setattr completes,
+> > but I think what if at the time of the client eviction from MDS, the
+> > connection between this client and an OST is unstable so that punches
+> > will hang in the re-send list for a while, enough for another client
+> > to modify the file
+> 
+> I a second client is trying to modify the file while the first one is
+> having OST connection problems, then the first client would either
+> succeed to flush its cache, or be evicted by the OST before the second
+> client can get the extent locks needed to truncate the file.
+> 
+> The same is true whether the truncate is from a remote client (with
+> client lock) or a lockless truncate (OST holds lock).
+> 
+> > MDS gets a new SOM cache, and later punch will modify the file.
+> >
+> > The same for lockless IO.
+> >
+> > The locked truncate is involved as it could hang in the re-send list
+> > with the lock enqueue, so that enqueue+punch will happen after MDS re-
+> > validates SOM cache.
+> 
+> In this case the client will not even begin to send the truncate RPC
+> until the lock enqueue has succeeded.
+> 
+> > Thus:
+> > - block truncate and lockless IO;
+> > - "re-open" truncate on re-connection as well as regularly opened files.
+> >
+> > This must happen even if SOM is disabled but the client already supports
+> > it (clients are upgraded first). Otherwise, the interoperability will be
+> > broken.
+> 
+> It isn't clear to me why the done_writing RPC needs to be sent separately
+> for each truncate?  The client is already sending an RPC to the MDS for
+> each truncate to update the size there, if file is not open (and currently
+> has no objects), and to verify file write permission (avoid truncate of
+> in-use executables).
+> 
+> Now, if this only happens on recovery I don't have a huge objection.  If
+> the "done_writing" RPC needs to be sent to the MDS for every single truncate,
+> then that is a major performance concern.
+> 
+> Cheers, Andreas
+> --
+> Andreas Dilger
+> Sr. Staff Engineer, Lustre Group
+> Sun Microsystems of Canada, Inc.
+> 
+> _______________________________________________
+> Lustre-devel mailing list
+> Lustre-devel at lists.lustre.org
+> http://lists.lustre.org/mailman/listinfo/lustre-devel
+
+
+
+From eeb at sun.com  Mon Feb 23 13:39:51 2009
+From: eeb at sun.com (Eric Barton)
+Date: Tue, 24 Feb 2009 00:39:51 +0300
+Subject: [Lustre-devel] moving obd_fail_check to libcfs
+In-Reply-To: <56B06EF4-AAF5-448C-96C0-55E5E9A1AA44@sun.com>
+References: <49A18841.7030200@cray.com>
+	<56B06EF4-AAF5-448C-96C0-55E5E9A1AA44@sun.com>
+Message-ID: <010b01c995ff$43083420$c9189c60$@com>
+
+Although I could agree that there should be levels of abstraction
+above libcfs, it is, de facto, the place we put _all_ generic code
+- not just stateless porting primitives, but everything that can be
+used everywhere.
+
+I don't actually think of obd_fail_check as inexorably bound with
+/proc.  But since that's the current implementation, it's probably
+my oversight not to have shared that sense of direction.
+
+Nic, is the patch totally /proc - centric?  Wangdi is doing the work
+to remove /proc-ness and make our tuneables, configurables and monitoring
+more portable.  He needs to be involved...
+
+    Cheers,
+              Eric
+
+> -----Original Message-----
+> From: lustre-devel-bounces at lists.lustre.org [mailto:lustre-devel-bounces at lists.lustre.org] On Behalf Of Robert Read
+> Sent: 23 February 2009 11:11 AM
+> To: Nic Henke
+> Cc: lustre-devel at lists.lustre.org
+> Subject: Re: [Lustre-devel] moving obd_fail_check to libcfs
+> 
+> I don't think libcfs currently initializes any proc entries, so it's
+> not clear how you will set obd_fail_loc.  In theory libcfs should just
+> thin library of porting primitives, and things like logging and
+> fail_check should be in a layer just above libcfs which could have a
+> management interface.    So far we've just put some extra low-level
+> functionality into libcfs, but at some point it should be refactored.
+> I think when we need to add initialization code and an interface is
+> that point.
+> 
+> robert
+> 
+> 
+> On Feb 22, 2009, at 8:15 PM, Nic Henke wrote:
+> 
+> > Would there be any objection to a patch that'd move the current
+> > obdclass-centric obd_fail_check and friends to libcfs ? I'd like to be
+> > able to use the same logic inside LNET and our new LND without
+> > replicating the code.
+> >
+> > I'm thinking it would need to be renamed to CFS_FAIL_CHECK as well.
+> >
+> > Thoughts or suggestions?
+> >
+> > Nic
+> > _______________________________________________
+> > Lustre-devel mailing list
+> > Lustre-devel at lists.lustre.org
+> > http://lists.lustre.org/mailman/listinfo/lustre-devel
+> 
+> _______________________________________________
+> Lustre-devel mailing list
+> Lustre-devel at lists.lustre.org
+> http://lists.lustre.org/mailman/listinfo/lustre-devel
+
+
+
+From di.wang at sun.com  Mon Feb 23 14:50:57 2009
+From: di.wang at sun.com (di wang)
+Date: Mon, 23 Feb 2009 17:50:57 -0500
+Subject: [Lustre-devel] moving obd_fail_check to libcfs
+In-Reply-To: <010b01c995ff$43083420$c9189c60$@com>
+References: <49A18841.7030200@cray.com>
+	<56B06EF4-AAF5-448C-96C0-55E5E9A1AA44@sun.com>
+	<010b01c995ff$43083420$c9189c60$@com>
+Message-ID: <49A32851.50803@sun.com>
+
+Hello,
+Eric Barton wrote:
+> Although I could agree that there should be levels of abstraction
+> above libcfs, it is, de facto, the place we put _all_ generic code
+> - not just stateless porting primitives, but everything that can be
+> used everywhere.
+>
+> I don't actually think of obd_fail_check as inexorably bound with
+> /proc.  But since that's the current implementation, it's probably
+> my oversight not to have shared that sense of direction.
+>
+> Nic, is the patch totally /proc - centric?  Wangdi is doing the work
+> to remove /proc-ness and make our tuneables, configurables and monitoring
+> more portable.  He needs to be involved...
+>
+>   
+Yes, after we have our own /proc stuff in lustre, which might be land to 
+HEAD in 2 or 3 weeks. All the new proc stuff is implemented in libcfs 
+layer, then we will move as much as obd proc stuff(obd lprocfs layer) to 
+libcfs layer, then they(include obd_fail_check) can be shared with LNET.
+
+The only difference for those sysctl parameters is that you may not use 
+/etc/sysctl.conf to control them anymore, and lctl set_param is the only 
+interface here.
+
+Actually, you can also move this now. but it means you need move those 
+obd proc api to libcfs layer,  which  might  not  be  small  amount  of  
+work.
+
+Thanks
+WangDi
+>     Cheers,
+>               Eric
+>
+>   
+
+
+
+From nic at cray.com  Mon Feb 23 15:53:31 2009
+From: nic at cray.com (Nicholas Henke)
+Date: Mon, 23 Feb 2009 17:53:31 -0600
+Subject: [Lustre-devel] moving obd_fail_check to libcfs
+In-Reply-To: <49A32851.50803@sun.com>
+References: <49A18841.7030200@cray.com>
+	<56B06EF4-AAF5-448C-96C0-55E5E9A1AA44@sun.com>
+	<010b01c995ff$43083420$c9189c60$@com> <49A32851.50803@sun.com>
+Message-ID: <49A336FB.1040908@cray.com>
+
+di wang wrote:
+> Hello,
+> Eric Barton wrote:
+>> Although I could agree that there should be levels of abstraction
+>> above libcfs, it is, de facto, the place we put _all_ generic code
+>> - not just stateless porting primitives, but everything that can be
+>> used everywhere.
+>>
+>> I don't actually think of obd_fail_check as inexorably bound with
+>> /proc.  But since that's the current implementation, it's probably
+>> my oversight not to have shared that sense of direction.
+>>
+>> Nic, is the patch totally /proc - centric?  Wangdi is doing the work
+>> to remove /proc-ness and make our tuneables, configurables and monitoring
+>> more portable.  He needs to be involved...
+
+Not totally, no - just the user-space data manipulation. Once that variable is 
+set, the code is pretty agnostic.
+
+> Yes, after we have our own /proc stuff in lustre, which might be land to 
+> HEAD in 2 or 3 weeks. All the new proc stuff is implemented in libcfs 
+> layer, then we will move as much as obd proc stuff(obd lprocfs layer) to 
+> libcfs layer, then they(include obd_fail_check) can be shared with LNET.
+> 
+
+Is there a branch name I could checkout to look at this ? I'd like to make sure 
+the fail_loc move would be easy to tie into that.
+
+> The only difference for those sysctl parameters is that you may not use 
+> /etc/sysctl.conf to control them anymore, and lctl set_param is the only 
+> interface here.
+> 
+> Actually, you can also move this now. but it means you need move those 
+> obd proc api to libcfs layer,  which  might  not  be  small  amount  of  
+> work.
+
+It isn't too bad - they use the CFS_PROC_PROTO and not all of the lprocfs_XXX() 
+functionality.
+
+It should like this would have a limited lifetime in 1.6.X and 1.8.X, but I'm 
+fine with that. That gives us a bit of time :-)
+
+Nic
+
+
+
+From di.wang at sun.com  Mon Feb 23 17:04:05 2009
+From: di.wang at sun.com (di wang)
+Date: Mon, 23 Feb 2009 20:04:05 -0500
+Subject: [Lustre-devel] moving obd_fail_check to libcfs
+In-Reply-To: <49A336FB.1040908@cray.com>
+References: <49A18841.7030200@cray.com>
+	<56B06EF4-AAF5-448C-96C0-55E5E9A1AA44@sun.com>
+	<010b01c995ff$43083420$c9189c60$@com> <49A32851.50803@sun.com>
+	<49A336FB.1040908@cray.com>
+Message-ID: <49A34785.5020007@sun.com>
+
+Hello,
+
+Nicholas Henke wrote:
+>
+> Is there a branch name I could checkout to look at this ? I'd like to 
+> make sure the fail_loc move would be easy to tie into that.
+It is in the b_hd_params, and you can also check bug 15384.
+
+Thanks
+WangDi
+>> The only difference for those sysctl parameters is that you may not 
+>> use /etc/sysctl.conf to control them anymore, and lctl set_param is 
+>> the only interface here.
+>>
+>> Actually, you can also move this now. but it means you need move 
+>> those obd proc api to libcfs layer,  which  might  not  be  small  
+>> amount  of  work.
+>
+> It isn't too bad - they use the CFS_PROC_PROTO and not all of the 
+> lprocfs_XXX() functionality.
+>
+> It should like this would have a limited lifetime in 1.6.X and 1.8.X, 
+> but I'm fine with that. That gives us a bit of time :-)
+>
+> Nic
+>
+
+
+
+From atchley at myri.com  Tue Feb 24 10:32:25 2009
+From: atchley at myri.com (Scott Atchley)
+Date: Tue, 24 Feb 2009 13:32:25 -0500
+Subject: [Lustre-devel] Credits, peer credits and concurrent sends
+Message-ID: <FCCFA143-03D6-45C3-93EC-61F106BF8193@myri.com>
+
+Hi all,
+
+I am updating MXLND. I am looking at O2IBLND as a reference and I am  
+wondering what is the difference between the above module parameters?
+
+The o2iblnd_modparams.c file has:
+
+static int credits = 64;
+CFS_MODULE_PARM(credits, "i", int, 0444,
+                 "# concurrent sends");
+
+static int peer_credits = 8;
+CFS_MODULE_PARM(peer_credits, "i", int, 0444,
+                 "# concurrent sends to 1 peer");
+
+#if IBLND_MAP_ON_DEMAND
+static int concurrent_sends = IBLND_RX_MSGS;
+#else
+static int concurrent_sends = IBLND_MSG_QUEUE_SIZE;
+#endif
+CFS_MODULE_PARM(concurrent_sends, "i", int, 0444,
+                 "send work-queue sizing");
+
+where IBLND_MSG_QUEUE_SIZE is 8.
+
+Can anyone elaborate on differences and relationships (e.g. what does  
+it mean if concurrent_sends is greater than peer_credits or is that  
+not allowed)?
+
+Thanks,
+
+Scott
+
+
+--
+Scott Atchley
+Myricom Inc.
+http://www.myri.com
+
+
+
+
+From He.Huang at Sun.COM  Tue Feb 24 11:09:16 2009
+From: He.Huang at Sun.COM (Isaac Huang)
+Date: Tue, 24 Feb 2009 14:09:16 -0500
+Subject: [Lustre-devel] Credits, peer credits and concurrent sends
+In-Reply-To: <FCCFA143-03D6-45C3-93EC-61F106BF8193@myri.com>
+References: <FCCFA143-03D6-45C3-93EC-61F106BF8193@myri.com>
+Message-ID: <20090224190916.GA12305@sun.com>
+
+On Tue, Feb 24, 2009 at 01:32:25PM -0500, Scott Atchley wrote:
+> Hi all,
+> 
+> I am updating MXLND. I am looking at O2IBLND as a reference and I am  
+> wondering what is the difference between the above module parameters?
+> 
+> The o2iblnd_modparams.c file has:
+> 
+> static int credits = 64;
+> CFS_MODULE_PARM(credits, "i", int, 0444,
+>                  "# concurrent sends");
+> 
+> static int peer_credits = 8;
+> CFS_MODULE_PARM(peer_credits, "i", int, 0444,
+>                  "# concurrent sends to 1 peer");
+
+These two controls LNet-layer send credits - how many LNet messages
+could be sent concurrently over a NI and a peer, respectively.
+
+> #if IBLND_MAP_ON_DEMAND
+> static int concurrent_sends = IBLND_RX_MSGS;
+> #else
+> static int concurrent_sends = IBLND_MSG_QUEUE_SIZE;
+> #endif
+> CFS_MODULE_PARM(concurrent_sends, "i", int, 0444,
+>                  "send work-queue sizing");
+> 
+> where IBLND_MSG_QUEUE_SIZE is 8.
+
+The concurrent_sends controls the number of o2iblnd messages that
+could be posted to a connection (and its QP) concurrently.
+
+The difference between LNet messages and o2iblnd messages is: 1. A
+LNet message is usually transfered by several o2iblnd messages (e.g.
+setting up RDMA transfer). 2. Some o2iblnd messages have nothing to do
+with LNet-layer messages (e.g. NOOP, which carries LND credits and
+keepalive data).
+
+The reason why we must limit the number of concurrent o2iblnd messages 
+posted to a connection is very specific to this LND - it has something
+to do with RDMA fragments and QP and CQ sizing. I wouldn't elaborate,
+unless you're very interested, because it only applies to the o2iblnd
+and probably wouldn't be an issue for the MXLND.
+
+The peer_credits alone couldn't limit the concurrent o2iblnd messages
+because some o2iblnd messages (like PUT_ACK, GET_DONE) are responses
+to peer's requests and are thus not limited by LNet peer tx credits at
+my side.
+
+That's why we had to add concurrent_sends.
+
+> Can anyone elaborate on differences and relationships (e.g. what does  
+> it mean if concurrent_sends is greater than peer_credits or is that  
+> not allowed)?
+
+In theory, it's possible. It simply means that concurrent o2iblnd
+messages allowed is more than concurrent LNet messages allowed.
+
+On the other hand, some LNDs (like the o2iblnd) also implements
+LND-layer tx credits, which seems very confusing together with the
+LNet tx credits. One important difference between the two is, LNet tx
+credits are returned when send operations complete locally and the
+local message buffer could be reused, while LND tx credits are returned
+by peers over the wire when my peers have reposted their receive buffers.
+In short, LND tx credits usually protects remote buffers and LNet tx
+credits prevent LNet from overcommitting an interface or a peer.
+
+Hope this helps,
+Isaac
+
+
+From magawake at gmail.com  Sat Feb 28 16:20:20 2009
+From: magawake at gmail.com (Mag Gam)
+Date: Sat, 28 Feb 2009 19:20:20 -0500
+Subject: [Lustre-devel] OST remount problem.
+Message-ID: <1cbd6f830902281620h2c87055aqdc58e80e114336af@mail.gmail.com>
+
+I have posted a very similar question in lustre-discuss but the lack
+of responses made me move to the developers. I created an OST (while
+clients were still active). I then mounted the OST, and it states the
+OST's services are already running but nothing is showing up on
+/etc/mtab.
+
+I suspect this is a bug. Therefore, I submitted a bug report.
+https://bugzilla.lustre.org/show_bug.cgi?id=18651
+
+But, meanwhile, is there a way to override this by changing a flag in
+ost's configuration (writeconf) to say, its not mouted up? This will
+hopefully enable me to mount up partition as intended.
+
+TIA
+
+

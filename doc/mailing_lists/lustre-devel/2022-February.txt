@@ -1,0 +1,365 @@
+From elliswilson at microsoft.com  Fri Feb 11 12:37:00 2022
+From: elliswilson at microsoft.com (Ellis Wilson)
+Date: Fri, 11 Feb 2022 20:37:00 +0000
+Subject: [lustre-devel] Memory issues with bulk rpcs and buffered I/O;
+ ptlrpc bug?
+Message-ID: <MN2PR21MB1439AD0458A0144B3825D83EBE309@MN2PR21MB1439.namprd21.prod.outlook.com>
+
+Hi,
+
+I'm still trying to get to the bottom of recurring OOM issues relating to: https://jira.whamcloud.com/browse/LU-15468  Any help is greatly appreciated, even if it's just "here are docs on bulk rpcs / ptlrpc / etc".
+
+The TL;DR issue is iozone or dd can trivially drive used memory up against system limits, I/O drags to a halt due to inability to allocate new pages, and eventually all of the outstanding pages are marked cleaned and the process repeats.  Oom-killer pops in and out for longer runs.
+
+I've been able to reproduce it on the following combinations of (kernel) + (lustre) on Ubuntu 18.04 (client-side):
+5.14.11 + 2.14.0
+4.15.17 + 2.14.0
+4.15.17 + 2.12.8
+
+One of the things I noticed was that when I hit the high-memory pressure condition, kswapd0 kicks in aggressively, and on-cpu graphs show that shrink_inactive_pages is cycling wildly (up to 1M calls per second).  Digging further into this, shrink_page_list is being called from that and every time it scans 32 pages, finding none available for reclaim.  This is due to the page not having a mapping (it was synced out to the OST long ago), and therefore the vmscan code is treating it almost like an anonymous page (though it's not) -- it's waiting for the last reference to drop it.  This behavior is NOT reproduced if you specify ODIRECT.
+
+Tracing this with ftrace, I find:
+
+If using direct I/O, kernel functions and counts per second matching 'get_page' or 'put_page' show up as (two seconds provided for each example): 
+
+FUNC                              COUNT
+pagecache_get_page                  238 
+sptlrpc_enc_pool_put_pages          356 
+__put_page                        45772
+get_page_from_freelist            56242
+
+FUNC                              COUNT
+pagecache_get_page                  119 
+sptlrpc_enc_pool_put_pages          356 
+__put_page                        45693
+get_page_from_freelist            55934
+
+
+But if you use buffered I/O, the result is: 
+
+FUNC                              COUNT
+__put_page                        45703
+pagecache_get_page               364219
+get_page_from_freelist           426720
+
+FUNC                              COUNT
+__put_page                        45934
+pagecache_get_page               364304
+get_page_from_freelist           427555
+
+Not only are the volumes significantly higher, but the gets to puts are way off.  Note: there are the ~55K gets per second as there were for DIO in get_page_from_freelist, PLUS one get per pagecache_get_page in get_page_from_freelist.
+So, this isn't 700K newly gotten pages per second, but more like 400K newly gotten pages per second (which matches the line-rate of around 1.6GB/s), 350K of which are referenced twice and end up gunking up the inactive page lru list for vmscan.  Some time later you will see a mass put of these pages for non-DIO workloads:
+
+FUNC                              COUNT
+__put_page                      2898827
+
+I've tracked these puts to be caused by:
+   ptlrpcd_00_03-3531    [002] .... 82284.061407: __put_page: (__put_page+0x0/0x80)
+   ptlrpcd_00_00-3527    [000] .... 82284.061423: __put_page: (__put_page+0x0/0x80)
+   ptlrpcd_00_00-3527    [000] .... 82284.061434: <stack trace>
+ => __put_page
+ => ptlrpc_free_bulk
+ => __ptlrpc_req_finished
+ => ptlrpc_free_request
+ => ptlrpc_free_committed
+ => after_reply
+ => ptlrpc_check_set
+ => ptlrpcd_check
+ => ptlrpcd
+ => kthread
+ => ret_from_fork
+
+The ptlrpcd_check loop basically processes around 2M+ of these in a second and suddenly we go from 15/16GB in Used to 1/16GB in Used, the rest having returned to Free.
+
+Anybody who can shed light on possible causes of the above behavior, provide suggested experiments or tunables to revise, or point me at useful docs on PTLRPC behavior would be greatly appreciated.
+
+I'm baffled that PTLRPC can seemingly hold onto references to an indefinite number of pages -- despite plenty of tunables existing at higher levels to control sizes of various caches, no tunable seems to govern how many refs ptlrpc can hold onto.
+
+Best,
+
+ellis
+
+From elliswilson at microsoft.com  Mon Feb 14 14:09:07 2022
+From: elliswilson at microsoft.com (Ellis Wilson)
+Date: Mon, 14 Feb 2022 22:09:07 +0000
+Subject: [lustre-devel] Memory issues with bulk rpcs and buffered I/O;
+ ptlrpc bug?
+In-Reply-To: <MN2PR21MB1439AD0458A0144B3825D83EBE309@MN2PR21MB1439.namprd21.prod.outlook.com>
+References: <MN2PR21MB1439AD0458A0144B3825D83EBE309@MN2PR21MB1439.namprd21.prod.outlook.com>
+Message-ID: <MN2PR21MB143903E11873AF9F11A01DD5BE339@MN2PR21MB1439.namprd21.prod.outlook.com>
+
+I posted what I think is root cause and a workaround in:
+https://jira.whamcloud.com/browse/LU-15468
+
+I have some resulting questions for the community, which I'll cross-post back on my original thread on lustre-discuss, since that seems to be the more active of the two channels.
+
+If anybody thinks my RC is not accurate or has any other thoughts don't hesitate to post on that JIRA issue or ping me directly.
+
+-----Original Message-----
+From: lustre-devel <lustre-devel-bounces at lists.lustre.org> On Behalf Of Ellis Wilson via lustre-devel
+Sent: Friday, February 11, 2022 3:37 PM
+To: lustre-devel at lists.lustre.org
+Subject: [EXTERNAL] [lustre-devel] Memory issues with bulk rpcs and buffered I/O; ptlrpc bug?
+
+Hi,
+
+I'm still trying to get to the bottom of recurring OOM issues relating to: https://nam06.safelinks.protection.outlook.com/?url=https%3A%2F%2Fjira.whamcloud.com%2Fbrowse%2FLU-15468&amp;data=04%7C01%7Celliswilson%40microsoft.com%7C4a0f0c5a088847d779a908d9ed9f9c51%7C72f988bf86f141af91ab2d7cd011db47%7C1%7C0%7C637802092058004059%7CUnknown%7CTWFpbGZsb3d8eyJWIjoiMC4wLjAwMDAiLCJQIjoiV2luMzIiLCJBTiI6Ik1haWwiLCJXVCI6Mn0%3D%7C3000&amp;sdata=coTYCDC8%2FQSjk5Jc3H8KHktWIqwbWw9JLKtSEUov6Vw%3D&amp;reserved=0  Any help is greatly appreciated, even if it's just "here are docs on bulk rpcs / ptlrpc / etc".
+
+The TL;DR issue is iozone or dd can trivially drive used memory up against system limits, I/O drags to a halt due to inability to allocate new pages, and eventually all of the outstanding pages are marked cleaned and the process repeats.  Oom-killer pops in and out for longer runs.
+
+I've been able to reproduce it on the following combinations of (kernel) + (lustre) on Ubuntu 18.04 (client-side):
+5.14.11 + 2.14.0
+4.15.17 + 2.14.0
+4.15.17 + 2.12.8
+
+One of the things I noticed was that when I hit the high-memory pressure condition, kswapd0 kicks in aggressively, and on-cpu graphs show that shrink_inactive_pages is cycling wildly (up to 1M calls per second).  Digging further into this, shrink_page_list is being called from that and every time it scans 32 pages, finding none available for reclaim.  This is due to the page not having a mapping (it was synced out to the OST long ago), and therefore the vmscan code is treating it almost like an anonymous page (though it's not) -- it's waiting for the last reference to drop it.  This behavior is NOT reproduced if you specify ODIRECT.
+
+Tracing this with ftrace, I find:
+
+If using direct I/O, kernel functions and counts per second matching 'get_page' or 'put_page' show up as (two seconds provided for each example): 
+
+FUNC                              COUNT
+pagecache_get_page                  238 
+sptlrpc_enc_pool_put_pages          356 
+__put_page                        45772
+get_page_from_freelist            56242
+
+FUNC                              COUNT
+pagecache_get_page                  119 
+sptlrpc_enc_pool_put_pages          356 
+__put_page                        45693
+get_page_from_freelist            55934
+
+
+But if you use buffered I/O, the result is: 
+
+FUNC                              COUNT
+__put_page                        45703
+pagecache_get_page               364219
+get_page_from_freelist           426720
+
+FUNC                              COUNT
+__put_page                        45934
+pagecache_get_page               364304
+get_page_from_freelist           427555
+
+Not only are the volumes significantly higher, but the gets to puts are way off.  Note: there are the ~55K gets per second as there were for DIO in get_page_from_freelist, PLUS one get per pagecache_get_page in get_page_from_freelist.
+So, this isn't 700K newly gotten pages per second, but more like 400K newly gotten pages per second (which matches the line-rate of around 1.6GB/s), 350K of which are referenced twice and end up gunking up the inactive page lru list for vmscan.  Some time later you will see a mass put of these pages for non-DIO workloads:
+
+FUNC                              COUNT
+__put_page                      2898827
+
+I've tracked these puts to be caused by:
+   ptlrpcd_00_03-3531    [002] .... 82284.061407: __put_page: (__put_page+0x0/0x80)
+   ptlrpcd_00_00-3527    [000] .... 82284.061423: __put_page: (__put_page+0x0/0x80)
+   ptlrpcd_00_00-3527    [000] .... 82284.061434: <stack trace>
+ => __put_page
+ => ptlrpc_free_bulk
+ => __ptlrpc_req_finished
+ => ptlrpc_free_request
+ => ptlrpc_free_committed
+ => after_reply
+ => ptlrpc_check_set
+ => ptlrpcd_check
+ => ptlrpcd
+ => kthread
+ => ret_from_fork
+
+The ptlrpcd_check loop basically processes around 2M+ of these in a second and suddenly we go from 15/16GB in Used to 1/16GB in Used, the rest having returned to Free.
+
+Anybody who can shed light on possible causes of the above behavior, provide suggested experiments or tunables to revise, or point me at useful docs on PTLRPC behavior would be greatly appreciated.
+
+I'm baffled that PTLRPC can seemingly hold onto references to an indefinite number of pages -- despite plenty of tunables existing at higher levels to control sizes of various caches, no tunable seems to govern how many refs ptlrpc can hold onto.
+
+Best,
+
+ellis
+_______________________________________________
+lustre-devel mailing list
+lustre-devel at lists.lustre.org
+https://nam06.safelinks.protection.outlook.com/?url=http%3A%2F%2Flists.lustre.org%2Flistinfo.cgi%2Flustre-devel-lustre.org&amp;data=04%7C01%7Celliswilson%40microsoft.com%7C4a0f0c5a088847d779a908d9ed9f9c51%7C72f988bf86f141af91ab2d7cd011db47%7C1%7C0%7C637802092058004059%7CUnknown%7CTWFpbGZsb3d8eyJWIjoiMC4wLjAwMDAiLCJQIjoiV2luMzIiLCJBTiI6Ik1haWwiLCJXVCI6Mn0%3D%7C3000&amp;sdata=EpbmuiGBdhWQmJpIOSWfauDO98ciO497ptde8g6IIgI%3D&amp;reserved=0
+
+From kevin.zhao at linaro.org  Fri Feb 18 00:05:30 2022
+From: kevin.zhao at linaro.org (Kevin Zhao)
+Date: Fri, 18 Feb 2022 16:05:30 +0800
+Subject: [lustre-devel] Lustre Arm stuff status and work plan
+In-Reply-To: <023CD146-E2BA-4B03-9459-C480E51EBE7E@whamcloud.com>
+References: <CAKoKPby+hn5+py-f11c31Po241871un0v=SQM+Cc6_hzvxW8uA@mail.gmail.com>
+ <CAKoKPbxTcSxGzASKyVhiv_7W3OY6x3DRtkcTu8hzvLM+4-PzZw@mail.gmail.com>
+ <6C592E3F-0437-4776-BB29-C5EE489C5FAE@whamcloud.com>
+ <CAKoKPbxmvn7GVc6wsYrLP_HD8SpNMVFfSFdiZMo-5ZXqS-HSdg@mail.gmail.com>
+ <7AAC4FDA-AC84-4E73-83AB-130B6BD3AE1B@whamcloud.com>
+ <CAKoKPbxQymhN93F5oM_TxK6y0kk5_bv3p62FncUz6Ri_0jmABw@mail.gmail.com>
+ <023CD146-E2BA-4B03-9459-C480E51EBE7E@whamcloud.com>
+Message-ID: <CACzn6-XOJuca15j8sObDwoG3Wb6WgUGc0ptTCUHuQFkEM7S1XQ@mail.gmail.com>
+
+Hi All,
+
+
+Greetings and thanks a lot for your comments! Xinliang and I are from Linaro
+<https://www.linaro.org/>, an organization focusing on Arm open-source
+ecosystem development. We have been working on Lustre on the Arm64 server
+and client end for a while now, already fixing a few bugs on arm64.
+
+As Xinliang said before, we want to enable the Arm64 CI, Oleg advises that
+we can plug our own CI nodes into the Jenkins. Now we want to understand
+and estimate how many machines resources can meet our requests, and doing
+the next stage plan of our hardware to meet the Lustre test requirements.
+
+
+As I understand, the test jobs will cover the ZFS and Ldiskfs backend with
+2 scenarios:
+
+   -
+
+   Lustre Arm64 Server + Arm64 Client( High Priority )
+   -
+
+   Lustre Arm64 Server + x86_64 Client
+
+After going through the Lustre test website:
+https://testing.whamcloud.com/test_sessions, it is quite clear to show the
+test info, and still remain some questions, that will be great if the
+community can give me a clear answer.
+
+1. Is there a link to show all the machine resources? Including the machine
+info, CPU, memory and peripheral info.
+
+2. Do we have a CI infra arch overview diagram to show the machine usage
+and communication?
+
+3. How many machines are needed to meet the request of the Lustre Arm64
+Server + Arm64 Client test?
+
+
+Thanks a lot for your time, and look forward to your response.
+
+
+On Tue, 28 Dec 2021 at 09:58, Oleg Drokin <green at whamcloud.com> wrote:
+
+>
+>
+> On Dec 27, 2021, at 8:53 PM, Xinliang Liu <xinliang.liu at linaro.org> wrote:
+>
+> Maloo is just one place to link to to actually let people see the results,
+>> but you can link to external resources too
+>> like e.g. gatekeeper janitor helper does or assuming the information is
+>> small enough it could be entirely contained
+>> in the comment (like say for a build failure)
+>>
+>
+> Ok, understand now. Is there any other reference external CI that posts
+> results to Lustre gerrit now?
+>
+>
+> Currently there are:
+> - checkpatch and Misc code checks (smach) that post their results as 100%
+> comment only. they share codebase pretty much
+> - the Janitor (also started with above codebase but got changed and
+> extended a lot)
+>
+> There was external interest in the past to post results to gerrit but it
+> never materialized in the end
+>
+
+
+-- 
+*Best Regards*
+
+*Kevin Zhao*
+
+Tech Lead, LDCG Cloud Infrastructure
+
+Linaro Vertical Technologies
+
+IRC(freenode): kevinz
+
+Slack(kubernetes.slack.com): kevinz
+
+kevin.zhao at linaro.org | Mobile/Direct/Wechat:  +86 18818270915
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20220218/59f01fe4/attachment.html>
+
+From green at whamcloud.com  Sun Feb 27 21:36:22 2022
+From: green at whamcloud.com (Oleg Drokin)
+Date: Mon, 28 Feb 2022 05:36:22 +0000
+Subject: [lustre-devel] Lustre Arm stuff status and work plan
+In-Reply-To: <CACzn6-XOJuca15j8sObDwoG3Wb6WgUGc0ptTCUHuQFkEM7S1XQ@mail.gmail.com>
+References: <CAKoKPby+hn5+py-f11c31Po241871un0v=SQM+Cc6_hzvxW8uA@mail.gmail.com>
+ <CAKoKPbxTcSxGzASKyVhiv_7W3OY6x3DRtkcTu8hzvLM+4-PzZw@mail.gmail.com>
+ <6C592E3F-0437-4776-BB29-C5EE489C5FAE@whamcloud.com>
+ <CAKoKPbxmvn7GVc6wsYrLP_HD8SpNMVFfSFdiZMo-5ZXqS-HSdg@mail.gmail.com>
+ <7AAC4FDA-AC84-4E73-83AB-130B6BD3AE1B@whamcloud.com>
+ <CAKoKPbxQymhN93F5oM_TxK6y0kk5_bv3p62FncUz6Ri_0jmABw@mail.gmail.com>
+ <023CD146-E2BA-4B03-9459-C480E51EBE7E@whamcloud.com>
+ <CACzn6-XOJuca15j8sObDwoG3Wb6WgUGc0ptTCUHuQFkEM7S1XQ@mail.gmail.com>
+Message-ID: <F5AF3C10-6ED7-4EEC-BA63-EF8256DA94D7@whamcloud.com>
+
+Hello!
+
+  the sizing really depends on your test scaling requirements.
+  For example my own test infrastructure is a couple builders + 4 nodes for VMs (each has 256G RAM), 160 VM pairs in total,
+  and on a particularly busy day another 80 VM pairs can be added. This is to ensure speedy feedback to developers.
+  You can operate a much smaller scale testing system if you want, just keep in mind what is the longest running test would take
+  to understand how many patches could be tested in parallel (sometimes patch bombs result in 20+ patches submission at the same time).
+   Here?s stats for last 30 days. https://imgur.com/lk2ogJv 1 item means single patch n processing. time in testing for a patch is typically about 3.5 hours.
+
+maloo shows the resources when you go into the test session, for example https://testing.whamcloud.com/test_sessions/4de25b47-43fc-4bfc-87aa-15e4968519a7 - scroll down to see list of nodes
+
+
+
+On Feb 18, 2022, at 3:05 AM, Kevin Zhao <kevin.zhao at linaro.org<mailto:kevin.zhao at linaro.org>> wrote:
+
+Hi All,
+
+Greetings and thanks a lot for your comments! Xinliang and I are from Linaro<https://www.linaro.org/>, an organization focusing on Arm open-source ecosystem development. We have been working on Lustre on the Arm64 server and client end for a while now, already fixing a few bugs on arm64.
+As Xinliang said before, we want to enable the Arm64 CI, Oleg advises that we can plug our own CI nodes into the Jenkins. Now we want to understand and estimate how many machines resources can meet our requests, and doing the next stage plan of our hardware to meet the Lustre test requirements.
+
+As I understand, the test jobs will cover the ZFS and Ldiskfs backend with 2 scenarios:
+
+  *
+Lustre Arm64 Server + Arm64 Client( High Priority )
+  *
+Lustre Arm64 Server + x86_64 Client
+
+After going through the Lustre test website: https://testing.whamcloud.com/test_sessions, it is quite clear to show the test info, and still remain some questions, that will be great if the community can give me a clear answer.
+1. Is there a link to show all the machine resources? Including the machine info, CPU, memory and peripheral info.
+2. Do we have a CI infra arch overview diagram to show the machine usage and communication?
+3. How many machines are needed to meet the request of the Lustre Arm64 Server + Arm64 Client test?
+
+Thanks a lot for your time, and look forward to your response.
+
+
+On Tue, 28 Dec 2021 at 09:58, Oleg Drokin <green at whamcloud.com<mailto:green at whamcloud.com>> wrote:
+
+
+On Dec 27, 2021, at 8:53 PM, Xinliang Liu <xinliang.liu at linaro.org<mailto:xinliang.liu at linaro.org>> wrote:
+
+Maloo is just one place to link to to actually let people see the results, but you can link to external resources too
+like e.g. gatekeeper janitor helper does or assuming the information is small enough it could be entirely contained
+in the comment (like say for a build failure)
+
+Ok, understand now. Is there any other reference external CI that posts results to Lustre gerrit now?
+
+Currently there are:
+- checkpatch and Misc code checks (smach) that post their results as 100% comment only. they share codebase pretty much
+- the Janitor (also started with above codebase but got changed and extended a lot)
+
+There was external interest in the past to post results to gerrit but it never materialized in the end
+
+
+--
+Best Regards
+Kevin Zhao
+Tech Lead, LDCG Cloud Infrastructure
+Linaro Vertical Technologies
+IRC(freenode): kevinz
+Slack(kubernetes.slack.com<http://kubernetes.slack.com/>): kevinz
+kevin.zhao at linaro.org<mailto:kevin.zhao at linaro.org> | Mobile/Direct/Wechat:  +86 18818270915
+
+
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20220228/5a38da1b/attachment-0001.html>
+

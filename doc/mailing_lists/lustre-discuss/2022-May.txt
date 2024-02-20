@@ -1,0 +1,3079 @@
+From s.nassyr at fz-juelich.de  Tue May  3 13:23:57 2022
+From: s.nassyr at fz-juelich.de (Stepan Nassyr)
+Date: Tue, 3 May 2022 22:23:57 +0200
+Subject: [lustre-discuss] Clients hang mounting after IO node crash
+Message-ID: <afe5e29c-4ec5-4cb7-352f-4f13c509d57a@fz-juelich.de>
+
+Hi Lustre community,
+
+I am running a lustre setup on a small cluster. It has 2 nodes that can be used for IO with 36 HDDs and 4 SSDs each. All nodes are AArch64 and running Rocky Linux 8.5. I've decided on a non-HA configuration on those two nodes using lustre 2.14.56 + zfs 2.1.2 (both built from source), using the SSDs for the MDT and the HDDs for OST. On one of the nodes I dedicated some HDDs for the MGT. So the nodes are running both MDS and OSS and one of them also the MGS.
+
+One of the nodes crashed unexpectedly. After bringing it back up, the filesystem could not be mounted on clients, hanging indefinitely. Output of dmesg on IO nodes showed that both MDTs were stuck recovering
+
+What I have tried so far:
+
+  1.  sudo lctl --device <mdt device> abort_recovery
+  2.  The usual restarts and reboots and remounts
+  3.  lfsck
+  4.  tunefs --writeconf on every mdt/ost
+  5.  (getting frustrated and desperate)
+  6.  reformat mgs
+  7.   lctl clear_conf <all mdts/osts>
+
+I'm not sure how much worse I made the issue. The data on the filesystem was non-critical but it would take a couple of days to rebuild, so I'd rather recover.
+
+Right now the situation is as follows:
+
+io01 lctl dl:
+
+[snassyr at io01 ~]$ sudo lctl dl
+  0 UP osd-zfs MGS-osd MGS-osd_UUID 4
+  1 UP mgs MGS MGS 20
+  2 UP mgc MGC10.31.7.61 at o2ib 7fc3c479-903d-4bf5-8239-77f6bb25d72f 4
+  3 UP osd-zfs storage-MDT0000-osd storage-MDT0000-osd_UUID 9
+  4 UP mds MDS MDS_uuid 2
+  5 UP lod storage-MDT0000-mdtlov storage-MDT0000-mdtlov_UUID 3
+  6 UP mdt storage-MDT0000 storage-MDT0000_UUID 22
+  7 UP mdd storage-MDD0000 storage-MDD0000_UUID 3
+  8 UP qmt storage-QMT0000 storage-QMT0000_UUID 3
+  9 UP osp storage-OST0000-osc-MDT0000 storage-MDT0000-mdtlov_UUID 4
+ 10 UP osp storage-OST0001-osc-MDT0000 storage-MDT0000-mdtlov_UUID 4
+ 11 UP osp storage-MDT0001-osp-MDT0000 storage-MDT0000-mdtlov_UUID 4
+ 12 UP lwp storage-MDT0000-lwp-MDT0000 storage-MDT0000-lwp-MDT0000_UUID 4
+ 13 UP osd-zfs storage-OST0000-osd storage-OST0000-osd_UUID 4
+ 14 UP ost OSS OSS_uuid 2
+ 15 UP obdfilter storage-OST0000 storage-OST0000_UUID 6
+ 16 UP lwp storage-MDT0000-lwp-OST0000 storage-MDT0000-lwp-OST0000_UUID 4
+ 17 UP lwp storage-MDT0001-lwp-OST0000 storage-MDT0001-lwp-OST0000_UUID 4
+
+io02 lctl dl:
+
+[snassyr at io02 ~]$ sudo lctl dl
+  0 UP osd-zfs storage-MDT0001-osd storage-MDT0001-osd_UUID 8
+  1 UP mgc MGC10.31.7.61 at o2ib 30fafefb-17d5-4b7e-b37d-f57b8cec706f 4
+  2 UP mds MDS MDS_uuid 2
+  3 UP lod storage-MDT0001-mdtlov storage-MDT0001-mdtlov_UUID 3
+  4 UP mdt storage-MDT0001 storage-MDT0001_UUID 10
+  5 UP mdd storage-MDD0001 storage-MDD0001_UUID 3
+  6 UP osp storage-MDT0000-osp-MDT0001 storage-MDT0001-mdtlov_UUID 4
+  7 UP osp storage-OST0000-osc-MDT0001 storage-MDT0001-mdtlov_UUID 4
+  8 UP osp storage-OST0001-osc-MDT0001 storage-MDT0001-mdtlov_UUID 4
+  9 UP lwp storage-MDT0000-lwp-MDT0001 storage-MDT0000-lwp-MDT0001_UUID 4
+ 10 UP osd-zfs storage-OST0001-osd storage-OST0001-osd_UUID 4
+ 11 UP ost OSS OSS_uuid 2
+ 12 UP obdfilter storage-OST0001 storage-OST0001_UUID 6
+ 13 UP lwp storage-MDT0000-lwp-OST0001 storage-MDT0000-lwp-OST0001_UUID 4
+ 14 UP lwp storage-MDT0001-lwp-OST0001 storage-MDT0001-lwp-OST0001_UUID 4
+
+When mounting the filesystem on a client:
+
+io01 lctl dk:
+
+010000:00080000:44.0F:1651608945.066329:1728:7485:0:(ldlm_lib.c:1363:target_handle_connect()) MGS: connection from 2977c7ca-d420-4590-8587-6dcca277b9ce at 10.31.7.2@o2ib<mailto:2977c7ca-d420-4590-8587-6dcca277b9ce at 10.31.7.2@o2ib> t0 exp 0000000080b2f6b3 cur 7766 last 0
+00000020:00000080:44.0:1651608945.066340:1904:7485:0:(genops.c:1357:class_connect()) connect: client 2977c7ca-d420-4590-8587-6dcca277b9ce, cookie 0x58c556ebddf199e6
+00000020:01000000:44.0:1651608945.066343:2176:7485:0:(lprocfs_status_server.c:513:lprocfs_exp_setup()) using hash 00000000a7721ebc
+00000100:00080000:44.0:1651608945.066354:1984:7485:0:(import.c:85:import_set_state_nolock()) 000000004427b505 : changing import state from RECOVER to FULL
+20000000:01000000:44.0:1651608945.069929:1712:7485:0:(mgs_nids.c:636:mgs_get_ir_logs()) Reading IR log storage-cliir bufsize 1048576.
+20000000:01000000:44.0:1651608945.069933:1920:7485:0:(mgs_nids.c:193:mgs_nidtbl_read()) fsname storage, entry size 32, pages 4064/1/16/255.
+20000000:01000000:44.0:1651608945.069934:1920:7485:0:(mgs_nids.c:193:mgs_nidtbl_read()) fsname storage, entry size 32, pages 4032/1/16/255.
+20000000:01000000:44.0:1651608945.069935:1920:7485:0:(mgs_nids.c:193:mgs_nidtbl_read()) fsname storage, entry size 32, pages 4000/1/16/255.
+20000000:01000000:44.0:1651608945.069936:1920:7485:0:(mgs_nids.c:193:mgs_nidtbl_read()) fsname storage, entry size 32, pages 3968/1/16/255.
+20000000:01000000:44.0:1651608945.069937:1920:7485:0:(mgs_nids.c:205:mgs_nidtbl_read()) Read IR logs storage return with 128, version 15
+00000040:00080000:44.0:1651608945.070263:1936:7485:0:(llog_osd.c:233:llog_osd_read_header()) not reading header from 0-byte log
+00010000:00080000:76.0F:1651608945.070500:1728:107218:0:(ldlm_lib.c:1363:target_handle_connect()) storage-MDT0000: connection from fcf3db3e-1e74-404e-9b5b-c5ddd03f655e at 10.31.7.2@o2ib<mailto:fcf3db3e-1e74-404e-9b5b-c5ddd03f655e at 10.31.7.2@o2ib> t0 exp 0000000080b2f6b3 cur 7766 last 0
+00010000:00080000:76.0:1651608945.073446:1728:107218:0:(ldlm_lib.c:1363:target_handle_connect()) storage-MDT0000: connection from fcf3db3e-1e74-404e-9b5b-c5ddd03f655e at 10.31.7.2@o2ib<mailto:fcf3db3e-1e74-404e-9b5b-c5ddd03f655e at 10.31.7.2@o2ib> t0 exp 0000000080b2f6b3 cur 7766 last 0
+
+client lctl dk:
+
+00000080:01200004:23.0F:1651608945.064695:0:97748:0:(super25.c:114:lustre_fill_super()) VFS Op: sb 00000000671f73ed
+00000020:01000004:23.0:1651608945.064703:0:97748:0:(obd_mount.c:951:lmd_print())   mount data:
+00000020:01000004:23.0:1651608945.064704:0:97748:0:(obd_mount.c:953:lmd_print()) profile: storage-client
+00000020:01000004:23.0:1651608945.064704:0:97748:0:(obd_mount.c:954:lmd_print()) device:  10.31.7.61 at o2ib:/storage
+00000020:01000004:23.0:1651608945.064705:0:97748:0:(obd_mount.c:955:lmd_print()) flags:   2
+00000080:01000004:23.0:1651608945.064705:0:97748:0:(super25.c:159:lustre_fill_super()) Mounting client storage-client
+00000020:01000004:23.0:1651608945.064744:0:97748:0:(obd_mount.c:340:lustre_start_mgc()) Start MGC 'MGC10.31.7.61 at o2ib'
+00000020:00000080:23.0:1651608945.064747:0:97748:0:(obd_config.c:1356:class_process_config()) processing cmd: cf005
+00000020:00000080:23.0:1651608945.064749:0:97748:0:(obd_config.c:1368:class_process_config()) adding mapping from uuid MGC10.31.7.61 at o2ib_0 to nid 0x500000a1f073d (10.31.7.61 at o2ib)
+00000020:01000004:23.0:1651608945.064759:0:97748:0:(obd_mount.c:191:lustre_start_simple()) Starting OBD MGC10.31.7.61 at o2ib (typ=mgc)
+00000020:00000080:23.0:1651608945.064760:0:97748:0:(obd_config.c:1356:class_process_config()) processing cmd: cf001
+00000020:00000080:23.0:1651608945.064771:0:97748:0:(genops.c:415:class_newdev()) Allocate new device MGC10.31.7.61 at o2ib (000000009d5385c4)
+00000020:00000080:23.0:1651608945.064792:0:97748:0:(obd_config.c:648:class_attach()) OBD: dev 0 attached type mgc with refcount 1
+00000020:00000080:23.0:1651608945.064793:0:97748:0:(obd_config.c:1356:class_process_config()) processing cmd: cf003
+00010000:00080000:6.0F:1651608945.065940:0:97748:0:(ldlm_lib.c:115:import_set_conn()) imp 00000000d1420d43 at MGC10.31.7.61@o2ib<mailto:00000000d1420d43 at MGC10.31.7.61@o2ib>: add connection MGC10.31.7.61 at o2ib_0 at head
+00000040:01000000:6.0:1651608945.065968:0:97748:0:(llog_obd.c:212:llog_setup()) obd MGC10.31.7.61 at o2ib ctxt 1 is initialized
+10000000:01000000:30.0F:1651608945.066034:0:97767:0:(mgc_request.c:628:mgc_requeue_thread()) Starting requeue thread
+00000020:00000080:6.0:1651608945.066039:0:97748:0:(obd_config.c:752:class_setup()) finished setup of obd MGC10.31.7.61 at o2ib (uuid 2977c7ca-d420-4590-8587-6dcca277b9ce)
+00000020:00000080:6.0:1651608945.066044:0:97748:0:(genops.c:1357:class_connect()) connect: client 2977c7ca-d420-4590-8587-6dcca277b9ce, cookie 0xb433eadff9fbd3f0
+00000100:00080000:6.0:1651608945.066048:0:97748:0:(import.c:533:import_select_connection()) MGC10.31.7.61 at o2ib: connect to NID 10.31.7.61 at o2ib last attempt 0
+00000100:00080000:6.0:1651608945.066049:0:97748:0:(import.c:614:import_select_connection()) MGC10.31.7.61 at o2ib: import 00000000d1420d43 using connection MGC10.31.7.61 at o2ib_0/10.31.7.61 at o2ib<mailto:MGC10.31.7.61 at o2ib_0/10.31.7.61 at o2ib>
+00000100:00080000:6.0:1651608945.066061:0:97748:0:(pinger.c:388:ptlrpc_pinger_add_import()) adding pingable import 2977c7ca-d420-4590-8587-6dcca277b9ce->MGS
+00000080:01000000:6.0:1651608945.066081:0:97748:0:(llite_lib.c:1252:ll_fill_super()) llite sb uuid: fcf3db3e-1e74-404e-9b5b-c5ddd03f655e
+10000000:01000000:6.0:1651608945.066151:0:97748:0:(mgc_request.c:2201:mgc_process_config()) parse_log storage-client from 0
+10000000:01000000:6.0:1651608945.066152:0:97748:0:(mgc_request.c:334:config_log_add()) add config log storage-client-ffff910943185800
+10000000:01000000:6.0:1651608945.066154:0:97748:0:(mgc_request.c:215:do_config_log_add()) do adding config log storage-sptlrpc-ffff910e650a0000
+10000000:01000000:6.0:1651608945.066155:0:97748:0:(mgc_request.c:90:mgc_name2resid()) log storage-sptlrpc to resid 0x656761726f7473/0x0 (storage)
+10000000:01000000:6.0:1651608945.066157:0:97748:0:(mgc_request.c:2060:mgc_process_log()) Process log storage-sptlrpc-ffff910e650a0000 from 1
+10000000:01000000:6.0:1651608945.066158:0:97748:0:(mgc_request.c:1102:mgc_enqueue()) Enqueue for storage-sptlrpc (res 0x656761726f7473)
+00000100:00080000:6.0:1651608945.066178:0:97748:0:(client.c:1659:ptlrpc_send_new_req()) @@@ req waiting for recovery: (FULL != CONNECTING)  req at 00000000a5867c8c x1731815472708096/t0(0) o101->MGC10.31.7.61 at o2ib@10.31.7.61 at o2ib:26/25<mailto:MGC10.31.7.61 at o2ib@10.31.7.61 at o2ib:26/25> lens 328/344 e 0 to 0 dl 0 ref 2 fl Rpc:WQU/0/ffffffff rc 0/-1 job:''
+00000100:00080000:20.0F:1651608945.066200:0:41661:0:(import.c:1073:ptlrpc_connect_interpret()) MGC10.31.7.61 at o2ib: connect to target with instance 0
+00000100:00080000:20.0:1651608945.066205:0:41661:0:(import.c:933:ptlrpc_connect_set_flags()) MGC10.31.7.61 at o2ib: Resetting ns_connect_flags to server flags: 0xa000011001002020
+10000000:01000000:20.0:1651608945.066207:0:41661:0:(mgc_request.c:1327:mgc_import_event()) import event 0x808005
+00000100:00080000:20.0:1651608945.066209:0:41661:0:(import.c:85:import_set_state_nolock()) 00000000d1420d43 MGS: changing import state from CONNECTING to FULL
+10000000:01000000:20.0:1651608945.066211:0:41661:0:(mgc_request.c:1327:mgc_import_event()) import event 0x808004
+00000100:00080000:20.0:1651608945.066213:0:41661:0:(pinger.c:207:ptlrpc_pinger_ir_up()) IR up
+00000100:00080000:20.0:1651608945.066215:0:41661:0:(recover.c:218:ptlrpc_wake_delayed()) @@@ waking (set 00000000ffe9ef2e):  req at 00000000a5867c8c x1731815472708096/t0(0) o101->MGC10.31.7.61 at o2ib@10.31.7.61 at o2ib:26/25<mailto:MGC10.31.7.61 at o2ib@10.31.7.61 at o2ib:26/25> lens 328/344 e 0 to 0 dl 0 ref 2 fl Rpc:WQU/0/ffffffff rc 0/-1 job:''
+10000000:01000000:6.0:1651608945.066426:0:97748:0:(mgc_request.c:2132:mgc_process_log()) MGC10.31.7.61 at o2ib: configuration from log 'storage-sptlrpc' failed (-2).
+10000000:01000000:6.0:1651608945.066428:0:97748:0:(mgc_request.c:215:do_config_log_add()) do adding config log params-ffff910943185800
+10000000:01000000:6.0:1651608945.066430:0:97748:0:(mgc_request.c:90:mgc_name2resid()) log params to resid 0x736d61726170/0x3 (params)
+10000000:01000000:6.0:1651608945.066430:0:97748:0:(mgc_request.c:215:do_config_log_add()) do adding config log storage-client-ffff910943185800
+10000000:01000000:6.0:1651608945.066431:0:97748:0:(mgc_request.c:90:mgc_name2resid()) log storage-client to resid 0x656761726f7473/0x0 (storage)
+10000000:01000000:6.0:1651608945.066432:0:97748:0:(mgc_request.c:215:do_config_log_add()) do adding config log storage-cliir-ffff910943185800
+10000000:01000000:6.0:1651608945.066433:0:97748:0:(mgc_request.c:90:mgc_name2resid()) log storage-cliir to resid 0x656761726f7473/0x2 (storage)
+10000000:01000000:6.0:1651608945.066433:0:97748:0:(mgc_request.c:2060:mgc_process_log()) Process log storage-client-ffff910943185800 from 1
+10000000:01000000:6.0:1651608945.066434:0:97748:0:(mgc_request.c:1102:mgc_enqueue()) Enqueue for storage-client (res 0x656761726f7473)
+00000020:01000000:4.0F:1651608945.067039:0:97769:0:(obd_config.c:1770:class_config_llog_handler()) Marker, inst_flg=0x0 mark_flg=0x1
+00000020:00000080:4.0:1651608945.067043:0:97769:0:(obd_config.c:1356:class_process_config()) processing cmd: cf010
+00000020:00000080:4.0:1651608945.067045:0:97769:0:(obd_config.c:1432:class_process_config()) marker 4 (0x1) storage-clilov lov setup
+00000020:01000000:4.0:1651608945.067047:0:97769:0:(obd_config.c:1885:class_config_llog_handler()) cmd cf001, instance name: storage-clilov-ffff910943185800
+00000020:00000080:4.0:1651608945.067048:0:97769:0:(obd_config.c:1356:class_process_config()) processing cmd: cf001
+00000020:00000080:4.0:1651608945.067052:0:97769:0:(genops.c:415:class_newdev()) Allocate new device storage-clilov-ffff910943185800 (00000000e39226db)
+00000020:00000080:4.0:1651608945.067074:0:97769:0:(obd_config.c:648:class_attach()) OBD: dev 1 attached type lov with refcount 1
+00000020:01000000:4.0:1651608945.067076:0:97769:0:(obd_config.c:1885:class_config_llog_handler()) cmd cf003, instance name: storage-clilov-ffff910943185800
+00000020:00000080:4.0:1651608945.067077:0:97769:0:(obd_config.c:1356:class_process_config()) processing cmd: cf003
+00000020:00000080:4.0:1651608945.067139:0:97769:0:(obd_config.c:752:class_setup()) finished setup of obd storage-clilov-ffff910943185800 (uuid fcf3db3e-1e74-404e-9b5b-c5ddd03f655e)
+00000020:01000000:4.0:1651608945.067140:0:97769:0:(obd_config.c:1770:class_config_llog_handler()) Marker, inst_flg=0x2 mark_flg=0x2
+00000020:00000080:4.0:1651608945.067141:0:97769:0:(obd_config.c:1356:class_process_config()) processing cmd: cf010
+00000020:00000080:4.0:1651608945.067142:0:97769:0:(obd_config.c:1432:class_process_config()) marker 4 (0x2) storage-clilov lov setup
+00000020:01000000:4.0:1651608945.067142:0:97769:0:(obd_config.c:1770:class_config_llog_handler()) Marker, inst_flg=0x0 mark_flg=0x1
+00000020:00000080:4.0:1651608945.067143:0:97769:0:(obd_config.c:1356:class_process_config()) processing cmd: cf010
+00000020:00000080:4.0:1651608945.067144:0:97769:0:(obd_config.c:1432:class_process_config()) marker 5 (0x1) storage-clilmv lmv setup
+00000020:01000000:4.0:1651608945.067144:0:97769:0:(obd_config.c:1885:class_config_llog_handler()) cmd cf001, instance name: storage-clilmv-ffff910943185800
+00000020:00000080:4.0:1651608945.067145:0:97769:0:(obd_config.c:1356:class_process_config()) processing cmd: cf001
+00000020:00000080:4.0:1651608945.067147:0:97769:0:(genops.c:415:class_newdev()) Allocate new device storage-clilmv-ffff910943185800 (00000000c0d1efc4)
+00000020:00000080:4.0:1651608945.067166:0:97769:0:(obd_config.c:648:class_attach()) OBD: dev 2 attached type lmv with refcount 1
+00000020:01000000:4.0:1651608945.067167:0:97769:0:(obd_config.c:1885:class_config_llog_handler()) cmd cf003, instance name: storage-clilmv-ffff910943185800
+00000020:00000080:4.0:1651608945.067168:0:97769:0:(obd_config.c:1356:class_process_config()) processing cmd: cf003
+00000020:00000080:4.0:1651608945.067189:0:97769:0:(obd_config.c:752:class_setup()) finished setup of obd storage-clilmv-ffff910943185800 (uuid fcf3db3e-1e74-404e-9b5b-c5ddd03f655e)
+00000020:01000000:4.0:1651608945.067190:0:97769:0:(obd_config.c:1770:class_config_llog_handler()) Marker, inst_flg=0x2 mark_flg=0x2
+00000020:00000080:4.0:1651608945.067191:0:97769:0:(obd_config.c:1356:class_process_config()) processing cmd: cf010
+00000020:00000080:4.0:1651608945.067191:0:97769:0:(obd_config.c:1432:class_process_config()) marker 5 (0x2) storage-clilmv lmv setup
+00000020:01000000:4.0:1651608945.067192:0:97769:0:(obd_config.c:1770:class_config_llog_handler()) Marker, inst_flg=0x0 mark_flg=0x1
+00000020:00000080:4.0:1651608945.067192:0:97769:0:(obd_config.c:1356:class_process_config()) processing cmd: cf010
+00000020:00000080:4.0:1651608945.067193:0:97769:0:(obd_config.c:1432:class_process_config()) marker 6 (0x1) storage-MDT0000 add mdc
+00000020:00000080:4.0:1651608945.067194:0:97769:0:(obd_config.c:1356:class_process_config()) processing cmd: cf005
+00000020:00000080:4.0:1651608945.067195:0:97769:0:(obd_config.c:1368:class_process_config()) adding mapping from uuid 10.31.7.61 at o2ib to nid 0x500000a1f073d (10.31.7.61 at o2ib)
+00000020:01000000:4.0:1651608945.067198:0:97769:0:(obd_config.c:1885:class_config_llog_handler()) cmd cf001, instance name: storage-MDT0000-mdc-ffff910943185800
+00000020:00000080:4.0:1651608945.067199:0:97769:0:(obd_config.c:1356:class_process_config()) processing cmd: cf001
+00000020:00000080:4.0:1651608945.067201:0:97769:0:(genops.c:415:class_newdev()) Allocate new device storage-MDT0000-mdc-ffff910943185800 (0000000049300b8f)
+00000020:00000080:4.0:1651608945.067220:0:97769:0:(obd_config.c:648:class_attach()) OBD: dev 3 attached type mdc with refcount 1
+00000020:01000000:4.0:1651608945.067221:0:97769:0:(obd_config.c:1885:class_config_llog_handler()) cmd cf003, instance name: storage-MDT0000-mdc-ffff910943185800
+00000020:00000080:4.0:1651608945.067222:0:97769:0:(obd_config.c:1356:class_process_config()) processing cmd: cf003
+00010000:00080000:4.0:1651608945.067234:0:97769:0:(ldlm_lib.c:115:import_set_conn()) imp 00000000ec1d7cd0 at storage-MDT0000-mdc-ffff910943185800: add connection 10.31.7.61 at o2ib at head
+00000040:01000000:4.0:1651608945.068071:0:97769:0:(llog_obd.c:212:llog_setup()) obd storage-MDT0000-mdc-ffff910943185800 ctxt 13 is initialized
+00000020:00000080:5.0F:1651608945.068125:0:97769:0:(obd_config.c:752:class_setup()) finished setup of obd storage-MDT0000-mdc-ffff910943185800 (uuid fcf3db3e-1e74-404e-9b5b-c5ddd03f655e)
+00000020:01000000:5.0:1651608945.068128:0:97769:0:(obd_config.c:1885:class_config_llog_handler()) cmd cf014, instance name: storage-clilmv-ffff910943185800
+00000020:00000080:5.0:1651608945.068129:0:97769:0:(obd_config.c:1356:class_process_config()) processing cmd: cf014
+00800000:01000000:5.0:1651608945.068132:0:97769:0:(lmv_obd.c:386:lmv_add_target()) Target uuid: storage-MDT0000_UUID. index 0
+00000020:01000000:5.0:1651608945.068140:0:97769:0:(obd_config.c:1770:class_config_llog_handler()) Marker, inst_flg=0x2 mark_flg=0x2
+00000020:00000080:5.0:1651608945.068141:0:97769:0:(obd_config.c:1356:class_process_config()) processing cmd: cf010
+00000020:00000080:5.0:1651608945.068142:0:97769:0:(obd_config.c:1432:class_process_config()) marker 6 (0x2) storage-MDT0000 add mdc
+00000020:01000000:5.0:1651608945.068143:0:97769:0:(obd_config.c:1770:class_config_llog_handler()) Marker, inst_flg=0x0 mark_flg=0x1
+00000020:00000080:5.0:1651608945.068144:0:97769:0:(obd_config.c:1356:class_process_config()) processing cmd: cf010
+00000020:00000080:5.0:1651608945.068144:0:97769:0:(obd_config.c:1432:class_process_config()) marker 7 (0x1) storage-client mount opts
+00000020:00000080:5.0:1651608945.068146:0:97769:0:(obd_config.c:1356:class_process_config()) processing cmd: cf007
+00000020:00000080:5.0:1651608945.068146:0:97769:0:(obd_config.c:1386:class_process_config()) mountopt: profile storage-client osc storage-clilov mdc storage-clilmv
+00000020:01000000:5.0:1651608945.068147:0:97769:0:(obd_config.c:1058:class_add_profile()) Add profile storage-client
+00000020:01000000:5.0:1651608945.068149:0:97769:0:(obd_config.c:1770:class_config_llog_handler()) Marker, inst_flg=0x2 mark_flg=0x2
+00000020:00000080:5.0:1651608945.068149:0:97769:0:(obd_config.c:1356:class_process_config()) processing cmd: cf010
+00000020:00000080:5.0:1651608945.068150:0:97769:0:(obd_config.c:1432:class_process_config()) marker 7 (0x2) storage-client mount opts
+00000020:01000000:5.0:1651608945.068150:0:97769:0:(obd_config.c:1770:class_config_llog_handler()) Marker, inst_flg=0x0 mark_flg=0x1
+00000020:01000004:5.0:1651608945.068151:0:97769:0:(obd_mount.c:990:lustre_check_exclusion()) Check exclusion storage-OST0000 (0) in 0 of 10.31.7.61 at o2ib:/storage
+00000020:00000080:5.0:1651608945.068153:0:97769:0:(obd_config.c:1356:class_process_config()) processing cmd: cf010
+00000020:00000080:5.0:1651608945.068153:0:97769:0:(obd_config.c:1432:class_process_config()) marker 10 (0x1) storage-OST0000 add osc
+00000020:00000080:5.0:1651608945.068154:0:97769:0:(obd_config.c:1356:class_process_config()) processing cmd: cf005
+00000020:00000080:5.0:1651608945.068155:0:97769:0:(obd_config.c:1368:class_process_config()) adding mapping from uuid 10.31.7.61 at o2ib to nid 0x500000a1f073d (10.31.7.61 at o2ib)
+00000020:01000000:5.0:1651608945.068157:0:97769:0:(obd_config.c:1885:class_config_llog_handler()) cmd cf001, instance name: storage-OST0000-osc-ffff910943185800
+00000020:00000080:5.0:1651608945.068158:0:97769:0:(obd_config.c:1356:class_process_config()) processing cmd: cf001
+00000020:00000080:5.0:1651608945.068165:0:97769:0:(genops.c:415:class_newdev()) Allocate new device storage-OST0000-osc-ffff910943185800 (000000008f5e9249)
+00000020:00000080:5.0:1651608945.068184:0:97769:0:(obd_config.c:648:class_attach()) OBD: dev 4 attached type osc with refcount 1
+00000020:01000000:5.0:1651608945.068185:0:97769:0:(obd_config.c:1885:class_config_llog_handler()) cmd cf003, instance name: storage-OST0000-osc-ffff910943185800
+00000020:00000080:5.0:1651608945.068186:0:97769:0:(obd_config.c:1356:class_process_config()) processing cmd: cf003
+00010000:00080000:5.0:1651608945.068200:0:97769:0:(ldlm_lib.c:115:import_set_conn()) imp 00000000027d94f9 at storage-OST0000-osc-ffff910943185800: add connection 10.31.7.61 at o2ib at head
+00000020:00000080:5.0:1651608945.068344:0:97769:0:(obd_config.c:752:class_setup()) finished setup of obd storage-OST0000-osc-ffff910943185800 (uuid fcf3db3e-1e74-404e-9b5b-c5ddd03f655e)
+00000020:01000000:5.0:1651608945.068346:0:97769:0:(obd_config.c:1885:class_config_llog_handler()) cmd cf00d, instance name: storage-clilov-ffff910943185800
+00000020:00000080:5.0:1651608945.068346:0:97769:0:(obd_config.c:1356:class_process_config()) processing cmd: cf00d
+00020000:01000000:5.0:1651608945.068350:0:97769:0:(lov_obd.c:480:lov_add_target()) uuid:storage-OST0000_UUID idx:0 gen:1 active:1
+00020000:01000000:5.0:1651608945.068352:0:97769:0:(lov_obd.c:531:lov_add_target()) tgts: 00000000703900ea size: 2
+00020000:01000000:5.0:1651608945.068353:0:97769:0:(lov_obd.c:560:lov_add_target()) idx=0 ltd_gen=1 ld_tgt_count=1
+00000020:01000000:5.0:1651608945.068356:0:97769:0:(obd_config.c:1770:class_config_llog_handler()) Marker, inst_flg=0x2 mark_flg=0x2
+00000020:00000080:5.0:1651608945.068356:0:97769:0:(obd_config.c:1356:class_process_config()) processing cmd: cf010
+00000020:00000080:5.0:1651608945.068357:0:97769:0:(obd_config.c:1432:class_process_config()) marker 10 (0x2) storage-OST0000 add osc
+00000020:01000000:5.0:1651608945.068358:0:97769:0:(obd_config.c:1770:class_config_llog_handler()) Marker, inst_flg=0x0 mark_flg=0x1
+00000020:01000004:5.0:1651608945.068358:0:97769:0:(obd_mount.c:990:lustre_check_exclusion()) Check exclusion storage-OST0001 (1) in 0 of 10.31.7.61 at o2ib:/storage
+00000020:00000080:5.0:1651608945.068359:0:97769:0:(obd_config.c:1356:class_process_config()) processing cmd: cf010
+00000020:00000080:5.0:1651608945.068359:0:97769:0:(obd_config.c:1432:class_process_config()) marker 13 (0x1) storage-OST0001 add osc
+00000020:00000080:5.0:1651608945.068360:0:97769:0:(obd_config.c:1356:class_process_config()) processing cmd: cf005
+00000020:00000080:5.0:1651608945.068361:0:97769:0:(obd_config.c:1368:class_process_config()) adding mapping from uuid 10.31.7.62 at o2ib to nid 0x500000a1f073e (10.31.7.62 at o2ib)
+00000020:01000000:5.0:1651608945.068363:0:97769:0:(obd_config.c:1885:class_config_llog_handler()) cmd cf001, instance name: storage-OST0001-osc-ffff910943185800
+00000020:00000080:5.0:1651608945.068363:0:97769:0:(obd_config.c:1356:class_process_config()) processing cmd: cf001
+00000020:00000080:5.0:1651608945.068365:0:97769:0:(genops.c:415:class_newdev()) Allocate new device storage-OST0001-osc-ffff910943185800 (000000003e523917)
+00000020:00000080:5.0:1651608945.068390:0:97769:0:(obd_config.c:648:class_attach()) OBD: dev 5 attached type osc with refcount 1
+00000020:01000000:5.0:1651608945.068391:0:97769:0:(obd_config.c:1885:class_config_llog_handler()) cmd cf003, instance name: storage-OST0001-osc-ffff910943185800
+00000020:00000080:5.0:1651608945.068392:0:97769:0:(obd_config.c:1356:class_process_config()) processing cmd: cf003
+00010000:00080000:5.0:1651608945.068398:0:97769:0:(ldlm_lib.c:115:import_set_conn()) imp 00000000024053c3 at storage-OST0001-osc-ffff910943185800: add connection 10.31.7.62 at o2ib at head
+00000020:00000080:5.0:1651608945.068505:0:97769:0:(obd_config.c:752:class_setup()) finished setup of obd storage-OST0001-osc-ffff910943185800 (uuid fcf3db3e-1e74-404e-9b5b-c5ddd03f655e)
+00000020:01000000:5.0:1651608945.068506:0:97769:0:(obd_config.c:1885:class_config_llog_handler()) cmd cf00d, instance name: storage-clilov-ffff910943185800
+00000020:00000080:5.0:1651608945.068507:0:97769:0:(obd_config.c:1356:class_process_config()) processing cmd: cf00d
+00020000:01000000:5.0:1651608945.068508:0:97769:0:(lov_obd.c:480:lov_add_target()) uuid:storage-OST0001_UUID idx:1 gen:1 active:1
+00020000:01000000:5.0:1651608945.068509:0:97769:0:(lov_obd.c:560:lov_add_target()) idx=1 ltd_gen=1 ld_tgt_count=2
+00000020:01000000:5.0:1651608945.068511:0:97769:0:(obd_config.c:1770:class_config_llog_handler()) Marker, inst_flg=0x2 mark_flg=0x2
+00000020:00000080:5.0:1651608945.068511:0:97769:0:(obd_config.c:1356:class_process_config()) processing cmd: cf010
+00000020:00000080:5.0:1651608945.068512:0:97769:0:(obd_config.c:1432:class_process_config()) marker 13 (0x2) storage-OST0001 add osc
+00000020:01000000:5.0:1651608945.068512:0:97769:0:(obd_config.c:1770:class_config_llog_handler()) Marker, inst_flg=0x0 mark_flg=0x1
+00000020:00000080:5.0:1651608945.068513:0:97769:0:(obd_config.c:1356:class_process_config()) processing cmd: cf010
+00000020:00000080:5.0:1651608945.068513:0:97769:0:(obd_config.c:1432:class_process_config()) marker 21 (0x1) storage-MDT0001 add mdc
+00000020:00000080:5.0:1651608945.068514:0:97769:0:(obd_config.c:1356:class_process_config()) processing cmd: cf005
+00000020:00000080:5.0:1651608945.068515:0:97769:0:(obd_config.c:1368:class_process_config()) adding mapping from uuid 10.31.7.62 at o2ib to nid 0x500000a1f073e (10.31.7.62 at o2ib)
+00000020:01000000:5.0:1651608945.068516:0:97769:0:(obd_config.c:1885:class_config_llog_handler()) cmd cf001, instance name: storage-MDT0001-mdc-ffff910943185800
+00000020:00000080:5.0:1651608945.068517:0:97769:0:(obd_config.c:1356:class_process_config()) processing cmd: cf001
+00000020:00000080:5.0:1651608945.068519:0:97769:0:(genops.c:415:class_newdev()) Allocate new device storage-MDT0001-mdc-ffff910943185800 (0000000003506110)
+00000020:00000080:5.0:1651608945.068537:0:97769:0:(obd_config.c:648:class_attach()) OBD: dev 6 attached type mdc with refcount 1
+00000020:01000000:5.0:1651608945.068538:0:97769:0:(obd_config.c:1885:class_config_llog_handler()) cmd cf003, instance name: storage-MDT0001-mdc-ffff910943185800
+00000020:00000080:5.0:1651608945.068539:0:97769:0:(obd_config.c:1356:class_process_config()) processing cmd: cf003
+00010000:00080000:5.0:1651608945.068544:0:97769:0:(ldlm_lib.c:115:import_set_conn()) imp 00000000ab8fbc69 at storage-MDT0001-mdc-ffff910943185800: add connection 10.31.7.62 at o2ib at head
+00000040:01000000:5.0:1651608945.069342:0:97769:0:(llog_obd.c:212:llog_setup()) obd storage-MDT0001-mdc-ffff910943185800 ctxt 13 is initialized
+00000020:00000080:5.0:1651608945.069380:0:97769:0:(obd_config.c:752:class_setup()) finished setup of obd storage-MDT0001-mdc-ffff910943185800 (uuid fcf3db3e-1e74-404e-9b5b-c5ddd03f655e)
+00000020:01000000:5.0:1651608945.069381:0:97769:0:(obd_config.c:1885:class_config_llog_handler()) cmd cf014, instance name: storage-clilmv-ffff910943185800
+00000020:00000080:5.0:1651608945.069382:0:97769:0:(obd_config.c:1356:class_process_config()) processing cmd: cf014
+00800000:01000000:5.0:1651608945.069383:0:97769:0:(lmv_obd.c:386:lmv_add_target()) Target uuid: storage-MDT0001_UUID. index 1
+00000020:01000000:5.0:1651608945.069386:0:97769:0:(obd_config.c:1770:class_config_llog_handler()) Marker, inst_flg=0x2 mark_flg=0x2
+00000020:00000080:5.0:1651608945.069387:0:97769:0:(obd_config.c:1356:class_process_config()) processing cmd: cf010
+00000020:00000080:5.0:1651608945.069387:0:97769:0:(obd_config.c:1432:class_process_config()) marker 21 (0x2) storage-MDT0001 add mdc
+00000020:01000000:5.0:1651608945.069388:0:97769:0:(obd_config.c:1770:class_config_llog_handler()) Marker, inst_flg=0x0 mark_flg=0x1
+00000020:00000080:5.0:1651608945.069389:0:97769:0:(obd_config.c:1356:class_process_config()) processing cmd: cf010
+00000020:00000080:5.0:1651608945.069389:0:97769:0:(obd_config.c:1432:class_process_config()) marker 22 (0x1) storage-client mount opts
+00000020:00000080:5.0:1651608945.069390:0:97769:0:(obd_config.c:1356:class_process_config()) processing cmd: cf007
+00000020:00000080:5.0:1651608945.069390:0:97769:0:(obd_config.c:1386:class_process_config()) mountopt: profile storage-client osc storage-clilov mdc storage-clilmv
+00000020:01000000:5.0:1651608945.069391:0:97769:0:(obd_config.c:1058:class_add_profile()) Add profile storage-client
+00000020:01000000:5.0:1651608945.069564:0:97769:0:(obd_config.c:1770:class_config_llog_handler()) Marker, inst_flg=0x2 mark_flg=0x2
+00000020:00000080:5.0:1651608945.069565:0:97769:0:(obd_config.c:1356:class_process_config()) processing cmd: cf010
+00000020:00000080:5.0:1651608945.069565:0:97769:0:(obd_config.c:1432:class_process_config()) marker 22 (0x2) storage-client mount opts
+00000040:00080000:5.0:1651608945.069566:0:97769:0:(llog.c:768:llog_process_thread()) stop processing plain 0x4:10:0 index 39 count 39
+00000020:01000000:6.0:1651608945.069572:0:97748:0:(obd_config.c:2042:class_config_parse_llog()) Processed log storage-client gen 1-38 (rc=0)
+10000000:01000000:6.0:1651608945.069576:0:97748:0:(mgc_request.c:2132:mgc_process_log()) MGC10.31.7.61 at o2ib: configuration from log 'storage-client' succeeded (0).
+10000000:01000000:6.0:1651608945.069577:0:97748:0:(mgc_request.c:2060:mgc_process_log()) Process log storage-cliir-ffff910943185800 from 1
+10000000:01000000:6.0:1651608945.069577:0:97748:0:(mgc_request.c:1102:mgc_enqueue()) Enqueue for storage-cliir (res 0x656761726f7473)
+00000020:00000080:6.0:1651608945.069823:0:97748:0:(obd_config.c:1356:class_process_config()) processing cmd: cf00f
+00000020:00000080:6.0:1651608945.069851:0:97748:0:(obd_config.c:1356:class_process_config()) processing cmd: cf00f
+00000020:00000080:6.0:1651608945.069859:0:97748:0:(obd_config.c:1356:class_process_config()) processing cmd: cf00f
+00000020:00000080:6.0:1651608945.069866:0:97748:0:(obd_config.c:1356:class_process_config()) processing cmd: cf00f
+10000000:01000000:6.0:1651608945.069893:0:97748:0:(mgc_request.c:2132:mgc_process_log()) MGC10.31.7.61 at o2ib: configuration from log 'storage-cliir' succeeded (0).
+10000000:01000000:6.0:1651608945.069894:0:97748:0:(mgc_request.c:2060:mgc_process_log()) Process log params-ffff910943185800 from 1
+10000000:01000000:6.0:1651608945.069895:0:97748:0:(mgc_request.c:1102:mgc_enqueue()) Enqueue for params (res 0x736d61726170)
+00000040:00080000:1.0F:1651608945.070236:0:97775:0:(llog.c:768:llog_process_thread()) stop processing plain 0x2:10:0 index 64768 count 1
+00000020:01000000:6.0:1651608945.070243:0:97748:0:(obd_config.c:2042:class_config_parse_llog()) Processed log params gen 1-0 (rc=0)
+10000000:01000000:6.0:1651608945.070246:0:97748:0:(mgc_request.c:2132:mgc_process_log()) MGC10.31.7.61 at o2ib: configuration from log 'params' succeeded (0).
+00000080:01000000:6.0:1651608945.070248:0:97748:0:(llite_lib.c:1312:ll_fill_super()) Found profile storage-client: mdc=storage-clilmv osc=storage-clilov
+00000020:00000080:6.0:1651608945.070252:0:97748:0:(genops.c:1357:class_connect()) connect: client fcf3db3e-1e74-404e-9b5b-c5ddd03f655e, cookie 0xb433eadff9fbd43d
+00800000:01000000:6.0:1651608945.070256:0:97748:0:(lmv_obd.c:459:lmv_check_connect()) Time to connect fcf3db3e-1e74-404e-9b5b-c5ddd03f655e to storage-clilmv-ffff910943185800
+00800000:01000000:6.0:1651608945.070258:0:97748:0:(lmv_obd.c:295:lmv_connect_mdc()) connect to storage-MDT0000-mdc-ffff910943185800(fcf3db3e-1e74-404e-9b5b-c5ddd03f655e) - storage-MDT0000_UUID, fcf3db3e-1e74-404e-9b5b-c5ddd03f655e
+00000020:00000080:6.0:1651608945.070260:0:97748:0:(genops.c:1357:class_connect()) connect: client fcf3db3e-1e74-404e-9b5b-c5ddd03f655e, cookie 0xb433eadff9fbd444
+00000100:00080000:6.0:1651608945.070261:0:97748:0:(import.c:533:import_select_connection()) storage-MDT0000-mdc-ffff910943185800: connect to NID 10.31.7.61 at o2ib last attempt 0
+00000100:00080000:6.0:1651608945.070262:0:97748:0:(import.c:614:import_select_connection()) storage-MDT0000-mdc-ffff910943185800: import 00000000ec1d7cd0 using connection 10.31.7.61 at o2ib/10.31.7.61 at o2ib<mailto:10.31.7.61 at o2ib/10.31.7.61 at o2ib>
+00000100:00080000:6.0:1651608945.070268:0:97748:0:(pinger.c:388:ptlrpc_pinger_add_import()) adding pingable import fcf3db3e-1e74-404e-9b5b-c5ddd03f655e->storage-MDT0000_UUID
+00800000:01000000:6.0:1651608945.070284:0:97748:0:(lmv_obd.c:356:lmv_connect_mdc()) Connected to storage-MDT0000-mdc-ffff910943185800(fcf3db3e-1e74-404e-9b5b-c5ddd03f655e) successfully (4)
+00800000:01000000:6.0:1651608945.070293:0:97748:0:(lmv_obd.c:295:lmv_connect_mdc()) connect to storage-MDT0001-mdc-ffff910943185800(fcf3db3e-1e74-404e-9b5b-c5ddd03f655e) - storage-MDT0001_UUID, fcf3db3e-1e74-404e-9b5b-c5ddd03f655e
+00000020:00000080:6.0:1651608945.070295:0:97748:0:(genops.c:1357:class_connect()) connect: client fcf3db3e-1e74-404e-9b5b-c5ddd03f655e, cookie 0xb433eadff9fbd44b
+00000100:00080000:23.0:1651608945.070296:0:41675:0:(client.c:1659:ptlrpc_send_new_req()) @@@ req waiting for recovery: (FULL != CONNECTING)  req at 0000000063b7198e x1731815472708928/t0(0) o41->storage-MDT0000-mdc-ffff910943185800 at 10.31.7.61@o2ib:12/10<mailto:storage-MDT0000-mdc-ffff910943185800 at 10.31.7.61@o2ib:12/10> lens 224/368 e 0 to 0 dl 0 ref 1 fl Rpc:WQU/0/ffffffff rc 0/-1 job:''
+00000100:00080000:6.0:1651608945.070296:0:97748:0:(import.c:533:import_select_connection()) storage-MDT0001-mdc-ffff910943185800: connect to NID 10.31.7.62 at o2ib last attempt 0
+00000100:00080000:6.0:1651608945.070297:0:97748:0:(import.c:614:import_select_connection()) storage-MDT0001-mdc-ffff910943185800: import 00000000ab8fbc69 using connection 10.31.7.62 at o2ib/10.31.7.62 at o2ib<mailto:10.31.7.62 at o2ib/10.31.7.62 at o2ib>
+00000100:00080000:6.0:1651608945.070302:0:97748:0:(pinger.c:388:ptlrpc_pinger_add_import()) adding pingable import fcf3db3e-1e74-404e-9b5b-c5ddd03f655e->storage-MDT0001_UUID
+00800000:01000000:6.0:1651608945.070311:0:97748:0:(lmv_obd.c:356:lmv_connect_mdc()) Connected to storage-MDT0001-mdc-ffff910943185800(fcf3db3e-1e74-404e-9b5b-c5ddd03f655e) successfully (4)
+00000100:00080000:22.0F:1651608945.070319:0:41676:0:(client.c:1659:ptlrpc_send_new_req()) @@@ req waiting for recovery: (FULL != CONNECTING)  req at 000000000268eff3 x1731815472709056/t0(0) o41->storage-MDT0001-mdc-ffff910943185800 at 10.31.7.62@o2ib:12/10<mailto:storage-MDT0001-mdc-ffff910943185800 at 10.31.7.62@o2ib:12/10> lens 224/368 e 0 to 0 dl 0 ref 1 fl Rpc:WQU/0/ffffffff rc 0/-1 job:''
+00000100:00080000:6.0:1651608945.070323:0:97748:0:(client.c:1659:ptlrpc_send_new_req()) @@@ req waiting for recovery: (FULL != CONNECTING)  req at 000000004b401ce8 x1731815472709120/t0(0) o41->storage-MDT0000-mdc-ffff910943185800 at 10.31.7.61@o2ib:12/10<mailto:storage-MDT0000-mdc-ffff910943185800 at 10.31.7.61@o2ib:12/10> lens 224/368 e 0 to 0 dl 0 ref 2 fl Rpc:WQU/0/ffffffff rc 0/-1 job:''
+00000100:00080000:21.0F:1651608945.070335:0:41661:0:(import.c:85:import_set_state_nolock()) 00000000ec1d7cd0 storage-MDT0000_UUID: changing import state from CONNECTING to DISCONN
+00000100:00080000:21.0:1651608945.070339:0:41661:0:(import.c:1428:ptlrpc_connect_interpret()) recovery of storage-MDT0000_UUID on 10.31.7.61 at o2ib failed (-11)
+00000100:00080000:21.0:1651608945.070396:0:41661:0:(import.c:85:import_set_state_nolock()) 00000000ab8fbc69 storage-MDT0001_UUID: changing import state from CONNECTING to DISCONN
+00000100:00080000:21.0:1651608945.070399:0:41661:0:(import.c:1428:ptlrpc_connect_interpret()) recovery of storage-MDT0001_UUID on 10.31.7.62 at o2ib failed (-11)
+00000100:00080000:23.0:1651608945.072863:0:97778:0:(import.c:233:ptlrpc_set_import_discon()) mdc: import 00000000ab8fbc69 already not connected (conn 1, was 0): DISCONN
+00010000:00080000:23.0:1651608945.072867:0:97778:0:(ldlm_lib.c:98:import_set_conn()) imp 00000000ab8fbc69 at storage-MDT0001-mdc-ffff910943185800: found existing conn 10.31.7.62 at o2ib, moved to head
+00000100:00080000:23.0:1651608945.072869:0:97778:0:(import.c:85:import_set_state_nolock()) 00000000ab8fbc69 storage-MDT0001_UUID: changing import state from DISCONN to CONNECTING
+00000100:00080000:23.0:1651608945.072870:0:97778:0:(import.c:533:import_select_connection()) storage-MDT0001-mdc-ffff910943185800: connect to NID 10.31.7.62 at o2ib last attempt 0
+00000100:00080000:23.0:1651608945.072871:0:97778:0:(import.c:614:import_select_connection()) storage-MDT0001-mdc-ffff910943185800: import 00000000ab8fbc69 using connection 10.31.7.62 at o2ib/10.31.7.62 at o2ib<mailto:10.31.7.62 at o2ib/10.31.7.62 at o2ib>
+00000100:00080000:21.0:1651608945.072937:0:41661:0:(import.c:85:import_set_state_nolock()) 00000000ab8fbc69 storage-MDT0001_UUID: changing import state from CONNECTING to DISCONN
+00000100:00080000:21.0:1651608945.072938:0:41661:0:(import.c:1428:ptlrpc_connect_interpret()) recovery of storage-MDT0001_UUID on 10.31.7.62 at o2ib failed (-11)
+00000100:00080000:30.0:1651608945.073197:0:97779:0:(import.c:233:ptlrpc_set_import_discon()) mdc: import 00000000ec1d7cd0 already not connected (conn 1, was 0): DISCONN
+00010000:00080000:30.0:1651608945.073206:0:97779:0:(ldlm_lib.c:98:import_set_conn()) imp 00000000ec1d7cd0 at storage-MDT0000-mdc-ffff910943185800: found existing conn 10.31.7.61 at o2ib, moved to head
+00000100:00080000:30.0:1651608945.073209:0:97779:0:(import.c:85:import_set_state_nolock()) 00000000ec1d7cd0 storage-MDT0000_UUID: changing import state from DISCONN to CONNECTING
+00000100:00080000:30.0:1651608945.073211:0:97779:0:(import.c:533:import_select_connection()) storage-MDT0000-mdc-ffff910943185800: connect to NID 10.31.7.61 at o2ib last attempt 0
+00000100:00080000:30.0:1651608945.073214:0:97779:0:(import.c:614:import_select_connection()) storage-MDT0000-mdc-ffff910943185800: import 00000000ec1d7cd0 using connection 10.31.7.61 at o2ib/10.31.7.61 at o2ib<mailto:10.31.7.61 at o2ib/10.31.7.61 at o2ib>
+00000100:00080000:4.0:1651608945.073280:0:41661:0:(import.c:85:import_set_state_nolock()) 00000000ec1d7cd0 storage-MDT0000_UUID: changing import state from CONNECTING to DISCONN
+00000100:00080000:4.0:1651608945.073281:0:41661:0:(import.c:1428:ptlrpc_connect_interpret()) recovery of storage-MDT0000_UUID on 10.31.7.61 at o2ib failed (-11)
+
+I'm not sure why on the client node there is something about waiting for recovery/recovery failing as on the io nodes no recovery is happening. This is also the case if I explicitly abort recovery.
+
+Could you possibly help me debug this further?
+
+Best regards,
+Stepan
+
+
+------------------------------------------------------------------------------------------------
+------------------------------------------------------------------------------------------------
+Forschungszentrum Juelich GmbH
+52425 Juelich
+Sitz der Gesellschaft: Juelich
+Eingetragen im Handelsregister des Amtsgerichts Dueren Nr. HR B 3498
+Vorsitzender des Aufsichtsrats: MinDir Volker Rieke
+Geschaeftsfuehrung: Prof. Dr.-Ing. Wolfgang Marquardt (Vorsitzender),
+Karsten Beneke (stellv. Vorsitzender), Prof. Dr. Astrid Lambrecht,
+Prof. Dr. Frauke Melchior
+------------------------------------------------------------------------------------------------
+------------------------------------------------------------------------------------------------
+
+
+Neugierige sind herzlich willkommen am Sonntag, den 21. August 2022, von 10:00 bis 17:00 Uhr. Mehr unter: https://www.tagderneugier.de
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20220503/4da58034/attachment-0001.html>
+
+From keith.mannthey at intel.com  Tue May  3 17:16:27 2022
+From: keith.mannthey at intel.com (Mannthey, Keith)
+Date: Wed, 4 May 2022 00:16:27 +0000
+Subject: [lustre-discuss] Anyone know why
+ lustre-zfs-dkms-2.12.8_6_g5457c37-1.el7.noarch.rpm won't install?
+Message-ID: <CO6PR11MB55712FFE0F262C6E1E47556E96C39@CO6PR11MB5571.namprd11.prod.outlook.com>
+
+Hello,
+  I has been a while since I installed Lustre ZFS and I am working to get 2.12.8 Lustre ZFS going on a basic system.
+
+The lib* spl* and zfs* packages all install with DKMS with no issue.
+
+lustre-zfs-dkms-2.12.8_6_g5457c37-1.el7.noarch.rpm does not want to install:
+   The root issues seems to be a zfs-devel package is missing from https://downloads.whamcloud.com/public/lustre/latest-2.12-release/el7/server/RPMS/x86_64/  ?
+   Any ideas?
+
+The Lustre ZFS DKMS build errors out with:
+"
+checking if kernel has 64-bit quota limits support... yes
+checking if Linux kernel was built with CONFIG_QUOTA in or as module... yes
+checking whether to build ldiskfs... no
+checking whether to enable zfs... yes
+checking zfs source directory... /usr/src/zfs-3.10.0-1160.62.1.el7.x86_64
+checking zfs build directory... /var/lib/dkms/zfs/3.10.0-1160.62.1.el7.x86_64/3.10.0-1160.62.1.el7.x86_64/x86_64
+checking user provided zfs devel headers...
+checking zfs devel headers... -I/usr/include/libspl -I /usr/include/libzfs
+./configure: line 33341: test: zfs: integer expression expected
+configure: error:
+
+Required zfs osd cannot be built due to missing zfs development headers.
+
+Support for zfs can be enabled by downloading the required packages for your
+distribution. See http://zfsonlinux.org/ to determine is zfs is supported by
+your distribution.
+
+configure error, check /var/lib/dkms/lustre-zfs/2.12.8_6_g5457c37/build/config.log
+
+Building module:
+cleaning build area...(bad exit status: 2)
+make -j72 KERNELRELEASE=3.10.0-1160.62.1.el7.x86_64...(bad exit status: 2)
+Error! Bad return status for module build on kernel: 3.10.0-1160.62.1.el7.x86_64 (x86_64)
+Consult /var/lib/dkms/lustre-zfs/2.12.8_6_g5457c37/build/make.log for more information.
+"
+
+Thanks,
+Keith
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20220504/66117acb/attachment.html>
+
+From shadi.ibrahim at inria.fr  Wed May  4 00:14:28 2022
+From: shadi.ibrahim at inria.fr (Shadi Ibrahim)
+Date: Wed, 4 May 2022 09:14:28 +0200
+Subject: [lustre-discuss] (CALL FOR PAPERS) SBAC-PAD 2022 - The 34th IEEE
+ International Symposium on Computer Architecture and High Performance
+ Computing
+Message-ID: <651D2D71-5EBF-4EC7-B41F-0B92EA5AEB8C@inria.fr>
+
+Call for papers: SBAC-PAD 2022
+Deadline for abstract submission: June 17th, 202
+Deadline for paper submission: June 24th, 2022
+============================================================================================
+The 34th IEEE International Symposium on Computer Architecture and High Performance Computing (SBAC-PAD 2022)
+November 2nd to 5th, 2022
+Bordeaux, Nouvelle-Aquitaine, France
+
+https://project.inria.fr/sbac2022/ <https://project.inria.fr/sbac2022/>  
+
+============================================================================================
+
+The 34th IEEE International Symposium on Computer Architecture and High Performance Computing (SBAC-PAD 2022) will take place from November 2nd to 5th, 2022, in Bordeaux, Nouvelle-Aquitaine, France.
+
+SBAC-PAD is an annual international conference series, which presents research and developments, applications, and trends in Computer Architecture, High Performance Computing (HPC) and Parallel and Distributed Computing technologies. SBAC-PAD is open to faculty, researchers, practitioners, undergraduate and graduate students around the world. Its scientific program is composed from high quality submitted papers, selected by a thorough peer review process.
+
+Keynote Speakers
+-------------------------
+Rosa Badia (Barcelone Supercomputing Center, Spain)
+Anne Beno?t (?cole Normale Sup?rieure de Lyon, France)
+Walfredo Cirne (Google Research)
+Ian Foster (Argonne National Laboratory, Illinois and Inria Grenoble, France)
+Kunle Olukotun (Stanford University, California)
+
+
+General Chairs
+----------------------
+Cristiana Bentes (State University of Rio de Janeiro, Brazil)
+Olivier Beaumont (Inria, University of Bordeaux, France)
+
+Topics of Interest
+-------------------------
+Authors are invited to submit original manuscripts on a wide range of computer architectures and high performance and distributed computing areas. Topics of interest include (but are not limited to):
+
+? Application-specific systems;
+? Architecture and programming support for emerging domains:
+   (Big Data, Deep Learning, Machine learning, Cognitive Systems);
+? Benchmarking, performance measurements, and analysis;
+? Cloud, cluster, and edge/fog computing systems;
+? Embedded and pervasive systems;
+? GPUs, FPGAs and accelerator architectures;
+? Languages, compilers, and tools for parallel and distributed programming;
+? Modelling and simulation methodology;
+? Operating systems and virtualization;
+? Parallel and distributed systems, algorithms, and applications;
+? Power and energy-efficient systems;
+? Processor, cache, memory, storage, and network architecture;
+? Real-world applications and case studies;
+? Reconfigurable, resilient and fault-tolerant systems;
+
+Program Chairs
+----------------------
+Cristina Boeres (Universidade Federal Fluminense, Brazil)
+Viktor K Prasanna (University of Southern California, USA)
+
+Track Chairs
+------------------
+Computer Architecture:
+Murali Annavaram (University of Southern California, USA)
+
+Networking and Distributed Systems:
+Eirini Eleni Tsiropoulou, (University of New Mexico, USA)
+
+Parallel Applications and Algorithms:
+Alba Melo (University of Brasilia, Brazil)
+
+Performance Evaluation:	
+Jay Lofstead (Sandia National Laboratories, USA)
+
+System Software:	
+Jidong Zhai (Tsinghua University, China)
+
+Paper submission
+-------------------------
+Papers submitted to SBAC-PAD 2022 must present original research results and must not have been published or concurrently submitted anywhere else.
+
+Paper submission can be done through: https://easychair.org/conferences/?conf=sbacpad2022 <https://easychair.org/conferences/?conf=sbacpad2022>
+
+Paper submissions must be in English, 10 pages maximum (including the references), following the IEEE conference formatting guidelines. Papers that do not meet these requirements might be rejected without a review. To be published in the conference proceedings and to be eligible for publication at the IEEE Xplore, one of the authors must register at the full rate and present his/her work at the conference.
+
+The SBAC-PAD 2022 submissions will undergo a double-blind review process, where reviewers do not know the identity of the authors, and vice-versa. Therefore, authors should ?blind? their submission adopting the following guidelines:
+? The authors cannot include their names, affiliations, funding sources, or acknowledgments in any part of the paper.
+? Self-references that are relevant to the work are allowed, but they should not appear in the text in the first person. Instead they should be referenced in the third person, like ?Smith et al. found that? [4].?.
+? For the authors? unpublished work, they need to use anonymous citations.
+
+The program committee will select the top papers as finalists, and one paper will be selected during the conference as the winner and will be recognized as such at the conference closing ceremony. 
+
+Journal Special Issue 
+------------------------------
+Authors of the best technical papers will be invited to submit an extended version to a special issue of the Journal of Parallel and Distributed Computing.
+
+
+Important dates
+----------------------
+? Abstract submission deadline:   June 17th, 2022
+? Paper submission deadline:      June 24th, 2022
+? Rebuttal period:                         Aug 22nd - Aug 25th, 2022
+? Author notification:                     Sep 5th, 2022
+? Camera-ready submission:        Sep 12th , 2022
+
+
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20220504/d2ef0b3b/attachment-0001.html>
+
+From lsh at jlab.org  Wed May  4 08:23:51 2022
+From: lsh at jlab.org (Laura Hild)
+Date: Wed, 4 May 2022 15:23:51 +0000
+Subject: [lustre-discuss] Anyone know why
+ lustre-zfs-dkms-2.12.8_6_g5457c37-1.el7.noarch.rpm won't install?
+In-Reply-To: <CO6PR11MB55712FFE0F262C6E1E47556E96C39@CO6PR11MB5571.namprd11.prod.outlook.com>
+References: <CO6PR11MB55712FFE0F262C6E1E47556E96C39@CO6PR11MB5571.namprd11.prod.outlook.com>
+Message-ID: <BLAPR09MB6211F8D27AEF5F266046AF59DCC39@BLAPR09MB6211.namprd09.prod.outlook.com>
+
+Hi Keith-
+
+I can reproduce the failure with dkms-3.0.3 and install successfully with dkms-2.8.5.  There was some discussion on this list in October (http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/2021-October/017812.html) but I don't know if anyone ended up submitting a patch.
+
+-Laura
+
+
+________________________________________
+Od: lustre-discuss <lustre-discuss-bounces at lists.lustre.org> v imenu Mannthey, Keith via lustre-discuss <lustre-discuss at lists.lustre.org>
+Poslano: torek, 03. maj 2022 20:16
+Za: lustre-discuss at lists.lustre.org
+Zadeva: [EXTERNAL] [lustre-discuss] Anyone know why lustre-zfs-dkms-2.12.8_6_g5457c37-1.el7.noarch.rpm won't install?
+
+Hello,
+  I has been a while since I installed Lustre ZFS and I am working to get 2.12.8 Lustre ZFS going on a basic system.
+
+The lib* spl* and zfs* packages all install with DKMS with no issue.
+
+lustre-zfs-dkms-2.12.8_6_g5457c37-1.el7.noarch.rpm does not want to install:
+   The root issues seems to be a zfs-devel package is missing from https://downloads.whamcloud.com/public/lustre/latest-2.12-release/el7/server/RPMS/x86_64/  ?
+   Any ideas?
+
+The Lustre ZFS DKMS build errors out with:
+?
+checking if kernel has 64-bit quota limits support... yes
+checking if Linux kernel was built with CONFIG_QUOTA in or as module... yes
+checking whether to build ldiskfs... no
+checking whether to enable zfs... yes
+checking zfs source directory... /usr/src/zfs-3.10.0-1160.62.1.el7.x86_64
+checking zfs build directory... /var/lib/dkms/zfs/3.10.0-1160.62.1.el7.x86_64/3.10.0-1160.62.1.el7.x86_64/x86_64
+checking user provided zfs devel headers...
+checking zfs devel headers... -I/usr/include/libspl -I /usr/include/libzfs
+./configure: line 33341: test: zfs: integer expression expected
+configure: error:
+
+Required zfs osd cannot be built due to missing zfs development headers.
+
+Support for zfs can be enabled by downloading the required packages for your
+distribution. See http://zfsonlinux.org/ to determine is zfs is supported by
+your distribution.
+
+configure error, check /var/lib/dkms/lustre-zfs/2.12.8_6_g5457c37/build/config.log
+
+Building module:
+cleaning build area...(bad exit status: 2)
+make -j72 KERNELRELEASE=3.10.0-1160.62.1.el7.x86_64...(bad exit status: 2)
+Error! Bad return status for module build on kernel: 3.10.0-1160.62.1.el7.x86_64 (x86_64)
+Consult /var/lib/dkms/lustre-zfs/2.12.8_6_g5457c37/build/make.log for more information.
+?
+
+Thanks,
+Keith
+
+From admin at opensfs.org  Wed May  4 12:41:02 2022
+From: admin at opensfs.org (OpenSFS Administration)
+Date: Wed, 4 May 2022 12:41:02 -0700
+Subject: [lustre-discuss] Last Chance to Register - LUG 2022
+Message-ID: <000401d85fee$e3d916e0$ab8b44a0$@opensfs.org>
+
+Hello Lustre Community, 
+
+ 
+
+There's still time to register for LUG 2022, scheduled for May 9-11th.
+<https://utconferences.eventsair.com/lug22/register/Site/Register> REGISTER
+ONLINE.  General registration is $175. 
+
+ 
+
+As with past LUG events, this year's conference will provide the industry's
+primary venue for discussion and seminars on the Lustre parallel file system
+and other open source file system technologies but in a virtual format. 
+
+ 
+
+Mark your calendars to join us for LUG 2022 on the following dates:
+
+*	May 9, 2022: 11:00-3:15pm ET - Lustre Tutorials
+*	May 10, 2022: 11:00-3pm ET - LUG Day1
+*	May 11, 2022: 11:00-2:35pm ET - LUG Day 2
+
+ 
+
+Agenda information and additional LUG 2022 details are available on the LUG
+2022 web site <https://www.opensfs.org/events/lug-2022/> . 
+
+ 
+
+OpenSFS Annual Meeting
+
+The OpenSFS Annual Meeting will be held in conjunction with LUG 2022. Be
+sure to attend to hear the latest updates from the OpenSFS Community, as
+well as meet our newly elected Board members. 
+
+Sponsor Opportunities
+Interested in supporting LUG 2022? Check out our sponsor opportunities
+<https://www.opensfs.org/events/lug-2022/>  and contact us for more
+information <mailto:admin at opensfs.org> .
+
+Thanks to our 2022 Sponsor, DDN <https://www.ddn.com/>  for their support of
+LUG 2022.
+
+
+
+We look forward to this annual event and the ability to share the latest
+Lustre information with the community. 
+
+Best Regards, 
+OpenSFS
+
+ 
+
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20220504/8436084e/attachment-0001.html>
+-------------- next part --------------
+A non-text attachment was scrubbed...
+Name: image001.png
+Type: image/png
+Size: 12895 bytes
+Desc: not available
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20220504/8436084e/attachment-0001.png>
+
+From andrew.elwell at gmail.com  Thu May  5 06:16:36 2022
+From: andrew.elwell at gmail.com (Andrew Elwell)
+Date: Thu, 5 May 2022 23:16:36 +1000
+Subject: [lustre-discuss] Corrupted? MDT not mounting
+In-Reply-To: <CAANX9yf4GrL43vTkOYFRaVmMRHEjKgEOEMHNA5P+_Xe8QrEpHw@mail.gmail.com>
+References: <CAANX9ydTxFzrHaQ_cx=E+no4+4ruY_aMvJdJZ986dKyPC-KpdQ@mail.gmail.com>
+ <BA97D7B3-DBD3-42A6-B977-3D4A5343A4FF@stanford.edu>
+ <CAANX9yf4GrL43vTkOYFRaVmMRHEjKgEOEMHNA5P+_Xe8QrEpHw@mail.gmail.com>
+Message-ID: <CAANX9yfM=mepeY2NSw_VxvD8_P2CmngFWJZYrHwtpofkw+ux0A@mail.gmail.com>
+
+> It's looking more like something filled up our space - I'm just
+> copying the files out as a backup (mounted as ldiskfs just now) -
+
+Ahem. Inode quotas are a good idea. Turns out that a user creating
+about 130 million directories rapidly is more than a small MDT volume
+can take.
+
+An update on recovery progress - Upgrading the MDS to 2.12 got us over
+the issue in LU-12674 enough to recover, and I've migrated half (one
+of the HA pairs) of the OSSs to RHEL 7.9 / Lustre 2.12.8 too
+
+It needed a set of writeconf's doing before they'd mount, and e2fsck
+has run over any suspect luns. The filesystem "works" in that under
+light testing I can read/write OK, but as soon as it gets stressed,
+OSSs are falling over
+
+[ 1226.864430] BUG: unable to handle kernel NULL pointer dereference
+at           (null)
+[ 1226.872281] IP: [<ffffffffac3a684b>] __list_add+0x1b/0xc0
+[ 1226.877699] PGD 1ffba0d067 PUD 1ffa48e067 PMD 0
+[ 1226.882360] Oops: 0000 [#1] SMP
+[ 1226.885619] Modules linked in: osp(OE) ofd(OE) lfsck(OE) ost(OE)
+mgc(OE) osd_ldiskfs(OE) ldiskfs(OE) lquota(OE) fid(OE) fld(OE)
+ko2iblnd(OE) ptlrpc(OE) obdclass(OE) lnet(OE) libcfs(OE)
+dm_round_robin ib_srp scsi_transport_srp scsi_tgt tcp_diag inet_diag
+ib_isert iscsi_target_mod target_core_mod rpcrdma rdma_ucm ib_iser
+ib_umad bonding rdma_cm ib_ipoib iw_cm libiscsi scsi_transport_iscsi
+ib_cm mlx4_ib ib_uverbs ib_core sunrpc ext4 mbcache jbd2 sb_edac
+intel_powerclamp coretemp intel_rapl iosf_mbi kvm_intel iTCO_wdt kvm
+iTCO_vendor_support irqbypass crc32_pclmul ghash_clmulni_intel
+aesni_intel lrw gf128mul glue_helper ablk_helper cryptd pcspkr
+i2c_i801 lpc_ich mei_me joydev mei sg ioatdma wmi ipmi_si ipmi_devintf
+ipmi_msghandler dm_multipath acpi_pad acpi_power_meter dm_mod
+ip_tables xfs libcrc32c sd_mod crc_t10dif crct10dif_generic mlx4_en
+ast drm_kms_helper syscopyarea sysfillrect sysimgblt fb_sys_fops ttm
+drm igb ahci libahci mpt2sas mlx4_core ptp crct10dif_pclmul
+crct10dif_common libata crc32c_intel pps_core dca raid_class devlink
+i2c_algo_bit drm_panel_orientation_quirks scsi_transport_sas nfit
+libnvdimm [last unloaded: scsi_tgt]
+[ 1226.987670] CPU: 6 PID: 366 Comm: kworker/u24:6 Kdump: loaded
+Tainted: G           OE  ------------
+3.10.0-1160.49.1.el7_lustre.x86_64 #1
+[ 1227.000168] Hardware name: SGI.COM CH-C1104-GP6/X10SRW-F, BIOS 3.1 06/06/2018
+[ 1227.007310] Workqueue: rdma_cm cma_work_handler [rdma_cm]
+[ 1227.012725] task: ffff934839f0b180 ti: ffff934836c20000 task.ti:
+ffff934836c20000
+[ 1227.020195] RIP: 0010:[<ffffffffac3a684b>]  [<ffffffffac3a684b>]
+__list_add+0x1b/0xc0
+[ 1227.028036] RSP: 0018:ffff934836c23d68  EFLAGS: 00010246
+[ 1227.033339] RAX: 00000000ffffffff RBX: ffff934836c23d90 RCX: 0000000000000000
+[ 1227.040463] RDX: ffff932fa518e680 RSI: 0000000000000000 RDI: ffff934836c23d90
+[ 1227.047587] RBP: ffff934836c23d80 R08: 0000000000000000 R09: b2df8c1b3dcb3100
+[ 1227.054712] R10: b2df8c1b3dcb3100 R11: 0000000000ffffff R12: ffff932fa518e680
+[ 1227.061835] R13: 0000000000000000 R14: 00000000ffffffff R15: ffff932fa518e680
+[ 1227.068958] FS:  0000000000000000(0000) GS:ffff93483f380000(0000)
+knlGS:0000000000000000
+[ 1227.077034] CS:  0010 DS: 0000 ES: 0000 CR0: 0000000080050033
+[ 1227.082772] CR2: 0000000000000000 CR3: 0000001fe47a8000 CR4: 00000000003607e0
+[ 1227.089895] DR0: 0000000000000000 DR1: 0000000000000000 DR2: 0000000000000000
+[ 1227.097020] DR3: 0000000000000000 DR6: 00000000fffe0ff0 DR7: 0000000000000400
+[ 1227.104142] Call Trace:
+[ 1227.106593]  [<ffffffffac7881c6>] __mutex_lock_slowpath+0xa6/0x1d0
+[ 1227.112770]  [<ffffffffac02b59e>] ? __switch_to+0xce/0x580
+[ 1227.118255]  [<ffffffffac7875bf>] mutex_lock+0x1f/0x2f
+[ 1227.123399]  [<ffffffffc06fcac5>] cma_work_handler+0x25/0xa0 [rdma_cm]
+[ 1227.129922]  [<ffffffffac0bde8f>] process_one_work+0x17f/0x440
+[ 1227.135752]  [<ffffffffac0befa6>] worker_thread+0x126/0x3c0
+[ 1227.141324]  [<ffffffffac0bee80>] ? manage_workers.isra.26+0x2a0/0x2a0
+[ 1227.147849]  [<ffffffffac0c5e61>] kthread+0xd1/0xe0
+[ 1227.152729]  [<ffffffffac0c5d90>] ? insert_kthread_work+0x40/0x40
+[ 1227.158822]  [<ffffffffac795ddd>] ret_from_fork_nospec_begin+0x7/0x21
+[ 1227.165260]  [<ffffffffac0c5d90>] ? insert_kthread_work+0x40/0x40
+[ 1227.171348] Code: ff ff ff 66 2e 0f 1f 84 00 00 00 00 00 0f 1f 00
+55 48 89 e5 41 55 49 89 f5 41 54 49 89 d4 53 4c 8b 42 08 48 89 fb 49
+39 f0 75 2a <4d> 8b 45 00 4d 39 c4 75 68 4c 39 e3 74 3e 4c 39 eb 74 39
+49 89
+[ 1227.191295] RIP  [<ffffffffac3a684b>] __list_add+0x1b/0xc0
+[ 1227.196798]  RSP <ffff934836c23d68>
+[ 1227.200284] CR2: 0000000000000000
+
+
+and I'm able to reproduce this on multiple servers :-/
+
+I can see a few mentions (https://access.redhat.com/solutions/4969471
+for example) that seem to hint it's low memory triggered, but they
+also say it's fixed in the Red Hat 7.9 kernel (and we're running the
+2.12.8 stock 3.10.0-1160.49.1.el7_lustre.x86_64)
+
+I've got a case open with the vendor to see if there are any firmware
+updates - but I'm not hopeful. These are 6 core single socket
+broadwells. with 128G of RAM, Storage disks are mounted over SRP from
+a DDN appliance. Would jumping to MOFED make a difference? Otherwise
+I'm open to suggestions as it's getting very tiring wrangling servers
+back to life
+
+[root at astrofs-oss1 ~]# ls -l /var/crash/ | grep 2022
+drwxr-xr-x 2 root root 44 May  1 23:12 127.0.0.1-2022-05-01-23:11:51
+drwxr-xr-x 2 root root 44 May  2 15:58 127.0.0.1-2022-05-02-15:58:26
+drwxr-xr-x 2 root root 44 May  3 21:43 127.0.0.1-2022-05-03-21:43:27
+drwxr-xr-x 2 root root 44 May  4 17:30 127.0.0.1-2022-05-04-17:29:08
+drwxr-xr-x 2 root root 44 May  4 17:38 127.0.0.1-2022-05-04-17:37:46
+drwxr-xr-x 2 root root 44 May  4 19:11 127.0.0.1-2022-05-04-19:11:27
+drwxr-xr-x 2 root root 44 May  4 19:19 127.0.0.1-2022-05-04-19:19:19
+drwxr-xr-x 2 root root 44 May  5 17:09 127.0.0.1-2022-05-05-17:08:50
+drwxr-xr-x 2 root root 44 May  5 20:26 127.0.0.1-2022-05-05-20:24:20
+drwxr-xr-x 2 root root 44 May  5 20:33 127.0.0.1-2022-05-05-20:32:18
+drwxr-xr-x 2 root root 44 May  5 20:58 127.0.0.1-2022-05-05-20:56:27
+drwxr-xr-x 2 root root 44 May  5 21:05 127.0.0.1-2022-05-05-21:04:06
+
+
+Many thanks
+
+Andrew
+
+From Riccardo.Veraldi at cnaf.infn.it  Thu May  5 07:20:55 2022
+From: Riccardo.Veraldi at cnaf.infn.it (Riccardo Veraldi)
+Date: Thu, 5 May 2022 07:20:55 -0700
+Subject: [lustre-discuss] Anyone know why
+ lustre-zfs-dkms-2.12.8_6_g5457c37-1.el7.noarch.rpm won't install?
+In-Reply-To: <CO6PR11MB55712FFE0F262C6E1E47556E96C39@CO6PR11MB5571.namprd11.prod.outlook.com>
+References: <CO6PR11MB55712FFE0F262C6E1E47556E96C39@CO6PR11MB5571.namprd11.prod.outlook.com>
+Message-ID: <4B722951-96D3-4445-A729-452FD236601D@cnaf.infn.it>
+
+If you look in the mentioned thread I wrote a patch for it. It was long time ago I thought somebody could have fixed it already
+
+Here is my post about this issue 
+
+http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/2021-October/017813.html
+
+
+
+> On May 3, 2022, at 5:16 PM, Mannthey, Keith via lustre-discuss <lustre-discuss at lists.lustre.org> wrote:
+> 
+> ?
+> Hello,
+>   I has been a while since I installed Lustre ZFS and I am working to get 2.12.8 Lustre ZFS going on a basic system.
+>  
+> The lib* spl* and zfs* packages all install with DKMS with no issue.
+>  
+> lustre-zfs-dkms-2.12.8_6_g5457c37-1.el7.noarch.rpm does not want to install:
+>    The root issues seems to be a zfs-devel package is missing from https://downloads.whamcloud.com/public/lustre/latest-2.12-release/el7/server/RPMS/x86_64/  ?
+>    Any ideas?
+>  
+> The Lustre ZFS DKMS build errors out with:
+> ?
+> checking if kernel has 64-bit quota limits support... yes
+> checking if Linux kernel was built with CONFIG_QUOTA in or as module... yes
+> checking whether to build ldiskfs... no
+> checking whether to enable zfs... yes
+> checking zfs source directory... /usr/src/zfs-3.10.0-1160.62.1.el7.x86_64
+> checking zfs build directory... /var/lib/dkms/zfs/3.10.0-1160.62.1.el7.x86_64/3.10.0-1160.62.1.el7.x86_64/x86_64
+> checking user provided zfs devel headers...
+> checking zfs devel headers... -I/usr/include/libspl -I /usr/include/libzfs
+> ./configure: line 33341: test: zfs: integer expression expected
+> configure: error:
+>  
+> Required zfs osd cannot be built due to missing zfs development headers.
+>  
+> Support for zfs can be enabled by downloading the required packages for your
+> distribution. See http://zfsonlinux.org/ to determine is zfs is supported by
+> your distribution.
+>  
+> configure error, check /var/lib/dkms/lustre-zfs/2.12.8_6_g5457c37/build/config.log
+>  
+> Building module:
+> cleaning build area...(bad exit status: 2)
+> make -j72 KERNELRELEASE=3.10.0-1160.62.1.el7.x86_64...(bad exit status: 2)
+> Error! Bad return status for module build on kernel: 3.10.0-1160.62.1.el7.x86_64 (x86_64)
+> Consult /var/lib/dkms/lustre-zfs/2.12.8_6_g5457c37/build/make.log for more information.
+> ?
+>  
+> Thanks,
+> Keith
+> _______________________________________________
+> lustre-discuss mailing list
+> lustre-discuss at lists.lustre.org
+> http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20220505/4aafee10/attachment.html>
+
+From adilger at whamcloud.com  Fri May  6 03:04:26 2022
+From: adilger at whamcloud.com (Andreas Dilger)
+Date: Fri, 6 May 2022 10:04:26 +0000
+Subject: [lustre-discuss] Corrupted? MDT not mounting
+In-Reply-To: <CAANX9yfM=mepeY2NSw_VxvD8_P2CmngFWJZYrHwtpofkw+ux0A@mail.gmail.com>
+References: <CAANX9ydTxFzrHaQ_cx=E+no4+4ruY_aMvJdJZ986dKyPC-KpdQ@mail.gmail.com>
+ <BA97D7B3-DBD3-42A6-B977-3D4A5343A4FF@stanford.edu>
+ <CAANX9yf4GrL43vTkOYFRaVmMRHEjKgEOEMHNA5P+_Xe8QrEpHw@mail.gmail.com>
+ <CAANX9yfM=mepeY2NSw_VxvD8_P2CmngFWJZYrHwtpofkw+ux0A@mail.gmail.com>
+Message-ID: <A2026066-1269-4636-871D-FF807FCF4CCF@ddn.com>
+
+On May 5, 2022, at 07:16, Andrew Elwell via lustre-discuss <lustre-discuss at lists.lustre.org<mailto:lustre-discuss at lists.lustre.org>> wrote:
+I've got a case open with the vendor to see if there are any firmware
+updates - but I'm not hopeful. These are 6 core single socket
+broadwells. with 128G of RAM, Storage disks are mounted over SRP from
+a DDN appliance. Would jumping to MOFED make a difference? Otherwise
+I'm open to suggestions as it's getting very tiring wrangling servers
+back to life
+
+MOFED is usually preferred over in-kernel OFED, it is just tested and fixed a lot more.
+
+Cheers, Andreas
+--
+Andreas Dilger
+Lustre Principal Architect
+Whamcloud
+
+
+
+
+
+
+
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20220506/73467b4b/attachment.html>
+
+From adilger at whamcloud.com  Fri May  6 03:10:54 2022
+From: adilger at whamcloud.com (Andreas Dilger)
+Date: Fri, 6 May 2022 10:10:54 +0000
+Subject: [lustre-discuss] Anyone know why
+ lustre-zfs-dkms-2.12.8_6_g5457c37-1.el7.noarch.rpm won't install?
+In-Reply-To: <4B722951-96D3-4445-A729-452FD236601D@cnaf.infn.it>
+References: <CO6PR11MB55712FFE0F262C6E1E47556E96C39@CO6PR11MB5571.namprd11.prod.outlook.com>
+ <4B722951-96D3-4445-A729-452FD236601D@cnaf.infn.it>
+Message-ID: <09F707FA-0B97-4C6D-8BD4-B05B8C21EC67@ddn.com>
+
+Riccardo,
+please file a Jira ticket and submit your change as a patch to Gerrit (review.whamcloud.com<http://review.whamcloud.com>), so that this fix is not lost,
+
+On May 5, 2022, at 08:20, Riccardo Veraldi <Riccardo.Veraldi at cnaf.infn.it<mailto:Riccardo.Veraldi at cnaf.infn.it>> wrote:
+
+If you look in the mentioned thread I wrote a patch for it. It was long time ago I thought somebody could have fixed it already
+
+Here is my post about this issue
+
+http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/2021-October/017813.html
+
+
+
+On May 3, 2022, at 5:16 PM, Mannthey, Keith via lustre-discuss <lustre-discuss at lists.lustre.org<mailto:lustre-discuss at lists.lustre.org>> wrote:
+
+?
+Hello,
+  I has been a while since I installed Lustre ZFS and I am working to get 2.12.8 Lustre ZFS going on a basic system.
+
+The lib* spl* and zfs* packages all install with DKMS with no issue.
+
+lustre-zfs-dkms-2.12.8_6_g5457c37-1.el7.noarch.rpm does not want to install:
+   The root issues seems to be a zfs-devel package is missing from https://downloads.whamcloud.com/public/lustre/latest-2.12-release/el7/server/RPMS/x86_64/  ?
+   Any ideas?
+
+The Lustre ZFS DKMS build errors out with:
+?
+checking if kernel has 64-bit quota limits support... yes
+checking if Linux kernel was built with CONFIG_QUOTA in or as module... yes
+checking whether to build ldiskfs... no
+checking whether to enable zfs... yes
+checking zfs source directory... /usr/src/zfs-3.10.0-1160.62.1.el7.x86_64
+checking zfs build directory... /var/lib/dkms/zfs/3.10.0-1160.62.1.el7.x86_64/3.10.0-1160.62.1.el7.x86_64/x86_64
+checking user provided zfs devel headers...
+checking zfs devel headers... -I/usr/include/libspl -I /usr/include/libzfs
+./configure: line 33341: test: zfs: integer expression expected
+configure: error:
+
+Required zfs osd cannot be built due to missing zfs development headers.
+
+Support for zfs can be enabled by downloading the required packages for your
+distribution. See http://zfsonlinux.org/ to determine is zfs is supported by
+your distribution.
+
+configure error, check /var/lib/dkms/lustre-zfs/2.12.8_6_g5457c37/build/config.log
+
+Building module:
+cleaning build area...(bad exit status: 2)
+make -j72 KERNELRELEASE=3.10.0-1160.62.1.el7.x86_64...(bad exit status: 2)
+Error! Bad return status for module build on kernel: 3.10.0-1160.62.1.el7.x86_64 (x86_64)
+Consult /var/lib/dkms/lustre-zfs/2.12.8_6_g5457c37/build/make.log for more information.
+?
+
+Thanks,
+Keith
+_______________________________________________
+lustre-discuss mailing list
+lustre-discuss at lists.lustre.org<mailto:lustre-discuss at lists.lustre.org>
+http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org
+_______________________________________________
+lustre-discuss mailing list
+lustre-discuss at lists.lustre.org<mailto:lustre-discuss at lists.lustre.org>
+http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org
+
+Cheers, Andreas
+--
+Andreas Dilger
+Lustre Principal Architect
+Whamcloud
+
+
+
+
+
+
+
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20220506/8c8d8262/attachment-0001.html>
+
+From lsh at jlab.org  Fri May  6 12:02:02 2022
+From: lsh at jlab.org (Laura Hild)
+Date: Fri, 6 May 2022 19:02:02 +0000
+Subject: [lustre-discuss] Corrupted? MDT not mounting
+In-Reply-To: <CAANX9yfM=mepeY2NSw_VxvD8_P2CmngFWJZYrHwtpofkw+ux0A@mail.gmail.com>
+References: <CAANX9ydTxFzrHaQ_cx=E+no4+4ruY_aMvJdJZ986dKyPC-KpdQ@mail.gmail.com>
+ <BA97D7B3-DBD3-42A6-B977-3D4A5343A4FF@stanford.edu>
+ <CAANX9yf4GrL43vTkOYFRaVmMRHEjKgEOEMHNA5P+_Xe8QrEpHw@mail.gmail.com>
+ <CAANX9yfM=mepeY2NSw_VxvD8_P2CmngFWJZYrHwtpofkw+ux0A@mail.gmail.com>
+Message-ID: <BLAPR09MB621175DC42D8E0EE9CF2F84CDCC59@BLAPR09MB6211.namprd09.prod.outlook.com>
+
+Absolutely try MOFED.  The problem you're describing is extremely similar to one we were dealing with in March after we patched to 2.12.8, right down to those call traces.  Went away when we switched.
+
+-Laura
+
+
+From woodystrash at hotmail.com  Sat May  7 02:04:56 2022
+From: woodystrash at hotmail.com (Scott Wood)
+Date: Sat, 7 May 2022 09:04:56 +0000
+Subject: [lustre-discuss] OST not recognized as lustre volume. - group
+ descriptors corrupted
+Message-ID: <SL2P216MB12484F5A049CB78F4D53BC30AAC49@SL2P216MB1248.KORP216.PROD.OUTLOOK.COM>
+
+Hey folks,
+
+We had a power "incident".  Not sure if it was the cause of our issues or if it just brought previous issues to light.  We're a CentOS 7, lustre 2.10.6-1.el7 (from provided binaries) site, SAS direct connect HA paired OSSs running pacemaker to manage failover.  Standard stuff.  After the power incident, some OSTS were dropped and remounted but one did not come back.  At this point, that OST does not seem to be recognized as a lustre volume.
+
+First step I took was to disable the pacemaker resource and try to mount it manually to see how it was doing:
+
+[root at hpcoss02 ~]# mount -t lustre /dev/mapper/mpathg /mnt/OST78
+mount.lustre: /dev/mapper/mpathg has not been formatted with mkfs.lustre or the backend filesystem type is not supported by this tool
+
+The syslog shows the following at that time (syslog is from a subsequent attempt but logs match):
+May 07 12:04:15 hpcoss02.adqimr.ad.lan kernel: LDISKFS-fs (dm-6): ldiskfs_check_descriptors: Checksum for group 192 failed (39981!=25867)
+May 07 12:04:15 hpcoss02.adqimr.ad.lan kernel: LDISKFS-fs (dm-6): group descriptors corrupted!
+
+No fun.  Next attempt was to try mounting ldiskfs in case a journal replay would help:
+
+[root at hpcoss02 ~]# mount -t ldiskfs /dev/mapper/mpathg /mnt/OST78
+mount: wrong fs type, bad option, bad superblock on /dev/mapper/mpathg,
+       missing codepage or helper program, or other error
+
+       In some cases useful info is found in syslog - try
+       dmesg | tail or so.
+
+Unhappy chappie.  This OST has been up and running happily for months so it knows it's part of the stack.  I ran a "tune2fs -l" against it and, from the "Filesystem magic number:  0xEF53", it looks like it knows it's a lustre volume.  I ran an "e2fsck -n" against it.  I'll spare you the details but am happy to answer specifics if you have ideas about what to look for but it does not look good.  stdout went to "out" stderr went to "err".  "out" shows the following and I can dig deeper or answer questions:
+
+[root at hpcoss01 fsck]# grep "Group descriptor.*checksum is.*, should be" out |head -n1
+Group descriptor 192 checksum is 0x650b, should be 0x9c2d.  IGNORED.
+[root at hpcoss01 fsck]# grep "Group descriptor.*checksum is.*, should be" out |wc -l
+435299
+[root at hpcoss01 fsck]# grep "Free blocks count wrong for group" out |head -n1
+Free blocks count wrong for group #192 (32768, counted=0).
+[root at hpcoss01 fsck]# grep "Free blocks count wrong for group" out |wc -l
+412325
+
+"err" showed quote issues but we're not too concerned about them as we don't enforce.
+
+We are currently replicating the block device of the OST to Logical Volume so we can run non-destructive tests against an LVM snapshot to see what we get (thanks @stu for the suggestion).  We're also running an "lfs find mountpoint -obd lustre-OST004e" to get a list of the files that could be lost.  Once we have a usable copy of the OST, we intend to "e2fscl -fy" the snapshot to see of the opject come back or go to lost+found.  If they go to lost+found, we're considering replicating the MDT and MGT in a sandbox, mounting them and the OST and "lfsck"ing the OST to see if the MDT knows how to move the lost objects out of the lost+found to their happy places.
+
+Are there any other troubleshooting steps we can take while we wait for the OST block device to be copied (that'll take a bit) for our test e2fsck?  Is there any output from the "tune2fs -l" or "e2fsck" that we can provide that could shed any light on the issue and provide possible solutions? Any other tips and tricks?  Thanks in advance for any insight.
+
+Cheers
+Scott
+
+
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20220507/5f5fc281/attachment.html>
+
+From andrew.elwell at gmail.com  Sun May  8 17:54:21 2022
+From: andrew.elwell at gmail.com (Andrew Elwell)
+Date: Mon, 9 May 2022 10:54:21 +1000
+Subject: [lustre-discuss] Corrupted? MDT not mounting
+In-Reply-To: <A2026066-1269-4636-871D-FF807FCF4CCF@ddn.com>
+References: <CAANX9ydTxFzrHaQ_cx=E+no4+4ruY_aMvJdJZ986dKyPC-KpdQ@mail.gmail.com>
+ <BA97D7B3-DBD3-42A6-B977-3D4A5343A4FF@stanford.edu>
+ <CAANX9yf4GrL43vTkOYFRaVmMRHEjKgEOEMHNA5P+_Xe8QrEpHw@mail.gmail.com>
+ <CAANX9yfM=mepeY2NSw_VxvD8_P2CmngFWJZYrHwtpofkw+ux0A@mail.gmail.com>
+ <A2026066-1269-4636-871D-FF807FCF4CCF@ddn.com>
+Message-ID: <CAANX9yfPScE_rxD8o4sgVbv7WZ1u6cxENSDLaoe0j_ox=b3chQ@mail.gmail.com>
+
+On Fri, 6 May 2022 at 20:04, Andreas Dilger <adilger at whamcloud.com> wrote:
+> MOFED is usually preferred over in-kernel OFED, it is just tested and fixed a lot more.
+
+Fair enough, However is the 2.12.8-ib tree built with all the features?
+specifically https://downloads.whamcloud.com/public/lustre/lustre-2.12.8-ib/MOFED-4.9-4.1.7.0/el7/server/
+
+If I compare the ib_srp module from 2.12 in-kernel
+
+[root at astrofs-oss3 ~]# find /lib/modules/`uname -r` -name ib_srp.ko.xz
+/lib/modules/3.10.0-1160.49.1.el7_lustre.x86_64/kernel/drivers/infiniband/ulp/srp/ib_srp.ko.xz
+[root at astrofs-oss3 ~]# rpm -qf
+/lib/modules/3.10.0-1160.49.1.el7_lustre.x86_64/kernel/drivers/infiniband/ulp/srp/ib_srp.ko.xz
+kernel-3.10.0-1160.49.1.el7_lustre.x86_64
+[root at astrofs-oss3 ~]# modinfo ib_srp
+filename:
+/lib/modules/3.10.0-1160.49.1.el7_lustre.x86_64/kernel/drivers/infiniband/ulp/srp/ib_srp.ko.xz
+license:        Dual BSD/GPL
+description:    InfiniBand SCSI RDMA Protocol initiator
+author:         Roland Dreier
+retpoline:      Y
+rhelversion:    7.9
+srcversion:     1FB80E3A962EE7F39AD3959
+depends:        ib_core,scsi_transport_srp,ib_cm,rdma_cm
+intree:         Y
+vermagic:       3.10.0-1160.49.1.el7_lustre.x86_64 SMP mod_unload modversions
+signer:         CentOS Linux kernel signing key
+sig_key:        FA:A3:27:4B:D9:17:36:F0:FD:43:6A:42:1B:6A:A4:FA:FE:D0:AC:FA
+sig_hashalgo:   sha256
+parm:           srp_sg_tablesize:Deprecated name for cmd_sg_entries (uint)
+parm:           cmd_sg_entries:Default number of gather/scatter
+entries in the SRP command (default is 12, max 255) (uint)
+parm:           indirect_sg_entries:Default max number of
+gather/scatter entries (default is 12, max is 2048) (uint)
+parm:           allow_ext_sg:Default behavior when there are more than
+cmd_sg_entries S/G entries after mapping; fails the request when false
+(default false) (bool)
+parm:           topspin_workarounds:Enable workarounds for
+Topspin/Cisco SRP target bugs if != 0 (int)
+parm:           prefer_fr:Whether to use fast registration if both FMR
+and fast registration are supported (bool)
+parm:           register_always:Use memory registration even for
+contiguous memory regions (bool)
+parm:           never_register:Never register memory (bool)
+parm:           reconnect_delay:Time between successive reconnect attempts
+parm:           fast_io_fail_tmo:Number of seconds between the
+observation of a transport layer error and failing all I/O. "off"
+means that this functionality is disabled.
+parm:           dev_loss_tmo:Maximum number of seconds that the SRP
+transport should insulate transport layer errors. After this time has
+been exceeded the SCSI host is removed. Should be between 1 and
+SCSI_DEVICE_BLOCK_MAX_TIMEOUT if fast_io_fail_tmo has not been set.
+"off" means that this functionality is disabled.
+parm:           ch_count:Number of RDMA channels to use for
+communication with an SRP target. Using more than one channel improves
+performance if the HCA supports multiple completion vectors. The
+default value is the minimum of four times the number of online CPU
+sockets and the number of completion vectors supported by the HCA.
+(uint)
+parm:           use_blk_mq:Use blk-mq for SRP (bool)
+[root at astrofs-oss3 ~]#
+
+.. it all looks normal and capable of mounting our exascaler luns
+
+cf the one from 2.12.8-ib
+
+=============================================================================================================================================================================================
+ Package                                            Arch
+              Version
+Repository                                   Size
+=============================================================================================================================================================================================
+Installing:
+ kernel                                             x86_64
+              3.10.0-1160.49.1.el7_lustre
+lustre-2.12-mofed                            50 M
+ kmod-lustre-osd-ldiskfs                            x86_64
+              2.12.8_6_g5457c37-1.el7
+lustre-2.12-mofed                           469 k
+ lustre                                             x86_64
+              2.12.8_6_g5457c37-1.el7
+lustre-2.12-mofed                           805 k
+Installing for dependencies:
+ kmod-lustre                                        x86_64
+              2.12.8_6_g5457c37-1.el7
+lustre-2.12-mofed                           3.9 M
+ kmod-mlnx-ofa_kernel                               x86_64
+              4.9-OFED.4.9.4.1.7.1
+lustre-2.12-mofed                           1.3 M
+ lustre-osd-ldiskfs-mount                           x86_64
+              2.12.8_6_g5457c37-1.el7
+lustre-2.12-mofed                            15 k
+ mlnx-ofa_kernel                                    x86_64
+              4.9-OFED.4.9.4.1.7.1
+lustre-2.12-mofed                           108 k
+
+[root at astrofs-oss1 ~]# find /lib/modules/`uname -r` -name ib_srp.ko.xz
+/lib/modules/3.10.0-1160.49.1.el7_lustre.x86_64/kernel/drivers/infiniband/ulp/srp/ib_srp.ko.xz
+[root at astrofs-oss1 ~]# rpm -qf
+/lib/modules/3.10.0-1160.49.1.el7_lustre.x86_64/kernel/drivers/infiniband/ulp/srp/ib_srp.ko.xz
+kernel-3.10.0-1160.49.1.el7_lustre.x86_64
+[root at astrofs-oss1 ~]# modinfo ib_srp
+filename:
+/lib/modules/3.10.0-1160.49.1.el7_lustre.x86_64/extra/mlnx-ofa_kernel/drivers/infiniband/ulp/srp/ib_srp.ko
+version:        4.9-4.1.7
+license:        Dual BSD/GPL
+description:    ib_srp dummy kernel module
+author:         Alaa Hleihel
+retpoline:      Y
+rhelversion:    7.9
+srcversion:     9ACAA2F5216D9D9FC379EC8
+depends:        mlx_compat
+vermagic:       3.10.0-1160.49.1.el7_lustre.x86_64 SMP mod_unload modversions
+[root at astrofs-oss1 ~]#
+
+
+which doesn't seem actually be able to take any of the normal ib_srp parameters:
+
+[root at astrofs-oss1 ~]# modprobe ib_srp
+modprobe: ERROR: could not insert 'ib_srp': Unknown symbol in module,
+or unknown parameter (see dmesg)
+
+[  238.194931] ib_srp: Unknown parameter `cmd_sg_entries'
+
+etc
+
+Any suggestions? I quickly tried installing another mlnx-ofa_kernel
+(from http://downloads.linux.hpe.com/SDR/repo/mlnx_ofed/RHEL/7.9/x86_64/4.9-4.1.7.0/)
+but the same.dummy module
+
+From lsh at jlab.org  Tue May 10 11:37:21 2022
+From: lsh at jlab.org (Laura Hild)
+Date: Tue, 10 May 2022 18:37:21 +0000
+Subject: [lustre-discuss] Corrupted? MDT not mounting
+In-Reply-To: <CAANX9yfPScE_rxD8o4sgVbv7WZ1u6cxENSDLaoe0j_ox=b3chQ@mail.gmail.com>
+References: <CAANX9ydTxFzrHaQ_cx=E+no4+4ruY_aMvJdJZ986dKyPC-KpdQ@mail.gmail.com>
+ <BA97D7B3-DBD3-42A6-B977-3D4A5343A4FF@stanford.edu>
+ <CAANX9yf4GrL43vTkOYFRaVmMRHEjKgEOEMHNA5P+_Xe8QrEpHw@mail.gmail.com>
+ <CAANX9yfM=mepeY2NSw_VxvD8_P2CmngFWJZYrHwtpofkw+ux0A@mail.gmail.com>
+ <A2026066-1269-4636-871D-FF807FCF4CCF@ddn.com>
+ <CAANX9yfPScE_rxD8o4sgVbv7WZ1u6cxENSDLaoe0j_ox=b3chQ@mail.gmail.com>
+Message-ID: <BLAPR09MB62115200906BEFFDC150C5B7DCC99@BLAPR09MB6211.namprd09.prod.outlook.com>
+
+Hi Andrew-
+
+The non-dummy SRP module is in the kmod-srp package, which isn't included in the Lustre repository.  I'm less certain than I'd like to be, as ours is a DKMS setup rather than kmod, and the last time I had an SRP setup was a couple years ago, but I suspect you may have success if you fetch the full MLNX_OFED from
+
+  https://content.mellanox.com/ofed/MLNX_OFED-4.9-4.1.7.0/MLNX_OFED_LINUX-4.9-4.1.7.0-rhel7.9-x86_64.tgz
+
+and rebuild it for the _lustre kernel (mlnxofedinstall --add-kernel-support --kmp).  When I do that, I get modules that load successfully into the kernel with the kmods from the Lustre repository.
+
+-Laura
+
+
+From b.lambrigger at opendrives.com  Tue May 10 13:38:32 2022
+From: b.lambrigger at opendrives.com (Brian Lambrigger)
+Date: Tue, 10 May 2022 13:38:32 -0700
+Subject: [lustre-discuss] Lustre File Mirroring Questions
+Message-ID: <CAOQfyFEV-DCdQD=FwkbUckZJsQ_C7bW0vFZGYGENT-ridNNBsA@mail.gmail.com>
+
+Hello Lustre-discuss,
+
+While testing file mirroring from the FLR initiative, I created the
+following setup:
+
+1) Two nodes with an OST each. NodeA has MGS, MDT, and OST0. NodeB has OST1
+2) Created two pools on the DFS, with OST0 in pool0, OST1 in pool 1.
+3) Created a mirrored layout for the DFS root directory, so that child
+files will inherit the layout.
+4) Created a file in the directory which inherits the mirroring.
+
+
+That worked well, but I had some questions as to the capabilities of the
+mirrored layout:
+
+1) With the file synced on both OSTs, I downed OST0. On OST1, I was able to
+read its replica, but any writes would hang as it attempted to contact
+OST0. Is this expected behavior, or do I need to change parameters for the
+devices with tunefs in order to have writes failover to OST1?
+2) It seems that resync must sync the entire file upon modification, even
+if its striped into smaller blocks and only one of those stripes is
+modified. Is that correct?
+
+
+Here's my current OST0000 setup as reported by tunefs:
+
+Read previous values:
+Target:     flrtest-OST0000 Index:      0
+Lustre FS:  flrtest Mount type: zfs
+Flags:      0x2
+              (OST )
+Persistent mount opts:
+Parameters: mgsnode=192.168.7.60 at tcp1 failover.mode=failout
+
+
+Permanent disk data:
+
+Target:     flrtest-OST0000
+Index:      0
+Lustre FS:  flrtest Mount type: zfs
+Flags:      0x2
+              (OST )
+Persistent mount opts:
+Parameters: mgsnode=192.168.7.60 at tcp1 failover.mode=failout
+
+
+As a newcomer to Lustre, thanks so much for your time and expertise.
+
+-- 
+
+<http://opendrives.com/>
+
+*Brian Lambrigger* | Platform Developer
+
+10602 Virginia Avenue | Culver City, CA 90232
+
+O: (310) 659-8999 | M: (xxx) xxx-xxxx
+<http://opendrives.com/> <http://linkedin.com/company/3184481>
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20220510/fb54ede9/attachment.html>
+
+From andrew.elwell at gmail.com  Tue May 10 15:44:05 2022
+From: andrew.elwell at gmail.com (Andrew Elwell)
+Date: Wed, 11 May 2022 08:44:05 +1000
+Subject: [lustre-discuss] Corrupted? MDT not mounting
+In-Reply-To: <BLAPR09MB62115200906BEFFDC150C5B7DCC99@BLAPR09MB6211.namprd09.prod.outlook.com>
+References: <CAANX9ydTxFzrHaQ_cx=E+no4+4ruY_aMvJdJZ986dKyPC-KpdQ@mail.gmail.com>
+ <BA97D7B3-DBD3-42A6-B977-3D4A5343A4FF@stanford.edu>
+ <CAANX9yf4GrL43vTkOYFRaVmMRHEjKgEOEMHNA5P+_Xe8QrEpHw@mail.gmail.com>
+ <CAANX9yfM=mepeY2NSw_VxvD8_P2CmngFWJZYrHwtpofkw+ux0A@mail.gmail.com>
+ <A2026066-1269-4636-871D-FF807FCF4CCF@ddn.com>
+ <CAANX9yfPScE_rxD8o4sgVbv7WZ1u6cxENSDLaoe0j_ox=b3chQ@mail.gmail.com>
+ <BLAPR09MB62115200906BEFFDC150C5B7DCC99@BLAPR09MB6211.namprd09.prod.outlook.com>
+Message-ID: <CAANX9yd8wN47iYbji4KO_Gc_KSbmKb4dFCJQBiMVrWQ1PdCZ2A@mail.gmail.com>
+
+On Wed, 11 May 2022 at 04:37, Laura Hild <lsh at jlab.org> wrote:
+> The non-dummy SRP module is in the kmod-srp package, which isn't included in the Lustre repository...
+
+Thanks Laura,
+Yeah, I realised that earlier in the week, and have rebuilt the srp
+module from source via mlnxofedinstall, and sure enough installing
+srp-4.9-OFED.4.9.4.1.6.1.kver.3.10.0_1160.49.1.el7_lustre.x86_64.x86_64.rpm
+(gotta love those short names) gives me working srp again.
+
+Hat tip to a DDN contact here (we owe him even more beers now) for
+some extra tuning parameters:
+    options ib_srp cmd_sg_entries=255 indirect_sg_entries=2048
+allow_ext_sg=1 ch_count=1 use_imm_data=0
+but I'm pleased to say that it _seems_ to be working much better. I'd
+done one half of the HA pairs earlier in the week, lfsck completed,
+full robinhood scan done (dropped the DB and rescanned from fresh) and
+I'm just bringing the other half of the pairs up to the same software
+stack now.
+
+Couple of pointers for anyone caught in the same boat that apparently
+we did correctly:
+* upgrade your f2fsprogs to the latest - if your fsck'ing disks make
+sure you're not introducing more problems with a buggy old e2fsck
+* tunefs.lustre --writeconf isn't too destructive (see the warnings,
+you'll lose pool info but in our case that wasn't critical)
+* monitoring is good but tbh the rate of change and that it happened
+out of hours means we likely couldn't have intervened
+* so quotas are better.
+
+Thanks to those who replied on and off-list - I'm just grateful we
+only had the pair of MDTs, not the 40 (!!!) that Origin's getting
+(yeah, I was watching the LUG talk last night) - service isn't quite
+back to users but we're getting there!
+
+Andrew
+
+From david.neujahr at menzel-it.net  Wed May 11 05:22:52 2022
+From: david.neujahr at menzel-it.net (David Neujahr)
+Date: Wed, 11 May 2022 14:22:52 +0200
+Subject: [lustre-discuss] RoCEv2
+Message-ID: <4d0de4830be136925fa0e63e57c29a9c@menzel-it.net>
+
+Hey Lustre-discuss,
+
+does anybody know if RDMA over converged Ethernet (RoCEv2) is supported 
+by lustre FS?
+
+Thank you so much.
+
+-- 
+David
+
+From ndauchy at nvidia.com  Wed May 11 07:25:19 2022
+From: ndauchy at nvidia.com (Nathan Dauchy)
+Date: Wed, 11 May 2022 14:25:19 +0000
+Subject: [lustre-discuss] FLR Mirroring for read performance
+Message-ID: <CY5PR12MB6275A597C7999D0210786238C4C89@CY5PR12MB6275.namprd12.prod.outlook.com>
+
+Greetings!
+
+During the helpful LUG tutorial from Rick Mohr on advanced lustre file layouts, it was mentioned that "lfs mirror" could be used to improve read performance.  And the manual supports this, stating "files that are concurrently read by many clients (e.g. input decks, shared libraries, or executables) the aggregate parallel read performance of a single file can be improved by creating multiple mirrors of the file data".
+
+What method does Lustre use to ensure that multiple clients balance their read workloads from the multiple mirrors?  Are there any tuning parameters that should be considered, other than making sure the "preferred" flag is NOT set on a single mirror, to help even out the read workload among the OSTs?
+
+Has anyone tested this and quantified the performance improvement?
+
+Thanks,
+Nathan
+
+
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20220511/2e29480d/attachment.html>
+
+From pjones at whamcloud.com  Wed May 11 08:25:12 2022
+From: pjones at whamcloud.com (Peter Jones)
+Date: Wed, 11 May 2022 15:25:12 +0000
+Subject: [lustre-discuss] RoCEv2
+In-Reply-To: <4d0de4830be136925fa0e63e57c29a9c@menzel-it.net>
+References: <4d0de4830be136925fa0e63e57c29a9c@menzel-it.net>
+Message-ID: <AAC97352-BAD9-43EE-AE03-FF43AF98C805@ddn.com>
+
+Hi David
+
+There are definitely sites using RoCE in production. Hopefully some of them notice this and share their experiences.
+
+Peter
+
+?On 2022-05-11, 5:22 AM, "lustre-discuss on behalf of David Neujahr via lustre-discuss" <lustre-discuss-bounces at lists.lustre.org on behalf of lustre-discuss at lists.lustre.org> wrote:
+
+    Hey Lustre-discuss,
+
+    does anybody know if RDMA over converged Ethernet (RoCEv2) is supported 
+    by lustre FS?
+
+    Thank you so much.
+
+    -- 
+    David
+    _______________________________________________
+    lustre-discuss mailing list
+    lustre-discuss at lists.lustre.org
+    http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org
+
+
+From mahmoud.hanafi at nasa.gov  Wed May 11 16:00:17 2022
+From: mahmoud.hanafi at nasa.gov (Hanafi, Mahmoud (ARC-TN)[InuTeq, LLC])
+Date: Wed, 11 May 2022 23:00:17 +0000
+Subject: [lustre-discuss] Invalid record in llog
+Message-ID: <6C91872A-7978-4D66-9BEE-68E6D1E26C87@ndc.nasa.gov>
+
+We have many MDTs with invalid record errors every time we mount them. How can we clean up these llog files.
+
+fsxx-MDT000d-osp-MDT0008: invalid record in llog [0x1:0xc0000400:0xa] record for index 0/17: rc = -22
+
+
+-Thanks.
+Mahmoud
+
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20220511/de007d0a/attachment.html>
+
+From thhsieh at twcp1.phys.ntu.edu.tw  Wed May 11 21:22:35 2022
+From: thhsieh at twcp1.phys.ntu.edu.tw (Tung-Han Hsieh)
+Date: Thu, 12 May 2022 12:22:35 +0800
+Subject: [lustre-discuss] Compiling lustre 2.12.X with linux kernel 5.10.X
+ and above
+Message-ID: <20220512042234.7po52hq5vpuleukp@twcp1.phys.ntu.edu.tw>
+
+Dear All,
+
+We tried to compile Lustre-2.12.6, 2.12.8, and 2.14.0 with Linux
+kernel 5.10.114 and 5.15.38, the newest releases of the longterm
+series of Linux kernel in Linux Kernel Archives:
+
+https://www.kernel.org/
+
+but all failed in configure state. When running this command in:
+
+./configure --prefix=/opt/lustre --with-linux=/usr/src/linux-5.4.192 \
+            --with-o2ib=no --disable-server --enable-mpitests=no
+
+it prompted with the error message:
+
+==============================================================================
+checking for /usr/src/linux-5.10.114/include/generated/autoconf.h... yes
+checking for /usr/src/linux-5.10.114/include/linux/version.h... no
+checking for /usr/src/linux-5.10.114/include/generated/uapi/linux/version.h... yes
+checking for /usr/src/linux-5.10.114/include/linux/kconfig.h... yes
+checking for external module build target... configure: error: unknown; check config.log for details
+==============================================================================
+
+The error logs in config.log are attached below.
+
+I am wondering whether there is a plan to port Lustre to Linux kernel
+version 5 ? at least the Lustre client part. Upgrading to Linux kernel
+version 5 is necessary for us, because the drivers of the embedded
+ethernet cards of some newly purchased hardware only available in
+Linux kernel version 5.
+
+Thanks very much for your reply in advance.
+
+Best Regards,
+
+T.H.Hsieh
+
+==============================================================================
+configure:10681: checking for external module build target
+configure:10709: cp conftest.c build && make -d /usr/src/lustre-2.12.6/build LUSTRE_KERNEL_TEST=conftest.i LDFLAGS= LD=/usr/bin/ld -m elf_x86_64 CC=gcc -f /usr/src/lustre-2.12.6/build/Makefile LUSTRE_LINUX_CONFIG=/usr/src/linux-5.10.114/.config LINUXINCLUDE= -I/usr/src/linux-5.10.114/arch/x86/include -Iinclude -Iarch/x86/include/generated -I/usr/src/linux-5.10.114/include -Iinclude2 -I/usr/src/linux-5.10.114/include/uapi -Iinclude/generated -I/usr/src/linux-5.10.114/arch/x86/include/uapi -Iarch/x86/include/generated/uapi -I/usr/src/linux-5.10.114/include/uapi -Iinclude/generated/uapi -include /usr/src/linux-5.10.114/include/linux/kconfig.h -o tmp_include_depends -o scripts -o include/config/MARKER -C /usr/src/linux-5.10.114 EXTRA_CFLAGS=-Werror-implicit-function-declaration -g -I/usr/src/lustre-2.12.6/libcfs/include -I/usr/src/lustre-2.12.6/lnet/include -I/usr/src/lustre-2.12.6/lustre/include/uapi -I/usr/src/lustre-2.12.6/lustre/include -Wno-format-truncation -Wno-stringop-truncation -Wno-stringop-overflow SUBDIRS=/usr/src/lustre-2.12.6/build
+configure:10712: $? = 0
+configure:10714: test -s build/conftest.i
+configure:10717: $? = 1
+configure: failed program was:
+| /* confdefs.h */
+| #define PACKAGE_NAME "Lustre"
+| #define PACKAGE_TARNAME "lustre"
+| #define PACKAGE_VERSION "2.12.6"
+| #define PACKAGE_STRING "Lustre 2.12.6"
+| #define PACKAGE_BUGREPORT "https://jira.whamcloud.com/"
+| #define PACKAGE_URL ""
+| #define PACKAGE "lustre"
+| #define VERSION "2.12.6"
+| #define STDC_HEADERS 1
+| #define HAVE_SYS_TYPES_H 1
+| #define HAVE_SYS_STAT_H 1
+| #define HAVE_STDLIB_H 1
+| #define HAVE_STRING_H 1
+| #define HAVE_MEMORY_H 1
+| #define HAVE_STRINGS_H 1
+| #define HAVE_INTTYPES_H 1
+| #define HAVE_STDINT_H 1
+| #define HAVE_UNISTD_H 1
+| #define HAVE_DLFCN_H 1
+| #define LT_OBJDIR ".libs/"
+| #define LUSTRE_MAJOR 2
+| #define LUSTRE_MINOR 12
+| #define LUSTRE_PATCH 6
+| #define LUSTRE_FIX 0
+| #define LUSTRE_VERSION_STRING "2.12.6"
+| #define SIZEOF_UNSIGNED_LONG_LONG 8
+| /* end confdefs.h.  */
+| 
+| #include <linux/kernel.h>
+| #include <linux/module.h>
+| 
+| int
+| main (void)
+| {
+| 
+|   ;
+|   return 0;
+| };
+| MODULE_LICENSE("GPL");
+configure:10746: cp conftest.c build && make -d _module_/usr/src/lustre-2.12.6/build LUSTRE_KERNEL_TEST=conftest.i LDFLAGS= LD=/usr/bin/ld -m elf_x86_64 CC=gcc -f /usr/src/lustre-2.12.6/build/Makefile LUSTRE_LINUX_CONFIG=/usr/src/linux-5.10.114/.config LINUXINCLUDE= -I/usr/src/linux-5.10.114/arch/x86/include -Iinclude -Iarch/x86/include/generated -I/usr/src/linux-5.10.114/include -Iinclude2 -I/usr/src/linux-5.10.114/include/uapi -Iinclude/generated -I/usr/src/linux-5.10.114/arch/x86/include/uapi -Iarch/x86/include/generated/uapi -I/usr/src/linux-5.10.114/include/uapi -Iinclude/generated/uapi -include /usr/src/linux-5.10.114/include/linux/kconfig.h -o tmp_include_depends -o scripts -o include/config/MARKER -C /usr/src/linux-5.10.114 EXTRA_CFLAGS=-Werror-implicit-function-declaration -g -I/usr/src/lustre-2.12.6/libcfs/include -I/usr/src/lustre-2.12.6/lnet/include -I/usr/src/lustre-2.12.6/lustre/include/uapi -I/usr/src/lustre-2.12.6/lustre/include -Wno-format-truncation -Wno-stringop-truncation -Wno-stringop-overflow M=/usr/src/lustre-2.12.6/build
+make: *** No rule to make target '_module_/usr/src/lustre-2.12.6/build'.  Stop.
+configure:10749: $? = 2
+configure: failed program was:
+| /* confdefs.h */
+| #define PACKAGE_NAME "Lustre"
+| #define PACKAGE_TARNAME "lustre"
+| #define PACKAGE_VERSION "2.12.6"
+| #define PACKAGE_STRING "Lustre 2.12.6"
+| #define PACKAGE_BUGREPORT "https://jira.whamcloud.com/"
+| #define PACKAGE_URL ""
+| #define PACKAGE "lustre"
+| #define VERSION "2.12.6"
+| #define STDC_HEADERS 1
+| #define HAVE_SYS_TYPES_H 1
+| #define HAVE_SYS_STAT_H 1
+| #define HAVE_STDLIB_H 1
+| #define HAVE_STRING_H 1
+| #define HAVE_MEMORY_H 1
+| #define HAVE_STRINGS_H 1
+| #define HAVE_INTTYPES_H 1
+| #define HAVE_STDINT_H 1
+| #define HAVE_UNISTD_H 1
+| #define HAVE_DLFCN_H 1
+| #define LT_OBJDIR ".libs/"
+| #define LUSTRE_MAJOR 2
+| #define LUSTRE_MINOR 12
+| #define LUSTRE_PATCH 6
+| #define LUSTRE_FIX 0
+| #define LUSTRE_VERSION_STRING "2.12.6"
+| #define SIZEOF_UNSIGNED_LONG_LONG 8
+| /* end confdefs.h.  */
+| 
+| #include <linux/kernel.h>
+| #include <linux/module.h>
+| 
+| int
+| main (void)
+| {
+| 
+|   ;
+|   return 0;
+| };
+| MODULE_LICENSE("GPL");
+configure:10762: error: unknown; check config.log for details
+
+
+
+
+From degremoa at amazon.fr  Thu May 12 02:39:11 2022
+From: degremoa at amazon.fr (Degremont, Aurelien)
+Date: Thu, 12 May 2022 09:39:11 +0000
+Subject: [lustre-discuss] Compiling lustre 2.12.X with linux kernel
+ 5.10.X and above
+In-Reply-To: <20220512042234.7po52hq5vpuleukp@twcp1.phys.ntu.edu.tw>
+References: <20220512042234.7po52hq5vpuleukp@twcp1.phys.ntu.edu.tw>
+Message-ID: <725D2221-8E57-4AA6-A0B8-87F5C2668C28@amazon.fr>
+
+Lustre 2.14.0 supports Linux kernel up to 5.4.
+Lustre 2.15.0 which will be released in the coming days, supports up to Linux 5.11 according to Changelog, but supports clients up to 5.14 according to this ticket https://jira.whamcloud.com/browse/LU-15220
+
+This ticket is tracking effort to support Linux 5.15 https://jira.whamcloud.com/browse/LU-15420
+
+
+Aur?lien
+
+?Le 12/05/2022 06:23, ? lustre-discuss au nom de Tung-Han Hsieh ? <lustre-discuss-bounces at lists.lustre.org au nom de thhsieh at twcp1.phys.ntu.edu.tw> a ?crit :
+
+    CAUTION: This email originated from outside of the organization. Do not click links or open attachments unless you can confirm the sender and know the content is safe.
+
+
+
+    Dear All,
+
+    We tried to compile Lustre-2.12.6, 2.12.8, and 2.14.0 with Linux
+    kernel 5.10.114 and 5.15.38, the newest releases of the longterm
+    series of Linux kernel in Linux Kernel Archives:
+
+    https://www.kernel.org/
+
+    but all failed in configure state. When running this command in:
+
+    ./configure --prefix=/opt/lustre --with-linux=/usr/src/linux-5.4.192 \
+                --with-o2ib=no --disable-server --enable-mpitests=no
+
+    it prompted with the error message:
+
+    ==============================================================================
+    checking for /usr/src/linux-5.10.114/include/generated/autoconf.h... yes
+    checking for /usr/src/linux-5.10.114/include/linux/version.h... no
+    checking for /usr/src/linux-5.10.114/include/generated/uapi/linux/version.h... yes
+    checking for /usr/src/linux-5.10.114/include/linux/kconfig.h... yes
+    checking for external module build target... configure: error: unknown; check config.log for details
+    ==============================================================================
+
+    The error logs in config.log are attached below.
+
+    I am wondering whether there is a plan to port Lustre to Linux kernel
+    version 5 ? at least the Lustre client part. Upgrading to Linux kernel
+    version 5 is necessary for us, because the drivers of the embedded
+    ethernet cards of some newly purchased hardware only available in
+    Linux kernel version 5.
+
+    Thanks very much for your reply in advance.
+
+    Best Regards,
+
+    T.H.Hsieh
+
+    ==============================================================================
+    configure:10681: checking for external module build target
+    configure:10709: cp conftest.c build && make -d /usr/src/lustre-2.12.6/build LUSTRE_KERNEL_TEST=conftest.i LDFLAGS= LD=/usr/bin/ld -m elf_x86_64 CC=gcc -f /usr/src/lustre-2.12.6/build/Makefile LUSTRE_LINUX_CONFIG=/usr/src/linux-5.10.114/.config LINUXINCLUDE= -I/usr/src/linux-5.10.114/arch/x86/include -Iinclude -Iarch/x86/include/generated -I/usr/src/linux-5.10.114/include -Iinclude2 -I/usr/src/linux-5.10.114/include/uapi -Iinclude/generated -I/usr/src/linux-5.10.114/arch/x86/include/uapi -Iarch/x86/include/generated/uapi -I/usr/src/linux-5.10.114/include/uapi -Iinclude/generated/uapi -include /usr/src/linux-5.10.114/include/linux/kconfig.h -o tmp_include_depends -o scripts -o include/config/MARKER -C /usr/src/linux-5.10.114 EXTRA_CFLAGS=-Werror-implicit-function-declaration -g -I/usr/src/lustre-2.12.6/libcfs/include -I/usr/src/lustre-2.12.6/lnet/include -I/usr/src/lustre-2.12.6/lustre/include/uapi -I/usr/src/lustre-2.12.6/lustre/include -Wno-format-truncation -Wno-stringop-truncation
+      -Wno-stringop-overflow SUBDIRS=/usr/src/lustre-2.12.6/build
+    configure:10712: $? = 0
+    configure:10714: test -s build/conftest.i
+    configure:10717: $? = 1
+    configure: failed program was:
+    | /* confdefs.h */
+    | #define PACKAGE_NAME "Lustre"
+    | #define PACKAGE_TARNAME "lustre"
+    | #define PACKAGE_VERSION "2.12.6"
+    | #define PACKAGE_STRING "Lustre 2.12.6"
+    | #define PACKAGE_BUGREPORT "https://jira.whamcloud.com/"
+    | #define PACKAGE_URL ""
+    | #define PACKAGE "lustre"
+    | #define VERSION "2.12.6"
+    | #define STDC_HEADERS 1
+    | #define HAVE_SYS_TYPES_H 1
+    | #define HAVE_SYS_STAT_H 1
+    | #define HAVE_STDLIB_H 1
+    | #define HAVE_STRING_H 1
+    | #define HAVE_MEMORY_H 1
+    | #define HAVE_STRINGS_H 1
+    | #define HAVE_INTTYPES_H 1
+    | #define HAVE_STDINT_H 1
+    | #define HAVE_UNISTD_H 1
+    | #define HAVE_DLFCN_H 1
+    | #define LT_OBJDIR ".libs/"
+    | #define LUSTRE_MAJOR 2
+    | #define LUSTRE_MINOR 12
+    | #define LUSTRE_PATCH 6
+    | #define LUSTRE_FIX 0
+    | #define LUSTRE_VERSION_STRING "2.12.6"
+    | #define SIZEOF_UNSIGNED_LONG_LONG 8
+    | /* end confdefs.h.  */
+    |
+    | #include <linux/kernel.h>
+    | #include <linux/module.h>
+    |
+    | int
+    | main (void)
+    | {
+    |
+    |   ;
+    |   return 0;
+    | };
+    | MODULE_LICENSE("GPL");
+    configure:10746: cp conftest.c build && make -d _module_/usr/src/lustre-2.12.6/build LUSTRE_KERNEL_TEST=conftest.i LDFLAGS= LD=/usr/bin/ld -m elf_x86_64 CC=gcc -f /usr/src/lustre-2.12.6/build/Makefile LUSTRE_LINUX_CONFIG=/usr/src/linux-5.10.114/.config LINUXINCLUDE= -I/usr/src/linux-5.10.114/arch/x86/include -Iinclude -Iarch/x86/include/generated -I/usr/src/linux-5.10.114/include -Iinclude2 -I/usr/src/linux-5.10.114/include/uapi -Iinclude/generated -I/usr/src/linux-5.10.114/arch/x86/include/uapi -Iarch/x86/include/generated/uapi -I/usr/src/linux-5.10.114/include/uapi -Iinclude/generated/uapi -include /usr/src/linux-5.10.114/include/linux/kconfig.h -o tmp_include_depends -o scripts -o include/config/MARKER -C /usr/src/linux-5.10.114 EXTRA_CFLAGS=-Werror-implicit-function-declaration -g -I/usr/src/lustre-2.12.6/libcfs/include -I/usr/src/lustre-2.12.6/lnet/include -I/usr/src/lustre-2.12.6/lustre/include/uapi -I/usr/src/lustre-2.12.6/lustre/include -Wno-format-truncation -Wno-stringop-tr
+     uncation -Wno-stringop-overflow M=/usr/src/lustre-2.12.6/build
+    make: *** No rule to make target '_module_/usr/src/lustre-2.12.6/build'.  Stop.
+    configure:10749: $? = 2
+    configure: failed program was:
+    | /* confdefs.h */
+    | #define PACKAGE_NAME "Lustre"
+    | #define PACKAGE_TARNAME "lustre"
+    | #define PACKAGE_VERSION "2.12.6"
+    | #define PACKAGE_STRING "Lustre 2.12.6"
+    | #define PACKAGE_BUGREPORT "https://jira.whamcloud.com/"
+    | #define PACKAGE_URL ""
+    | #define PACKAGE "lustre"
+    | #define VERSION "2.12.6"
+    | #define STDC_HEADERS 1
+    | #define HAVE_SYS_TYPES_H 1
+    | #define HAVE_SYS_STAT_H 1
+    | #define HAVE_STDLIB_H 1
+    | #define HAVE_STRING_H 1
+    | #define HAVE_MEMORY_H 1
+    | #define HAVE_STRINGS_H 1
+    | #define HAVE_INTTYPES_H 1
+    | #define HAVE_STDINT_H 1
+    | #define HAVE_UNISTD_H 1
+    | #define HAVE_DLFCN_H 1
+    | #define LT_OBJDIR ".libs/"
+    | #define LUSTRE_MAJOR 2
+    | #define LUSTRE_MINOR 12
+    | #define LUSTRE_PATCH 6
+    | #define LUSTRE_FIX 0
+    | #define LUSTRE_VERSION_STRING "2.12.6"
+    | #define SIZEOF_UNSIGNED_LONG_LONG 8
+    | /* end confdefs.h.  */
+    |
+    | #include <linux/kernel.h>
+    | #include <linux/module.h>
+    |
+    | int
+    | main (void)
+    | {
+    |
+    |   ;
+    |   return 0;
+    | };
+    | MODULE_LICENSE("GPL");
+    configure:10762: error: unknown; check config.log for details
+
+
+
+    _______________________________________________
+    lustre-discuss mailing list
+    lustre-discuss at lists.lustre.org
+    http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org
+
+
+From m.magrys at cyfronet.pl  Fri May 13 01:42:40 2022
+From: m.magrys at cyfronet.pl (Marek =?UTF-8?Q?Magry=C5=9B?=)
+Date: Fri, 13 May 2022 10:42:40 +0200
+Subject: [lustre-discuss] RoCEv2
+In-Reply-To: <4d0de4830be136925fa0e63e57c29a9c@menzel-it.net>
+References: <4d0de4830be136925fa0e63e57c29a9c@menzel-it.net>
+Message-ID: <6901bef2d593e3e6ef2b62fb56dec1e67ad7f39f.camel@cyfronet.pl>
+
+Hi David,
+
+We've been using RoCEv2 in a reasonably big Lustre setup for over three
+years. Besides some minor issues in the beginning (caused by our
+configuration, some clients 14km away from the servers), we are pretty
+happy with it. 
+
+Such a setup behaves like Infiniband on the Lustre/LNET level, as it's
+handled by the same driver (ko2iblnd) but still gives you more
+flexibility on the network side, especially in more complex (in terms
+of traffic routing and distance) environments.
+
+If there is anything specific you'd like to discuss, please feel free
+to ask.
+
+Cheers,
+Marek
+
+
+W dniu ?ro, 11.05.2022 o godzinie 14?22?+0200, u?ytkownik David Neujahr
+via lustre-discuss napisa?:
+> Hey Lustre-discuss,
+> 
+> does anybody know if RDMA over converged Ethernet (RoCEv2) is
+> supported 
+> by lustre FS?
+> 
+> Thank you so much.
+> 
+-- 
+Marek Magrys
+ACC Cyfronet AGH-UST
+
+
+From Kenneth.Waegeman at UGent.be  Tue May 17 05:21:28 2022
+From: Kenneth.Waegeman at UGent.be (Kenneth Waegeman)
+Date: Tue, 17 May 2022 12:21:28 +0000
+Subject: [lustre-discuss] Disk usage for users per project
+Message-ID: <50B7678D-C2F1-4A74-A71B-F69D0871FD77@ugent.be>
+
+Hi all,
+
+We have a lustre file system with project quota enabled. We are able to list the project quota usage with lfs quota -p, and the total usage of a user on the file system with lfs quota -u, but is there any way to find out the per user usage within a project ?
+
+Thank you!
+
+Kind regards,
+Kenneth
+
+
+From a.g.basden at durham.ac.uk  Tue May 17 09:02:08 2022
+From: a.g.basden at durham.ac.uk (Alastair Basden)
+Date: Tue, 17 May 2022 17:02:08 +0100 (BST)
+Subject: [lustre-discuss] (no subject)
+Message-ID: <0bc1ef6-81c-1ac-2a72-4d1157169b39@durham.ac.uk>
+
+Hi all,
+
+We had a problem with one of our MDS (ldiskfs) on Lustre 2.12.6, which we 
+think is a bug - but haven't been able to identify it.  Can anyone shed 
+any light?  We unmounted and remounted the mdt at around 23:00.
+
+Client logs:
+May 16 22:15:41 m8011 kernel: LustreError: 11-0: lustrefs8-MDT0000-mdc-ffff956fb73c3800: operation ldlm_enqueue to node 172.18.185.1 at o2ib failed: rc = -107
+May 16 22:15:41 m8011 kernel: Lustre: lustrefs8-MDT0000-mdc-ffff956fb73c3800: Connection to lustrefs8-MDT0000 (at 172.18.185.1 at o2ib) was lost; in progress operations using this service will wait for recovery to complete
+May 16 22:15:41 m8011 kernel: LustreError: Skipped 5 previous similar messages
+May 16 22:15:48 m8011 kernel: Lustre: 101710:0:(client.c:2146:ptlrpc_expire_one_request()) @@@ Request sent has timed out for slow reply: [sent 1652735641/real 1652735641]  req at ffff949d8cb1de80 x1724290358528896/t0(0) o101->lustrefs8-MDT0000-mdc-ffff956fb73c3800 at 172.18.185.1@o2ib:12/10 lens 480/568 e 4 to 1 dl 1652735748 ref 2 fl Rpc:X/0/ffffffff rc 0/-1
+May 16 22:15:48 m8011 kernel: Lustre: 101710:0:(client.c:2146:ptlrpc_expire_one_request()) Skipped 6 previous similar messages
+May 16 23:00:15 m8011 kernel: Lustre: 4784:0:(client.c:2146:ptlrpc_expire_one_request()) @@@ Request sent has timed out for slow reply: [sent 1652738408/real 1652738408]  req at ffff94ea07314380 x1724290358763776/t0(0) o400->MGC172.18.185.1 at o2ib@172.18.185.1 at o2ib:26/25 lens 224/224 e 0 to 1 dl 1652738415 ref 1 fl Rpc:XN/0/ffffffff rc 0/-1
+May 16 23:00:15 m8011 kernel: LustreError: 166-1: MGC172.18.185.1 at o2ib: Connection to MGS (at 172.18.185.1 at o2ib) was lost; in progress operations using this service will fail
+May 16 23:00:15 m8011 kernel: Lustre: Evicted from MGS (at MGC172.18.185.1 at o2ib_0) after server handle changed from 0xdb7c7c778c8908d6 to 0xdb7c7cbad3be9e79
+May 16 23:00:15 m8011 kernel: Lustre: MGC172.18.185.1 at o2ib: Connection restored to MGC172.18.185.1 at o2ib_0 (at 172.18.185.1 at o2ib)
+May 16 23:01:49 m8011 kernel: LustreError: 167-0: lustrefs8-MDT0000-mdc-ffff956fb73c3800: This client was evicted by lustrefs8-MDT0000; in progress operations using this service will fail.
+May 16 23:01:49 m8011 kernel: LustreError: 101719:0:(vvp_io.c:1562:vvp_io_init()) lustrefs8: refresh file layout [0x200008107:0x9b08:0x0] error -108.
+May 16 23:01:49 m8011 kernel: LustreError: 101719:0:(vvp_io.c:1562:vvp_io_init()) Skipped 3 previous similar messages
+May 16 23:01:49 m8011 kernel: Lustre: lustrefs8-MDT0000-mdc-ffff956fb73c3800: Connection restored to 172.18.185.1 at o2ib (at 172.18.185.1 at o2ib)
+
+
+
+MDS server logs:
+May 16 22:15:40 c8mds1 kernel: LustreError: 10686:0:(ldlm_lockd.c:256:expired_lock_main()) ### lock callback timer expired after 99s: evicting client at 172.18.181.11 at o2ib  ns: mdt-lustrefs8-MDT0000_UUID lock: ffff97b3730d98c0/0xdb7c7cbad3be1c7b lrc: 3/0,0 mode: PW/PW res: [0x200009119:0x327f:0x0].0x0 bits 0x40/0x0 rrc: 201 type: IBT flags: 0x60200400000020 nid: 172.18.181.11 at o2ib remote: 0xe62e31610edfb808 expref: 90 pid: 10707 timeout: 8482830 lvb_type: 0
+May 16 22:15:40 c8mds1 kernel: LustreError: 10712:0:(ldlm_lockd.c:1351:ldlm_handle_enqueue0()) ### lock on destroyed export ffff9769eaf46c00 ns: mdt-lustrefs8-MDT0000_UUID lock: ffff97d828635e80/0xdb7c7cbad3be1c90 lrc: 3/0,0 mode: PW/PW res: [0x200009119:0x327f:0x0].0x0 bits 0x40/0x0 rrc: 199 type: IBT flags: 0x50200400000020 nid: 172.18.181.11 at o2ib remote: 0xe62e31610edfb80f expref: 77 pid: 10712 timeout: 0 lvb_type: 0
+May 16 22:15:40 c8mds1 kernel: LustreError: 10712:0:(ldlm_lockd.c:1351:ldlm_handle_enqueue0()) Skipped 27 previous similar messages
+May 16 22:17:22 c8mds1 kernel: LNet: Service thread pid 10783 was inactive for 200.73s. The thread might be hung, or it might only be slow and will resume later. Dumping the stack trace for debugging purposes:
+May 16 22:17:22 c8mds1 kernel: LNet: Skipped 3 previous similar messages
+May 16 22:17:22 c8mds1 kernel: Pid: 10783, comm: mdt01_040 3.10.0-1160.2.1.el7_lustre.x86_64 #1 SMP Wed Dec 9 20:53:35 UTC 2020
+May 16 22:17:22 c8mds1 kernel: Call Trace:
+May 16 22:17:22 c8mds1 kernel: [<ffffffffc1b160c0>] ldlm_completion_ast+0x430/0x860 [ptlrpc]
+May 16 22:17:22 c8mds1 kernel: [<ffffffffc1b180f1>] ldlm_cli_enqueue_local+0x231/0x830 [ptlrpc]
+May 16 22:17:22 c8mds1 kernel: [<ffffffffc0e1969b>] mdt_object_local_lock+0x50b/0xb20 [mdt]
+May 16 22:17:22 c8mds1 kernel: [<ffffffffc0e19d20>] mdt_object_lock_internal+0x70/0x360 [mdt]
+May 16 22:17:22 c8mds1 kernel: [<ffffffffc0e1a030>] mdt_object_lock+0x20/0x30 [mdt]
+May 16 22:17:22 c8mds1 kernel: [<ffffffffc0e5966b>] mdt_brw_enqueue+0x44b/0x760 [mdt]
+May 16 22:17:22 c8mds1 kernel: [<ffffffffc0e074bf>] mdt_intent_brw+0x1f/0x30 [mdt]
+May 16 22:17:22 c8mds1 kernel: [<ffffffffc0e20745>] mdt_intent_policy+0x435/0xd80 [mdt]
+May 16 22:17:22 c8mds1 kernel: [<ffffffffc1afd4e6>] ldlm_lock_enqueue+0x376/0x9b0 [ptlrpc]
+May 16 22:17:22 c8mds1 kernel: [<ffffffffc1b24b16>] ldlm_handle_enqueue0+0xa86/0x1620 [ptlrpc]
+May 16 22:17:22 c8mds1 kernel: [<ffffffffc1bae102>] tgt_enqueue+0x62/0x210 [ptlrpc]
+May 16 22:17:22 c8mds1 kernel: [<ffffffffc1bb4f1a>] tgt_request_handle+0xada/0x1570 [ptlrpc]
+May 16 22:17:22 c8mds1 kernel: [<ffffffffc1b5988b>] ptlrpc_server_handle_request+0x24b/0xab0 [ptlrpc]
+May 16 22:17:22 c8mds1 kernel: [<ffffffffc1b5d1f4>] ptlrpc_main+0xb34/0x1470 [ptlrpc]
+May 16 22:17:22 c8mds1 kernel: [<ffffffff904c5c21>] kthread+0xd1/0xe0
+May 16 22:17:22 c8mds1 kernel: [<ffffffff90b93de4>] ret_from_fork_nospec_begin+0xe/0x21
+May 16 22:17:22 c8mds1 kernel: [<ffffffffffffffff>] 0xffffffffffffffff
+May 16 22:17:22 c8mds1 kernel: LustreError: dumping log to /tmp/lustre-log.1652735842.10783
+May 16 22:17:25 c8mds1 kernel: LNet: Service thread pid 10779 was inactive for 203.65s. The thread might be hung, or it might only be slow and will resume later. Dumping the stack trace for debugging purposes:
+May 16 22:17:25 c8mds1 kernel: Pid: 10779, comm: mdt01_036 3.10.0-1160.2.1.el7_lustre.x86_64 #1 SMP Wed Dec 9 20:53:35 UTC 2020
+May 16 22:17:25 c8mds1 kernel: Call Trace:
+May 16 22:17:25 c8mds1 kernel: [<ffffffffc1b160c0>] ldlm_completion_ast+0x430/0x860 [ptlrpc]
+May 16 22:17:25 c8mds1 kernel: [<ffffffffc1b180f1>] ldlm_cli_enqueue_local+0x231/0x830 [ptlrpc]
+May 16 22:17:25 c8mds1 kernel: [<ffffffffc0e1969b>] mdt_object_local_lock+0x50b/0xb20 [mdt]
+May 16 22:17:25 c8mds1 kernel: [<ffffffffc0e19d20>] mdt_object_lock_internal+0x70/0x360 [mdt]
+May 16 22:17:25 c8mds1 kernel: [<ffffffffc0e1a030>] mdt_object_lock+0x20/0x30 [mdt]
+May 16 22:17:25 c8mds1 kernel: [<ffffffffc0e5966b>] mdt_brw_enqueue+0x44b/0x760 [mdt]
+May 16 22:17:25 c8mds1 kernel: [<ffffffffc0e074bf>] mdt_intent_brw+0x1f/0x30 [mdt]
+May 16 22:17:25 c8mds1 kernel: [<ffffffffc0e20745>] mdt_intent_policy+0x435/0xd80 [mdt]
+May 16 22:17:25 c8mds1 kernel: [<ffffffffc1afd4e6>] ldlm_lock_enqueue+0x376/0x9b0 [ptlrpc]
+May 16 22:17:25 c8mds1 kernel: [<ffffffffc1b24b16>] ldlm_handle_enqueue0+0xa86/0x1620 [ptlrpc]
+May 16 22:17:25 c8mds1 kernel: [<ffffffffc1bae102>] tgt_enqueue+0x62/0x210 [ptlrpc]
+May 16 22:17:25 c8mds1 kernel: [<ffffffffc1bb4f1a>] tgt_request_handle+0xada/0x1570 [ptlrpc]
+May 16 22:17:25 c8mds1 kernel: [<ffffffffc1b5988b>] ptlrpc_server_handle_request+0x24b/0xab0 [ptlrpc]
+May 16 22:17:25 c8mds1 kernel: [<ffffffffc1b5d1f4>] ptlrpc_main+0xb34/0x1470 [ptlrpc]
+May 16 22:17:25 c8mds1 kernel: [<ffffffff904c5c21>] kthread+0xd1/0xe0
+May 16 22:17:25 c8mds1 kernel: [<ffffffff90b93de4>] ret_from_fork_nospec_begin+0xe/0x21
+May 16 22:17:25 c8mds1 kernel: [<ffffffffffffffff>] 0xffffffffffffffff
+May 16 22:17:25 c8mds1 kernel: Pid: 10761, comm: mdt01_018 3.10.0-1160.2.1.el7_lustre.x86_64 #1 SMP Wed Dec 9 20:53:35 UTC 2020
+May 16 22:17:25 c8mds1 kernel: Call Trace:
+May 16 22:17:25 c8mds1 kernel: [<ffffffffc1b160c0>] ldlm_completion_ast+0x430/0x860 [ptlrpc]
+May 16 22:17:25 c8mds1 kernel: [<ffffffffc1b180f1>] ldlm_cli_enqueue_local+0x231/0x830 [ptlrpc]
+May 16 22:17:25 c8mds1 kernel: [<ffffffffc0e1969b>] mdt_object_local_lock+0x50b/0xb20 [mdt]
+May 16 22:17:25 c8mds1 kernel: [<ffffffffc0e19d20>] mdt_object_lock_internal+0x70/0x360 [mdt]
+May 16 22:17:25 c8mds1 kernel: [<ffffffffc0e1a030>] mdt_object_lock+0x20/0x30 [mdt]
+May 16 22:17:25 c8mds1 kernel: [<ffffffffc0e5966b>] mdt_brw_enqueue+0x44b/0x760 [mdt]
+May 16 22:17:25 c8mds1 kernel: [<ffffffffc0e074bf>] mdt_intent_brw+0x1f/0x30 [mdt]
+May 16 22:17:25 c8mds1 kernel: [<ffffffffc0e20745>] mdt_intent_policy+0x435/0xd80 [mdt]
+May 16 22:17:25 c8mds1 kernel: [<ffffffffc1afd4e6>] ldlm_lock_enqueue+0x376/0x9b0 [ptlrpc]
+May 16 22:17:25 c8mds1 kernel: [<ffffffffc1b24b16>] ldlm_handle_enqueue0+0xa86/0x1620 [ptlrpc]
+May 16 22:17:25 c8mds1 kernel: [<ffffffffc1bae102>] tgt_enqueue+0x62/0x210 [ptlrpc]
+May 16 22:17:25 c8mds1 kernel: [<ffffffffc1bb4f1a>] tgt_request_handle+0xada/0x1570 [ptlrpc]
+May 16 22:17:25 c8mds1 kernel: [<ffffffffc1b5988b>] ptlrpc_server_handle_request+0x24b/0xab0 [ptlrpc]
+May 16 22:17:25 c8mds1 kernel: [<ffffffffc1b5d1f4>] ptlrpc_main+0xb34/0x1470 [ptlrpc]
+May 16 22:17:25 c8mds1 kernel: [<ffffffff904c5c21>] kthread+0xd1/0xe0
+May 16 22:17:25 c8mds1 kernel: [<ffffffff90b93de4>] ret_from_fork_nospec_begin+0xe/0x21
+May 16 22:17:25 c8mds1 kernel: [<ffffffffffffffff>] 0xffffffffffffffff
+May 16 22:17:25 c8mds1 kernel: Pid: 10744, comm: mdt01_001 3.10.0-1160.2.1.el7_lustre.x86_64 #1 SMP Wed Dec 9 20:53:35 UTC 2020
+May 16 22:17:25 c8mds1 kernel: Call Trace:
+May 16 22:17:25 c8mds1 kernel: [<ffffffffc1b160c0>] ldlm_completion_ast+0x430/0x860 [ptlrpc]
+May 16 22:17:25 c8mds1 kernel: [<ffffffffc1b180f1>] ldlm_cli_enqueue_local+0x231/0x830 [ptlrpc]
+May 16 22:17:25 c8mds1 kernel: [<ffffffffc0e1969b>] mdt_object_local_lock+0x50b/0xb20 [mdt]
+May 16 22:17:25 c8mds1 kernel: [<ffffffffc0e19d20>] mdt_object_lock_internal+0x70/0x360 [mdt]
+May 16 22:17:25 c8mds1 kernel: [<ffffffffc0e1a030>] mdt_object_lock+0x20/0x30 [mdt]
+May 16 22:17:25 c8mds1 kernel: [<ffffffffc0e5966b>] mdt_brw_enqueue+0x44b/0x760 [mdt]
+May 16 22:17:25 c8mds1 kernel: [<ffffffffc0e074bf>] mdt_intent_brw+0x1f/0x30 [mdt]
+May 16 22:17:25 c8mds1 kernel: [<ffffffffc0e20745>] mdt_intent_policy+0x435/0xd80 [mdt]
+May 16 22:17:25 c8mds1 kernel: [<ffffffffc1afd4e6>] ldlm_lock_enqueue+0x376/0x9b0 [ptlrpc]
+May 16 22:17:25 c8mds1 kernel: [<ffffffffc1b24b16>] ldlm_handle_enqueue0+0xa86/0x1620 [ptlrpc]
+May 16 22:17:25 c8mds1 kernel: [<ffffffffc1bae102>] tgt_enqueue+0x62/0x210 [ptlrpc]
+May 16 22:17:25 c8mds1 kernel: [<ffffffffc1bb4f1a>] tgt_request_handle+0xada/0x1570 [ptlrpc]
+May 16 22:17:25 c8mds1 kernel: [<ffffffffc1b5988b>] ptlrpc_server_handle_request+0x24b/0xab0 [ptlrpc]
+May 16 22:17:25 c8mds1 kernel: [<ffffffffc1b5d1f4>] ptlrpc_main+0xb34/0x1470 [ptlrpc]
+May 16 22:17:25 c8mds1 kernel: [<ffffffff904c5c21>] kthread+0xd1/0xe0
+May 16 22:17:25 c8mds1 kernel: [<ffffffff90b93de4>] ret_from_fork_nospec_begin+0xe/0x21
+May 16 22:17:25 c8mds1 kernel: [<ffffffffffffffff>] 0xffffffffffffffff
+May 16 22:17:25 c8mds1 kernel: Pid: 10775, comm: mdt01_032 3.10.0-1160.2.1.el7_lustre.x86_64 #1 SMP Wed Dec 9 20:53:35 UTC 2020
+May 16 22:17:25 c8mds1 kernel: Call Trace:
+May 16 22:17:25 c8mds1 kernel: [<ffffffffc1b160c0>] ldlm_completion_ast+0x430/0x860 [ptlrpc]
+May 16 22:17:25 c8mds1 kernel: [<ffffffffc1b180f1>] ldlm_cli_enqueue_local+0x231/0x830 [ptlrpc]
+May 16 22:17:25 c8mds1 kernel: [<ffffffffc0e1969b>] mdt_object_local_lock+0x50b/0xb20 [mdt]
+May 16 22:17:25 c8mds1 kernel: [<ffffffffc0e19d20>] mdt_object_lock_internal+0x70/0x360 [mdt]
+May 16 22:17:25 c8mds1 kernel: [<ffffffffc0e1a030>] mdt_object_lock+0x20/0x30 [mdt]
+May 16 22:17:25 c8mds1 kernel: [<ffffffffc0e5966b>] mdt_brw_enqueue+0x44b/0x760 [mdt]
+May 16 22:17:25 c8mds1 kernel: [<ffffffffc0e074bf>] mdt_intent_brw+0x1f/0x30 [mdt]
+May 16 22:17:25 c8mds1 kernel: [<ffffffffc0e20745>] mdt_intent_policy+0x435/0xd80 [mdt]
+May 16 22:17:25 c8mds1 kernel: [<ffffffffc1afd4e6>] ldlm_lock_enqueue+0x376/0x9b0 [ptlrpc]
+May 16 22:17:26 c8mds1 kernel: [<ffffffffc1b24b16>] ldlm_handle_enqueue0+0xa86/0x1620 [ptlrpc]
+May 16 22:17:26 c8mds1 kernel: [<ffffffffc1bae102>] tgt_enqueue+0x62/0x210 [ptlrpc]
+May 16 22:17:26 c8mds1 kernel: [<ffffffffc1bb4f1a>] tgt_request_handle+0xada/0x1570 [ptlrpc]
+May 16 22:17:26 c8mds1 kernel: [<ffffffffc1b5988b>] ptlrpc_server_handle_request+0x24b/0xab0 [ptlrpc]
+May 16 22:17:26 c8mds1 kernel: [<ffffffffc1b5d1f4>] ptlrpc_main+0xb34/0x1470 [ptlrpc]
+May 16 22:17:26 c8mds1 kernel: [<ffffffff904c5c21>] kthread+0xd1/0xe0
+May 16 22:17:26 c8mds1 kernel: [<ffffffff90b93de4>] ret_from_fork_nospec_begin+0xe/0x21
+May 16 22:17:26 c8mds1 kernel: [<ffffffffffffffff>] 0xffffffffffffffff
+May 16 22:17:26 c8mds1 kernel: LNet: Service thread pid 10758 was inactive for 204.22s. Watchdog stack traces are limited to 3 per 300 seconds, skipping this one.
+May 16 22:17:26 c8mds1 kernel: LNet: Skipped 86 previous similar messages
+May 16 22:19:01 c8mds1 kernel: LustreError: 10731:0:(ldlm_request.c:130:ldlm_expired_completion_wait()) ### lock timed out (enqueued at 1652735641, 300s ago); not entering recovery in server code, just going back to sleep ns: mdt-lustrefs8-MDT0000_UUID lock: ffff97e004e2c140/0xdb7c7cbad3be1cf9 lrc: 3/0,1 mode: --/PW res: [0x200009119:0x327f:0x0].0x0 bits 0x40/0x0 rrc: 199 type: IBT flags: 0x40210400000020 nid: local remote: 0x0 expref: -99 pid: 10731 timeout: 0 lvb_type: 0
+May 16 22:19:01 c8mds1 kernel: LustreError: 10731:0:(ldlm_request.c:130:ldlm_expired_completion_wait()) Skipped 82 previous similar messages
+May 16 22:19:13 c8mds1 kernel: LNet: Service thread pid 10712 was inactive for 212.17s. Watchdog stack traces are limited to 3 per 300 seconds, skipping this one.
+May 16 22:19:13 c8mds1 kernel: LNet: Skipped 79 previous similar messages
+May 16 22:19:13 c8mds1 kernel: LustreError: dumping log to /tmp/lustre-log.1652735953.10712
+May 16 22:20:41 c8mds1 kernel: LustreError: 10712:0:(ldlm_request.c:130:ldlm_expired_completion_wait()) ### lock timed out (enqueued at 1652735740, 300s ago); not entering recovery in server code, just going back to sleep ns: mdt-lustrefs8-MDT0000_UUID lock: ffff97d828631680/0xdb7c7cbad3be255e lrc: 3/0,1 mode: --/PW res: [0x200009119:0x327f:0x0].0x0 bits 0x40/0x0 rrc: 199 type: IBT flags: 0x40210400000020 nid: local remote: 0x0 expref: -99 pid: 10712 timeout: 0 lvb_type: 0
+May 16 22:20:41 c8mds1 kernel: LustreError: 10712:0:(ldlm_request.c:130:ldlm_expired_completion_wait()) Skipped 6 previous similar messages
+May 16 22:23:56 c8mds1 kernel: Lustre: 10741:0:(service.c:1372:ptlrpc_at_send_early_reply()) @@@ Couldn't add any time (5/5), not sending early reply#012  req at ffff978ac2779b00 x1724294641533504/t0(0) o101->70387729-37e6-0b1d-21e1-7361ddded0de at 172.18.182.20@o2ib:471/0 lens 608/0 e 24 to 0 dl 1652736241 ref 2 fl New:/0/ffffffff rc 0/-1
+May 16 22:23:56 c8mds1 kernel: Lustre: 10741:0:(service.c:1372:ptlrpc_at_send_early_reply()) Skipped 1 previous similar message
+May 16 22:24:02 c8mds1 kernel: Lustre: lustrefs8-MDT0000: Client 5167509f-95db-2f03-61ce-247954999671 (at 172.18.181.64 at o2ib) reconnecting
+May 16 22:24:02 c8mds1 kernel: Lustre: Skipped 3 previous similar messages
+May 16 22:24:02 c8mds1 kernel: Lustre: lustrefs8-MDT0000: Connection restored to e1d625a8-a6a8-baed-7c20-96366af6623c (at 172.18.181.26 at o2ib)
+May 16 22:24:03 c8mds1 kernel: Lustre: lustrefs8-MDT0000: Connection restored to 4d39a1d1-ecbe-d67d-ca2a-415e2a07a1bb (at 172.18.182.90 at o2ib)
+May 16 22:24:03 c8mds1 kernel: Lustre: Skipped 63 previous similar messages
+May 16 22:24:14 c8mds1 kernel: Lustre: 10741:0:(service.c:1372:ptlrpc_at_send_early_reply()) @@@ Couldn't add any time (5/5), not sending early reply#012  req at ffff97dfcf718480 x1724302352520256/t0(0) o101->d2a8736a-59c6-e6f5-15db-d12a0417e37e at 172.18.182.36@o2ib:489/0 lens 376/0 e 22 to 0 dl 1652736259 ref 2 fl New:/0/ffffffff rc 0/-1
+May 16 22:24:14 c8mds1 kernel: Lustre: 10741:0:(service.c:1372:ptlrpc_at_send_early_reply()) Skipped 183 previous similar messages
+May 16 22:24:20 c8mds1 kernel: Lustre: lustrefs8-MDT0000: Connection restored to 6827f755-94c1-722c-22ec-777c3630efe9 (at 172.18.182.36 at o2ib)
+May 16 22:24:20 c8mds1 kernel: Lustre: Skipped 1 previous similar message
+May 16 22:24:23 c8mds1 kernel: Lustre: lustrefs8-MDT0000: Connection restored to 02863bb5-0efe-30af-b758-5ea6d9c8f49e (at 172.18.180.22 at o2ib)
+May 16 22:24:28 c8mds1 kernel: Lustre: lustrefs8-MDT0000: Connection restored to 21ce8ec3-244d-5053-20fa-257438c22965 (at 172.18.182.24 at o2ib)
+May 16 22:24:41 c8mds1 kernel: Lustre: lustrefs8-MDT0000: Client 8a587b98-f20f-7e04-716d-07a70d0ddc59 (at 172.18.182.66 at o2ib) reconnecting
+May 16 22:24:41 c8mds1 kernel: Lustre: Skipped 63 previous similar messages
+May 16 22:24:41 c8mds1 kernel: Lustre: lustrefs8-MDT0000: Connection restored to d2aff88b-77e8-31ce-8eff-d4eaf8ebc25f (at 172.18.182.66 at o2ib)
+May 16 22:25:04 c8mds1 kernel: Lustre: 10711:0:(service.c:1372:ptlrpc_at_send_early_reply()) @@@ Couldn't add any time (5/5), not sending early reply#012  req at ffff98a4b61fe780 x1724308360403904/t0(0) o101->b8eae58d-c4c3-797e-0993-98d43037a3f6 at 172.18.182.9@o2ib:539/0 lens 2112/0 e 7 to 0 dl 1652736309 ref 2 fl New:/0/ffffffff rc 0/-1
+May 16 22:25:04 c8mds1 kernel: Lustre: 10711:0:(service.c:1372:ptlrpc_at_send_early_reply()) Skipped 3 previous similar messages
+May 16 22:25:10 c8mds1 kernel: Lustre: lustrefs8-MDT0000: Connection restored to c16da7b9-791e-3f2f-c782-3c0d58b634ff (at 172.18.182.9 at o2ib)
+May 16 22:25:44 c8mds1 kernel: Lustre: lustrefs8-MDT0000: Connection restored to 266a4d82-5148-c97a-6950-49a1a34de653 (at 172.18.182.46 at o2ib)
+May 16 22:25:44 c8mds1 kernel: Lustre: Skipped 1 previous similar message
+May 16 22:25:46 c8mds1 kernel: Lustre: lustrefs8-MDT0000: Client c91bd11c-13d6-526f-b70b-f3cdf9dad9f5 (at 172.18.181.249 at o2ib) reconnecting
+May 16 22:25:46 c8mds1 kernel: Lustre: Skipped 3 previous similar messages
+May 16 22:26:27 c8mds1 kernel: Lustre: 10711:0:(service.c:1372:ptlrpc_at_send_early_reply()) @@@ Couldn't add any time (5/5), not sending early reply#012  req at ffff9769d8be0480 x1726170743340288/t0(0) o101->91ea24e9-1911-fbf5-7956-efb46ee6e0ca at 172.18.181.244@o2ib:622/0 lens 376/0 e 3 to 0 dl 1652736392 ref 2 fl New:/0/ffffffff rc 0/-1
+May 16 22:26:27 c8mds1 kernel: Lustre: 10711:0:(service.c:1372:ptlrpc_at_send_early_reply()) Skipped 3 previous similar messages
+May 16 22:26:57 c8mds1 kernel: Lustre: lustrefs8-MDT0000: Connection restored to 6a5cfbfd-cf9d-6fb5-e6f4-e22032e176a7 (at 172.18.181.245 at o2ib)
+May 16 22:26:57 c8mds1 kernel: Lustre: Skipped 2 previous similar messages
+May 16 22:28:13 c8mds1 kernel: Lustre: lustrefs8-MDT0000: Client 214637ef-4511-539a-9833-362852da07d8 (at 172.18.182.8 at o2ib) reconnecting
+May 16 22:28:13 c8mds1 kernel: Lustre: Skipped 3 previous similar messages
+May 16 22:29:19 c8mds1 kernel: Lustre: 10762:0:(service.c:1372:ptlrpc_at_send_early_reply()) @@@ Couldn't add any time (5/5), not sending early reply#012  req at ffff98cd090c5e80 x1724301745017408/t0(0) o101->a6a02916-73da-e7fe-c9ba-5beb38eb7ef9 at 172.18.182.74@o2ib:39/0 lens 2096/0 e 1 to 0 dl 1652736564 ref 2 fl New:/0/ffffffff rc 0/-1
+May 16 22:29:19 c8mds1 kernel: Lustre: 10762:0:(service.c:1372:ptlrpc_at_send_early_reply()) Skipped 6 previous similar messages
+May 16 22:29:25 c8mds1 kernel: Lustre: lustrefs8-MDT0000: Connection restored to bbc75da8-afe7-2412-e2b0-3aa0ce2c9280 (at 172.18.182.74 at o2ib)
+May 16 22:29:25 c8mds1 kernel: Lustre: Skipped 3 previous similar messages
+May 16 22:33:20 c8mds1 kernel: Lustre: lustrefs8-MDT0000: Client c2742dcd-9705-b811-3cf8-59feadd3ef65 (at 172.18.181.58 at o2ib) reconnecting
+May 16 22:33:20 c8mds1 kernel: Lustre: Skipped 4 previous similar messages
+May 16 22:33:57 c8mds1 kernel: Lustre: 10741:0:(service.c:1372:ptlrpc_at_send_early_reply()) @@@ Couldn't add any time (5/5), not sending early reply#012  req at ffff97e095943a80 x1724312024844544/t0(0) o101->d4404db7-77c2-9b93-4062-23fa777df3f5 at 172.18.181.17@o2ib:317/0 lens 2120/0 e 0 to 0 dl 1652736842 ref 2 fl New:/2/ffffffff rc 0/-1
+May 16 22:33:57 c8mds1 kernel: Lustre: 10741:0:(service.c:1372:ptlrpc_at_send_early_reply()) Skipped 4 previous similar messages
+May 16 22:34:03 c8mds1 kernel: Lustre: lustrefs8-MDT0000: Connection restored to e1d625a8-a6a8-baed-7c20-96366af6623c (at 172.18.181.26 at o2ib)
+May 16 22:34:03 c8mds1 kernel: Lustre: Skipped 3 previous similar messages
+May 16 22:42:23 c8mds1 kernel: Lustre: lustrefs8-MDT0000: Client 0d1b5384-3f3e-fd7e-4e8f-5a942b2cf1c3 (at 172.18.182.12 at o2ib) reconnecting
+May 16 22:42:23 c8mds1 kernel: Lustre: Skipped 86 previous similar messages
+May 16 22:42:39 c8mds1 kernel: Lustre: lustrefs8-MDT0000: Connection restored to 0d5dbd26-a3f4-83a8-6867-3ab763b89119 (at 172.18.181.58 at o2ib)
+May 16 22:42:39 c8mds1 kernel: Lustre: Skipped 83 previous similar messages
+May 16 22:42:52 c8mds1 kernel: Lustre: 10759:0:(service.c:1372:ptlrpc_at_send_early_reply()) @@@ Couldn't add any time (5/-150), not sending early reply#012  req at ffff98c5db275100 x1724396809193344/t0(0) o101->4cd977ab-9c50-e1bb-5ddf-184d7f219c8f at 172.18.182.79@o2ib:97/0 lens 376/0 e 0 to 0 dl 1652737377 ref 2 fl New:/0/ffffffff rc 0/-1
+May 16 22:42:52 c8mds1 kernel: Lustre: 10759:0:(service.c:1372:ptlrpc_at_send_early_reply()) Skipped 111 previous similar messages
+May 16 22:52:42 c8mds1 kernel: Lustre: lustrefs8-MDT0000: Client 38b54f7b-fdb8-09cc-c169-0d63b4bed5fd (at 172.18.182.13 at o2ib) reconnecting
+May 16 22:52:42 c8mds1 kernel: Lustre: Skipped 101 previous similar messages
+May 16 22:52:42 c8mds1 kernel: Lustre: lustrefs8-MDT0000: Connection restored to 469e12ba-269a-69f4-056b-d22dc3ac5737 (at 172.18.182.13 at o2ib)
+May 16 22:52:42 c8mds1 kernel: Lustre: Skipped 101 previous similar messages
+May 16 22:53:59 c8mds1 kernel: Lustre: 10762:0:(service.c:1372:ptlrpc_at_send_early_reply()) @@@ Couldn't add any time (5/5), not sending early reply#012  req at ffff987345d20000 x1724286364171584/t0(0) o36->362ed117-2a64-a5a9-88ff-dd3c1fa876b4 at 172.18.181.60@o2ib:9/0 lens 488/0 e 0 to 0 dl 1652738044 ref 2 fl New:/2/ffffffff rc 0/-1
+May 16 22:53:59 c8mds1 kernel: Lustre: 10762:0:(service.c:1372:ptlrpc_at_send_early_reply()) Skipped 125 previous similar messages
+May 16 22:59:41 c8mds1 kernel: Lustre: 113553:0:(client.c:2146:ptlrpc_expire_one_request()) @@@ Request sent has timed out for slow reply: [sent 1652738375/real 1652738375]  req at ffff988780e1ba80 x1724210116907968/t0(0) o39->lustrefs8-MDT0000-lwp-MDT0000 at 0@lo:12/10 lens 224/224 e 0 to 1 dl 1652738381 ref 2 fl Rpc:XN/0/ffffffff rc 0/-1
+May 16 22:59:41 c8mds1 kernel: Lustre: 113553:0:(client.c:2146:ptlrpc_expire_one_request()) Skipped 28 previous similar messages
+May 16 22:59:42 c8mds1 kernel: Lustre: Failing over lustrefs8-MDT0000
+May 16 22:59:42 c8mds1 kernel: LNet: Service thread pid 10731 completed after 2740.20s. This indicates the system was overloaded (too many service threads, or there were not enough hardware resources).
+May 16 22:59:42 c8mds1 kernel: Lustre: 10731:0:(service.c:2165:ptlrpc_server_handle_request()) @@@ Request took longer than estimated (106:2635s); client may timeout.  req at ffff9769d8bcc380 x1724290358529536/t0(0) o101->233a14d0-0bff-ec92-6b0f-433ad8b53245 at 172.18.181.11@o2ib:732/0 lens 568/192 e 4 to 0 dl 1652735747 ref 1 fl Interpret:/0/0 rc -19/-19
+May 16 22:59:42 c8mds1 kernel: LustreError: 10696:0:(ldlm_lockd.c:1351:ldlm_handle_enqueue0()) ### lock on destroyed export ffff9769eaf46c00 ns: mdt-lustrefs8-MDT0000_UUID lock: ffff97e03ac62880/0xdb7c7cbad3be1d0e lrc: 3/0,0 mode: PW/PW res: [0x200009119:0x327f:0x0].0x0 bits 0x40/0x0 rrc: 196 type: IBT flags: 0x50200400000020 nid: 172.18.181.11 at o2ib remote: 0xe62e31610edfb839 expref: 13 pid: 10696 timeout: 0 lvb_type: 0
+May 16 22:59:42 c8mds1 kernel: LustreError: 10696:0:(ldlm_lockd.c:1351:ldlm_handle_enqueue0()) Skipped 5 previous similar messages
+May 16 22:59:42 c8mds1 kernel: LustreError: 10738:0:(service.c:2128:ptlrpc_server_handle_request()) @@@ Dropping timed-out request from 12345-172.18.181.11 at o2ib: deadline 100:2542s ago#012  req at ffff97b0899b9b00 x1724290358535616/t0(0) o38-><?>@<?>:0/0 lens 520/0 e 0 to 0 dl 1652735840 ref 1 fl Interpret:/0/ffffffff rc 0/-1
+May 16 22:59:42 c8mds1 kernel: Lustre: lustrefs8-MDT0000: Not available for connect from 172.18.181.11 at o2ib (stopping)
+May 16 22:59:42 c8mds1 kernel: Lustre: Skipped 1 previous similar message
+May 16 22:59:42 c8mds1 kernel: Lustre: 10731:0:(service.c:2165:ptlrpc_server_handle_request()) Skipped 927 previous similar messages
+May 16 22:59:42 c8mds1 kernel: LustreError: 10642:0:(client.c:1187:ptlrpc_import_delay_req()) @@@ IMP_CLOSED   req at ffff98b1c1922400 x1724210116914432/t0(0) o41->lustrefs8-MDT0002-osp-MDT0000 at 172.18.185.3@o2ib:24/4 lens 224/368 e 0 to 0 dl 0 ref 1 fl Rpc:/0/ffffffff rc 0/-1
+May 16 22:59:42 c8mds1 kernel: Lustre: lustrefs8-MDT0000: Not available for connect from 172.18.182.100 at o2ib (stopping)
+May 16 22:59:42 c8mds1 kernel: Lustre: Skipped 128 previous similar messages
+May 16 22:59:43 c8mds1 kernel: Lustre: lustrefs8-MDT0000: Not available for connect from 172.18.121.96 at o2ib (stopping)
+May 16 22:59:43 c8mds1 kernel: Lustre: Skipped 33 previous similar messages
+May 16 22:59:44 c8mds1 kernel: LustreError: 69266:0:(ldlm_lockd.c:2366:ldlm_cancel_handler()) ldlm_cancel from 172.18.185.7 at o2ib arrived at 1652738384 with bad export cookie 15815652844318675611
+May 16 22:59:44 c8mds1 kernel: LustreError: 69266:0:(ldlm_lockd.c:2366:ldlm_cancel_handler()) Skipped 1 previous similar message
+May 16 22:59:45 c8mds1 kernel: LustreError: 137-5: lustrefs8-MDT0000_UUID: not available for connect from 172.18.181.68 at o2ib (no target). If you are running an HA pair check that the target is mounted on the other server.
+May 16 22:59:45 c8mds1 kernel: LustreError: Skipped 1 previous similar message
+May 16 22:59:45 c8mds1 kernel: LustreError: 137-5: lustrefs8-MDT0000_UUID: not available for connect from 172.18.121.44 at o2ib (no target). If you are running an HA pair check that the target is mounted on the other server.
+May 16 22:59:45 c8mds1 kernel: LustreError: Skipped 18 previous similar messages
+May 16 22:59:46 c8mds1 kernel: LustreError: 137-5: lustrefs8-MDT0000_UUID: not available for connect from 172.18.181.205 at o2ib (no target). If you are running an HA pair check that the target is mounted on the other server.
+May 16 22:59:46 c8mds1 kernel: LustreError: Skipped 31 previous similar messages
+May 16 22:59:48 c8mds1 kernel: LustreError: 73512:0:(ldlm_lockd.c:2366:ldlm_cancel_handler()) ldlm_cancel from 172.18.185.6 at o2ib arrived at 1652738388 with bad export cookie 15815652844318675548
+May 16 22:59:48 c8mds1 kernel: LustreError: 73512:0:(ldlm_lockd.c:2366:ldlm_cancel_handler()) Skipped 5 previous similar messages
+May 16 22:59:48 c8mds1 kernel: LustreError: 137-5: lustrefs8-MDT0000_UUID: not available for connect from 172.18.122.191 at o2ib (no target). If you are running an HA pair check that the target is mounted on the other server.
+May 16 22:59:48 c8mds1 kernel: LustreError: Skipped 64 previous similar messages
+May 16 22:59:51 c8mds1 kernel: Lustre: server umount lustrefs8-MDT0000 complete
+May 16 23:00:10 c8mds1 kernel: LDISKFS-fs (drbd0): mounted filesystem with ordered data mode. Opts: user_xattr,errors=remount-ro,no_mbcache,nodelalloc
+May 16 23:00:11 c8mds1 kernel: Lustre: lustrefs8-MDT0000: Imperative Recovery not enabled, recovery window 300-900
+May 16 23:00:11 c8mds1 kernel: LustreError: 0-0: lustrefs8-MDT0000: can't enable quota enforcement since space accounting isn't functional. Please run tunefs.lustre --quota on an unmounted filesystem if not done already
+May 16 23:00:11 c8mds1 kernel: Lustre: lustrefs8-MDT0000: in recovery but waiting for the first client to connect
+May 16 23:00:12 c8mds1 kernel: Lustre: lustrefs8-MDT0000: Will be in recovery for at least 5:00, or until 864 clients reconnect
+May 16 23:00:17 c8mds1 kernel: LustreError: 113800:0:(tgt_handler.c:526:tgt_filter_recovery_request()) @@@ not permitted during recovery  req at ffff97df902a1f80 x1724236285455488/t0(0) o601->lustrefs8-MDT0000-lwp-OST0022_UUID at 172.18.185.9@o2ib:382/0 lens 336/0 e 0 to 0 dl 1652739172 ref 1 fl Interpret:/0/ffffffff rc 0/-1
+May 16 23:00:17 c8mds1 kernel: LustreError: 113800:0:(tgt_handler.c:526:tgt_filter_recovery_request()) Skipped 2 previous similar messages
+May 16 23:00:18 c8mds1 kernel: LustreError: 113688:0:(ldlm_lockd.c:2366:ldlm_cancel_handler()) ldlm_cancel from 172.18.185.9 at o2ib arrived at 1652738418 with bad export cookie 15815652844318675674
+May 16 23:00:18 c8mds1 kernel: LustreError: 113688:0:(ldlm_lockd.c:2366:ldlm_cancel_handler()) Skipped 1 previous similar message
+May 16 23:00:19 c8mds1 kernel: LustreError: 114119:0:(tgt_handler.c:526:tgt_filter_recovery_request()) @@@ not permitted during recovery  req at ffff97d6edba4c80 x1724236285460864/t0(0) o601->lustrefs8-MDT0000-lwp-OST001d_UUID at 172.18.185.9@o2ib:384/0 lens 336/0 e 0 to 0 dl 1652739174 ref 1 fl Interpret:/0/ffffffff rc 0/-1
+May 16 23:00:19 c8mds1 kernel: LustreError: 114119:0:(tgt_handler.c:526:tgt_filter_recovery_request()) Skipped 4 previous similar messages
+May 16 23:00:23 c8mds1 kernel: LustreError: 114128:0:(tgt_handler.c:526:tgt_filter_recovery_request()) @@@ not permitted during recovery  req at ffff97e0c04a1050 x1724236285465344/t0(0) o601->lustrefs8-MDT0000-lwp-OST001e_UUID at 172.18.185.9@o2ib:387/0 lens 336/0 e 0 to 0 dl 1652739177 ref 1 fl Interpret:/0/ffffffff rc 0/-1
+May 16 23:00:23 c8mds1 kernel: LustreError: 114128:0:(tgt_handler.c:526:tgt_filter_recovery_request()) Skipped 4 previous similar messages
+May 16 23:00:24 c8mds1 kernel: LustreError: 113691:0:(ldlm_lockd.c:2366:ldlm_cancel_handler()) ldlm_cancel from 172.18.185.7 at o2ib arrived at 1652738424 with bad export cookie 15815652844318675625
+May 16 23:00:25 c8mds1 kernel: LustreError: 113802:0:(tgt_handler.c:526:tgt_filter_recovery_request()) @@@ not permitted during recovery  req at ffff98a7398e0480 x1724236297724160/t0(0) o601->lustrefs8-MDT0000-lwp-OST0026_UUID at 172.18.185.10@o2ib:390/0 lens 336/0 e 0 to 0 dl 1652739180 ref 1 fl Interpret:/0/ffffffff rc 0/-1
+May 16 23:00:25 c8mds1 kernel: LustreError: 113802:0:(tgt_handler.c:526:tgt_filter_recovery_request()) Skipped 8 previous similar messages
+May 16 23:00:29 c8mds1 kernel: LustreError: 114128:0:(tgt_handler.c:526:tgt_filter_recovery_request()) @@@ not permitted during recovery  req at ffff97d821e2f500 x1724235485488064/t0(0) o601->lustrefs8-MDT0000-lwp-OST0007_UUID at 172.18.185.6@o2ib:394/0 lens 336/0 e 0 to 0 dl 1652739184 ref 1 fl Interpret:/0/ffffffff rc 0/-1
+May 16 23:00:29 c8mds1 kernel: LustreError: 114128:0:(tgt_handler.c:526:tgt_filter_recovery_request()) Skipped 35 previous similar messages
+May 16 23:00:34 c8mds1 kernel: Lustre: lustrefs8-MDT0000: Denying connection for new client 233a14d0-0bff-ec92-6b0f-433ad8b53245 (at 172.18.181.11 at o2ib), waiting for 864 known clients (581 recovered, 0 in progress, and 0 evicted) to recover in 14:12
+May 16 23:00:34 c8mds1 kernel: LustreError: 113690:0:(ldlm_lockd.c:2366:ldlm_cancel_handler()) ldlm_cancel from 172.18.185.7 at o2ib arrived at 1652738434 with bad export cookie 15815652844318675632
+May 16 23:00:34 c8mds1 kernel: LustreError: 113690:0:(ldlm_lockd.c:2366:ldlm_cancel_handler()) Skipped 3 previous similar messages
+May 16 23:00:38 c8mds1 kernel: LustreError: 114121:0:(tgt_handler.c:526:tgt_filter_recovery_request()) @@@ not permitted during recovery  req at ffff97dfb1884800 x1724236032786624/t0(0) o601->lustrefs8-MDT0000-lwp-OST0019_UUID at 172.18.185.8@o2ib:403/0 lens 336/0 e 0 to 0 dl 1652739193 ref 1 fl Interpret:/0/ffffffff rc 0/-1
+May 16 23:00:38 c8mds1 kernel: LustreError: 114121:0:(tgt_handler.c:526:tgt_filter_recovery_request()) Skipped 87 previous similar messages
+May 16 23:00:59 c8mds1 kernel: LustreError: 113803:0:(tgt_handler.c:526:tgt_filter_recovery_request()) @@@ not permitted during recovery  req at ffff9870a787a880 x1724235698119168/t0(0) o601->lustrefs8-MDT0000-lwp-OST0001_UUID at 172.18.185.5@o2ib:424/0 lens 336/0 e 0 to 0 dl 1652739214 ref 1 fl Interpret:/0/ffffffff rc 0/-1
+May 16 23:00:59 c8mds1 kernel: LustreError: 113803:0:(tgt_handler.c:526:tgt_filter_recovery_request()) Skipped 102 previous similar messages
+May 16 23:00:59 c8mds1 kernel: Lustre: lustrefs8-MDT0000: Denying connection for new client 233a14d0-0bff-ec92-6b0f-433ad8b53245 (at 172.18.181.11 at o2ib), waiting for 864 known clients (860 recovered, 1 in progress, and 0 evicted) to recover in 13:47
+May 16 23:01:24 c8mds1 kernel: Lustre: lustrefs8-MDT0000: Denying connection for new client 233a14d0-0bff-ec92-6b0f-433ad8b53245 (at 172.18.181.11 at o2ib), waiting for 864 known clients (860 recovered, 1 in progress, and 0 evicted) to recover in 13:22
+May 16 23:01:30 c8mds1 kernel: Lustre: lustrefs8-MDT0000: Recovery over after 1:18, of 864 clients 864 recovered and 0 were evicted.
+
+Thanks,
+Alastair.
+
+From rajgautam at gmail.com  Wed May 18 11:17:48 2022
+From: rajgautam at gmail.com (Raj)
+Date: Wed, 18 May 2022 13:17:48 -0500
+Subject: [lustre-discuss] Disk usage for users per project
+In-Reply-To: <50B7678D-C2F1-4A74-A71B-F69D0871FD77@ugent.be>
+References: <50B7678D-C2F1-4A74-A71B-F69D0871FD77@ugent.be>
+Message-ID: <CANF66k9P-ZfEiHkO1CYmGtMSXz6YHTMD1moHPyZAWoAMk7gegg@mail.gmail.com>
+
+I do not think this exists yet.
+But, if every user has individual area(sub folder) inside the main project
+folder, can you create a  ?lustre project? per project-user?
+
+-Raj
+On Tue, May 17, 2022 at 7:21 AM Kenneth Waegeman via lustre-discuss <
+lustre-discuss at lists.lustre.org> wrote:
+
+> Hi all,
+>
+> We have a lustre file system with project quota enabled. We are able to
+> list the project quota usage with lfs quota -p, and the total usage of a
+> user on the file system with lfs quota -u, but is there any way to find out
+> the per user usage within a project ?
+>
+> Thank you!
+>
+> Kind regards,
+> Kenneth
+>
+> _______________________________________________
+> lustre-discuss mailing list
+> lustre-discuss at lists.lustre.org
+> http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org
+>
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20220518/71bea777/attachment.html>
+
+From adilger at whamcloud.com  Thu May 19 02:15:25 2022
+From: adilger at whamcloud.com (Andreas Dilger)
+Date: Thu, 19 May 2022 09:15:25 +0000
+Subject: [lustre-discuss] FLR Mirroring for read performance
+In-Reply-To: <CY5PR12MB6275A597C7999D0210786238C4C89@CY5PR12MB6275.namprd12.prod.outlook.com>
+References: <CY5PR12MB6275A597C7999D0210786238C4C89@CY5PR12MB6275.namprd12.prod.outlook.com>
+Message-ID: <C29F7F17-5B5E-4281-AC5A-398B9EE766FC@ddn.com>
+
+On May 11, 2022, at 08:25, Nathan Dauchy wrote:
+> 
+> Greetings!
+
+Hello Nathan,
+
+> During the helpful LUG tutorial from Rick Mohr on advanced lustre file layouts, it was mentioned that ?lfs mirror? could be used to improve read performance.  And the manual supports this, stating ?files that are concurrently read by many clients (e.g. input decks, shared libraries, or executables) the aggregate parallel read performance of a single file can be improved by creating multiple mirrors of the file data?.
+>  
+> What method does Lustre use to ensure that multiple clients balance their read workloads from the multiple mirrors?
+
+Currently (2.15.0), if there are no mirror copies marked "prefer", it tries the mirror with the most stripes on flash devices (vs. mirrors on HDDs), and if there are still multiple mirrors it uses the hash of a client memory pointer address modulo mirror count.  This should be relatively random for each client to distribute the read workload across mirrors. 
+
+I'm not totally sure why the "hash of the pointer address" mechanism was implemented, as clients typically use the client NID as the basis for "autonomous" load distribution (modulo mirror count in this case) so that the workload is "ideally" distributed across copies without any added communication.  The latter is what is described in LU-10158 "FLR: Define a replica choosing policy function", but this is not fully implemented.
+
+> Are there any tuning parameters that should be considered, other than making sure the ?preferred? flag is NOT set on a single mirror, to help even out the read workload among the OSTs?
+>  
+> Has anyone tested this and quantified the performance improvement?
+
+I don't recall seeing any benchmarks to verify this behavior for reads, but I'd be interested to learn of any results you find.
+
+In typical FLR uses that I'm aware of this is mainly between HDD and NVMe mirror copies, not multiple copies on the same class of storage, so they use either the "prefer" flag set on the flash mirror, or with LU-14996 it also checks the OS_STATFS_NONROT flag from the OSTs (if this is reported, check "lfs df -v" for the 'f' (flash) flag).
+
+Cheers, Andreas
+--
+Andreas Dilger
+Lustre Principal Architect
+Whamcloud
+
+
+
+
+
+
+
+
+From bauerj at iodoctors.com  Thu May 19 10:48:49 2022
+From: bauerj at iodoctors.com (John Bauer)
+Date: Thu, 19 May 2022 12:48:49 -0500
+Subject: [lustre-discuss] Avoiding system cache when using ssd pfl extent
+Message-ID: <afbbce27-e7cd-0d69-a0fb-b60766c8689a@iodoctors.com>
+
+When using PFL, and using an SSD as the first extent, it seems it would 
+be advantageous to not have that extent's file data consume memory in 
+the client's system buffers.? It would be similar to using O_DIRECT, but 
+on a per-extent basis.? Is there a mechanism for that already?
+
+Thanks,
+
+John
+
+
+From pfarrell at ddn.com  Thu May 19 11:05:02 2022
+From: pfarrell at ddn.com (Patrick Farrell)
+Date: Thu, 19 May 2022 18:05:02 +0000
+Subject: [lustre-discuss] Avoiding system cache when using ssd pfl extent
+In-Reply-To: <afbbce27-e7cd-0d69-a0fb-b60766c8689a@iodoctors.com>
+References: <afbbce27-e7cd-0d69-a0fb-b60766c8689a@iodoctors.com>
+Message-ID: <DM6PR19MB312958A89DDEDEC0B9E3682AC9D09@DM6PR19MB3129.namprd19.prod.outlook.com>
+
+No, and I'm not sure I agree with you at first glance.
+
+Is this just generally an idea that data stored on SSD should not be in RAM?  If so, there's no mechanism for that other than using direct I/O.
+
+-Patrick
+________________________________
+From: lustre-discuss <lustre-discuss-bounces at lists.lustre.org> on behalf of John Bauer <bauerj at iodoctors.com>
+Sent: Thursday, May 19, 2022 12:48 PM
+To: lustre-discuss at lists.lustre.org <lustre-discuss at lists.lustre.org>
+Subject: [lustre-discuss] Avoiding system cache when using ssd pfl extent
+
+When using PFL, and using an SSD as the first extent, it seems it would
+be advantageous to not have that extent's file data consume memory in
+the client's system buffers.  It would be similar to using O_DIRECT, but
+on a per-extent basis.  Is there a mechanism for that already?
+
+Thanks,
+
+John
+
+_______________________________________________
+lustre-discuss mailing list
+lustre-discuss at lists.lustre.org
+http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20220519/778d89e4/attachment.html>
+
+From bauerj at iodoctors.com  Thu May 19 11:16:56 2022
+From: bauerj at iodoctors.com (John Bauer)
+Date: Thu, 19 May 2022 13:16:56 -0500
+Subject: [lustre-discuss] Avoiding system cache when using ssd pfl extent
+In-Reply-To: <DM6PR19MB312958A89DDEDEC0B9E3682AC9D09@DM6PR19MB3129.namprd19.prod.outlook.com>
+References: <afbbce27-e7cd-0d69-a0fb-b60766c8689a@iodoctors.com>
+ <DM6PR19MB312958A89DDEDEC0B9E3682AC9D09@DM6PR19MB3129.namprd19.prod.outlook.com>
+Message-ID: <80b776ed-b6bd-c3ee-39c6-7c21172c5fd9@iodoctors.com>
+
+Pat,
+
+No, not in? general.? It just seems that if one is storing data on an 
+SSD it should be optional to have it not stored in memory ( why store in 
+2 fast mediums ).
+
+O_DIRECT is not of value as that would apply to all extents, whether on 
+SSD on HDD.?? O_DIRECT on Lustre has been problematic for me in the 
+past, performance wise.
+
+John
+
+On 5/19/22 13:05, Patrick Farrell wrote:
+> No, and I'm not sure I agree with you at first glance.
+>
+> Is this just generally an idea that data stored on SSD should not be 
+> in RAM?? If so, there's no mechanism for that other than using direct I/O.
+>
+> -Patrick
+> ------------------------------------------------------------------------
+> *From:* lustre-discuss <lustre-discuss-bounces at lists.lustre.org> on 
+> behalf of John Bauer <bauerj at iodoctors.com>
+> *Sent:* Thursday, May 19, 2022 12:48 PM
+> *To:* lustre-discuss at lists.lustre.org <lustre-discuss at lists.lustre.org>
+> *Subject:* [lustre-discuss] Avoiding system cache when using ssd pfl 
+> extent
+> When using PFL, and using an SSD as the first extent, it seems it would
+> be advantageous to not have that extent's file data consume memory in
+> the client's system buffers.? It would be similar to using O_DIRECT, but
+> on a per-extent basis.? Is there a mechanism for that already?
+>
+> Thanks,
+>
+> John
+>
+> _______________________________________________
+> lustre-discuss mailing list
+> lustre-discuss at lists.lustre.org
+> http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20220519/c970dfdd/attachment-0001.html>
+
+From pfarrell at ddn.com  Thu May 19 11:21:32 2022
+From: pfarrell at ddn.com (Patrick Farrell)
+Date: Thu, 19 May 2022 18:21:32 +0000
+Subject: [lustre-discuss] Avoiding system cache when using ssd pfl extent
+In-Reply-To: <80b776ed-b6bd-c3ee-39c6-7c21172c5fd9@iodoctors.com>
+References: <afbbce27-e7cd-0d69-a0fb-b60766c8689a@iodoctors.com>
+ <DM6PR19MB312958A89DDEDEC0B9E3682AC9D09@DM6PR19MB3129.namprd19.prod.outlook.com>
+ <80b776ed-b6bd-c3ee-39c6-7c21172c5fd9@iodoctors.com>
+Message-ID: <DM6PR19MB3129F6BE4E8BDB7260B48814C9D09@DM6PR19MB3129.namprd19.prod.outlook.com>
+
+Well, you could use two file descriptors, one for O_DIRECT one otherwise. ?
+
+SSD is a fast medium but my instinct is the desirability of having data in RAM is much more about I/O pattern and hard to optimize for in advance - Do you read the data you wrote?  (Or read data repeatedly?)
+
+In any case, there's no mechanism today.  It's also relatively marginal if we're just doing buffered I/O then forcing the data out - it will reduce memory usage but it won't improve performance.
+
+-Patrick
+
+________________________________
+From: John Bauer <bauerj at iodoctors.com>
+Sent: Thursday, May 19, 2022 1:16 PM
+To: Patrick Farrell <pfarrell at ddn.com>; lustre-discuss at lists.lustre.org <lustre-discuss at lists.lustre.org>
+Subject: Re: [lustre-discuss] Avoiding system cache when using ssd pfl extent
+
+
+Pat,
+
+No, not in  general.  It just seems that if one is storing data on an SSD it should be optional to have it not stored in memory ( why store in 2 fast mediums ).
+
+O_DIRECT is not of value as that would apply to all extents, whether on SSD on HDD.   O_DIRECT on Lustre has been problematic for me in the past, performance wise.
+
+John
+
+On 5/19/22 13:05, Patrick Farrell wrote:
+No, and I'm not sure I agree with you at first glance.
+
+Is this just generally an idea that data stored on SSD should not be in RAM?  If so, there's no mechanism for that other than using direct I/O.
+
+-Patrick
+________________________________
+From: lustre-discuss <lustre-discuss-bounces at lists.lustre.org><mailto:lustre-discuss-bounces at lists.lustre.org> on behalf of John Bauer <bauerj at iodoctors.com><mailto:bauerj at iodoctors.com>
+Sent: Thursday, May 19, 2022 12:48 PM
+To: lustre-discuss at lists.lustre.org<mailto:lustre-discuss at lists.lustre.org> <lustre-discuss at lists.lustre.org><mailto:lustre-discuss at lists.lustre.org>
+Subject: [lustre-discuss] Avoiding system cache when using ssd pfl extent
+
+When using PFL, and using an SSD as the first extent, it seems it would
+be advantageous to not have that extent's file data consume memory in
+the client's system buffers.  It would be similar to using O_DIRECT, but
+on a per-extent basis.  Is there a mechanism for that already?
+
+Thanks,
+
+John
+
+_______________________________________________
+lustre-discuss mailing list
+lustre-discuss at lists.lustre.org<mailto:lustre-discuss at lists.lustre.org>
+http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20220519/fc421b22/attachment.html>
+
+From adilger at whamcloud.com  Fri May 20 00:53:31 2022
+From: adilger at whamcloud.com (Andreas Dilger)
+Date: Fri, 20 May 2022 07:53:31 +0000
+Subject: [lustre-discuss] Avoiding system cache when using ssd pfl extent
+In-Reply-To: <DM6PR19MB3129F6BE4E8BDB7260B48814C9D09@DM6PR19MB3129.namprd19.prod.outlook.com>
+References: <afbbce27-e7cd-0d69-a0fb-b60766c8689a@iodoctors.com>
+ <DM6PR19MB312958A89DDEDEC0B9E3682AC9D09@DM6PR19MB3129.namprd19.prod.outlook.com>
+ <80b776ed-b6bd-c3ee-39c6-7c21172c5fd9@iodoctors.com>
+ <DM6PR19MB3129F6BE4E8BDB7260B48814C9D09@DM6PR19MB3129.namprd19.prod.outlook.com>
+Message-ID: <A500FC81-B2F1-4CDB-BE84-ACE90B00B2EA@ddn.com>
+
+To elaborate a bit on Patrick's answer, there is no mechanism to do this on the *client*, because the performance difference between client RAM and server storage is still fairly significant, especially if the application is doing sub-page read or write operations.
+
+However, on the *server* the OSS and MDS will *not* put flash storage into the page cache, because using the kernel page cache has a measurable overhead, and (at least in our testing) the performance of NVMe IOPS is actually better *without* the page cache because more CPU is available to handle RPCs.  This is controlled on the server with osd-ldiskfs.*.{read_cache_enable,writethrough_cache_enable}, default to 0 if the block device is non-rotational, default to 1 if block device is rotational.
+
+Separately, there is a tunable for avoiding the page cache for large read/write RPCs, osd-ldiskfs.*.readcache_max_io_mb=8 by default, so RPCs >= 8MB go directly to the disk, to avoid blowing out the page cache on the server.
+
+Cheers, Andreas
+
+> On May 19, 2022, at 12:21, Patrick Farrell via lustre-discuss <lustre-discuss at lists.lustre.org> wrote:
+> 
+> Well, you could use two file descriptors, one for O_DIRECT one otherwise. ?
+> 
+> SSD is a fast medium but my instinct is the desirability of having data in RAM is much more about I/O pattern and hard to optimize for in advance - Do you read the data you wrote?  (Or read data repeatedly?)
+> 
+> In any case, there's no mechanism today.  It's also relatively marginal if we're just doing buffered I/O then forcing the data out - it will reduce memory usage but it won't improve performance.
+> 
+> -Patrick
+> 
+> From: John Bauer <bauerj at iodoctors.com>
+> Sent: Thursday, May 19, 2022 1:16 PM
+> To: Patrick Farrell <pfarrell at ddn.com>; lustre-discuss at lists.lustre.org <lustre-discuss at lists.lustre.org>
+> Subject: Re: [lustre-discuss] Avoiding system cache when using ssd pfl extent
+>  
+> Pat,
+> No, not in  general.  It just seems that if one is storing data on an SSD it should be optional to have it not stored in memory ( why store in 2 fast mediums ).
+> O_DIRECT is not of value as that would apply to all extents, whether on SSD on HDD.   O_DIRECT on Lustre has been problematic for me in the past, performance wise.
+> John
+> On 5/19/22 13:05, Patrick Farrell wrote:
+>> No, and I'm not sure I agree with you at first glance.
+>> 
+>> Is this just generally an idea that data stored on SSD should not be in RAM?  If so, there's no mechanism for that other than using direct I/O.
+>> 
+>> -Patrick
+>> From: lustre-discuss <lustre-discuss-bounces at lists.lustre.org> on behalf of John Bauer <bauerj at iodoctors.com>
+>> Sent: Thursday, May 19, 2022 12:48 PM
+>> To: lustre-discuss at lists.lustre.org <lustre-discuss at lists.lustre.org>
+>> Subject: [lustre-discuss] Avoiding system cache when using ssd pfl extent
+>>  
+>> When using PFL, and using an SSD as the first extent, it seems it would 
+>> be advantageous to not have that extent's file data consume memory in 
+>> the client's system buffers.  It would be similar to using O_DIRECT, but 
+>> on a per-extent basis.  Is there a mechanism for that already?
+>> 
+>> Thanks,
+>> 
+>> John
+>> 
+>> _______________________________________________
+>> lustre-discuss mailing list
+>> lustre-discuss at lists.lustre.org
+>> http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org
+> _______________________________________________
+> lustre-discuss mailing list
+> lustre-discuss at lists.lustre.org
+> http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org
+
+Cheers, Andreas
+--
+Andreas Dilger
+Lustre Principal Architect
+Whamcloud
+
+
+
+
+
+
+
+
+From ake.sandgren at hpc2n.umu.se  Fri May 20 01:49:49 2022
+From: ake.sandgren at hpc2n.umu.se (=?UTF-8?Q?=c3=85ke_Sandgren?=)
+Date: Fri, 20 May 2022 10:49:49 +0200
+Subject: [lustre-discuss] Avoiding system cache when using ssd pfl extent
+In-Reply-To: <A500FC81-B2F1-4CDB-BE84-ACE90B00B2EA@ddn.com>
+References: <afbbce27-e7cd-0d69-a0fb-b60766c8689a@iodoctors.com>
+ <DM6PR19MB312958A89DDEDEC0B9E3682AC9D09@DM6PR19MB3129.namprd19.prod.outlook.com>
+ <80b776ed-b6bd-c3ee-39c6-7c21172c5fd9@iodoctors.com>
+ <DM6PR19MB3129F6BE4E8BDB7260B48814C9D09@DM6PR19MB3129.namprd19.prod.outlook.com>
+ <A500FC81-B2F1-4CDB-BE84-ACE90B00B2EA@ddn.com>
+Message-ID: <14bd953c-02d4-10a8-6baa-eb955feeb3de@hpc2n.umu.se>
+
+
+
+On 5/20/22 09:53, Andreas Dilger via lustre-discuss wrote:
+> To elaborate a bit on Patrick's answer, there is no mechanism to do this on the *client*, because the performance difference between client RAM and server storage is still fairly significant, especially if the application is doing sub-page read or write operations.
+> 
+> However, on the *server* the OSS and MDS will *not* put flash storage into the page cache, because using the kernel page cache has a measurable overhead, and (at least in our testing) the performance of NVMe IOPS is actually better *without* the page cache because more CPU is available to handle RPCs.  This is controlled on the server with osd-ldiskfs.*.{read_cache_enable,writethrough_cache_enable}, default to 0 if the block device is non-rotational, default to 1 if block device is rotational.
+
+Then my question is, what is it checking to determine non-rotational?
+
+On our systems the NVMe disks have read/writethrough_cache_enable = 1 
+(DDN SFA400NVXE) with
+===
+/dev/sde on /lustre/stor10/ost0000 (NVMe)
+cat /sys/block/sde/queue/rotational
+0
+lctl get_param osd-ldiskfs.*.*cache*enable
+osd-ldiskfs.stor10-OST0000.read_cache_enable=1
+osd-ldiskfs.stor10-OST0000.writethrough_cache_enable=1
+
+EXAScaler SFA CentOS 5.2.3-r5
+kmod-lustre-2.12.6_ddn58-1.el7.x86_64
+===
+
+-- 
+Ake Sandgren, HPC2N, Umea University, S-90187 Umea, Sweden
+Internet: ake at hpc2n.umu.se  Mobile: +46 70 7716134  Fax: +46 90-580 14
+WWW: http://www.hpc2n.umu.se
+
+From robert.redl at lmu.de  Fri May 20 05:33:19 2022
+From: robert.redl at lmu.de (Robert Redl)
+Date: Fri, 20 May 2022 14:33:19 +0200
+Subject: [lustre-discuss] lustre_rsync with growing statuslog
+Message-ID: <e02e836e-84f5-81bf-9ceb-4cd45c8d08ec@lmu.de>
+
+Dear Lustre Experts,
+
+since a few weeks we are keeping two Lustre system synchronous using 
+lustre_rsync. That works fine, but the statuslog file is growing. It is 
+currently about 500MB in size. Updating it is apparently slowing down 
+the whole process.
+
+Is it only important to keep the statuslog in cases where lustre_rsync 
+has been interrupted? Or is it necessary to keep it forever in order to 
+not miss any changes.
+
+Cheers,
+Robert
+
+-------------- next part --------------
+A non-text attachment was scrubbed...
+Name: OpenPGP_0x151A9E7E39552153.asc
+Type: application/pgp-keys
+Size: 18917 bytes
+Desc: OpenPGP public key
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20220520/2a5bada8/attachment-0001.key>
+-------------- next part --------------
+A non-text attachment was scrubbed...
+Name: OpenPGP_signature
+Type: application/pgp-signature
+Size: 495 bytes
+Desc: OpenPGP digital signature
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20220520/2a5bada8/attachment-0001.sig>
+
+From julienrey76 at gmail.com  Fri May 20 07:57:36 2022
+From: julienrey76 at gmail.com (Julien Rey)
+Date: Fri, 20 May 2022 16:57:36 +0200
+Subject: [lustre-discuss] how to unsquash users
+Message-ID: <3839fcb3-a6fd-a88b-08a6-5aadde24c856@gmail.com>
+
+Hello everyone,
+
+We are running lustre 2.12.7 and today I tried to set up a few nodemaps 
+so as to restrict access to an unique user (seamless user with uid/gid 
+3669) to a subdirectory (/webservices/seamless) from a range of machines 
+(10.0.1.[35-38]).
+
+Here's what I did so far :
+
+lctl nodemap_add seamless
+
+lctl nodemap_add_range --name seamless --range 10.0.1.[35-38]@tcp
+
+lctl nodemap_modify --name seamless --property trusted --value 1
+
+lctl nodemap_add_idmap --name seamless --idtype uid --idmap 3669:3669
+
+lctl nodemap_add_idmap --name seamless --idtype gid --idmap 3669:3669
+
+lctl nodemap_set_fileset --name seamless --fileset '/webservices/seamless'
+
+lctl nodemap_activate 1
+
+
+However, when I tried to log on one of the machine NOT in the 
+10.0.1.[35-38] range with my user account (uid 2154), my home directory 
+ownership got immediately squashed to:
+
+drwx------ 12 nobody????? nobody?????? 4096 Apr? 5 17:11 rey
+
+So I immediatly deactivated the nodemaps using :
+
+lctl nodemap_activate 0
+
+However, the directory ownership remains nobody/nobody and I can no 
+longer log in.
+
+
+Does anyone know how to revert this ? And what was wrong with my 
+nodemaps configuration ?
+
+Thanks.
+
+-- 
+Julien REY
+
+Plate-forme RPBS
+Mod?lisation Computationnelle des Interactions Prot?ines-Ligand (CMPLI)
+Universit? de Paris
+tel : 01 57 27 83 95
+
+
+From sbuisson at ddn.com  Fri May 20 08:10:14 2022
+From: sbuisson at ddn.com (Sebastien Buisson)
+Date: Fri, 20 May 2022 15:10:14 +0000
+Subject: [lustre-discuss] how to unsquash users
+In-Reply-To: <3839fcb3-a6fd-a88b-08a6-5aadde24c856@gmail.com>
+References: <3839fcb3-a6fd-a88b-08a6-5aadde24c856@gmail.com>
+Message-ID: <BF478F37-83EB-4F27-ACF9-FB8DBAD80ABE@ddn.com>
+
+Hi,
+
+It looks like you did not set properties on the default nodemap, which gets involved for your machine not in the 10.0.1.[35-38] range.
+When in use, the nodemap feature does not change anything about UID/GID of files as stored on servers, it just changes (maps) the way clients see them. Once deactivated, you should unmount then remount Lustre on your client (I understand that you have your home directories on Lustre?).
+
+Also, if you set the trusted property on the ?seamless? nodemap, no id or gid mapping will be actually carried out, because by definition it means you trust the file system's canonical identifiers.
+
+HTH,
+Sebastien.
+
+> Le 20 mai 2022 ? 16:57, Julien Rey via lustre-discuss <lustre-discuss at lists.lustre.org> a ?crit :
+> 
+> Hello everyone,
+> 
+> We are running lustre 2.12.7 and today I tried to set up a few nodemaps so as to restrict access to an unique user (seamless user with uid/gid 3669) to a subdirectory (/webservices/seamless) from a range of machines (10.0.1.[35-38]).
+> 
+> Here's what I did so far :
+> 
+> lctl nodemap_add seamless
+> 
+> lctl nodemap_add_range --name seamless --range 10.0.1.[35-38]@tcp
+> 
+> lctl nodemap_modify --name seamless --property trusted --value 1
+> 
+> lctl nodemap_add_idmap --name seamless --idtype uid --idmap 3669:3669
+> 
+> lctl nodemap_add_idmap --name seamless --idtype gid --idmap 3669:3669
+> 
+> lctl nodemap_set_fileset --name seamless --fileset '/webservices/seamless'
+> 
+> lctl nodemap_activate 1
+> 
+> 
+> However, when I tried to log on one of the machine NOT in the 10.0.1.[35-38] range with my user account (uid 2154), my home directory ownership got immediately squashed to:
+> 
+> drwx------ 12 nobody      nobody       4096 Apr  5 17:11 rey
+> 
+> So I immediatly deactivated the nodemaps using :
+> 
+> lctl nodemap_activate 0
+> 
+> However, the directory ownership remains nobody/nobody and I can no longer log in.
+> 
+> 
+> Does anyone know how to revert this ? And what was wrong with my nodemaps configuration ?
+> 
+> Thanks.
+> 
+> -- 
+> Julien REY
+> 
+> Plate-forme RPBS
+> Mod?lisation Computationnelle des Interactions Prot?ines-Ligand (CMPLI)
+> Universit? de Paris
+> tel : 01 57 27 83 95
+> 
+> _______________________________________________
+> lustre-discuss mailing list
+> lustre-discuss at lists.lustre.org
+> http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org
+
+
+From julienrey76 at gmail.com  Fri May 20 09:28:30 2022
+From: julienrey76 at gmail.com (Julien Rey)
+Date: Fri, 20 May 2022 18:28:30 +0200
+Subject: [lustre-discuss] how to unsquash users
+In-Reply-To: <BF478F37-83EB-4F27-ACF9-FB8DBAD80ABE@ddn.com>
+References: <3839fcb3-a6fd-a88b-08a6-5aadde24c856@gmail.com>
+ <BF478F37-83EB-4F27-ACF9-FB8DBAD80ABE@ddn.com>
+Message-ID: <76aa1094-1c80-a532-c9e4-6f28a2a19318@gmail.com>
+
+Hello Sebastien,
+
+Thanks for your clear explanation.
+
+I managed to "unsquash" my directory's ownership with a simple chown and 
+without having to re-mount the lustre filesystem.
+
+I understand that I should activate the "admin" and "trusted" properties 
+on the default nodemap to turn it off completely for the rest of the 
+clients. Am I correct ?
+
+J.
+
+Le 20/05/2022 ? 17:10, Sebastien Buisson a ?crit?:
+> Hi,
+>
+> It looks like you did not set properties on the default nodemap, which gets involved for your machine not in the 10.0.1.[35-38] range.
+> When in use, the nodemap feature does not change anything about UID/GID of files as stored on servers, it just changes (maps) the way clients see them. Once deactivated, you should unmount then remount Lustre on your client (I understand that you have your home directories on Lustre?).
+>
+> Also, if you set the trusted property on the ?seamless? nodemap, no id or gid mapping will be actually carried out, because by definition it means you trust the file system's canonical identifiers.
+>
+> HTH,
+> Sebastien.
+>
+>> Le 20 mai 2022 ? 16:57, Julien Rey via lustre-discuss <lustre-discuss at lists.lustre.org> a ?crit :
+>>
+>> Hello everyone,
+>>
+>> We are running lustre 2.12.7 and today I tried to set up a few nodemaps so as to restrict access to an unique user (seamless user with uid/gid 3669) to a subdirectory (/webservices/seamless) from a range of machines (10.0.1.[35-38]).
+>>
+>> Here's what I did so far :
+>>
+>> lctl nodemap_add seamless
+>>
+>> lctl nodemap_add_range --name seamless --range 10.0.1.[35-38]@tcp
+>>
+>> lctl nodemap_modify --name seamless --property trusted --value 1
+>>
+>> lctl nodemap_add_idmap --name seamless --idtype uid --idmap 3669:3669
+>>
+>> lctl nodemap_add_idmap --name seamless --idtype gid --idmap 3669:3669
+>>
+>> lctl nodemap_set_fileset --name seamless --fileset '/webservices/seamless'
+>>
+>> lctl nodemap_activate 1
+>>
+>>
+>> However, when I tried to log on one of the machine NOT in the 10.0.1.[35-38] range with my user account (uid 2154), my home directory ownership got immediately squashed to:
+>>
+>> drwx------ 12 nobody      nobody       4096 Apr  5 17:11 rey
+>>
+>> So I immediatly deactivated the nodemaps using :
+>>
+>> lctl nodemap_activate 0
+>>
+>> However, the directory ownership remains nobody/nobody and I can no longer log in.
+>>
+>>
+>> Does anyone know how to revert this ? And what was wrong with my nodemaps configuration ?
+>>
+>> Thanks.
+>>
+>> -- 
+>> Julien REY
+>>
+>> Plate-forme RPBS
+>> Mod?lisation Computationnelle des Interactions Prot?ines-Ligand (CMPLI)
+>> Universit? de Paris
+>> tel : 01 57 27 83 95
+>>
+>> _______________________________________________
+>> lustre-discuss mailing list
+>> lustre-discuss at lists.lustre.org
+>> http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org
+
+-- 
+Julien REY
+
+Plate-forme RPBS
+Mod?lisation Computationnelle des Interactions Prot?ines-Ligand (CMPLI)
+Universit? de Paris
+tel : 01 57 27 83 95
+
+
+From adilger at whamcloud.com  Fri May 20 16:02:07 2022
+From: adilger at whamcloud.com (Andreas Dilger)
+Date: Fri, 20 May 2022 23:02:07 +0000
+Subject: [lustre-discuss] Avoiding system cache when using ssd pfl extent
+In-Reply-To: <14bd953c-02d4-10a8-6baa-eb955feeb3de@hpc2n.umu.se>
+References: <afbbce27-e7cd-0d69-a0fb-b60766c8689a@iodoctors.com>
+ <DM6PR19MB312958A89DDEDEC0B9E3682AC9D09@DM6PR19MB3129.namprd19.prod.outlook.com>
+ <80b776ed-b6bd-c3ee-39c6-7c21172c5fd9@iodoctors.com>
+ <DM6PR19MB3129F6BE4E8BDB7260B48814C9D09@DM6PR19MB3129.namprd19.prod.outlook.com>
+ <A500FC81-B2F1-4CDB-BE84-ACE90B00B2EA@ddn.com>
+ <14bd953c-02d4-10a8-6baa-eb955feeb3de@hpc2n.umu.se>
+Message-ID: <A3845B16-32F7-4A38-A47A-B35C11AE2076@ddn.com>
+
+Ake,
+in this particular case I can answer your question in detail.
+
+Before SFAOS 12.1 (IIRC) the /sys/block/*/queue/rotational setting is set from userspace at mount time via a udev script, and the Lustre detection of "rotational=0" could be racy.  Newer versions of SFAOS (12.1+) set the rotational state in the SCSI VPD page and this is detected directly by the kernel.
+
+For EXAScaler systems that may be running older SFAOS releases, there was a patch made (included in 2.12.6-ddn72/EXA5.2.5) that revalidates the rotational device state occasionally in case it has been modified after mount time, and uses that to update the read_cache_enable and writethrough_cache_enable tunables *if they have not been explicitly set*.
+
+Until you update to a newer EXA and/or SFAOS, you can explicitly tune osd-ldiskfs.*.read_cache_enable=0 and ...writethrough_cache_enable=0, using a wildcard "*" if all of the OSTs/MDTs are flash based.  If you have a hybrid NVMe/HDD system, you can explicitly select a subset of OST/MDT devices to disable the caches.
+
+Cheers, Andreas
+
+On May 20, 2022, at 02:49, ?ke Sandgren <ake.sandgren at hpc2n.umu.se<mailto:ake.sandgren at hpc2n.umu.se>> wrote:
+On 5/20/22 09:53, Andreas Dilger via lustre-discuss wrote:
+To elaborate a bit on Patrick's answer, there is no mechanism to do this on the *client*, because the performance difference between client RAM and server storage is still fairly significant, especially if the application is doing sub-page read or write operations.
+However, on the *server* the OSS and MDS will *not* put flash storage into the page cache, because using the kernel page cache has a measurable overhead, and (at least in our testing) the performance of NVMe IOPS is actually better *without* the page cache because more CPU is available to handle RPCs.  This is controlled on the server with osd-ldiskfs.*.{read_cache_enable,writethrough_cache_enable}, default to 0 if the block device is non-rotational, default to 1 if block device is rotational.
+
+Then my question is, what is it checking to determine non-rotational?
+
+On our systems the NVMe disks have read/writethrough_cache_enable = 1 (DDN SFA400NVXE) with
+===
+/dev/sde on /lustre/stor10/ost0000 (NVMe)
+cat /sys/block/sde/queue/rotational
+0
+lctl get_param osd-ldiskfs.*.*cache*enable
+osd-ldiskfs.stor10-OST0000.read_cache_enable=1
+osd-ldiskfs.stor10-OST0000.writethrough_cache_enable=1
+
+EXAScaler SFA CentOS 5.2.3-r5
+kmod-lustre-2.12.6_ddn58-1.el7.x86_64
+===
+
+--
+Ake Sandgren, HPC2N, Umea University, S-90187 Umea, Sweden
+Internet: ake at hpc2n.umu.se<mailto:ake at hpc2n.umu.se>  Mobile: +46 70 7716134  Fax: +46 90-580 14
+WWW: http://www.hpc2n.umu.se
+_______________________________________________
+lustre-discuss mailing list
+lustre-discuss at lists.lustre.org<mailto:lustre-discuss at lists.lustre.org>
+http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org
+
+Cheers, Andreas
+--
+Andreas Dilger
+Lustre Principal Architect
+Whamcloud
+
+
+
+
+
+
+
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20220520/e3678431/attachment.html>
+
+From adilger at whamcloud.com  Fri May 20 16:32:03 2022
+From: adilger at whamcloud.com (Andreas Dilger)
+Date: Fri, 20 May 2022 23:32:03 +0000
+Subject: [lustre-discuss] lustre_rsync with growing statuslog
+In-Reply-To: <e02e836e-84f5-81bf-9ceb-4cd45c8d08ec@lmu.de>
+References: <e02e836e-84f5-81bf-9ceb-4cd45c8d08ec@lmu.de>
+Message-ID: <35515002-B94F-477F-9AC5-2B159D23C22B@ddn.com>
+
+On May 20, 2022, at 06:33, Robert Redl <robert.redl at lmu.de<mailto:robert.redl at lmu.de>> wrote:
+
+Dear Lustre Experts,
+
+since a few weeks we are keeping two Lustre system synchronous using lustre_rsync. That works fine, but the statuslog file is growing. It is currently about 500MB in size. Updating it is apparently slowing down the whole process.
+
+Is it only important to keep the statuslog in cases where lustre_rsync has been interrupted? Or is it necessary to keep it forever in order to not miss any changes.
+
+It should be noted that lustre_rsync is not commonly used and only tested in the context of an automated regression test that runs and largely passes.  It was developed originally as a proof of concept for Lustre Changelogs, so may be missing support for newer features (e.g. explicit file layouts, project IDs, ACLs, etc, though that *may* all be handled by rsync).  There may be unknown bugs lurking in this code, so use with some caution (i.e. don't sync your bank transaction records with it).
+
+I would recommend to at least use some other tool (e.g. MPIFileUtils) to periodically do a full scan to verify that the files are being copied over properly to the target filesystem.
+
+Taking a quick look into the lustre_rsync.c, I see that "statuslog" appears to be a log file of pending rename actions, or something like that?  It is backed up when lustre_rsync is started, but only to a file <statuslog>.old.  It looks like an entry is added into "parents" if it is renamed to/from a directory that doesn't exist in the target, but I don't know enough detail to say why that isn't working properly in your case.
+
+Feedback, patches, and status updates are welcome.  Maybe you can present about your usage of it at LAD this year?  I don't want to totally discourage your usage of lustre_rsync since it has potential for further improvements (e.g. parallel copying, bug fixing, etc), otherwise it will never get better, but just wanted to make sure you know what the current state of this tool.
+
+Cheers, Andreas
+--
+Andreas Dilger
+Lustre Principal Architect
+Whamcloud
+
+
+
+
+
+
+
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20220520/92645ae8/attachment-0001.html>
+
+From sbuisson at ddn.com  Mon May 23 03:25:10 2022
+From: sbuisson at ddn.com (Sebastien Buisson)
+Date: Mon, 23 May 2022 10:25:10 +0000
+Subject: [lustre-discuss] how to unsquash users
+In-Reply-To: <76aa1094-1c80-a532-c9e4-6f28a2a19318@gmail.com>
+References: <3839fcb3-a6fd-a88b-08a6-5aadde24c856@gmail.com>
+ <BF478F37-83EB-4F27-ACF9-FB8DBAD80ABE@ddn.com>
+ <76aa1094-1c80-a532-c9e4-6f28a2a19318@gmail.com>
+Message-ID: <9F37837C-AFA2-44B0-93C1-B9F6F0976B56@ddn.com>
+
+That is correct, in your case you should set admin and trusted to 1 on your default nodemap. But that is not really the recommended way to work with nodemaps. The default nodemap should be restrictive so that unknown clients ending up in this group are not granted any privileges. And then you create specific nodemaps for your different uses cases.
+
+Also, as explained in the Lustre Operations Manual in section 28.2.2:
+https://doc.lustre.org/lustre_manual.xhtml#idm139897458337088
+The administrative site for the Lustre file system needs at least one group with both admin and trusted properties in order to perform maintenance or to perform administrative tasks. And, more importantly, Lustre server nodes *must* be in a policy group with both these properties set to 1.
+
+HTH,
+Sebastien.
+
+> Le 20 mai 2022 ? 18:28, Julien Rey <julienrey76 at gmail.com> a ?crit :
+> 
+> Hello Sebastien,
+> 
+> Thanks for your clear explanation.
+> 
+> I managed to "unsquash" my directory's ownership with a simple chown and without having to re-mount the lustre filesystem.
+> 
+> I understand that I should activate the "admin" and "trusted" properties on the default nodemap to turn it off completely for the rest of the clients. Am I correct ?
+> 
+> J.
+> 
+> Le 20/05/2022 ? 17:10, Sebastien Buisson a ?crit :
+>> Hi,
+>> 
+>> It looks like you did not set properties on the default nodemap, which gets involved for your machine not in the 10.0.1.[35-38] range.
+>> When in use, the nodemap feature does not change anything about UID/GID of files as stored on servers, it just changes (maps) the way clients see them. Once deactivated, you should unmount then remount Lustre on your client (I understand that you have your home directories on Lustre?).
+>> 
+>> Also, if you set the trusted property on the ?seamless? nodemap, no id or gid mapping will be actually carried out, because by definition it means you trust the file system's canonical identifiers.
+>> 
+>> HTH,
+>> Sebastien.
+>> 
+>>> Le 20 mai 2022 ? 16:57, Julien Rey via lustre-discuss <lustre-discuss at lists.lustre.org> a ?crit :
+>>> 
+>>> Hello everyone,
+>>> 
+>>> We are running lustre 2.12.7 and today I tried to set up a few nodemaps so as to restrict access to an unique user (seamless user with uid/gid 3669) to a subdirectory (/webservices/seamless) from a range of machines (10.0.1.[35-38]).
+>>> 
+>>> Here's what I did so far :
+>>> 
+>>> lctl nodemap_add seamless
+>>> 
+>>> lctl nodemap_add_range --name seamless --range 10.0.1.[35-38]@tcp
+>>> 
+>>> lctl nodemap_modify --name seamless --property trusted --value 1
+>>> 
+>>> lctl nodemap_add_idmap --name seamless --idtype uid --idmap 3669:3669
+>>> 
+>>> lctl nodemap_add_idmap --name seamless --idtype gid --idmap 3669:3669
+>>> 
+>>> lctl nodemap_set_fileset --name seamless --fileset '/webservices/seamless'
+>>> 
+>>> lctl nodemap_activate 1
+>>> 
+>>> 
+>>> However, when I tried to log on one of the machine NOT in the 10.0.1.[35-38] range with my user account (uid 2154), my home directory ownership got immediately squashed to:
+>>> 
+>>> drwx------ 12 nobody nobody 4096 Apr 5 17:11 rey
+>>> 
+>>> So I immediatly deactivated the nodemaps using :
+>>> 
+>>> lctl nodemap_activate 0
+>>> 
+>>> However, the directory ownership remains nobody/nobody and I can no longer log in.
+>>> 
+>>> 
+>>> Does anyone know how to revert this ? And what was wrong with my nodemaps configuration ?
+>>> 
+>>> Thanks.
+>>> 
+>>> -- 
+>>> Julien REY
+>>> 
+>>> Plate-forme RPBS
+>>> Mod?lisation Computationnelle des Interactions Prot?ines-Ligand (CMPLI)
+>>> Universit? de Paris
+>>> tel : 01 57 27 83 95
+>>> 
+>>> _______________________________________________
+>>> lustre-discuss mailing list
+>>> lustre-discuss at lists.lustre.org
+>>> http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org
+> 
+> -- 
+> Julien REY
+> 
+> Plate-forme RPBS
+> Mod?lisation Computationnelle des Interactions Prot?ines-Ligand (CMPLI)
+> Universit? de Paris
+> tel : 01 57 27 83 95
+
+
+From robert.redl at lmu.de  Mon May 23 04:54:52 2022
+From: robert.redl at lmu.de (Robert Redl)
+Date: Mon, 23 May 2022 13:54:52 +0200
+Subject: [lustre-discuss] lustre_rsync with growing statuslog
+In-Reply-To: <35515002-B94F-477F-9AC5-2B159D23C22B@ddn.com>
+References: <e02e836e-84f5-81bf-9ceb-4cd45c8d08ec@lmu.de>
+ <35515002-B94F-477F-9AC5-2B159D23C22B@ddn.com>
+Message-ID: <137f45e5-3189-a759-bc52-7de02805bc1c@lmu.de>
+
+Dear Andreas,
+
+thanks a lot for the explanation! Using lustre_rsync is only a temporal 
+solution for us. We created a full copy of a lustre system in a 
+different location using ZFS snapshots. This system has then been 
+renamed and the idea was to keep it for a limited time synchronized with 
+the original system. Afterwards the new system should be used in 
+production.
+
+With your explanation and a look into the source code, I had now a 
+closer look to the created statuslog. The entries are almost exclusively 
+pointing to temporal files. Files that are created and deleted or moved 
+quickly afterwards. We use the statuslog now to identify directories 
+that need synchronization using standard rsync. That works as long as 
+the parent of the element to synchronize is still available, for other 
+cases periodical traditional rsync will be necessary.
+
+Cheers,
+Robert
+
+Am 21.05.22 um 01:32 schrieb Andreas Dilger:
+> On May 20, 2022, at 06:33, Robert Redl <robert.redl at lmu.de> wrote:
+>>
+>> Dear Lustre Experts,
+>>
+>> since a few weeks we are keeping two Lustre system synchronous using 
+>> lustre_rsync. That works fine, but the statuslog file is growing. It 
+>> is currently about 500MB in size. Updating it is apparently slowing 
+>> down the whole process.
+>>
+>> Is it only important to keep the statuslog in cases where 
+>> lustre_rsync has been interrupted? Or is it necessary to keep it 
+>> forever in order to not miss any changes.
+>
+> It should be noted that lustre_rsync is not commonly used and only 
+> tested in the context of an automated regression test that runs and 
+> largely passes. ?It was developed originally as a proof of concept for 
+> Lustre Changelogs, so may be missing support for newer features (e.g. 
+> explicit file layouts, project IDs, ACLs, etc, though that *may* all 
+> be handled by rsync). ?There may be unknown bugs lurking in this code, 
+> so use with some caution (i.e. don't sync your bank transaction 
+> records with it).
+>
+> I would recommend to at least use some other tool (e.g. MPIFileUtils) 
+> to periodically do a full scan to verify that the files are being 
+> copied over properly to the target filesystem.
+>
+> Taking a quick look into the lustre_rsync.c, I see that "statuslog" 
+> appears to be a log file of pending rename actions, or something like 
+> that? ?It is backed up when lustre_rsync is started, but only to a 
+> file <statuslog>.old. ?It looks like an entry is added into "parents" 
+> if it is renamed to/from a directory that doesn't exist in the target, 
+> but I don't know enough detail to say why that isn't working properly 
+> in your case.
+>
+> Feedback, patches, and status updates are welcome. ?Maybe you can 
+> present about your usage of it at LAD this year? ?I don't want to 
+> totally discourage your usage of lustre_rsync since it has potential 
+> for further improvements (e.g. parallel copying, bug fixing, etc), 
+> otherwise it will never get better, but just wanted to make sure you 
+> know what the current state of this tool.
+>
+> Cheers, Andreas
+> --
+> Andreas Dilger
+> Lustre?Principal Architect
+> Whamcloud
+>
+>
+>
+>
+>
+>
+>
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20220523/67685057/attachment-0001.html>
+
+From anna.fuchs at informatik.uni-hamburg.de  Tue May 24 12:34:34 2022
+From: anna.fuchs at informatik.uni-hamburg.de (Anna Fuchs)
+Date: Tue, 24 May 2022 21:34:34 +0200
+Subject: [lustre-discuss] I/O in HPC applications and systems SURVEY
+Message-ID: <d7a983ae-4aa8-1e25-4755-e4417e7a93c1@informatik.uni-hamburg.de>
+
+Dear all,
+
+I have prepared a survey 'I/O in HPC applications and systems' for my 
+studies about compression in Lustre.
+I would be excited if you would fill in the survey and forward the link 
+to any user or admin of an HPC system.
+https://www.limesurvey.uni-hamburg.de/index.php/237926?lang=en
+
+The most questions are of type multiple choice and it will take you 
+about 5-10 minutes.
+I would share the results later, if desired.
+
+Thank you for the support!
+
+Best regards
+Anna
+
+-- 
+Anna Fuchs
+Universit?t Hamburg
+https://wr.informatik.uni-hamburg.de
+
+anna.fuchs at informatik.uni-hamburg.de
+https://wr.informatik.uni-hamburg.de/people/anna_fuchs
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20220524/5e3cb087/attachment.html>
+
+From admin at opensfs.org  Tue May 24 17:45:08 2022
+From: admin at opensfs.org (OpenSFS Administration)
+Date: Tue, 24 May 2022 17:45:08 -0700
+Subject: [lustre-discuss] LUG 2022 Videos and Presentations Available
+Message-ID: <002701d86fd0$b019c830$104d5890$@opensfs.org>
+
+Hello Lustre Community, 
+
+ 
+
+Thank you to our presenters, sponsors, and attendees who participated in the
+<https://www.opensfs.org/events/lug-2022/> Lustre User Group (LUG) 2022
+virtual conference! 
+
+ 
+
+The  <https://www.opensfs.org/events/lug-2022/> LUG 2022 videos and
+presentations are now available on the OpenSFS web site. Please feel free to
+share and promote these materials with others in the Lustre community. 
+
+Thanks to our LUG 2022 Sponsor! 
+
+
+
+Best Regards, 
+OpenSFS Administration 
+
+ 
+
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20220524/0638c888/attachment-0001.html>
+-------------- next part --------------
+A non-text attachment was scrubbed...
+Name: image001.png
+Type: image/png
+Size: 69126 bytes
+Desc: not available
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20220524/0638c888/attachment-0001.png>
+
+From andrew.elwell at gmail.com  Fri May 27 02:11:51 2022
+From: andrew.elwell at gmail.com (Andrew Elwell)
+Date: Fri, 27 May 2022 19:11:51 +1000
+Subject: [lustre-discuss] jobstats
+Message-ID: <CAANX9yce=KFTKBc+aoJz3as-eXxm+p26ABQugLYmfivf6yCPYg@mail.gmail.com>
+
+Hi folks,
+
+I've finally started to re-investigate pushing jobstats to our central
+dashboards and realised there's a dearth of scripts / tooling to
+actually gather the job_stats files and push them to $whatever. I have
+seen the telegraf one, and the DDN fork of collectd seems somewhat
+abandonware. Hence at this stage I'm back to rolling another Python
+script to feed influxdb. Yes, I know all the cool kids are using
+prometheus, but I'm not one of them.
+
+However while rummaging I came across LU-11407 (Improve stats data) -
+Andreas commented[1] he was hoping to add start_time and elapsed_time
+fields, but are these targeted in an upcoming release (still shows
+'open') - It's also referred to in LU-15826 - Is that likely to make a
+point release of 2.15 or will it be the targeted at the next major
+release? It might be handy to save me correlating with slurm job start
+times, especially if the user job does $other_stuff before actually
+hitting the disks.
+
+
+Many thanks
+
+Andrew
+
+
+
+
+[1] https://jira.whamcloud.com/browse/LU-11407?focusedCommentId=234830&page=com.atlassian.jira.plugin.system.issuetabpanels:comment-tabpanel#comment-234830
+
+From wcolburn at nrao.edu  Tue May 31 12:01:57 2022
+From: wcolburn at nrao.edu (William D. Colburn)
+Date: Tue, 31 May 2022 13:01:57 -0600
+Subject: [lustre-discuss] Removing stale files
+Message-ID: <20220531190157.GA14477@zia.aoc.nrao.edu>
+
+We had a filesystem corruption back in February, and we've been trying
+to salvage things since then.  I've spent the past month slowly draining
+the corrupt OST, and over the weekend it finally finished.  An lfs find
+on the filesystem says that there are no files stored on that OST.  The
+OST is 100% full, and if I mount it as an ldiskfs I can see a little
+over five millions files in O/*/*.  Most of them have numbers as names,
+and some of them are named LAST_ID.  All of the numbered files seem to
+be user data, with owners, and real data in them (based on ls and the
+find command)
+
+I would like to clean out this OST and readd it to lustre, but I'm
+unsure of how to best approach this.  I see several options:
+
+OPTION ONE: run lfsck against the entire filesystem with the full and
+previously corrupt OST mounted.
+
+OPTION TWO: run lfsck against only the corrupt OST in the hopes that
+cleans up all of the orphans on that OST.
+
+OPTION THREE: mounted as ldiskfs remove O/*/[1234567890]*[1234567890]
+and then remount the file system.
+
+OPTION FOUR: newfs the bad OST and readd it losing the old index.
+
+We tried option one once before, and it killed cluster jobs because it
+made files unreadable while they were in use.  Option two might avoid
+that since it would not be affecting existing files.  Option three
+sounds like it will work based on my limited knowledge of how lustre
+works, and would probably be the most expedient method.  Option four is
+annoying because it leaves a hole in the lustre that is upsetting to our
+OCD tendencies.
+
+Any and all advice is appreciated here.  Thank you.
+
+--Schlake
+  Sysadmin IV, NRAO
+  Work: 575-835-7281 (BACK IN THE OFFICE!)
+  Cell: 575-517-5668 (out of work hours)
+

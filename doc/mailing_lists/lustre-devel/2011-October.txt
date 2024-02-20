@@ -1,0 +1,3348 @@
+From Nathan_Rutman at xyratex.com  Mon Oct  3 13:15:30 2011
+From: Nathan_Rutman at xyratex.com (Nathan Rutman)
+Date: Mon, 3 Oct 2011 13:15:30 -0700
+Subject: [Lustre-devel] Wide striping
+Message-ID: <73AED5C780AE05478241DB067651A9210237883C@XYUS-EX22.xyus.xyratex.com>
+
+Oracle BZ-4424 (continued in WC LU-80) adds support for larger OST stripe counts via increased EXT4 EA sizes.
+Some problems with this are:
+1) increased MDT storage and network loading for transmitting the object list 
+2) relative low new limit (1350 up from 160)
+
+
+We have been thinking about a different wide-striping method that doesn't have these problems. The basic idea is to create a new stripe type that encodes the list of OSTs compactly, and then using the same (or a calculable) object identifier (or FID) on all these OSTs.
+ <https://lh4.googleusercontent.com/mxm5R4Yd000I_v5qNcpYH6ZzHBvryGEE6pjxOBWz6ysHUNK0Yjh1J81kmP-5zVaoCiOU8RJv04WMhNoe1JqipOOmtRd7otrZ0saWKUnNyNVvaWvLRD8> 
+
+Our version of widestriping does not involve increasing the EA size at all, but instead utilizes a new stripe pattern.  (This will not be understandable by older Lustre versions, which will generate an error locally, or potentially we can convert into the BZ-4424 form if the layout fits in that format). A bitmap will identify which OSTs hold a stripe of this file. The bitmap should probably fit into current ext4 EA size limit, giving us ~32k stripes.
+
+Some OST?s may be down at file creation time, or new OSTs added later; hence there will likely be holes in the bitmap (but relatively few). Start index will still be used, but stripe order will be strictly round-robin (we will wrap around).  In other words, the stripe sequence will always be in linear OST order, starting from start_index, maybe skipping some holes, wrapping around to start_index-1.
+
+Widestripe objects do not need a special sequence number (fid_seq); the MDT knows the file was created as widestriped and marks it as such (LOV_PATTERN_BITMAP).  There are two options for OST object identification: common object ID and FID-on-OST.
+Common Object ID
+
+The MDT tracks a special range of OST object ID?s (?wide stripe objectid? = WSO) that are used on all OSTs.  The MDT assigns the next available WSO to the file, and this objectid is used on all the OSTs.  The OSTs must never use these objects for regular striped files.  A special precreation group for these objects is probably necessary, as well as orphan cleanup (the MDT should purge "hole" objects that aren?t allocated from a particular OST). The MDT should track the last assigned WSO; this will be the starting point for new wide striped files after recovery.  Objects cannot be migrated from one OST to another, since this would result in out-of-order access. Similarly, stripes can never be added to holes.
+FID-on-OST
+
+Use a mapping of the MDT FID to uniquely determine an OST object.  The clients and MDT add in the OST number to the MDT FID (probably just reserve one sequence per OST).  (This allows the objects to potentially migrate to different OSTs).  The OSTs then internally must map the FID to a local object id.  Note this allows OST-local precreation pools, getting the MDT out of the precreate/orphan cleanup business and potentially improving create speeds, and also facilitates "create on write" semantics.  The FID can be assigned during the first access to OST object.
+The big problem here is that FID>OBJID ( or better FID->inode id ) translation is absent from the OSTs today. See http://wiki.lustre.org/images/e/e9/SC09-FID-on-OST.pdf <http://wiki.lustre.org/images/e/e9/SC09-FID-on-OST.pdf>  (what is the current state of this?)  There is also some work in this direction in the OST restructuring work (?Orion? WC branch, ORI-300(?), scheduled for Lustre 2.4). 
+
+
+There's a few questions here, probably the first of which is "is it worthwhile to spend effort on this, or is BZ4424 good enough?" Then there is the question of object identification, where FID-on-OST is more flexible, but also significantly more work (and risk). Also, I thought I understood from the EOFS Summit that WC also has a separate FID-on-OST project (separate from Orion that is) -- can someone tell me the state of that?
+
+
+
+
+
+
+
+
+
+______________________________________________________________________
+This email may contain privileged or confidential information, which should only be used for the purpose for which it was sent by Xyratex. No further rights or licenses are granted to use such information. If you are not the intended recipient of this message, please notify the sender by return and delete it. You may not use, copy, disclose or rely on the information contained in it.
+ 
+Internet email is susceptible to data corruption, interception and unauthorised amendment for which Xyratex does not accept liability. While we have taken reasonable precautions to ensure that this email is free of viruses, Xyratex does not accept liability for the presence of any computer viruses in this email, nor for any losses caused as a result of viruses.
+ 
+Xyratex Technology Limited (03134912), Registered in England & Wales, Registered Office, Langstone Road, Havant, Hampshire, PO9 1SA.
+ 
+The Xyratex group of companies also includes, Xyratex Ltd, registered in Bermuda, Xyratex International Inc, registered in California, Xyratex (Malaysia) Sdn Bhd registered in Malaysia, Xyratex Technology (Wuxi) Co Ltd registered in The People's Republic of China and Xyratex Japan Limited registered in Japan.
+______________________________________________________________________
+ 
+
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20111003/02427d93/attachment.htm>
+
+From dillowda at ornl.gov  Mon Oct  3 17:17:48 2011
+From: dillowda at ornl.gov (David Dillow)
+Date: Mon, 03 Oct 2011 20:17:48 -0400
+Subject: [Lustre-devel] Wide striping
+In-Reply-To: <73AED5C780AE05478241DB067651A9210237883C@XYUS-EX22.xyus.xyratex.com>
+References: <73AED5C780AE05478241DB067651A9210237883C@XYUS-EX22.xyus.xyratex.com>
+Message-ID: <1317687469.23023.3.camel@obelisk.thedillows.org>
+
+On Mon, 2011-10-03 at 13:15 -0700, Nathan Rutman wrote:
+
+> Some OST?s may be down at file creation time, or new OSTs added later;
+> hence there will likely be holes in the bitmap (but relatively few).
+> Start index will still be used, but stripe order will be strictly
+> round-robin (we will wrap around).  In other words, the stripe
+> sequence will always be in linear OST order, starting from
+> start_index, maybe skipping some holes, wrapping around to
+> start_index-1.
+
+It didn't occur to me when spoke at EOFS, but you'd need to store the
+number of OSTs in the system when the mapping was created if you allow
+it to wrap around -- otherwise, adding OSTs later would cause existing
+files to loose track of the objects after the wrap point.
+
+-- 
+Dave Dillow
+National Center for Computational Science
+Oak Ridge National Laboratory
+(865) 241-6602 office
+
+
+
+From Nathan_Rutman at xyratex.com  Tue Oct  4 10:44:34 2011
+From: Nathan_Rutman at xyratex.com (Nathan Rutman)
+Date: Tue, 4 Oct 2011 10:44:34 -0700
+Subject: [Lustre-devel] Wide striping
+In-Reply-To: <1317687469.23023.3.camel@obelisk.thedillows.org>
+References: <73AED5C780AE05478241DB067651A9210237883C@XYUS-EX22.xyus.xyratex.com>
+	<1317687469.23023.3.camel@obelisk.thedillows.org>
+Message-ID: <73AED5C780AE05478241DB067651A92102378846@XYUS-EX22.xyus.xyratex.com>
+
+
+On Oct 3, 2011, at 5:17 PM, David Dillow wrote:
+
+> On Mon, 2011-10-03 at 13:15 -0700, Nathan Rutman wrote:
+> 
+>> Some OST?s may be down at file creation time, or new OSTs added later;
+>> hence there will likely be holes in the bitmap (but relatively few).
+>> Start index will still be used, but stripe order will be strictly
+>> round-robin (we will wrap around).  In other words, the stripe
+>> sequence will always be in linear OST order, starting from
+>> start_index, maybe skipping some holes, wrapping around to
+>> start_index-1.
+> 
+> It didn't occur to me when spoke at EOFS, but you'd need to store the
+> number of OSTs in the system when the mapping was created if you allow
+> it to wrap around -- otherwise, adding OSTs later would cause existing
+> files to loose track of the objects after the wrap point.
+
+That's done inherently in the bitmap, where everything beyond the current number of OSTs is marked as a hole.
+(So actually, there will typically be one giant hole at the end of every bitmap, and then maybe some singeltons for deactivated
+OSTs.)
+
+> 
+> -- 
+> Dave Dillow
+> National Center for Computational Science
+> Oak Ridge National Laboratory
+> (865) 241-6602 office
+> 
+> _______________________________________________
+> Lustre-devel mailing list
+> Lustre-devel at lists.lustre.org
+> http://lists.lustre.org/mailman/listinfo/lustre-devel
+______________________________________________________________________
+This email may contain privileged or confidential information, which should only be used for the purpose for which it was sent by Xyratex. No further rights or licenses are granted to use such information. If you are not the intended recipient of this message, please notify the sender by return and delete it. You may not use, copy, disclose or rely on the information contained in it.
+ 
+Internet email is susceptible to data corruption, interception and unauthorised amendment for which Xyratex does not accept liability. While we have taken reasonable precautions to ensure that this email is free of viruses, Xyratex does not accept liability for the presence of any computer viruses in this email, nor for any losses caused as a result of viruses.
+ 
+Xyratex Technology Limited (03134912), Registered in England & Wales, Registered Office, Langstone Road, Havant, Hampshire, PO9 1SA.
+ 
+The Xyratex group of companies also includes, Xyratex Ltd, registered in Bermuda, Xyratex International Inc, registered in California, Xyratex (Malaysia) Sdn Bhd registered in Malaysia, Xyratex Technology (Wuxi) Co Ltd registered in The People's Republic of China and Xyratex Japan Limited registered in Japan.
+______________________________________________________________________
+ 
+
+
+
+From di.wang at whamcloud.com  Tue Oct  4 17:25:18 2011
+From: di.wang at whamcloud.com (wangdi)
+Date: Tue, 04 Oct 2011 17:25:18 -0700
+Subject: [Lustre-devel] Wide striping
+In-Reply-To: <73AED5C780AE05478241DB067651A9210237883C@XYUS-EX22.xyus.xyratex.com>
+References: <73AED5C780AE05478241DB067651A9210237883C@XYUS-EX22.xyus.xyratex.com>
+Message-ID: <4E8BA3EE.6060300@whamcloud.com>
+
+Hello, Nathan
+
+On 10/03/2011 01:15 PM, Nathan Rutman wrote:
+> Oracle BZ-4424 (continued in WC LU-80) adds support for larger OST 
+> stripe counts via increased EXT4 EA sizes.
+> Some problems with this are:
+> 1) increased MDT storage and network loading for transmitting the 
+> object list
+> 2) relative low new limit (1350 up from 160)
+>
+> We have been thinking about a different wide-striping method that 
+> doesn't have these problems. The basic idea is to create a new stripe 
+> type that encodes the list of OSTs compactly, and then using the same 
+> (or a calculable) object identifier (or FID) on all these OSTs.
+>
+>
+> Our version of widestriping does not involve increasing the EA size at 
+> all, but instead utilizes a new stripe pattern.  (This will not be 
+> understandable by older Lustre versions, which will generate an error 
+> locally, or potentially we can convert into the BZ-4424 form if the 
+> layout fits in that format). A bitmap will identify which OSTs hold a 
+> stripe of this file. The bitmap should probably fit into current ext4 
+> EA size limit, giving us ~32k stripes.
+>
+> Some OST?s may be down at file creation time, or new OSTs added later; 
+> hence there will likely be holes in the bitmap (but relatively few). 
+> Start index will still be used, but stripe order will be strictly 
+> round-robin (we will wrap around). In other words, the stripe sequence 
+> will always be in linear OST order, starting from start_index, maybe 
+> skipping some holes, wrapping around to start_index-1.
+>
+> Widestripe objects do not need a special sequence number (fid_seq); 
+> the MDT knows the file was created as widestriped and marks it as such 
+> (LOV_PATTERN_BITMAP).  There are two options for OST object 
+> identification: common object ID and FID-on-OST.
+
+Actually, we also discussed to use real object (IAM or other index 
+format) to store the stripe pattern, instead of using EA. Of course it 
+would use more space, but it would give us the potential to explore the 
+stripe pattern.
+
+> Common Object ID
+> The MDT tracks a special range of OST object ID?s (?wide stripe 
+> objectid? = WSO) that are used on all OSTs.  The MDT assigns the next 
+> available WSO to the file, and this objectid is used on all the OSTs. 
+>  The OSTs must never use these objects for regular striped files.  A 
+> special precreation group for these objects is probably necessary, as 
+> well as orphan cleanup (the MDT should purge "hole" objects that 
+> aren?t allocated from a particular OST). The MDT should track the last 
+> assigned WSO; this will be the starting point for new wide striped 
+> files after recovery. Objects cannot be migrated from one OST to 
+> another, since this would result in out-of-order access. Similarly, 
+> stripes can never be added to holes.
+> FID-on-OST
+> Use a mapping of the MDT FID to uniquely determine an OST object.  The 
+> clients and MDT add in the OST number to the MDT FID (probably just 
+> reserve one sequence per OST).  (This allows the objects to 
+> potentially migrate to different OSTs).  The OSTs then internally must 
+> map the FID to a local object id.  Note this allows OST-local 
+> precreation pools, getting the MDT out of the precreate/orphan cleanup 
+> business and potentially improving create speeds, and also facilitates 
+> "create on write" semantics.  The FID can be assigned during the first 
+> access to OST object.
+
+I am not sure I follow your idea here. You mean the OST needs internally 
+map MDT FID(added in OST number) to object id (or inode ino) ? So there 
+are no real OST FID? But you also said "The FID can be assigned during 
+the first access to OST object.", Could you please explain more here?
+
+
+> The big problem here is that FID>OBJID ( or better FID->inode id ) 
+> translation is absent from the OSTs today. See 
+> http://wiki.lustre.org/images/e/e9/SC09-FID-on-OST.pdf(what is the 
+> current state of this?)  There is also some work in this direction in 
+> the OST restructuring work (?Orion? WC branch, ORI-300(?), scheduled 
+> for Lustre 2.4).
+>
+> There's a few questions here, probably the first of which is "is it 
+> worthwhile to spend effort on this, or is BZ4424 good enough?" Then 
+> there is the question of object identification, where FID-on-OST is 
+> more flexible, but also significantly more work (and risk). Also, I 
+> thought I understood from the EOFS Summit that WC also has a separate 
+> FID-on-OST project (separate from Orion that is) -- can someone tell 
+> me the state of that?
+
+FID-on-OST is actually part of DNE(dirtribute name space) phase I.  It 
+basically follows current fid client server infrastructure.
+
+1. MDT is the fid client, which requests fid from the OST and allocates 
+fids for the object during pre-creation.
+2. OST is the fid server, which will allocate the FIDs to MDTs and 
+requests super fid sequence from fid control server (root MDT).
+3. Similar as MDT FID, there will be OI to map FID to object inside OST.
+
+The code will be release with DNE sometime next year.
+
+Thanks
+WangDi
+
+
+
+
+>
+>
+>
+>
+>
+> ______________________________________________________________________
+> This email may contain privileged or confidential information, which should only be used for the purpose for which it was sent by Xyratex. No further rights or licenses are granted to use such information. If you are not the intended recipient of this message, please notify the sender by return and delete it. You may not use, copy, disclose or rely on the information contained in it.
+>
+> Internet email is susceptible to data corruption, interception and unauthorised amendment for which Xyratex does not accept liability. While we have taken reasonable precautions to ensure that this email is free of viruses, Xyratex does not accept liability for the presence of any computer viruses in this email, nor for any losses caused as a result of viruses.
+>
+> Xyratex Technology Limited (03134912), Registered in England&  Wales, Registered Office, Langstone Road, Havant, Hampshire, PO9 1SA.
+>
+> The Xyratex group of companies also includes, Xyratex Ltd, registered in Bermuda, Xyratex International Inc, registered in California, Xyratex (Malaysia) Sdn Bhd registered in Malaysia, Xyratex Technology (Wuxi) Co Ltd registered in The People's Republic of China and Xyratex Japan Limited registered in Japan.
+> ______________________________________________________________________
+>
+>
+>
+>
+> _______________________________________________
+> Lustre-devel mailing list
+> Lustre-devel at lists.lustre.org
+> http://lists.lustre.org/mailman/listinfo/lustre-devel
+
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20111004/c5a68cdf/attachment.htm>
+
+From alexey_lyashkov at xyratex.com  Wed Oct  5 02:28:47 2011
+From: alexey_lyashkov at xyratex.com (Alexey Lyashkov)
+Date: Wed, 5 Oct 2011 13:28:47 +0400
+Subject: [Lustre-devel] Wide striping
+In-Reply-To: <4E8BA3EE.6060300@whamcloud.com>
+References: <73AED5C780AE05478241DB067651A9210237883C@XYUS-EX22.xyus.xyratex.com>
+	<4E8BA3EE.6060300@whamcloud.com>
+Message-ID: <54C22AB8-783C-4B23-9CC9-B70C72CA1150@xyratex.com>
+
+Hi All,
+> 
+> FID-on-OST is actually part of DNE(dirtribute name space) phase I.  It basically follows current fid client server infrastructure.
+> 
+> 1. MDT is the fid client, which requests fid from the OST and allocates fids for the object during pre-creation. 
+> 2. OST is the fid server, which will allocate the FIDs to MDTs and requests super fid sequence from fid control server (root MDT).
+> 3. Similar as MDT FID, there will be OI to map FID to object inside OST.
+> 
+> The code will be release with DNE sometime next year.
+> 
+I think we not need a special FID's for OST object, except we want to migrate one object via different data containers over cluster.
+I think it's not a priority for now.
+So we can simplify a FID management for OST now.
+Each data object may identified via pair {OST_INDEX / OST_UUID, MDT_FID}.
+In that case OST not need allocate any FID's, and MDT can reuse current reallocation scheme.
+in fact we not need a assign a FID for OST object in file creation time (aka creating LSM), but we need a guaranteed free OST object exist when client tried to make access to that object.
+in that case OST can preallocate some pool and report that size to MDT,
+MDT know it's uses some objects from that pool, but not know which object id assigned to file. 
+to avoid OST confusion client send a MDT FID to OST when need access to OST object.
+OST look to OI database and check - is that FID assigned to something or not.
+if assigned - IO will return a inode, otherwise OST need to grab any free object from a pool and assign to that FID.
+that's all.
+
+orphan cleanup not need to be changed in that case - MDT send a last allocated objid, and OST will kill a unallocated objects and return last index to the MDT.
+open-unlink case need to be changed to put a fid in LLOG record and OST need to be changed to handle FID as object index.
+
+
+
+--------------------------------------------
+Alexey Lyashkov
+alexey_lyashkov at xyratex.com
+
+
+
+
+______________________________________________________________________
+This email may contain privileged or confidential information, which should only be used for the purpose for which it was sent by Xyratex. No further rights or licenses are granted to use such information. If you are not the intended recipient of this message, please notify the sender by return and delete it. You may not use, copy, disclose or rely on the information contained in it.
+ 
+Internet email is susceptible to data corruption, interception and unauthorised amendment for which Xyratex does not accept liability. While we have taken reasonable precautions to ensure that this email is free of viruses, Xyratex does not accept liability for the presence of any computer viruses in this email, nor for any losses caused as a result of viruses.
+ 
+Xyratex Technology Limited (03134912), Registered in England & Wales, Registered Office, Langstone Road, Havant, Hampshire, PO9 1SA.
+ 
+The Xyratex group of companies also includes, Xyratex Ltd, registered in Bermuda, Xyratex International Inc, registered in California, Xyratex (Malaysia) Sdn Bhd registered in Malaysia, Xyratex Technology (Wuxi) Co Ltd registered in The People's Republic of China and Xyratex Japan Limited registered in Japan.
+______________________________________________________________________
+ 
+
+
+
+From eeb at whamcloud.com  Wed Oct  5 06:03:31 2011
+From: eeb at whamcloud.com (Eric Barton)
+Date: Wed, 5 Oct 2011 14:03:31 +0100
+Subject: [Lustre-devel] Erratum about indexes in robinhood DB
+In-Reply-To: <4E84346B.8060300@cea.fr>
+References: <4E84346B.8060300@cea.fr>
+Message-ID: <038c01cc835f$2f30f090$8d92d1b0$@com>
+
+Thomas,
+
+Thanks a lot and I hope you don't mind me cc-ing lustre-devel as this
+seems to be of general interest.
+
+Do you have a feel (or measurements :) for the rate at which a changelog
+can be ingested into robinhood?  And I'm wondering about DNE and multiple
+changelogs coming from multiple MDTs.  I'd be very interested to know if
+you've thought about this and have views on what the maximum ingest rate
+could be and whether there will be issues coordinating/merging events
+across multiple feeds.
+
+          Cheers,
+                   Eric
+
+Eric Barton
+CTO Whamcloud, Inc.
+
+> -----Original Message-----
+> From: LEIBOVICI Thomas [mailto:thomas.leibovici at cea.fr]
+> Sent: 29 September 2011 10:04 AM
+> To: Eric Barton
+> Subject: Erratum about indexes in robinhood DB
+> 
+> Hello Eric,
+> 
+> Re-thinking about your question on indexes in robinhood DB, my answer
+> was incomplete.
+> Actually, there are indexes on user/group/type/status, but there are not
+> on the main table:
+> 
+> 1) As I said you, on the main table (the one that list all FS entries),
+> there are as few indexes as possible (just fid as primary key, and
+> parent fid)
+> in order to preserve a good insert/update rate on this table whatever
+> the FS size (the deeper the DB index trees, the slower those requests).
+> 
+> 2) There is a secondary table where robinhood maintains aggregated
+> statitics like nbr entries, volume per user/group/type/(hsm)status and
+> which is updated on the fly.
+> This one as indexes on quite all its fields, which makes it possible to
+> get instantaneous stats per user, etc. without penalizing insert/update
+> rate on main table.
+> Indexes on this secondary table are less expensive, given that the set
+> of users is much more resticted that the nbr of entries.
+> 
+> This time you have a more complete answer.
+> 
+> Best regards
+> Thomas
+
+
+
+From Nathan_Rutman at xyratex.com  Wed Oct  5 08:06:15 2011
+From: Nathan_Rutman at xyratex.com (Nathan Rutman)
+Date: Wed, 5 Oct 2011 08:06:15 -0700
+Subject: [Lustre-devel] Wide striping
+In-Reply-To: <1317762984.16569.18.camel@lap75545.ornl.gov>
+References: <73AED5C780AE05478241DB067651A9210237883C@XYUS-EX22.xyus.xyratex.com>
+	<1317687469.23023.3.camel@obelisk.thedillows.org>
+	<73AED5C780AE05478241DB067651A92102378846@XYUS-EX22.xyus.xyratex.com>
+	<1317762984.16569.18.camel@lap75545.ornl.gov>
+Message-ID: <73AED5C780AE05478241DB067651A9210237884F@XYUS-EX22.xyus.xyratex.com>
+
+
+On Oct 4, 2011, at 2:16 PM, David Dillow wrote:
+
+> On Tue, 2011-10-04 at 10:44 -0700, Nathan Rutman wrote:
+>> On Oct 3, 2011, at 5:17 PM, David Dillow wrote:
+>> 
+>>> On Mon, 2011-10-03 at 13:15 -0700, Nathan Rutman wrote:
+>>> 
+>>>> Some OST?s may be down at file creation time, or new OSTs added later;
+>>>> hence there will likely be holes in the bitmap (but relatively few).
+>>>> Start index will still be used, but stripe order will be strictly
+>>>> round-robin (we will wrap around).  In other words, the stripe
+>>>> sequence will always be in linear OST order, starting from
+>>>> start_index, maybe skipping some holes, wrapping around to
+>>>> start_index-1.
+>>> 
+>>> It didn't occur to me when spoke at EOFS, but you'd need to store the
+>>> number of OSTs in the system when the mapping was created if you allow
+>>> it to wrap around -- otherwise, adding OSTs later would cause existing
+>>> files to loose track of the objects after the wrap point.
+>> 
+>> That's done inherently in the bitmap, where everything beyond the
+>> current number of OSTs is marked as a hole. (So actually, there will
+>> typically be one giant hole at the end of every bitmap, and then maybe
+>> some singeltons for deactivated OSTs.)
+> 
+> Perhaps I'm misunderstanding something, then.
+> 
+> I understood you to say that we would have a linear OST order that
+> starts from the start_index. So bitmap position 0 would be start_index,
+> position 1 would be start_index + 1, and so on. If those bits are on,
+> then there is a object for this file on those OSTs.
+
+Sorry if I'm being unclear.
+
+start_index is just an offset into the bitmap.  That's the OST where the first 
+stripe will be.  Next stripe will be on the next OST index (unless a hole). 
+When we get to the big hole at the end of the used OSTs, these OST index 
+locations are all skipped (since they are holes), and the next stripe will 
+be at OST index 0, then 1, etc, up to start_index-1 (again, unless holes).
+
+
+
+> 
+> Am I on the same page so far?
+> 
+> Now, above you mention wrapping around to start_index - 1; I take this
+> to mean that at some point, we'd say bitmap position N is no longer OST
+> start_index + N, but would be OST 0. Bitmap position N + 1 would be OST
+> 1, etc. This scheme may allow for a more compact bitmap when our file
+> consists of OSTs at the extreme ends of the ones available, but you have
+> to store the maximum OST number when creating the file to avoid having
+> the bitmap wrap point shift when you add new OSTs.
+> 
+> Or perhaps I just misunderstood what you meant by wrapping? Did you mean
+> bitmap position 0 is always OST 0, and the OST indicated by start_index
+> will hold the first object, and each set bit in turn indicates the next
+> OST/object, and if we run out of bits in the bitmap before we hit
+> stripe_count, we'll start checking again at bitmap position/OST 0?
+> -- 
+> Dave Dillow
+> National Center for Computational Science
+> Oak Ridge National Laboratory
+> (865) 241-6602 office
+> 
+> 
+______________________________________________________________________
+This email may contain privileged or confidential information, which should only be used for the purpose for which it was sent by Xyratex. No further rights or licenses are granted to use such information. If you are not the intended recipient of this message, please notify the sender by return and delete it. You may not use, copy, disclose or rely on the information contained in it.
+ 
+Internet email is susceptible to data corruption, interception and unauthorised amendment for which Xyratex does not accept liability. While we have taken reasonable precautions to ensure that this email is free of viruses, Xyratex does not accept liability for the presence of any computer viruses in this email, nor for any losses caused as a result of viruses.
+ 
+Xyratex Technology Limited (03134912), Registered in England & Wales, Registered Office, Langstone Road, Havant, Hampshire, PO9 1SA.
+ 
+The Xyratex group of companies also includes, Xyratex Ltd, registered in Bermuda, Xyratex International Inc, registered in California, Xyratex (Malaysia) Sdn Bhd registered in Malaysia, Xyratex Technology (Wuxi) Co Ltd registered in The People's Republic of China and Xyratex Japan Limited registered in Japan.
+______________________________________________________________________
+ 
+
+
+
+From dillowda at ornl.gov  Tue Oct  4 14:16:23 2011
+From: dillowda at ornl.gov (David Dillow)
+Date: Tue, 04 Oct 2011 17:16:23 -0400
+Subject: [Lustre-devel] Wide striping
+In-Reply-To: <73AED5C780AE05478241DB067651A92102378846@XYUS-EX22.xyus.xyratex.com>
+References: <73AED5C780AE05478241DB067651A9210237883C@XYUS-EX22.xyus.xyratex.com>
+	<1317687469.23023.3.camel@obelisk.thedillows.org>
+	<73AED5C780AE05478241DB067651A92102378846@XYUS-EX22.xyus.xyratex.com>
+Message-ID: <1317762984.16569.18.camel@lap75545.ornl.gov>
+
+On Tue, 2011-10-04 at 10:44 -0700, Nathan Rutman wrote:
+> On Oct 3, 2011, at 5:17 PM, David Dillow wrote:
+> 
+> > On Mon, 2011-10-03 at 13:15 -0700, Nathan Rutman wrote:
+> > 
+> >> Some OST?s may be down at file creation time, or new OSTs added later;
+> >> hence there will likely be holes in the bitmap (but relatively few).
+> >> Start index will still be used, but stripe order will be strictly
+> >> round-robin (we will wrap around).  In other words, the stripe
+> >> sequence will always be in linear OST order, starting from
+> >> start_index, maybe skipping some holes, wrapping around to
+> >> start_index-1.
+> > 
+> > It didn't occur to me when spoke at EOFS, but you'd need to store the
+> > number of OSTs in the system when the mapping was created if you allow
+> > it to wrap around -- otherwise, adding OSTs later would cause existing
+> > files to loose track of the objects after the wrap point.
+> 
+> That's done inherently in the bitmap, where everything beyond the
+> current number of OSTs is marked as a hole. (So actually, there will
+> typically be one giant hole at the end of every bitmap, and then maybe
+> some singeltons for deactivated OSTs.)
+
+Perhaps I'm misunderstanding something, then.
+
+I understood you to say that we would have a linear OST order that
+starts from the start_index. So bitmap position 0 would be start_index,
+position 1 would be start_index + 1, and so on. If those bits are on,
+then there is a object for this file on those OSTs.
+
+Am I on the same page so far?
+
+Now, above you mention wrapping around to start_index - 1; I take this
+to mean that at some point, we'd say bitmap position N is no longer OST
+start_index + N, but would be OST 0. Bitmap position N + 1 would be OST
+1, etc. This scheme may allow for a more compact bitmap when our file
+consists of OSTs at the extreme ends of the ones available, but you have
+to store the maximum OST number when creating the file to avoid having
+the bitmap wrap point shift when you add new OSTs.
+
+Or perhaps I just misunderstood what you meant by wrapping? Did you mean
+bitmap position 0 is always OST 0, and the OST indicated by start_index
+will hold the first object, and each set bit in turn indicates the next
+OST/object, and if we run out of bits in the bitmap before we hit
+stripe_count, we'll start checking again at bitmap position/OST 0?
+-- 
+Dave Dillow
+National Center for Computational Science
+Oak Ridge National Laboratory
+(865) 241-6602 office
+
+
+
+
+From Nathan_Rutman at xyratex.com  Wed Oct  5 09:06:15 2011
+From: Nathan_Rutman at xyratex.com (Nathan Rutman)
+Date: Wed, 5 Oct 2011 09:06:15 -0700
+Subject: [Lustre-devel] Wide striping
+In-Reply-To: <4E8BA3EE.6060300@whamcloud.com>
+References: <73AED5C780AE05478241DB067651A9210237883C@XYUS-EX22.xyus.xyratex.com>
+	<4E8BA3EE.6060300@whamcloud.com>
+Message-ID: <73AED5C780AE05478241DB067651A92102378850@XYUS-EX22.xyus.xyratex.com>
+
+
+On Oct 4, 2011, at 5:25 PM, wangdi wrote:
+
+
+	Hello, Nathan
+	
+	On 10/03/2011 01:15 PM, Nathan Rutman wrote: 
+
+		Oracle BZ-4424 (continued in WC LU-80) adds support for larger OST stripe counts via increased EXT4 EA sizes.
+		Some problems with this are:
+		1) increased MDT storage and network loading for transmitting the object list 
+		2) relative low new limit (1350 up from 160)
+		
+		
+		We have been thinking about a different wide-striping method that doesn't have these problems. The basic idea is to create a new stripe type that encodes the list of OSTs compactly, and then using the same (or a calculable) object identifier (or FID) on all these OSTs.
+		 <https://lh4.googleusercontent.com/mxm5R4Yd000I_v5qNcpYH6ZzHBvryGEE6pjxOBWz6ysHUNK0Yjh1J81kmP-5zVaoCiOU8RJv04WMhNoe1JqipOOmtRd7otrZ0saWKUnNyNVvaWvLRD8> 
+		
+		Our version of widestriping does not involve increasing the EA size at all, but instead utilizes a new stripe pattern.  (This will not be understandable by older Lustre versions, which will generate an error locally, or potentially we can convert into the BZ-4424 form if the layout fits in that format). A bitmap will identify which OSTs hold a stripe of this file. The bitmap should probably fit into current ext4 EA size limit, giving us ~32k stripes.
+		
+		Some OST?s may be down at file creation time, or new OSTs added later; hence there will likely be holes in the bitmap (but relatively few). Start index will still be used, but stripe order will be strictly round-robin (we will wrap around).  In other words, the stripe sequence will always be in linear OST order, starting from start_index, maybe skipping some holes, wrapping around to start_index-1.
+		
+		Widestripe objects do not need a special sequence number (fid_seq); the MDT knows the file was created as widestriped and marks it as such (LOV_PATTERN_BITMAP).  There are two options for OST object identification: common object ID and FID-on-OST.
+		
+
+
+	Actually, we also discussed to use real object (IAM or other index format) to store the stripe pattern, instead of using EA. Of course it would use more space, but it would give us the potential to explore the stripe pattern.
+	
+
+
+One of the main (the only?) benefits of our design (over current BZ4424 widestriping) is that it does not need any more space than the old MDT stripe pattern.  No additional storage, no additional network traffic to transmit pattern.
+
+
+
+
+		Common Object ID
+		
+		The MDT tracks a special range of OST object ID?s (?wide stripe objectid? = WSO) that are used on all OSTs.  The MDT assigns the next available WSO to the file, and this objectid is used on all the OSTs.  The OSTs must never use these objects for regular striped files.  A special precreation group for these objects is probably necessary, as well as orphan cleanup (the MDT should purge "hole" objects that aren?t allocated from a particular OST). The MDT should track the last assigned WSO; this will be the starting point for new wide striped files after recovery.  Objects cannot be migrated from one OST to another, since this would result in out-of-order access. Similarly, stripes can never be added to holes.
+		FID-on-OST
+		
+		Use a mapping of the MDT FID to uniquely determine an OST object.  The clients and MDT add in the OST number to the MDT FID (probably just reserve one sequence per OST).  (This allows the objects to potentially migrate to different OSTs).  The OSTs then internally must map the FID to a local object id.  Note this allows OST-local precreation pools, getting the MDT out of the precreate/orphan cleanup business and potentially improving create speeds, and also facilitates "create on write" semantics.  The FID can be assigned during the first access to OST object.
+
+
+	I am not sure I follow your idea here. You mean the OST needs internally map MDT FID(added in OST number) to object id (or inode ino) ?
+
+yes.
+
+
+	So there are no real OST FID?
+
+I suppose -- this is just a mapping of the MDT fid to the local OST object id, via a local lookup on the OST.  There would be something like the OI to do this mapping.
+
+
+	But you also said "The FID can be assigned during the first access to OST object.", Could you please explain more here? 
+	
+
+
+Since the FID -> Objid mapping is performed locally, it doesn't need to be assigned until the first write.  This is not integral to the design, just a side effect.
+
+
+
+
+		The big problem here is that FID>OBJID ( or better FID->inode id ) translation is absent from the OSTs today. See http://wiki.lustre.org/images/e/e9/SC09-FID-on-OST.pdf <http://wiki.lustre.org/images/e/e9/SC09-FID-on-OST.pdf>  (what is the current state of this?)  There is also some work in this direction in the OST restructuring work (?Orion? WC branch, ORI-300(?), scheduled for Lustre 2.4). 
+		
+		
+		There's a few questions here, probably the first of which is "is it worthwhile to spend effort on this, or is BZ4424 good enough?" Then there is the question of object identification, where FID-on-OST is more flexible, but also significantly more work (and risk). Also, I thought I understood from the EOFS Summit that WC also has a separate FID-on-OST project (separate from Orion that is) -- can someone tell me the state of that?
+
+
+	FID-on-OST is actually part of DNE(dirtribute name space) phase I.  It basically follows current fid client server infrastructure.
+	
+	1. MDT is the fid client, which requests fid from the OST and allocates fids for the object during pre-creation. 
+	2. OST is the fid server, which will allocate the FIDs to MDTs and requests super fid sequence from fid control server (root MDT).
+	3. Similar as MDT FID, there will be OI to map FID to object inside OST.
+	
+
+
+To integrate with this, we would need to have a reserved sequence on each OST that the MDT could assign FIDs from --
+the MDT would need to use the same Object ID on all OSTs.  For DNE, there would need to be a reserved sequence per OST per MDT.
+
+
+
+
+	The code will be release with DNE sometime next year.
+	
+	Thanks
+	WangDi
+	
+	
+	   
+
+
+______________________________________________________________________
+This email may contain privileged or confidential information, which should only be used for the purpose for which it was sent by Xyratex. No further rights or licenses are granted to use such information. If you are not the intended recipient of this message, please notify the sender by return and delete it. You may not use, copy, disclose or rely on the information contained in it.
+ 
+Internet email is susceptible to data corruption, interception and unauthorised amendment for which Xyratex does not accept liability. While we have taken reasonable precautions to ensure that this email is free of viruses, Xyratex does not accept liability for the presence of any computer viruses in this email, nor for any losses caused as a result of viruses.
+ 
+Xyratex Technology Limited (03134912), Registered in England & Wales, Registered Office, Langstone Road, Havant, Hampshire, PO9 1SA.
+ 
+The Xyratex group of companies also includes, Xyratex Ltd, registered in Bermuda, Xyratex International Inc, registered in California, Xyratex (Malaysia) Sdn Bhd registered in Malaysia, Xyratex Technology (Wuxi) Co Ltd registered in The People's Republic of China and Xyratex Japan Limited registered in Japan.
+______________________________________________________________________
+ 
+
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20111005/d8a50271/attachment.htm>
+
+From eeb at whamcloud.com  Wed Oct  5 10:33:51 2011
+From: eeb at whamcloud.com (Eric Barton)
+Date: Wed, 5 Oct 2011 18:33:51 +0100
+Subject: [Lustre-devel] question about failover
+In-Reply-To: <CAO=bG7pWxqBX-U6Vp+cJV_jZMui2JbdEUaxVWvHLMqFn6Vv24w@mail.gmail.com>
+References: <CAO=bG7pWxqBX-U6Vp+cJV_jZMui2JbdEUaxVWvHLMqFn6Vv24w@mail.gmail.com>
+Message-ID: <03d501cc8384$f39d3630$dad7a290$@com>
+
+Peter,
+
+ 
+
+I'm not sure I understand the situation you're trying to describe.
+
+ 
+
+Consider 2 servers (S1, S2) connected to 2 routers (R1, R2) on 1 LNET (N1)
+
+and clients connect to the routers via another LNET (N2).   Normally both R1
+
+and R2 carry traffic between any/all clients on N2 and either server.  
+
+ 
+
+If (say) R1 fails, clients on N2 will see communications failures when they
+
+attempt to send to either of the servers via R1 and stop using it.  Similarly, both
+
+servers will see communications failures when they attempt to send to any client
+
+via R1 and they too will stop using it.  
+
+ 
+
+Meanwhile, clients will time out RPCs that were affected by the failure of R1
+
+and try to reconnect - first using the affected OST's current NID, then trying
+
+the failover NID.  When they successfully reconnect, they will find that S1's
+
+OSTs are still the "same ones" as before and therefore just resend the failed RPCs.
+
+ 
+
+LNET running on both clients and servers will continue to avoid routing traffic
+
+through R1, however they will try to ping R1 occasionally so that they notice
+
+when it comes back and can start to reuse it.
+
+ 
+
+If (say) S1 fails concurrently with R1, clients reconnecting after RPCs have
+
+timed out will only reconnect successfully to the failover OST NIDs and
+
+discover that they need to participate in recovery.
+
+ 
+
+For all this to work smoothly, we require (a) multiple routers between N1 and N2
+
+to ensure communications between clients and servers can continue in the face of
+
+router failures.   We also need router failure to be detected relatively promptly to
+
+minimize the number of reconnection attempts the clients make.
+
+ 
+
+Cheers,
+                   Eric 
+
+ 
+
+ 
+
+ 
+
+From: lustre-devel-bounces at lists.lustre.org [mailto:lustre-devel-bounces at lists.lustre.org] On Behalf Of Peter Braam
+Sent: 27 September 2011 1:47 PM
+To: lustre-devel at lists.lustre.org
+Subject: [Lustre-devel] question about failover
+
+ 
+
+Greetings -
+
+ 
+
+The general question is how do router failures and server failover interact?
+
+ 
+
+My suspicion is that is it necessary for the routing topology and server topology to be such that server failures one wants to
+recover from always leave working servers connected to the router, so that at least some traffic makes it through that router, and
+it won't be declared failed also.  Is that right?
+
+ 
+
+As an example, point to point connections between two routers and a singe failover pair are to be avoided, because it becomes
+impossible to distinguish server and router failures.  Is that a rule that is generally followed?
+
+ 
+
+Thanks!
+
+ 
+
+Peter
+
+______________________________________________________________________
+This email may contain privileged or confidential information, which should only be used for the purpose for which it was sent by
+Xyratex. No further rights or licenses are granted to use such information. If you are not the intended recipient of this message,
+please notify the sender by return and delete it. You may not use, copy, disclose or rely on the information contained in it.
+ 
+Internet email is susceptible to data corruption, interception and unauthorised amendment for which Xyratex does not accept
+liability. While we have taken reasonable precautions to ensure that this email is free of viruses, Xyratex does not accept
+liability for the presence of any computer viruses in this email, nor for any losses caused as a result of viruses.
+ 
+Xyratex Technology Limited (03134912), Registered in England & Wales, Registered Office, Langstone Road, Havant, Hampshire, PO9 1SA.
+ 
+The Xyratex group of companies also includes, Xyratex Ltd, registered in Bermuda, Xyratex International Inc, registered in
+California, Xyratex (Malaysia) Sdn Bhd registered in Malaysia, Xyratex Technology (Wuxi) Co Ltd registered in The People's Republic
+of China and Xyratex Japan Limited registered in Japan.
+______________________________________________________________________
+ 
+ 
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20111005/df8826b6/attachment.htm>
+
+From eeb at whamcloud.com  Wed Oct  5 11:02:22 2011
+From: eeb at whamcloud.com (Eric Barton)
+Date: Wed, 5 Oct 2011 19:02:22 +0100
+Subject: [Lustre-devel] Wide striping
+In-Reply-To: <54C22AB8-783C-4B23-9CC9-B70C72CA1150@xyratex.com>
+References: <73AED5C780AE05478241DB067651A9210237883C@XYUS-EX22.xyus.xyratex.com>	<4E8BA3EE.6060300@whamcloud.com>
+	<54C22AB8-783C-4B23-9CC9-B70C72CA1150@xyratex.com>
+Message-ID: <03dd01cc8388$ef4f3c00$cdedb400$@com>
+
+Shadow,
+
+Your comment describes create-on-write (CROW), which is vulnerable
+to orphan creation by clients which have been evicted from the MDS
+but are not actually dead, unless further safeguards are implemented
+such as capabilities or server-cluster-wide client eviction.
+
+I also think that the decision to use FIDs in the way you suggest
+has architectural implications which would benefit from further
+discussion.  The original idea was that a FID would be all you need
+to identify any object (including its target) and that using them
+uniformly in this way could help simplify the code and enable further
+development - e.g. to allow unified targets which mix namespace and
+data objects to better support small/sparse files.
+
+Making the FID just a unique identifier which requires a target index
+to specify a specific object doesn't have to be inconsistent with
+uniform usage for data and metadata, but it has further knock-on
+implications which must be acknowledged and debated explicitly
+before we go further.  We really must be confident we've thought
+through all the consequences of our architectural decisions before
+we invest development effort in them.  It's just too expensive to
+reverse a bad decision otherwise.
+
+          Cheers,
+                   Eric
+
+> -----Original Message-----
+> From: lustre-devel-bounces at lists.lustre.org [mailto:lustre-devel-bounces at lists.lustre.org] On Behalf
+> Of Alexey Lyashkov
+> Sent: 05 October 2011 10:29 AM
+> To: wangdi
+> Cc: Alexander Boyko; Lustre Development Mailing List; Artem Blagodarenko; Nathan Rutman
+> Subject: Re: [Lustre-devel] Wide striping
+> 
+> Hi All,
+> >
+> > FID-on-OST is actually part of DNE(dirtribute name space) phase I.  It basically follows current fid
+> client server infrastructure.
+> >
+> > 1. MDT is the fid client, which requests fid from the OST and allocates fids for the object during
+> pre-creation.
+> > 2. OST is the fid server, which will allocate the FIDs to MDTs and requests super fid sequence from
+> fid control server (root MDT).
+> > 3. Similar as MDT FID, there will be OI to map FID to object inside OST.
+> >
+> > The code will be release with DNE sometime next year.
+> >
+> I think we not need a special FID's for OST object, except we want to migrate one object via different
+> data containers over cluster.
+> I think it's not a priority for now.
+> So we can simplify a FID management for OST now.
+> Each data object may identified via pair {OST_INDEX / OST_UUID, MDT_FID}.
+> In that case OST not need allocate any FID's, and MDT can reuse current reallocation scheme.
+> in fact we not need a assign a FID for OST object in file creation time (aka creating LSM), but we
+> need a guaranteed free OST object exist when client tried to make access to that object.
+> in that case OST can preallocate some pool and report that size to MDT,
+> MDT know it's uses some objects from that pool, but not know which object id assigned to file.
+> to avoid OST confusion client send a MDT FID to OST when need access to OST object.
+> OST look to OI database and check - is that FID assigned to something or not.
+> if assigned - IO will return a inode, otherwise OST need to grab any free object from a pool and
+> assign to that FID.
+> that's all.
+> 
+> orphan cleanup not need to be changed in that case - MDT send a last allocated objid, and OST will
+> kill a unallocated objects and return last index to the MDT.
+> open-unlink case need to be changed to put a fid in LLOG record and OST need to be changed to handle
+> FID as object index.
+> 
+> 
+> 
+> --------------------------------------------
+> Alexey Lyashkov
+> alexey_lyashkov at xyratex.com
+> 
+> 
+> 
+> 
+> ______________________________________________________________________
+> This email may contain privileged or confidential information, which should only be used for the
+> purpose for which it was sent by Xyratex. No further rights or licenses are granted to use such
+> information. If you are not the intended recipient of this message, please notify the sender by return
+> and delete it. You may not use, copy, disclose or rely on the information contained in it.
+> 
+> Internet email is susceptible to data corruption, interception and unauthorised amendment for which
+> Xyratex does not accept liability. While we have taken reasonable precautions to ensure that this
+> email is free of viruses, Xyratex does not accept liability for the presence of any computer viruses
+> in this email, nor for any losses caused as a result of viruses.
+> 
+> Xyratex Technology Limited (03134912), Registered in England & Wales, Registered Office, Langstone
+> Road, Havant, Hampshire, PO9 1SA.
+> 
+> The Xyratex group of companies also includes, Xyratex Ltd, registered in Bermuda, Xyratex
+> International Inc, registered in California, Xyratex (Malaysia) Sdn Bhd registered in Malaysia,
+> Xyratex Technology (Wuxi) Co Ltd registered in The People's Republic of China and Xyratex Japan
+> Limited registered in Japan.
+> ______________________________________________________________________
+> 
+> 
+> _______________________________________________
+> Lustre-devel mailing list
+> Lustre-devel at lists.lustre.org
+> http://lists.lustre.org/mailman/listinfo/lustre-devel
+
+
+
+From Nathan_Rutman at xyratex.com  Wed Oct  5 11:18:57 2011
+From: Nathan_Rutman at xyratex.com (Nathan Rutman)
+Date: Wed, 5 Oct 2011 11:18:57 -0700
+Subject: [Lustre-devel] Wide striping
+In-Reply-To: <54C22AB8-783C-4B23-9CC9-B70C72CA1150@xyratex.com>
+References: <73AED5C780AE05478241DB067651A9210237883C@XYUS-EX22.xyus.xyratex.com>
+	<4E8BA3EE.6060300@whamcloud.com>
+	<54C22AB8-783C-4B23-9CC9-B70C72CA1150@xyratex.com>
+Message-ID: <73AED5C780AE05478241DB067651A92102378851@XYUS-EX22.xyus.xyratex.com>
+
+
+On Oct 5, 2011, at 2:28 AM, Alexey Lyashkov wrote:
+
+> Hi All,
+>> 
+>> FID-on-OST is actually part of DNE(dirtribute name space) phase I.  It basically follows current fid client server infrastructure.
+>> 
+>> 1. MDT is the fid client, which requests fid from the OST and allocates fids for the object during pre-creation. 
+>> 2. OST is the fid server, which will allocate the FIDs to MDTs and requests super fid sequence from fid control server (root MDT).
+>> 3. Similar as MDT FID, there will be OI to map FID to object inside OST.
+>> 
+>> The code will be release with DNE sometime next year.
+>> 
+> I think we not need a special FID's for OST object, except we want to migrate one object via different data containers over cluster.
+> I think it's not a priority for now.
+> So we can simplify a FID management for OST now.
+> Each data object may identified via pair {OST_INDEX / OST_UUID, MDT_FID}.
+> In that case OST not need allocate any FID's, and MDT can reuse current reallocation scheme.
+> in fact we not need a assign a FID for OST object in file creation time (aka creating LSM), but we need a guaranteed free OST object exist when client tried to make access to that object.
+> in that case OST can preallocate some pool and report that size to MDT,
+> MDT know it's uses some objects from that pool, but not know which object id assigned to file. 
+> to avoid OST confusion client send a MDT FID to OST when need access to OST object.
+> OST look to OI database and check - is that FID assigned to something or not.
+> if assigned - IO will return a inode, otherwise OST need to grab any free object from a pool and assign to that FID.
+> that's all.
+> 
+> orphan cleanup not need to be changed in that case - MDT send a last allocated objid, and OST will kill a unallocated objects and return last index to the MDT.
+> open-unlink case need to be changed to put a fid in LLOG record and OST need to be changed to handle FID as object index.
+> 
+
+What Shadow is saying here (correct me if I'm wrong) is that full-blown FIDs on OSTs are really needed; just a way to map the MDT fid to to the local object id.
+(The other general class of solution being to reserve a specific range of common ost object id's, and do no mapping.)  Both of these are significantly less
+complicated than the DNE FID-on-OST description.
+
+As I was hinting at before, perhaps there's not a very strong case to be made for doing anything other than using the "just make it bigger" solution of BZ4424.
+I was trying to gauge the interest of the community in an intermediate solution.=
+______________________________________________________________________
+This email may contain privileged or confidential information, which should only be used for the purpose for which it was sent by Xyratex. No further rights or licenses are granted to use such information. If you are not the intended recipient of this message, please notify the sender by return and delete it. You may not use, copy, disclose or rely on the information contained in it.
+ 
+Internet email is susceptible to data corruption, interception and unauthorised amendment for which Xyratex does not accept liability. While we have taken reasonable precautions to ensure that this email is free of viruses, Xyratex does not accept liability for the presence of any computer viruses in this email, nor for any losses caused as a result of viruses.
+ 
+Xyratex Technology Limited (03134912), Registered in England & Wales, Registered Office, Langstone Road, Havant, Hampshire, PO9 1SA.
+ 
+The Xyratex group of companies also includes, Xyratex Ltd, registered in Bermuda, Xyratex International Inc, registered in California, Xyratex (Malaysia) Sdn Bhd registered in Malaysia, Xyratex Technology (Wuxi) Co Ltd registered in The People's Republic of China and Xyratex Japan Limited registered in Japan.
+______________________________________________________________________
+ 
+
+
+
+From Nathan_Rutman at xyratex.com  Wed Oct  5 11:23:25 2011
+From: Nathan_Rutman at xyratex.com (Nathan Rutman)
+Date: Wed, 5 Oct 2011 11:23:25 -0700
+Subject: [Lustre-devel] Wide striping
+In-Reply-To: <73AED5C780AE05478241DB067651A92102378851@XYUS-EX22.xyus.xyratex.com>
+References: <73AED5C780AE05478241DB067651A9210237883C@XYUS-EX22.xyus.xyratex.com>
+	<4E8BA3EE.6060300@whamcloud.com>
+	<54C22AB8-783C-4B23-9CC9-B70C72CA1150@xyratex.com>
+	<73AED5C780AE05478241DB067651A92102378851@XYUS-EX22.xyus.xyratex.com>
+Message-ID: <73AED5C780AE05478241DB067651A92102378852@XYUS-EX22.xyus.xyratex.com>
+
+
+On Oct 5, 2011, at 11:18 AM, Nathan Rutman wrote:
+
+> 
+> On Oct 5, 2011, at 2:28 AM, Alexey Lyashkov wrote:
+> 
+>> Hi All,
+>>> 
+>>> FID-on-OST is actually part of DNE(dirtribute name space) phase I.  It basically follows current fid client server infrastructure.
+>>> 
+>>> 1. MDT is the fid client, which requests fid from the OST and allocates fids for the object during pre-creation. 
+>>> 2. OST is the fid server, which will allocate the FIDs to MDTs and requests super fid sequence from fid control server (root MDT).
+>>> 3. Similar as MDT FID, there will be OI to map FID to object inside OST.
+>>> 
+>>> The code will be release with DNE sometime next year.
+>>> 
+>> I think we not need a special FID's for OST object, except we want to migrate one object via different data containers over cluster.
+>> I think it's not a priority for now.
+>> So we can simplify a FID management for OST now.
+>> Each data object may identified via pair {OST_INDEX / OST_UUID, MDT_FID}.
+>> In that case OST not need allocate any FID's, and MDT can reuse current reallocation scheme.
+>> in fact we not need a assign a FID for OST object in file creation time (aka creating LSM), but we need a guaranteed free OST object exist when client tried to make access to that object.
+>> in that case OST can preallocate some pool and report that size to MDT,
+>> MDT know it's uses some objects from that pool, but not know which object id assigned to file. 
+>> to avoid OST confusion client send a MDT FID to OST when need access to OST object.
+>> OST look to OI database and check - is that FID assigned to something or not.
+>> if assigned - IO will return a inode, otherwise OST need to grab any free object from a pool and assign to that FID.
+>> that's all.
+>> 
+>> orphan cleanup not need to be changed in that case - MDT send a last allocated objid, and OST will kill a unallocated objects and return last index to the MDT.
+>> open-unlink case need to be changed to put a fid in LLOG record and OST need to be changed to handle FID as object index.
+>> 
+> 
+> What Shadow is saying here (correct me if I'm wrong) is that full-blown FIDs on OSTs are really needed;
+s/are/aren't/   :(
+
+> just a way to map the MDT fid to to the local object id.
+> (The other general class of solution being to reserve a specific range of common ost object id's, and do no mapping.)  Both of these are significantly less
+> complicated than the DNE FID-on-OST description.
+> 
+> As I was hinting at before, perhaps there's not a very strong case to be made for doing anything other than using the "just make it bigger" solution of BZ4424.
+> I was trying to gauge the interest of the community in an intermediate solution.=
+______________________________________________________________________
+This email may contain privileged or confidential information, which should only be used for the purpose for which it was sent by Xyratex. No further rights or licenses are granted to use such information. If you are not the intended recipient of this message, please notify the sender by return and delete it. You may not use, copy, disclose or rely on the information contained in it.
+ 
+Internet email is susceptible to data corruption, interception and unauthorised amendment for which Xyratex does not accept liability. While we have taken reasonable precautions to ensure that this email is free of viruses, Xyratex does not accept liability for the presence of any computer viruses in this email, nor for any losses caused as a result of viruses.
+ 
+Xyratex Technology Limited (03134912), Registered in England & Wales, Registered Office, Langstone Road, Havant, Hampshire, PO9 1SA.
+ 
+The Xyratex group of companies also includes, Xyratex Ltd, registered in Bermuda, Xyratex International Inc, registered in California, Xyratex (Malaysia) Sdn Bhd registered in Malaysia, Xyratex Technology (Wuxi) Co Ltd registered in The People's Republic of China and Xyratex Japan Limited registered in Japan.
+______________________________________________________________________
+ 
+
+
+
+From Nathan_Rutman at xyratex.com  Wed Oct  5 11:44:07 2011
+From: Nathan_Rutman at xyratex.com (Nathan Rutman)
+Date: Wed, 5 Oct 2011 11:44:07 -0700
+Subject: [Lustre-devel] Wide striping
+In-Reply-To: <03dd01cc8388$ef4f3c00$cdedb400$@com>
+References: <73AED5C780AE05478241DB067651A9210237883C@XYUS-EX22.xyus.xyratex.com>	<4E8BA3EE.6060300@whamcloud.com>
+	<54C22AB8-783C-4B23-9CC9-B70C72CA1150@xyratex.com>
+	<03dd01cc8388$ef4f3c00$cdedb400$@com>
+Message-ID: <73AED5C780AE05478241DB067651A92102378853@XYUS-EX22.xyus.xyratex.com>
+
+
+On Oct 5, 2011, at 11:02 AM, Eric Barton wrote:
+
+> Shadow,
+> 
+> Your comment describes create-on-write (CROW), which is vulnerable
+> to orphan creation by clients which have been evicted from the MDS
+> but are not actually dead, unless further safeguards are implemented
+> such as capabilities or server-cluster-wide client eviction.
+create-on-write isn't really an integral part of this design, just a side thought.  Let's leave it out of the 
+discussion for now.
+> 
+> I also think that the decision to use FIDs in the way you suggest
+> has architectural implications which would benefit from further
+> discussion.  The original idea was that a FID would be all you need
+> to identify any object (including its target) and that using them
+> uniformly in this way could help simplify the code and enable further
+> development - e.g. to allow unified targets which mix namespace and
+> data objects to better support small/sparse files.
+> 
+> Making the FID just a unique identifier which requires a target index
+> to specify a specific object doesn't have to be inconsistent with
+> uniform usage for data and metadata, but it has further knock-on
+> implications which must be acknowledged and debated explicitly
+> before we go further.  We really must be confident we've thought
+> through all the consequences of our architectural decisions before
+> we invest development effort in them.  It's just too expensive to
+> reverse a bad decision otherwise.
+That's what we're trying to do now :)
+
+The issue as I see it is that we're thinking about a feature that could be useful 
+today, and is implementable today, except for the fact that there are some 
+longer term plans that might conflict.  Our wide-striping could be implemented
+on top of WC's future FID-on-OST plans -- but would require that code to exist.
+So then we have to decide if waiting is the best option, or whether a more 
+minimal change (probably the "common object ID" from my original arch email)
+could land first, and then DNE FID-on-OST could change it later. 
+
+
+> 
+>          Cheers,
+>                   Eric
+> 
+>> -----Original Message-----
+>> From: lustre-devel-bounces at lists.lustre.org [mailto:lustre-devel-bounces at lists.lustre.org] On Behalf
+>> Of Alexey Lyashkov
+>> Sent: 05 October 2011 10:29 AM
+>> To: wangdi
+>> Cc: Alexander Boyko; Lustre Development Mailing List; Artem Blagodarenko; Nathan Rutman
+>> Subject: Re: [Lustre-devel] Wide striping
+>> 
+>> Hi All,
+>>> 
+>>> FID-on-OST is actually part of DNE(dirtribute name space) phase I.  It basically follows current fid
+>> client server infrastructure.
+>>> 
+>>> 1. MDT is the fid client, which requests fid from the OST and allocates fids for the object during
+>> pre-creation.
+>>> 2. OST is the fid server, which will allocate the FIDs to MDTs and requests super fid sequence from
+>> fid control server (root MDT).
+>>> 3. Similar as MDT FID, there will be OI to map FID to object inside OST.
+>>> 
+>>> The code will be release with DNE sometime next year.
+>>> 
+>> I think we not need a special FID's for OST object, except we want to migrate one object via different
+>> data containers over cluster.
+>> I think it's not a priority for now.
+>> So we can simplify a FID management for OST now.
+>> Each data object may identified via pair {OST_INDEX / OST_UUID, MDT_FID}.
+>> In that case OST not need allocate any FID's, and MDT can reuse current reallocation scheme.
+>> in fact we not need a assign a FID for OST object in file creation time (aka creating LSM), but we
+>> need a guaranteed free OST object exist when client tried to make access to that object.
+>> in that case OST can preallocate some pool and report that size to MDT,
+>> MDT know it's uses some objects from that pool, but not know which object id assigned to file.
+>> to avoid OST confusion client send a MDT FID to OST when need access to OST object.
+>> OST look to OI database and check - is that FID assigned to something or not.
+>> if assigned - IO will return a inode, otherwise OST need to grab any free object from a pool and
+>> assign to that FID.
+>> that's all.
+>> 
+>> orphan cleanup not need to be changed in that case - MDT send a last allocated objid, and OST will
+>> kill a unallocated objects and return last index to the MDT.
+>> open-unlink case need to be changed to put a fid in LLOG record and OST need to be changed to handle
+>> FID as object index.
+>> 
+>> 
+>> 
+>> --------------------------------------------
+>> Alexey Lyashkov
+>> alexey_lyashkov at xyratex.com
+>> 
+>> 
+>> 
+>> 
+>> ______________________________________________________________________
+>> This email may contain privileged or confidential information, which should only be used for the
+>> purpose for which it was sent by Xyratex. No further rights or licenses are granted to use such
+>> information. If you are not the intended recipient of this message, please notify the sender by return
+>> and delete it. You may not use, copy, disclose or rely on the information contained in it.
+>> 
+>> Internet email is susceptible to data corruption, interception and unauthorised amendment for which
+>> Xyratex does not accept liability. While we have taken reasonable precautions to ensure that this
+>> email is free of viruses, Xyratex does not accept liability for the presence of any computer viruses
+>> in this email, nor for any losses caused as a result of viruses.
+>> 
+>> Xyratex Technology Limited (03134912), Registered in England & Wales, Registered Office, Langstone
+>> Road, Havant, Hampshire, PO9 1SA.
+>> 
+>> The Xyratex group of companies also includes, Xyratex Ltd, registered in Bermuda, Xyratex
+>> International Inc, registered in California, Xyratex (Malaysia) Sdn Bhd registered in Malaysia,
+>> Xyratex Technology (Wuxi) Co Ltd registered in The People's Republic of China and Xyratex Japan
+>> Limited registered in Japan.
+>> ______________________________________________________________________
+>> 
+>> 
+>> _______________________________________________
+>> Lustre-devel mailing list
+>> Lustre-devel at lists.lustre.org
+>> http://lists.lustre.org/mailman/listinfo/lustre-devel
+> 
+______________________________________________________________________
+This email may contain privileged or confidential information, which should only be used for the purpose for which it was sent by Xyratex. No further rights or licenses are granted to use such information. If you are not the intended recipient of this message, please notify the sender by return and delete it. You may not use, copy, disclose or rely on the information contained in it.
+ 
+Internet email is susceptible to data corruption, interception and unauthorised amendment for which Xyratex does not accept liability. While we have taken reasonable precautions to ensure that this email is free of viruses, Xyratex does not accept liability for the presence of any computer viruses in this email, nor for any losses caused as a result of viruses.
+ 
+Xyratex Technology Limited (03134912), Registered in England & Wales, Registered Office, Langstone Road, Havant, Hampshire, PO9 1SA.
+ 
+The Xyratex group of companies also includes, Xyratex Ltd, registered in Bermuda, Xyratex International Inc, registered in California, Xyratex (Malaysia) Sdn Bhd registered in Malaysia, Xyratex Technology (Wuxi) Co Ltd registered in The People's Republic of China and Xyratex Japan Limited registered in Japan.
+______________________________________________________________________
+ 
+
+
+
+From di.wang at whamcloud.com  Wed Oct  5 12:44:01 2011
+From: di.wang at whamcloud.com (wangdi)
+Date: Wed, 05 Oct 2011 12:44:01 -0700
+Subject: [Lustre-devel] Wide striping
+In-Reply-To: <73AED5C780AE05478241DB067651A92102378850@XYUS-EX22.xyus.xyratex.com>
+References: <73AED5C780AE05478241DB067651A9210237883C@XYUS-EX22.xyus.xyratex.com>
+	<4E8BA3EE.6060300@whamcloud.com>
+	<73AED5C780AE05478241DB067651A92102378850@XYUS-EX22.xyus.xyratex.com>
+Message-ID: <4E8CB381.40805@whamcloud.com>
+
+On 10/05/2011 09:06 AM, Nathan Rutman wrote:
+>
+>>
+>>> Common
+>>> Object ID
+>>> The MDT
+>>> tracks a special range of OST object ID?s (?wide stripe
+>>> objectid? = WSO) that are used on all OSTs.  The MDT
+>>> assigns the next available WSO to the file, and this
+>>> objectid is used on all the OSTs.  The OSTs must never use
+>>> these objects for regular striped files.  A special
+>>> precreation group for these objects is probably necessary,
+>>> as well as orphan cleanup (the MDT should purge "hole"
+>>> objects that aren?t allocated from a particular OST). The
+>>> MDT should track the last assigned WSO; this will be the
+>>> starting point for new wide striped files after recovery. Objects 
+>>> cannot be migrated
+>>> from one OST to another, since this would result in
+>>> out-of-order access. Similarly, stripes can
+>>> never be added to holes.
+>>> FID-on-OST
+>>> Use a
+>>> mapping of the MDT FID to uniquely determine an OST
+>>> object.  The clients and MDT add in the OST number to the
+>>> MDT FID (probably just reserve one sequence per OST).
+>>>  (This allows the objects to potentially migrate to
+>>> different OSTs).  The OSTs then internally must map the
+>>> FID to a local object id.  Note this allows OST-local
+>>> precreation pools, getting the MDT out of the
+>>> precreate/orphan cleanup business and potentially
+>>> improving create speeds, and also facilitates "create on
+>>> write" semantics.  The FID can be assigned during the
+>>> first access to OST object.
+>>
+>> I am not sure I follow your idea here. You mean the OST needs 
+>> internally map MDT FID(added in OST number) to object id (or inode ino) ?
+> yes.
+>
+>> So there are no real OST FID?
+> I suppose -- this is just a mapping of the MDT fid to the local OST 
+> object id, via a local lookup on the OST.  There would be something 
+> like the OI to do this mapping.
+>
+>> But you also said "The FID can be
+>> assigned during the first access to OST object.", Could you please
+>> explain more here?
+>
+> Since the FID -> Objid mapping is performed locally, it doesn't need 
+> to be assigned until the first write.  This is not integral to the 
+> design, just a side effect.
+
+Ah, you mean the object ID can be assigned during the first access, 
+instead of FID? This is indeed an interesting idea, and do not need 
+extra space. But this may add some limits of the future. (what if we 
+decides to store some small file data in MDT directly?) And also it will 
+add another difference between MDT and OST, probably it conflicts with 
+the efforts of unifying MDT and OST?  I still prefer to have real OST 
+FID, i.e. every object has its own identification in the cluster. Please 
+correct me if I miss the point of your suggestion.
+
+Thanks
+Wangdi
+
+>
+>>
+>>
+>>> The big
+>>> problem here is that FID>OBJID ( or better
+>>> FID->inode id ) translation is absent from the OSTs
+>>> today. See http://wiki.lustre.org/images/e/e9/SC09-FID-on-OST.pdf
+>>> (what is the current state of this?)  There is also some
+>>> work in this direction in the OST restructuring work
+>>> (?Orion? WC branch, ORI-300(?), scheduled for Lustre 2.4).
+>>>
+>>>
+>>> There's
+>>> a few questions here, probably the first of which is "is it 
+>>> worthwhile to
+>>> spend effort on this, or is BZ4424 good enough?" Then there
+>>> is the question of object identification, where FID-on-OST
+>>> is more flexible, but also significantly more work (and
+>>> risk). Also, I thought I understood from the EOFS Summit
+>>> that WC also has a separate FID-on-OST project (separate
+>>> from Orion that is) -- can someone tell me the state of
+>>> that?
+>>
+>> FID-on-OST is actually part of DNE(dirtribute name space) phase I.  
+>> It basically follows current fid client server infrastructure.
+>>
+>> 1. MDT is the fid client, which requests fid from the OST and 
+>> allocates fids for the object during pre-creation.
+>> 2. OST is the fid server, which will allocate the FIDs to MDTs and 
+>> requests super fid sequence from fid control server (root MDT).
+>> 3. Similar as MDT FID, there will be OI to map FID to object inside OST.
+>
+> To integrate with this, we would need to have a reserved sequence on 
+> each OST that the MDT could assign FIDs from --
+> the MDT would need to use the same Object ID on all OSTs.  For DNE, 
+> there would need to be a reserved sequence per OST per MDT.
+>
+>
+>>
+>> The code will be release with DNE sometime next year.
+>>
+>> Thanks
+>> WangDi
+>>
+>>
+> ______________________________________________________________________
+> This email may contain privileged or confidential information, which should only be used for the purpose for which it was sent by Xyratex. No further rights or licenses are granted to use such information. If you are not the intended recipient of this message, please notify the sender by return and delete it. You may not use, copy, disclose or rely on the information contained in it.
+>
+> Internet email is susceptible to data corruption, interception and unauthorised amendment for which Xyratex does not accept liability. While we have taken reasonable precautions to ensure that this email is free of viruses, Xyratex does not accept liability for the presence of any computer viruses in this email, nor for any losses caused as a result of viruses.
+>
+> Xyratex Technology Limited (03134912), Registered in England&  Wales, Registered Office, Langstone Road, Havant, Hampshire, PO9 1SA.
+>
+> The Xyratex group of companies also includes, Xyratex Ltd, registered in Bermuda, Xyratex International Inc, registered in California, Xyratex (Malaysia) Sdn Bhd registered in Malaysia, Xyratex Technology (Wuxi) Co Ltd registered in The People's Republic of China and Xyratex Japan Limited registered in Japan.
+> ______________________________________________________________________
+>
+>
+
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20111005/837cc869/attachment.htm>
+
+From green at whamcloud.com  Wed Oct  5 16:31:58 2011
+From: green at whamcloud.com (Oleg Drokin)
+Date: Wed, 5 Oct 2011 19:31:58 -0400
+Subject: [Lustre-devel] Wide striping
+In-Reply-To: <4E8CB381.40805@whamcloud.com>
+References: <73AED5C780AE05478241DB067651A9210237883C@XYUS-EX22.xyus.xyratex.com>
+	<4E8BA3EE.6060300@whamcloud.com>
+	<73AED5C780AE05478241DB067651A92102378850@XYUS-EX22.xyus.xyratex.com>
+	<4E8CB381.40805@whamcloud.com>
+Message-ID: <9CC6473C-DFE9-4FF4-9AA5-E7AB97D2987D@whamcloud.com>
+
+Hello!
+
+On Oct 5, 2011, at 3:44 PM, wangdi wrote:
+>> Since the FID -> Objid mapping is performed locally, it doesn't need to be assigned until the first write.  This is not integral to the design, just a side effect.
+> Ah, you mean the object ID can be assigned during the first access, instead of FID? This is indeed an interesting idea, and do not need extra space. But this may add some limits of the future. (what if we decides to store some small file data in MDT directly?) And also it will add another difference between MDT and OST, probably it conflicts with the efforts of unifying MDT and OST?  I still prefer to have real OST FID, i.e. every object has its own identification in the cluster. Please correct me if I miss the point of your suggestion.
+
+Another problems I see here are similar to create on write.
+Say if we delete a file, do we purge this mapping table too? and then when stale client comes we recreate an orphan object?
+Or we don't purge the table and let it grow indefinitely using more and more space and eventually slowing down lookups?
+Or do we purge really old objects from it only, what triggers it, what failure scenarios are there for this process?
+How do we recover from disasters that happened to this table?
+
+Bye,
+    Oleg
+--
+Oleg Drokin
+Senior Software Engineer
+Whamcloud, Inc.
+
+
+
+From dillowda at ornl.gov  Wed Oct  5 08:33:52 2011
+From: dillowda at ornl.gov (David Dillow)
+Date: Wed, 05 Oct 2011 11:33:52 -0400
+Subject: [Lustre-devel] Wide striping
+In-Reply-To: <73AED5C780AE05478241DB067651A9210237884F@XYUS-EX22.xyus.xyratex.com>
+References: <73AED5C780AE05478241DB067651A9210237883C@XYUS-EX22.xyus.xyratex.com>
+	<1317687469.23023.3.camel@obelisk.thedillows.org>
+	<73AED5C780AE05478241DB067651A92102378846@XYUS-EX22.xyus.xyratex.com>
+	<1317762984.16569.18.camel@lap75545.ornl.gov>
+	<73AED5C780AE05478241DB067651A9210237884F@XYUS-EX22.xyus.xyratex.com>
+Message-ID: <1317828832.27894.8.camel@lap75545.ornl.gov>
+
+On Wed, 2011-10-05 at 11:06 -0400, Nathan Rutman wrote:
+> Sorry if I'm being unclear.
+> 
+> start_index is just an offset into the bitmap.  That's the OST where the first 
+> stripe will be.  Next stripe will be on the next OST index (unless a hole). 
+> When we get to the big hole at the end of the used OSTs, these OST index 
+> locations are all skipped (since they are holes), and the next stripe will 
+> be at OST index 0, then 1, etc, up to start_index-1 (again, unless holes).
+
+Ok, so bitmap position 0 is always OST 0; thanks for clearing up my
+misunderstanding.
+-- 
+Dave Dillow
+National Center for Computational Science
+Oak Ridge National Laboratory
+(865) 241-6602 office
+
+
+
+
+From dillowda at ornl.gov  Wed Oct  5 16:56:54 2011
+From: dillowda at ornl.gov (David Dillow)
+Date: Wed, 05 Oct 2011 19:56:54 -0400
+Subject: [Lustre-devel] Wide striping
+In-Reply-To: <9CC6473C-DFE9-4FF4-9AA5-E7AB97D2987D@whamcloud.com>
+References: <73AED5C780AE05478241DB067651A9210237883C@XYUS-EX22.xyus.xyratex.com>
+	<4E8BA3EE.6060300@whamcloud.com>
+	<73AED5C780AE05478241DB067651A92102378850@XYUS-EX22.xyus.xyratex.com>
+	<4E8CB381.40805@whamcloud.com>
+	<9CC6473C-DFE9-4FF4-9AA5-E7AB97D2987D@whamcloud.com>
+Message-ID: <1317859015.15874.2.camel@obelisk.thedillows.org>
+
+On Wed, 2011-10-05 at 19:31 -0400, Oleg Drokin wrote:
+> Hello!
+> 
+> On Oct 5, 2011, at 3:44 PM, wangdi wrote:
+> >> Since the FID -> Objid mapping is performed locally, it doesn't
+> need to be assigned until the first write.  This is not integral to
+> the design, just a side effect.
+> > Ah, you mean the object ID can be assigned during the first access,
+> instead of FID? This is indeed an interesting idea, and do not need
+> extra space. But this may add some limits of the future. (what if we
+> decides to store some small file data in MDT directly?) And also it
+> will add another difference between MDT and OST, probably it conflicts
+> with the efforts of unifying MDT and OST?  I still prefer to have real
+> OST FID, i.e. every object has its own identification in the cluster.
+> Please correct me if I miss the point of your suggestion.
+> 
+> Another problems I see here are similar to create on write.
+> Say if we delete a file, do we purge this mapping table too? and then
+> when stale client comes we recreate an orphan object?
+> Or we don't purge the table and let it grow indefinitely using more
+> and more space and eventually slowing down lookups?
+> Or do we purge really old objects from it only, what triggers it, what
+> failure scenarios are there for this process?
+> How do we recover from disasters that happened to this table?
+
+Wouldn't the online lfsck work being done for OpenSFS catch and correct
+these types of problems?
+
+It seems like it could provide a base for purging/compacting the table
+as well, but that's obviously going to be a complicated endeavor....
+-- 
+Dave Dillow
+National Center for Computational Science
+Oak Ridge National Laboratory
+(865) 241-6602 office
+
+
+
+From eeb at whamcloud.com  Wed Oct  5 18:13:05 2011
+From: eeb at whamcloud.com (Eric Barton)
+Date: Thu, 6 Oct 2011 02:13:05 +0100
+Subject: [Lustre-devel] question about failover
+In-Reply-To: <CAO=bG7q_TAbkwX_S7j6nRQihgQVb-xDCFX5eDHedSK+oA1Yr2g@mail.gmail.com>
+References: <CAO=bG7pWxqBX-U6Vp+cJV_jZMui2JbdEUaxVWvHLMqFn6Vv24w@mail.gmail.com>	<03d501cc8384$f39d3630$dad7a290$@com>
+	<CAO=bG7q_TAbkwX_S7j6nRQihgQVb-xDCFX5eDHedSK+oA1Yr2g@mail.gmail.com>
+Message-ID: <044a01cc83c5$1b0a5640$511f02c0$@com>
+
+Hi Peter,
+
+ 
+
+LNETs are cliques, so in the example I gave, R1 and R2 both had connectivity to S1 and S2.
+
+Redundant routers like this are required to ensure no single router failure "hides" a working
+server from some of its clients.  More equivalent routers make partition less likely, but if it
+occurs, affected targets that don't fail over to an accessible server will remain inaccessible
+as you describe.
+
+ 
+
+LNET is oblivious to the success or failure of the RPCs it transports - i.e. RPC failures cannot
+change LNET's perception of peer router status.  LNET uses the success or failure of LND
+communications with a given peer router to infer its status and upper levels don't even know
+which router forwarded which messages.
+
+ 
+
+Difficult cases occur when one of a router's networks fails or worse, when communications
+between a router and one of its peers fails, but both the router and its peer are healthy.  Such
+routers become a black hole for communications to their inaccessible peers.  They really need
+to detect this (carefully) and absent themselves from all networks.  IIRC Isaac worked on
+this and should know all about it.
+
+ 
+
+Cheers,
+                   Eric 
+
+ 
+
+From: Peter Braam [mailto:peter_braam at xyratex.com] 
+Sent: 05 October 2011 8:23 PM
+To: Eric Barton
+Subject: Re: [Lustre-devel] question about failover
+
+ 
+
+Hi Eric -
+
+On 5 October 2011 11:33, Eric Barton <eeb at whamcloud.com> wrote:
+
+Peter,
+
+ 
+
+I'm not sure I understand the situation you're trying to describe.
+
+ 
+
+ 
+
+I'm trying to state that the following topology, as an example, is undesirable:
+
+ 
+
+R1 has just one point to point connection with S1
+
+R2 has just one point to point connection with S2
+
+R3 has just one point to point connection with S2
+
+S1, S2 form a failover pair, let's say with one target on S1, no target on S2 under normal operation.  Upon failover S2 takes over
+this target.
+
+ 
+
+Let's say there is one thread on one client sitting on some network connection to R1, R2 and R3.
+
+ 
+
+The reason I think (but I want to verify) it is undesirable is that a client that finds a failure talking to S1 will go to S2,
+through R2.  But S2 may not have started services yet to take over from S1, so the client may get no reply at all.  If this silence
+leads the client to believe that R2 is not working, then we have a problem, because the client will go to R3 and possibly fail that
+also as S2 may still not be ready.  Then no path to S2 remains when it finally boots up.
+
+ 
+
+If routers, for example, ACK incoming packets then my suggestion is perhaps not correct.  
+
+ 
+
+Please not that the formulation here is the contra-positive of the one I wrote earlier, when I describe how we would avoid this from
+happening.
+
+ 
+
+Thank you for thinking about it.
+
+ 
+
+Peter
+
+ 
+
+ 
+
+Consider 2 servers (S1, S2) connected to 2 routers (R1, R2) on 1 LNET (N1)
+
+and clients connect to the routers via another LNET (N2).   Normally both R1
+
+and R2 carry traffic between any/all clients on N2 and either server.  
+
+ 
+
+If (say) R1 fails, clients on N2 will see communications failures when they
+
+attempt to send to either of the servers via R1 and stop using it.  Similarly, both
+
+servers will see communications failures when they attempt to send to any client
+
+via R1 and they too will stop using it.  
+
+ 
+
+Meanwhile, clients will time out RPCs that were affected by the failure of R1
+
+and try to reconnect - first using the affected OST's current NID, then trying
+
+the failover NID.  When they successfully reconnect, they will find that S1's
+
+OSTs are still the "same ones" as before and therefore just resend the failed RPCs.
+
+ 
+
+LNET running on both clients and servers will continue to avoid routing traffic
+
+through R1, however they will try to ping R1 occasionally so that they notice
+
+when it comes back and can start to reuse it.
+
+ 
+
+If (say) S1 fails concurrently with R1, clients reconnecting after RPCs have
+
+timed out will only reconnect successfully to the failover OST NIDs and
+
+discover that they need to participate in recovery.
+
+ 
+
+For all this to work smoothly, we require (a) multiple routers between N1 and N2
+
+to ensure communications between clients and servers can continue in the face of
+
+router failures.   We also need router failure to be detected relatively promptly to
+
+minimize the number of reconnection attempts the clients make.
+
+ 
+
+Cheers,
+                   Eric 
+
+ 
+
+ 
+
+ 
+
+From: lustre-devel-bounces at lists.lustre.org [mailto:lustre-devel-bounces at lists.lustre.org] On Behalf Of Peter Braam
+Sent: 27 September 2011 1:47 PM
+To: lustre-devel at lists.lustre.org
+Subject: [Lustre-devel] question about failover
+
+ 
+
+Greetings -
+
+ 
+
+The general question is how do router failures and server failover interact?
+
+ 
+
+My suspicion is that is it necessary for the routing topology and server topology to be such that server failures one wants to
+recover from always leave working servers connected to the router, so that at least some traffic makes it through that router, and
+it won't be declared failed also.  Is that right?
+
+ 
+
+As an example, point to point connections between two routers and a singe failover pair are to be avoided, because it becomes
+impossible to distinguish server and router failures.  Is that a rule that is generally followed?
+
+ 
+
+Thanks!
+
+ 
+
+Peter
+
+______________________________________________________________________
+This email may contain privileged or confidential information, which should only be used for the purpose for which it was sent by
+Xyratex. No further rights or licenses are granted to use such information. If you are not the intended recipient of this message,
+please notify the sender by return and delete it. You may not use, copy, disclose or rely on the information contained in it.
+ 
+Internet email is susceptible to data corruption, interception and unauthorised amendment for which Xyratex does not accept
+liability. While we have taken reasonable precautions to ensure that this email is free of viruses, Xyratex does not accept
+liability for the presence of any computer viruses in this email, nor for any losses caused as a result of viruses.
+ 
+Xyratex Technology Limited (03134912), Registered in England & Wales, Registered Office, Langstone Road, Havant, Hampshire, PO9 1SA.
+ 
+The Xyratex group of companies also includes, Xyratex Ltd, registered in Bermuda, Xyratex International Inc, registered in
+California, Xyratex (Malaysia) Sdn Bhd registered in Malaysia, Xyratex Technology (Wuxi) Co Ltd registered in The People's Republic
+of China and Xyratex Japan Limited registered in Japan.
+______________________________________________________________________
+ 
+ 
+______________________________________________________________________
+This email may contain privileged or confidential information, which should only be used for the purpose for which it was sent by
+Xyratex. No further rights or licenses are granted to use such information. If you are not the intended recipient of this message,
+please notify the sender by return and delete it. You may not use, copy, disclose or rely on the information contained in it.
+ 
+Internet email is susceptible to data corruption, interception and unauthorised amendment for which Xyratex does not accept
+liability. While we have taken reasonable precautions to ensure that this email is free of viruses, Xyratex does not accept
+liability for the presence of any computer viruses in this email, nor for any losses caused as a result of viruses.
+ 
+Xyratex Technology Limited (03134912), Registered in England & Wales, Registered Office, Langstone Road, Havant, Hampshire, PO9 1SA.
+ 
+The Xyratex group of companies also includes, Xyratex Ltd, registered in Bermuda, Xyratex International Inc, registered in
+California, Xyratex (Malaysia) Sdn Bhd registered in Malaysia, Xyratex Technology (Wuxi) Co Ltd registered in The People's Republic
+of China and Xyratex Japan Limited registered in Japan.
+______________________________________________________________________
+ 
+ 
+
+ 
+
+______________________________________________________________________
+This email may contain privileged or confidential information, which should only be used for the purpose for which it was sent by
+Xyratex. No further rights or licenses are granted to use such information. If you are not the intended recipient of this message,
+please notify the sender by return and delete it. You may not use, copy, disclose or rely on the information contained in it.
+ 
+Internet email is susceptible to data corruption, interception and unauthorised amendment for which Xyratex does not accept
+liability. While we have taken reasonable precautions to ensure that this email is free of viruses, Xyratex does not accept
+liability for the presence of any computer viruses in this email, nor for any losses caused as a result of viruses.
+ 
+Xyratex Technology Limited (03134912), Registered in England & Wales, Registered Office, Langstone Road, Havant, Hampshire, PO9 1SA.
+ 
+The Xyratex group of companies also includes, Xyratex Ltd, registered in Bermuda, Xyratex International Inc, registered in
+California, Xyratex (Malaysia) Sdn Bhd registered in Malaysia, Xyratex Technology (Wuxi) Co Ltd registered in The People's Republic
+of China and Xyratex Japan Limited registered in Japan.
+______________________________________________________________________
+ 
+ 
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20111006/fc9d88d1/attachment.htm>
+
+From adilger at whamcloud.com  Wed Oct  5 18:51:37 2011
+From: adilger at whamcloud.com (Andreas Dilger)
+Date: Wed, 5 Oct 2011 19:51:37 -0600
+Subject: [Lustre-devel] Wide striping
+In-Reply-To: <1317828832.27894.8.camel@lap75545.ornl.gov>
+References: <73AED5C780AE05478241DB067651A9210237883C@XYUS-EX22.xyus.xyratex.com>
+	<1317687469.23023.3.camel@obelisk.thedillows.org>
+	<73AED5C780AE05478241DB067651A92102378846@XYUS-EX22.xyus.xyratex.com>
+	<1317762984.16569.18.camel@lap75545.ornl.gov>
+	<73AED5C780AE05478241DB067651A9210237884F@XYUS-EX22.xyus.xyratex.com>
+	<1317828832.27894.8.camel@lap75545.ornl.gov>
+Message-ID: <4684D08A-A823-47CD-8C02-22A92AEE6112@whamcloud.com>
+
+On 2011-10-05, at 9:33 AM, David Dillow <dillowda at ornl.gov> wrote:
+> On Wed, 2011-10-05 at 11:06 -0400, Nathan Rutman wrote:
+>> Sorry if I'm being unclear.
+>> 
+>> start_index is just an offset into the bitmap.  That's the OST where the first 
+>> stripe will be.  Next stripe will be on the next OST index (unless a hole). 
+>> When we get to the big hole at the end of the used OSTs, these OST index 
+>> locations are all skipped (since they are holes), and the next stripe will 
+>> be at OST index 0, then 1, etc, up to start_index-1 (again, unless holes).
+> 
+> Ok, so bitmap position 0 is always OST 0; thanks for clearing up my
+> misunderstanding.
+
+But this means that the table always needs to be as large as the maximum OST number. If the bitmap started at the starting OST index it would only need to be as large as the number of stripes. 
+
+That said, the limitation if not being able to migrate objects with this layout is a major one. The ability to so online object migration is just arriving with the layout lock (from HSM), so I expect this to be useful to many users. 
+
+Cheers, Andreas
+
+From thomas.leibovici at cea.fr  Thu Oct  6 04:01:45 2011
+From: thomas.leibovici at cea.fr (LEIBOVICI Thomas)
+Date: Thu, 06 Oct 2011 13:01:45 +0200
+Subject: [Lustre-devel] Erratum about indexes in robinhood DB
+In-Reply-To: <038c01cc835f$2f30f090$8d92d1b0$@com>
+References: <4E84346B.8060300@cea.fr> <038c01cc835f$2f30f090$8d92d1b0$@com>
+Message-ID: <4E8D8A99.1010804@cea.fr>
+
+Hello Eric,
+
+With a fast enough feeder, the ingest rate robinhood can currently 
+sustain is between 50.000/sec and 100.000/sec
+(depending on insert/update/remove ratio) with a basic MySQL DB stored 
+on a local disk.
+This can certainly still be improved with MySQL tunings and/or better HW 
+and/or enterprise class DB,
+but for now, we notice it is easily high enough for reading a MDT 
+changelog stream on a Petaflopic system.
+
+This rate is actually lower when processing Lustre MDT changelogs (but I 
+have no measurement) because of "stat" operations to get file attributes
+(unfortunately, changelogs do not give the new value of what has just 
+changed, e.g new uid for a chown operation, new size&mtime with a mtime 
+event...)
+SOM will probably improve that point, but it could be a good idea to add 
+more info in changelogs.
+
+Handling chglogs from multiple MDTs is indeed a very interesting point 
+to address.
+The main issue is the database scaling in terms of operation rate, 
+volume and entry location.
+A solution could be using an existing clustered DB engine (MySQL 
+cluster, NOSQL DBs...),
+thus we are going to take a look at the different alternatives and see 
+if they could match the need.
+For that, it would be interesting to know how records will be splitted 
+into the multiple changelog streams:
+is a given fid always reported by the same stream? what about the parent 
+fid (like in create/unlink operations)?
+If you have a document about DNE design, I think it would give a more 
+precise idea about
+what event and fid is supposed to be reported by each MDT.
+
+Thanks,
+Thomas
+
+Eric Barton wrote:
+> Thomas,
+>
+> Thanks a lot and I hope you don't mind me cc-ing lustre-devel as this
+> seems to be of general interest.
+>
+> Do you have a feel (or measurements :) for the rate at which a changelog
+> can be ingested into robinhood?  And I'm wondering about DNE and multiple
+> changelogs coming from multiple MDTs.  I'd be very interested to know if
+> you've thought about this and have views on what the maximum ingest rate
+> could be and whether there will be issues coordinating/merging events
+> across multiple feeds.
+>
+>           Cheers,
+>                    Eric
+>
+> Eric Barton
+> CTO Whamcloud, Inc.
+>
+>   
+>> -----Original Message-----
+>> From: LEIBOVICI Thomas [mailto:thomas.leibovici at cea.fr]
+>> Sent: 29 September 2011 10:04 AM
+>> To: Eric Barton
+>> Subject: Erratum about indexes in robinhood DB
+>>
+>> Hello Eric,
+>>
+>> Re-thinking about your question on indexes in robinhood DB, my answer
+>> was incomplete.
+>> Actually, there are indexes on user/group/type/status, but there are not
+>> on the main table:
+>>
+>> 1) As I said you, on the main table (the one that list all FS entries),
+>> there are as few indexes as possible (just fid as primary key, and
+>> parent fid)
+>> in order to preserve a good insert/update rate on this table whatever
+>> the FS size (the deeper the DB index trees, the slower those requests).
+>>
+>> 2) There is a secondary table where robinhood maintains aggregated
+>> statitics like nbr entries, volume per user/group/type/(hsm)status and
+>> which is updated on the fly.
+>> This one as indexes on quite all its fields, which makes it possible to
+>> get instantaneous stats per user, etc. without penalizing insert/update
+>> rate on main table.
+>> Indexes on this secondary table are less expensive, given that the set
+>> of users is much more resticted that the nbr of entries.
+>>
+>> This time you have a more complete answer.
+>>
+>> Best regards
+>> Thomas
+>>     
+>
+>   
+
+
+
+From Nathan_Rutman at xyratex.com  Thu Oct  6 12:09:26 2011
+From: Nathan_Rutman at xyratex.com (Nathan Rutman)
+Date: Thu, 6 Oct 2011 12:09:26 -0700
+Subject: [Lustre-devel] Wide striping
+In-Reply-To: <4684D08A-A823-47CD-8C02-22A92AEE6112@whamcloud.com>
+References: <73AED5C780AE05478241DB067651A9210237883C@XYUS-EX22.xyus.xyratex.com>
+	<1317687469.23023.3.camel@obelisk.thedillows.org>
+	<73AED5C780AE05478241DB067651A92102378846@XYUS-EX22.xyus.xyratex.com>
+	<1317762984.16569.18.camel@lap75545.ornl.gov>
+	<73AED5C780AE05478241DB067651A9210237884F@XYUS-EX22.xyus.xyratex.com>
+	<1317828832.27894.8.camel@lap75545.ornl.gov>
+	<4684D08A-A823-47CD-8C02-22A92AEE6112@whamcloud.com>
+Message-ID: <73AED5C780AE05478241DB067651A92102378866@XYUS-EX22.xyus.xyratex.com>
+
+
+On Oct 5, 2011, at 6:51 PM, Andreas Dilger wrote:
+
+> On 2011-10-05, at 9:33 AM, David Dillow <dillowda at ornl.gov> wrote:
+>> On Wed, 2011-10-05 at 11:06 -0400, Nathan Rutman wrote:
+>>> Sorry if I'm being unclear.
+>>> 
+>>> start_index is just an offset into the bitmap.  That's the OST where the first 
+>>> stripe will be.  Next stripe will be on the next OST index (unless a hole). 
+>>> When we get to the big hole at the end of the used OSTs, these OST index 
+>>> locations are all skipped (since they are holes), and the next stripe will 
+>>> be at OST index 0, then 1, etc, up to start_index-1 (again, unless holes).
+>> 
+>> Ok, so bitmap position 0 is always OST 0; thanks for clearing up my
+>> misunderstanding.
+> 
+> But this means that the table always needs to be as large as the maximum OST number. If the bitmap started at the starting OST index it would only need to be as large as the number of stripes. 
+Yes, the table is as large as the maximum possible OST number.  32,000 stripes fit in a bitmap in the current (non-extended) EA size.  If you started at the starting OST index, you would need to record the last OST number also.  Either way I don't see as a problem.
+
+> 
+> That said, the limitation if not being able to migrate objects with this layout is a major one. The ability to so online object migration is just arriving with the layout lock (from HSM), so I expect this to be useful to many users. 
+Well, that's why we added the complication of embedding the OST index into the object FIDs that the clients would ask for. Then you could migrate that object to a new OST - but really only for exceptional cases.  General migration for e.g. space rebalancing would result in a bunch of additional overhead to figure out where all the stripes moved to.  So I agree - this is a weakness of the bitmap design, which really implies a fixed ordering. =
+______________________________________________________________________
+This email may contain privileged or confidential information, which should only be used for the purpose for which it was sent by Xyratex. No further rights or licenses are granted to use such information. If you are not the intended recipient of this message, please notify the sender by return and delete it. You may not use, copy, disclose or rely on the information contained in it.
+ 
+Internet email is susceptible to data corruption, interception and unauthorised amendment for which Xyratex does not accept liability. While we have taken reasonable precautions to ensure that this email is free of viruses, Xyratex does not accept liability for the presence of any computer viruses in this email, nor for any losses caused as a result of viruses.
+ 
+Xyratex Technology Limited (03134912), Registered in England & Wales, Registered Office, Langstone Road, Havant, Hampshire, PO9 1SA.
+ 
+The Xyratex group of companies also includes, Xyratex Ltd, registered in Bermuda, Xyratex International Inc, registered in California, Xyratex (Malaysia) Sdn Bhd registered in Malaysia, Xyratex Technology (Wuxi) Co Ltd registered in The People's Republic of China and Xyratex Japan Limited registered in Japan.
+______________________________________________________________________
+ 
+
+
+
+From green at whamcloud.com  Fri Oct  7 03:29:12 2011
+From: green at whamcloud.com (Oleg Drokin)
+Date: Fri, 7 Oct 2011 06:29:12 -0400
+Subject: [Lustre-devel] Wide striping
+In-Reply-To: <1317859015.15874.2.camel@obelisk.thedillows.org>
+References: <73AED5C780AE05478241DB067651A9210237883C@XYUS-EX22.xyus.xyratex.com>
+	<4E8BA3EE.6060300@whamcloud.com>
+	<73AED5C780AE05478241DB067651A92102378850@XYUS-EX22.xyus.xyratex.com>
+	<4E8CB381.40805@whamcloud.com>
+	<9CC6473C-DFE9-4FF4-9AA5-E7AB97D2987D@whamcloud.com>
+	<1317859015.15874.2.camel@obelisk.thedillows.org>
+Message-ID: <2044C4C7-7F27-4524-B552-CB339A5B14CF@whamcloud.com>
+
+Hello!
+
+On Oct 5, 2011, at 7:56 PM, David Dillow wrote:
+>> Another problems I see here are similar to create on write.
+>> Say if we delete a file, do we purge this mapping table too? and then
+>> when stale client comes we recreate an orphan object?
+>> Or we don't purge the table and let it grow indefinitely using more
+>> and more space and eventually slowing down lookups?
+>> Or do we purge really old objects from it only, what triggers it, what
+>> failure scenarios are there for this process?
+>> How do we recover from disasters that happened to this table?
+> Wouldn't the online lfsck work being done for OpenSFS catch and correct
+> these types of problems?
+
+It probably would, once the online lfsck is implemented.
+
+Bye,
+    Oleg
+--
+Oleg Drokin
+Senior Software Engineer
+Whamcloud, Inc.
+
+
+
+From eeb at whamcloud.com  Tue Oct 11 06:04:29 2011
+From: eeb at whamcloud.com (Eric Barton)
+Date: Tue, 11 Oct 2011 14:04:29 +0100
+Subject: [Lustre-devel] Erratum about indexes in robinhood DB
+In-Reply-To: <4E8D8A99.1010804@cea.fr>
+References: <4E84346B.8060300@cea.fr> <038c01cc835f$2f30f090$8d92d1b0$@com>
+	<4E8D8A99.1010804@cea.fr>
+Message-ID: <06d901cc8816$50808600$f1819200$@com>
+
+Thomas,
+
+Interesting point about changelog entries requiring a 'stat'.
+
+Nathan, what's your take on making changelogs tell you what has
+changed - even if only on "easy" changes?
+
+          Cheers,
+                   Eric
+
+> -----Original Message-----
+> From: LEIBOVICI Thomas [mailto:thomas.leibovici at cea.fr]
+> Sent: 06 October 2011 12:02 PM
+> To: Eric Barton
+> Cc: lustre-devel at lists.lustre.org
+> Subject: Re: Erratum about indexes in robinhood DB
+> 
+> Hello Eric,
+> 
+> With a fast enough feeder, the ingest rate robinhood can currently
+> sustain is between 50.000/sec and 100.000/sec
+> (depending on insert/update/remove ratio) with a basic MySQL DB stored
+> on a local disk.
+> This can certainly still be improved with MySQL tunings and/or better HW
+> and/or enterprise class DB,
+> but for now, we notice it is easily high enough for reading a MDT
+> changelog stream on a Petaflopic system.
+> 
+> This rate is actually lower when processing Lustre MDT changelogs (but I
+> have no measurement) because of "stat" operations to get file attributes
+> (unfortunately, changelogs do not give the new value of what has just
+> changed, e.g new uid for a chown operation, new size&mtime with a mtime
+> event...)
+> SOM will probably improve that point, but it could be a good idea to add
+> more info in changelogs.
+> 
+> Handling chglogs from multiple MDTs is indeed a very interesting point
+> to address.
+> The main issue is the database scaling in terms of operation rate,
+> volume and entry location.
+> A solution could be using an existing clustered DB engine (MySQL
+> cluster, NOSQL DBs...),
+> thus we are going to take a look at the different alternatives and see
+> if they could match the need.
+> For that, it would be interesting to know how records will be splitted
+> into the multiple changelog streams:
+> is a given fid always reported by the same stream? what about the parent
+> fid (like in create/unlink operations)?
+> If you have a document about DNE design, I think it would give a more
+> precise idea about
+> what event and fid is supposed to be reported by each MDT.
+> 
+> Thanks,
+> Thomas
+> 
+> Eric Barton wrote:
+> > Thomas,
+> >
+> > Thanks a lot and I hope you don't mind me cc-ing lustre-devel as this
+> > seems to be of general interest.
+> >
+> > Do you have a feel (or measurements :) for the rate at which a changelog
+> > can be ingested into robinhood?  And I'm wondering about DNE and multiple
+> > changelogs coming from multiple MDTs.  I'd be very interested to know if
+> > you've thought about this and have views on what the maximum ingest rate
+> > could be and whether there will be issues coordinating/merging events
+> > across multiple feeds.
+> >
+> >           Cheers,
+> >                    Eric
+> >
+> > Eric Barton
+> > CTO Whamcloud, Inc.
+> >
+> >
+> >> -----Original Message-----
+> >> From: LEIBOVICI Thomas [mailto:thomas.leibovici at cea.fr]
+> >> Sent: 29 September 2011 10:04 AM
+> >> To: Eric Barton
+> >> Subject: Erratum about indexes in robinhood DB
+> >>
+> >> Hello Eric,
+> >>
+> >> Re-thinking about your question on indexes in robinhood DB, my answer
+> >> was incomplete.
+> >> Actually, there are indexes on user/group/type/status, but there are not
+> >> on the main table:
+> >>
+> >> 1) As I said you, on the main table (the one that list all FS entries),
+> >> there are as few indexes as possible (just fid as primary key, and
+> >> parent fid)
+> >> in order to preserve a good insert/update rate on this table whatever
+> >> the FS size (the deeper the DB index trees, the slower those requests).
+> >>
+> >> 2) There is a secondary table where robinhood maintains aggregated
+> >> statitics like nbr entries, volume per user/group/type/(hsm)status and
+> >> which is updated on the fly.
+> >> This one as indexes on quite all its fields, which makes it possible to
+> >> get instantaneous stats per user, etc. without penalizing insert/update
+> >> rate on main table.
+> >> Indexes on this secondary table are less expensive, given that the set
+> >> of users is much more resticted that the nbr of entries.
+> >>
+> >> This time you have a more complete answer.
+> >>
+> >> Best regards
+> >> Thomas
+> >>
+> >
+> >
+
+
+
+From eeb at whamcloud.com  Tue Oct 11 06:20:44 2011
+From: eeb at whamcloud.com (Eric Barton)
+Date: Tue, 11 Oct 2011 14:20:44 +0100
+Subject: [Lustre-devel] IPv6 NIDs
+Message-ID: <06e901cc8818$95acbc60$c1063520$@com>
+
+I'd like to canvass thoughts on how big an IPv6 compatible NID
+might be.  We'd like to start anticipating changing to these NIDs
+so that current development at least doesn't dig us deeper into a
+hole (e.g. on the nidtable entries sent over the wire in
+imperative recovery).  So here are some suggestions....
+
+Current NID: 32 bit address-within LNET + 32 bit LNET number
+64 bits / 8 bytes total
+
+IPv6 compatible NID:
+
+1. Minimum: 128 bit address-within-LNET + 32 bit LNET number.
+   160 bits / 20 bytes total.
+
+2. Hedge a little by reserving an additional (say) 32 bits for
+   something we've not thought of yet and keeping the total a
+   multiple of 64 bits to simplify alignment.
+   192 bits / 24 bytes total.
+
+3. Hedge a lot with a nice round number.
+   256 bits / 32 bytes total.
+
+(2) gets my vote currently...
+
+          Cheers,
+                   Eric
+
+Eric Barton
+CTO Whamcloud, Inc.
+Tel: +44 (117) 330 1575
+Mob: +44 (7920) 797 273
+
+
+
+
+
+
+From chas at cmf.nrl.navy.mil  Tue Oct 11 06:34:06 2011
+From: chas at cmf.nrl.navy.mil (chas williams - CONTRACTOR)
+Date: Tue, 11 Oct 2011 09:34:06 -0400
+Subject: [Lustre-devel] IPv6 NIDs
+In-Reply-To: <06e901cc8818$95acbc60$c1063520$@com>
+References: <06e901cc8818$95acbc60$c1063520$@com>
+Message-ID: <20111011093406.3063f001@thirdoffive.cmf.nrl.navy.mil>
+
+On Tue, 11 Oct 2011 14:20:44 +0100
+"Eric Barton" <eeb at whamcloud.com> wrote:
+
+
+> 2. Hedge a little by reserving an additional (say) 32 bits for
+>    something we've not thought of yet and keeping the total a
+>    multiple of 64 bits to simplify alignment.
+>    192 bits / 24 bytes total.
+>
+> 3. Hedge a lot with a nice round number.
+>    256 bits / 32 bytes total.
+
+i would pick this.  you never know what address size is coming in the
+future for any particular protocol.  the infiniband link layer is
+160 bits.  so if someone implemented a 'native' ib solution they
+would need 160 + 32 (192).
+
+of course, option 2 would work fine in this case.  however, unless there
+is a pressing reason i would just pick 256 because we already have a
+case that could use up your 'hedge a little'.
+
+
+From Nathan_Rutman at xyratex.com  Tue Oct 11 10:12:35 2011
+From: Nathan_Rutman at xyratex.com (Nathan Rutman)
+Date: Tue, 11 Oct 2011 10:12:35 -0700
+Subject: [Lustre-devel] Erratum about indexes in robinhood DB
+In-Reply-To: <06d901cc8816$50808600$f1819200$@com>
+References: <4E84346B.8060300@cea.fr> <038c01cc835f$2f30f090$8d92d1b0$@com>
+	<4E8D8A99.1010804@cea.fr> <06d901cc8816$50808600$f1819200$@com>
+Message-ID: <73AED5C780AE05478241DB067651A9210237888E@XYUS-EX22.xyus.xyratex.com>
+
+We actually already did some of that for a one-off. We didn't push the changes upstream because
+there were some ugly layering violations involved.  Vitaly, do you remember the details?
+
+
+On Oct 11, 2011, at 6:04 AM, Eric Barton wrote:
+
+> Thomas,
+> 
+> Interesting point about changelog entries requiring a 'stat'.
+> 
+> Nathan, what's your take on making changelogs tell you what has
+> changed - even if only on "easy" changes?
+> 
+>         Cheers,
+>                  Eric
+> 
+>> -----Original Message-----
+>> From: LEIBOVICI Thomas [mailto:thomas.leibovici at cea.fr]
+>> Sent: 06 October 2011 12:02 PM
+>> To: Eric Barton
+>> Cc: lustre-devel at lists.lustre.org
+>> Subject: Re: Erratum about indexes in robinhood DB
+>> 
+>> Hello Eric,
+>> 
+>> With a fast enough feeder, the ingest rate robinhood can currently
+>> sustain is between 50.000/sec and 100.000/sec
+>> (depending on insert/update/remove ratio) with a basic MySQL DB stored
+>> on a local disk.
+>> This can certainly still be improved with MySQL tunings and/or better HW
+>> and/or enterprise class DB,
+>> but for now, we notice it is easily high enough for reading a MDT
+>> changelog stream on a Petaflopic system.
+>> 
+>> This rate is actually lower when processing Lustre MDT changelogs (but I
+>> have no measurement) because of "stat" operations to get file attributes
+>> (unfortunately, changelogs do not give the new value of what has just
+>> changed, e.g new uid for a chown operation, new size&mtime with a mtime
+>> event...)
+>> SOM will probably improve that point, but it could be a good idea to add
+>> more info in changelogs.
+>> 
+>> Handling chglogs from multiple MDTs is indeed a very interesting point
+>> to address.
+>> The main issue is the database scaling in terms of operation rate,
+>> volume and entry location.
+>> A solution could be using an existing clustered DB engine (MySQL
+>> cluster, NOSQL DBs...),
+>> thus we are going to take a look at the different alternatives and see
+>> if they could match the need.
+>> For that, it would be interesting to know how records will be splitted
+>> into the multiple changelog streams:
+>> is a given fid always reported by the same stream? what about the parent
+>> fid (like in create/unlink operations)?
+>> If you have a document about DNE design, I think it would give a more
+>> precise idea about
+>> what event and fid is supposed to be reported by each MDT.
+>> 
+>> Thanks,
+>> Thomas
+>> 
+>> Eric Barton wrote:
+>>> Thomas,
+>>> 
+>>> Thanks a lot and I hope you don't mind me cc-ing lustre-devel as this
+>>> seems to be of general interest.
+>>> 
+>>> Do you have a feel (or measurements :) for the rate at which a changelog
+>>> can be ingested into robinhood?  And I'm wondering about DNE and multiple
+>>> changelogs coming from multiple MDTs.  I'd be very interested to know if
+>>> you've thought about this and have views on what the maximum ingest rate
+>>> could be and whether there will be issues coordinating/merging events
+>>> across multiple feeds.
+>>> 
+>>>         Cheers,
+>>>                  Eric
+>>> 
+>>> Eric Barton
+>>> CTO Whamcloud, Inc.
+>>> 
+>>> 
+>>>> -----Original Message-----
+>>>> From: LEIBOVICI Thomas [mailto:thomas.leibovici at cea.fr]
+>>>> Sent: 29 September 2011 10:04 AM
+>>>> To: Eric Barton
+>>>> Subject: Erratum about indexes in robinhood DB
+>>>> 
+>>>> Hello Eric,
+>>>> 
+>>>> Re-thinking about your question on indexes in robinhood DB, my answer
+>>>> was incomplete.
+>>>> Actually, there are indexes on user/group/type/status, but there are not
+>>>> on the main table:
+>>>> 
+>>>> 1) As I said you, on the main table (the one that list all FS entries),
+>>>> there are as few indexes as possible (just fid as primary key, and
+>>>> parent fid)
+>>>> in order to preserve a good insert/update rate on this table whatever
+>>>> the FS size (the deeper the DB index trees, the slower those requests).
+>>>> 
+>>>> 2) There is a secondary table where robinhood maintains aggregated
+>>>> statitics like nbr entries, volume per user/group/type/(hsm)status and
+>>>> which is updated on the fly.
+>>>> This one as indexes on quite all its fields, which makes it possible to
+>>>> get instantaneous stats per user, etc. without penalizing insert/update
+>>>> rate on main table.
+>>>> Indexes on this secondary table are less expensive, given that the set
+>>>> of users is much more resticted that the nbr of entries.
+>>>> 
+>>>> This time you have a more complete answer.
+>>>> 
+>>>> Best regards
+>>>> Thomas
+>>>> 
+>>> 
+>>> 
+> 
+______________________________________________________________________
+This email may contain privileged or confidential information, which should only be used for the purpose for which it was sent by Xyratex. No further rights or licenses are granted to use such information. If you are not the intended recipient of this message, please notify the sender by return and delete it. You may not use, copy, disclose or rely on the information contained in it.
+ 
+Internet email is susceptible to data corruption, interception and unauthorised amendment for which Xyratex does not accept liability. While we have taken reasonable precautions to ensure that this email is free of viruses, Xyratex does not accept liability for the presence of any computer viruses in this email, nor for any losses caused as a result of viruses.
+ 
+Xyratex Technology Limited (03134912), Registered in England & Wales, Registered Office, Langstone Road, Havant, Hampshire, PO9 1SA.
+ 
+The Xyratex group of companies also includes, Xyratex Ltd, registered in Bermuda, Xyratex International Inc, registered in California, Xyratex (Malaysia) Sdn Bhd registered in Malaysia, Xyratex Technology (Wuxi) Co Ltd registered in The People's Republic of China and Xyratex Japan Limited registered in Japan.
+______________________________________________________________________
+ 
+
+
+
+From Nathan_Rutman at xyratex.com  Tue Oct 11 10:26:43 2011
+From: Nathan_Rutman at xyratex.com (Nathan Rutman)
+Date: Tue, 11 Oct 2011 10:26:43 -0700
+Subject: [Lustre-devel] IPv6 NIDs
+In-Reply-To: <06e901cc8818$95acbc60$c1063520$@com>
+References: <06e901cc8818$95acbc60$c1063520$@com>
+Message-ID: <73AED5C780AE05478241DB067651A92102378890@XYUS-EX22.xyus.xyratex.com>
+
+
+On Oct 11, 2011, at 6:20 AM, Eric Barton wrote:
+
+> I'd like to canvass thoughts on how big an IPv6 compatible NID
+> might be.  We'd like to start anticipating changing to these NIDs
+> so that current development at least doesn't dig us deeper into a
+> hole (e.g. on the nidtable entries sent over the wire in
+> imperative recovery).  So here are some suggestions....
+> 
+> Current NID: 32 bit address-within LNET + 32 bit LNET number
+> 64 bits / 8 bytes total
+> 
+> IPv6 compatible NID:
+> 
+> 1. Minimum: 128 bit address-within-LNET + 32 bit LNET number.
+>   160 bits / 20 bytes total.
+> 
+> 2. Hedge a little by reserving an additional (say) 32 bits for
+>   something we've not thought of yet and keeping the total a
+>   multiple of 64 bits to simplify alignment.
+>   192 bits / 24 bytes total.
+> 
+> 3. Hedge a lot with a nice round number.
+>   256 bits / 32 bytes total.
+> 
+> (2) gets my vote currently...
+
+The cost of the bytes is so minor compared to the cost of revving the protocol, I vote for 3.
+
+BTW, Isaac is starting to look in to how much work it would be to rev the protocol for full
+IPv6 interoperability.=
+______________________________________________________________________
+This email may contain privileged or confidential information, which should only be used for the purpose for which it was sent by Xyratex. No further rights or licenses are granted to use such information. If you are not the intended recipient of this message, please notify the sender by return and delete it. You may not use, copy, disclose or rely on the information contained in it.
+ 
+Internet email is susceptible to data corruption, interception and unauthorised amendment for which Xyratex does not accept liability. While we have taken reasonable precautions to ensure that this email is free of viruses, Xyratex does not accept liability for the presence of any computer viruses in this email, nor for any losses caused as a result of viruses.
+ 
+Xyratex Technology Limited (03134912), Registered in England & Wales, Registered Office, Langstone Road, Havant, Hampshire, PO9 1SA.
+ 
+The Xyratex group of companies also includes, Xyratex Ltd, registered in Bermuda, Xyratex International Inc, registered in California, Xyratex (Malaysia) Sdn Bhd registered in Malaysia, Xyratex Technology (Wuxi) Co Ltd registered in The People's Republic of China and Xyratex Japan Limited registered in Japan.
+______________________________________________________________________
+ 
+
+
+
+From Vitaly_Fertman at xyratex.com  Tue Oct 11 11:42:41 2011
+From: Vitaly_Fertman at xyratex.com (Vitaly Fertman)
+Date: Tue, 11 Oct 2011 22:42:41 +0400
+Subject: [Lustre-devel] Erratum about indexes in robinhood DB
+In-Reply-To: <73AED5C780AE05478241DB067651A9210237888E@XYUS-EX22.xyus.xyratex.com>
+References: <4E84346B.8060300@cea.fr> <038c01cc835f$2f30f090$8d92d1b0$@com>
+	<4E8D8A99.1010804@cea.fr> <06d901cc8816$50808600$f1819200$@com>
+	<73AED5C780AE05478241DB067651A9210237888E@XYUS-EX22.xyus.xyratex.com>
+Message-ID: <53BE65BC-2051-4CE4-BA72-EF6671451B0F@xyratex.com>
+
+HI,
+
+yes, there is a fixed patch which adds some info to the changelog,
+UID, GID, NID. it is not a problem to pack it with other (changed)
+inode attributes. not sent upstream because an issue has been 
+found which fix has not been landed yet.
+
+On Oct 11, 2011, at 9:12 PM, Nathan Rutman wrote:
+
+> We actually already did some of that for a one-off. We didn't push the changes upstream because
+> there were some ugly layering violations involved.  Vitaly, do you remember the details?
+> 
+> 
+> On Oct 11, 2011, at 6:04 AM, Eric Barton wrote:
+> 
+>> Thomas,
+>> 
+>> Interesting point about changelog entries requiring a 'stat'.
+>> 
+>> Nathan, what's your take on making changelogs tell you what has
+>> changed - even if only on "easy" changes?
+>> 
+>>        Cheers,
+>>                 Eric
+>> 
+>>> -----Original Message-----
+>>> From: LEIBOVICI Thomas [mailto:thomas.leibovici at cea.fr]
+>>> Sent: 06 October 2011 12:02 PM
+>>> To: Eric Barton
+>>> Cc: lustre-devel at lists.lustre.org
+>>> Subject: Re: Erratum about indexes in robinhood DB
+>>> 
+>>> Hello Eric,
+>>> 
+>>> With a fast enough feeder, the ingest rate robinhood can currently
+>>> sustain is between 50.000/sec and 100.000/sec
+>>> (depending on insert/update/remove ratio) with a basic MySQL DB stored
+>>> on a local disk.
+>>> This can certainly still be improved with MySQL tunings and/or better HW
+>>> and/or enterprise class DB,
+>>> but for now, we notice it is easily high enough for reading a MDT
+>>> changelog stream on a Petaflopic system.
+>>> 
+>>> This rate is actually lower when processing Lustre MDT changelogs (but I
+>>> have no measurement) because of "stat" operations to get file attributes
+>>> (unfortunately, changelogs do not give the new value of what has just
+>>> changed, e.g new uid for a chown operation, new size&mtime with a mtime
+>>> event...)
+>>> SOM will probably improve that point, but it could be a good idea to add
+>>> more info in changelogs.
+>>> 
+>>> Handling chglogs from multiple MDTs is indeed a very interesting point
+>>> to address.
+>>> The main issue is the database scaling in terms of operation rate,
+>>> volume and entry location.
+>>> A solution could be using an existing clustered DB engine (MySQL
+>>> cluster, NOSQL DBs...),
+>>> thus we are going to take a look at the different alternatives and see
+>>> if they could match the need.
+>>> For that, it would be interesting to know how records will be splitted
+>>> into the multiple changelog streams:
+>>> is a given fid always reported by the same stream? what about the parent
+>>> fid (like in create/unlink operations)?
+>>> If you have a document about DNE design, I think it would give a more
+>>> precise idea about
+>>> what event and fid is supposed to be reported by each MDT.
+>>> 
+>>> Thanks,
+>>> Thomas
+>>> 
+>>> Eric Barton wrote:
+>>>> Thomas,
+>>>> 
+>>>> Thanks a lot and I hope you don't mind me cc-ing lustre-devel as this
+>>>> seems to be of general interest.
+>>>> 
+>>>> Do you have a feel (or measurements :) for the rate at which a changelog
+>>>> can be ingested into robinhood?  And I'm wondering about DNE and multiple
+>>>> changelogs coming from multiple MDTs.  I'd be very interested to know if
+>>>> you've thought about this and have views on what the maximum ingest rate
+>>>> could be and whether there will be issues coordinating/merging events
+>>>> across multiple feeds.
+>>>> 
+>>>>        Cheers,
+>>>>                 Eric
+>>>> 
+>>>> Eric Barton
+>>>> CTO Whamcloud, Inc.
+>>>> 
+>>>> 
+>>>>> -----Original Message-----
+>>>>> From: LEIBOVICI Thomas [mailto:thomas.leibovici at cea.fr]
+>>>>> Sent: 29 September 2011 10:04 AM
+>>>>> To: Eric Barton
+>>>>> Subject: Erratum about indexes in robinhood DB
+>>>>> 
+>>>>> Hello Eric,
+>>>>> 
+>>>>> Re-thinking about your question on indexes in robinhood DB, my answer
+>>>>> was incomplete.
+>>>>> Actually, there are indexes on user/group/type/status, but there are not
+>>>>> on the main table:
+>>>>> 
+>>>>> 1) As I said you, on the main table (the one that list all FS entries),
+>>>>> there are as few indexes as possible (just fid as primary key, and
+>>>>> parent fid)
+>>>>> in order to preserve a good insert/update rate on this table whatever
+>>>>> the FS size (the deeper the DB index trees, the slower those requests).
+>>>>> 
+>>>>> 2) There is a secondary table where robinhood maintains aggregated
+>>>>> statitics like nbr entries, volume per user/group/type/(hsm)status and
+>>>>> which is updated on the fly.
+>>>>> This one as indexes on quite all its fields, which makes it possible to
+>>>>> get instantaneous stats per user, etc. without penalizing insert/update
+>>>>> rate on main table.
+>>>>> Indexes on this secondary table are less expensive, given that the set
+>>>>> of users is much more resticted that the nbr of entries.
+>>>>> 
+>>>>> This time you have a more complete answer.
+>>>>> 
+>>>>> Best regards
+>>>>> Thomas
+>>>>> 
+>>>> 
+>>>> 
+>> 
+
+--
+Vitaly
+
+
+
+From isaac_huang at xyratex.com  Tue Oct 11 23:18:36 2011
+From: isaac_huang at xyratex.com (Isaac Huang)
+Date: Wed, 12 Oct 2011 00:18:36 -0600
+Subject: [Lustre-devel] IPv6 NIDs
+In-Reply-To: <06e901cc8818$95acbc60$c1063520$@com>
+References: <06e901cc8818$95acbc60$c1063520$@com>
+Message-ID: <20111012061836.GA4154@xyratex.com>
+
+On Tue, Oct 11, 2011 at 02:20:44PM +0100, Eric Barton wrote:
+> ......
+> IPv6 compatible NID:
+> 
+> 1. Minimum: 128 bit address-within-LNET + 32 bit LNET number.
+>    160 bits / 20 bytes total.
+
+(1) might cause alignment problem somewhere. I remember that the
+PTLLND is picky on alignments, and there might be more such places.
+
+> 2. Hedge a little by reserving an additional (say) 32 bits for
+>    something we've not thought of yet and keeping the total a
+>    multiple of 64 bits to simplify alignment.
+>    192 bits / 24 bytes total.
+> 
+> 3. Hedge a lot with a nice round number.
+>    256 bits / 32 bytes total.
+> 
+> (2) gets my vote currently...
+
+I'd feel happy to pay the extra 8 bytes for the peace of mind that I
+wouldn't have to handle this again.
+
+- Isaac
+______________________________________________________________________
+This email may contain privileged or confidential information, which should only be used for the purpose for which it was sent by Xyratex. No further rights or licenses are granted to use such information. If you are not the intended recipient of this message, please notify the sender by return and delete it. You may not use, copy, disclose or rely on the information contained in it.
+ 
+Internet email is susceptible to data corruption, interception and unauthorised amendment for which Xyratex does not accept liability. While we have taken reasonable precautions to ensure that this email is free of viruses, Xyratex does not accept liability for the presence of any computer viruses in this email, nor for any losses caused as a result of viruses.
+ 
+Xyratex Technology Limited (03134912), Registered in England & Wales, Registered Office, Langstone Road, Havant, Hampshire, PO9 1SA.
+ 
+The Xyratex group of companies also includes, Xyratex Ltd, registered in Bermuda, Xyratex International Inc, registered in California, Xyratex (Malaysia) Sdn Bhd registered in Malaysia, Xyratex Technology (Wuxi) Co Ltd registered in The People's Republic of China and Xyratex Japan Limited registered in Japan.
+______________________________________________________________________
+ 
+
+
+
+From morrone2 at llnl.gov  Wed Oct 12 14:44:32 2011
+From: morrone2 at llnl.gov (Christopher J. Morrone)
+Date: Wed, 12 Oct 2011 14:44:32 -0700
+Subject: [Lustre-devel] Moving ldiskfs external to the Lustre tree
+Message-ID: <4E960A40.9040509@llnl.gov>
+
+We would like to see the ldiskfs tree removed from the lustre tree and 
+made an independent package.  I have been floating this idea 
+unofficially for a while, but I would like to now officially propose 
+this for Lustre 2.2.
+
+With the OBD changes that are taking place on the Orion branch, we want 
+to make lustre be able to use any of a number of backend filesystems. 
+The current tree and configure tools make it very hard to build without 
+ldiskfs (instead using zfs, btrfs, or something we haven't thought of 
+yet).  As part of cleaning that up, moving ldiskfs external to lustre 
+will help ensure that we don't have unnecessary dependencies crop up in 
+the future.
+
+We have created an external package of the ldiskfs tree and put it up on 
+github:
+
+   https://github.com/chaos/ldiskfs
+
+To use the new external ldiskfs package with lustre, you will also need 
+a few patches to lustre itself.  There are links to the patches in this 
+jira ticket:
+
+   http://jira.whamcloud.com/browse/LU-723
+
+On a RHEL system, ldiskfs has a build dependency on the kernel-debuginfo 
+packages by default.  That is where we find the ext4 source code.
+
+Building should be fairly straight forward.  Build and install ldiskfs 
+(in particular the lustre-ldiskfs-devel package), and then build lustre. 
+  The main new change to lustre is the addition of the configure option 
+"--with-ldiskfs-devel".  On a RHEL system if you have the 
+lustre-ldiskfs-devel package installed, you won't need to give a path.
+
+Note that we have not yet removed the in-tree ldiskfs.  Our first step 
+was to get this working.  Once this is accepted, we will be happy to 
+submit the patches to remove lustre's copy of ldiskfs and generally 
+clean up lustre's autoconf checks involving ldiskfs.
+
+We attempted to keep the changes minimal, so we didn't change the name 
+of the ldiskfs rpm packages.  But we think is would be nice to change 
+the name from "lustre-ldiskfs" to simply "ldiskfs".  If we want to make 
+that change, now is the time to do it.
+
+Chris
+
+
+
+From adilger at whamcloud.com  Wed Oct 12 19:05:51 2011
+From: adilger at whamcloud.com (Andreas Dilger)
+Date: Wed, 12 Oct 2011 20:05:51 -0600
+Subject: [Lustre-devel] Moving ldiskfs external to the Lustre tree
+In-Reply-To: <4E960A40.9040509@llnl.gov>
+References: <4E960A40.9040509@llnl.gov>
+Message-ID: <2B361165-F4ED-4339-BA05-D216AE62A4AC@whamcloud.com>
+
+Chris,
+I'm not against this in principle, but I think it may be more difficult to actually implement before the OSD changes from Orion are landed to master.  In the past we also thought about making ldiskfs as a separate package, before ext4 started in the kernel. 
+
+I've seen Prakash working on those patches but will not have time to look at them until at least next week. 
+
+Are those patches against the master branch or against Orion?  Also, what kernels are supported?
+
+Cheers, Andreas
+
+On 2011-10-12, at 3:44 PM, "Christopher J. Morrone" <morrone2 at llnl.gov> wrote:
+
+> We would like to see the ldiskfs tree removed from the lustre tree and 
+> made an independent package.  I have been floating this idea 
+> unofficially for a while, but I would like to now officially propose 
+> this for Lustre 2.2.
+> 
+> With the OBD changes that are taking place on the Orion branch, we want 
+> to make lustre be able to use any of a number of backend filesystems. 
+> The current tree and configure tools make it very hard to build without 
+> ldiskfs (instead using zfs, btrfs, or something we haven't thought of 
+> yet).  As part of cleaning that up, moving ldiskfs external to lustre 
+> will help ensure that we don't have unnecessary dependencies crop up in 
+> the future.
+> 
+> We have created an external package of the ldiskfs tree and put it up on 
+> github:
+> 
+>  https://github.com/chaos/ldiskfs
+> 
+> To use the new external ldiskfs package with lustre, you will also need 
+> a few patches to lustre itself.  There are links to the patches in this 
+> jira ticket:
+> 
+>  http://jira.whamcloud.com/browse/LU-723
+> 
+> On a RHEL system, ldiskfs has a build dependency on the kernel-debuginfo 
+> packages by default.  That is where we find the ext4 source code.
+> 
+> Building should be fairly straight forward.  Build and install ldiskfs 
+> (in particular the lustre-ldiskfs-devel package), and then build lustre. 
+> The main new change to lustre is the addition of the configure option 
+> "--with-ldiskfs-devel".  On a RHEL system if you have the 
+> lustre-ldiskfs-devel package installed, you won't need to give a path.
+> 
+> Note that we have not yet removed the in-tree ldiskfs.  Our first step 
+> was to get this working.  Once this is accepted, we will be happy to 
+> submit the patches to remove lustre's copy of ldiskfs and generally 
+> clean up lustre's autoconf checks involving ldiskfs.
+> 
+> We attempted to keep the changes minimal, so we didn't change the name 
+> of the ldiskfs rpm packages.  But we think is would be nice to change 
+> the name from "lustre-ldiskfs" to simply "ldiskfs".  If we want to make 
+> that change, now is the time to do it.
+> 
+> Chris
+> 
+> _______________________________________________
+> Lustre-devel mailing list
+> Lustre-devel at lists.lustre.org
+> http://lists.lustre.org/mailman/listinfo/lustre-devel
+
+
+
+From vitaly_fertman at xyratex.com  Thu Oct 13 11:53:35 2011
+From: vitaly_fertman at xyratex.com (Vitaly Fertman)
+Date: Thu, 13 Oct 2011 22:53:35 +0400
+Subject: [Lustre-devel] Xyratex Releases 1.8 to 2.x Lustre Migrator Tool
+Message-ID: <5945F2BF-ED83-4605-8389-0FAAA19244FB@xyratex.com>
+
+Lustre users,
+
+Xyratex, a leading provider of enterprise-class data storage subsystems,
+announces the release of a Lustre? migrator tool, which converts Lustre
+file system MDS on-disk data structures from version 1.8 format to version
+2.x native format. The Xyratex migrator tool uses the ?upgrade? mount
+option to change the on-disk data format of the MDS/MDT component
+to native Lustre 2.x. Specifically, the migrator tool:
+	? Allocates and assigns true FIDs to objects, storing them in the LMA EA
+	? Assigns parent FIDs to objects, storing them in the Link EA
+	? Assigns children FIDs to directory entries, storing them correctly in
+	  directory entries
+	? Creates an Object Index for the newly-allocated FID, so it points
+	  to the proper inode number
+
+The Xyratex migrator tool uses the ?restore? mount option to enable the
+file system level backups (tar, rsync, cp); specifically, it restores the Object
+Index for restored files.
+
+The Xyratex migrator tool, released under the GPL v.2 license, is available
+as a patch from http://www.xyratex.com/technology/lustre.aspx, Xyratex?s
+Lustre Community page  . The migrator tool?s code cleanly patches against
+Lustre 2.x versions, and has been fully tested against the latest Lustre
+community release version 2.1.  In addition, we have requested the landing
+of this tool in a future release at the Whamcloud Community Jira under issue
+ID: LU-591 (http://jira.whamcloud.com/browse/LU-591).
+
+Xyratex values the Lustre community?s feedback on this new migrator tool.
+Comments can be directed to lustre-devel at lists.opensfs.org or
+lustreinfo at xyratex.com
+
+Warm regards,
+Vitaly 
+
+-----------------------------
+Vitaly Fertman
+Senior Lustre Engineer
+Xyratex, Inc.
+
+
+From Nathan_Rutman at xyratex.com  Thu Oct 13 15:30:36 2011
+From: Nathan_Rutman at xyratex.com (Nathan Rutman)
+Date: Thu, 13 Oct 2011 15:30:36 -0700
+Subject: [Lustre-devel] Moving ldiskfs external to the Lustre tree
+In-Reply-To: <2B361165-F4ED-4339-BA05-D216AE62A4AC@whamcloud.com>
+References: <4E960A40.9040509@llnl.gov>
+	<2B361165-F4ED-4339-BA05-D216AE62A4AC@whamcloud.com>
+Message-ID: <73AED5C780AE05478241DB067651A921023788A5@XYUS-EX22.xyus.xyratex.com>
+
+
+On Oct 12, 2011, at 7:05 PM, Andreas Dilger wrote:
+
+> Chris,
+> I'm not against this in principle, but I think it may be more difficult to actually implement before the OSD changes from Orion are landed to master.  
+
+You mean, it will make it more difficult to land Orion changes, right?  
+Chris already has implemented the external build.
+
+
+> In the past we also thought about making ldiskfs as a separate package, before ext4 started in the kernel. 
+> 
+> I've seen Prakash working on those patches but will not have time to look at them until at least next week. 
+> 
+> Are those patches against the master branch or against Orion?  Also, what kernels are supported?
+> 
+> Cheers, Andreas
+> 
+> On 2011-10-12, at 3:44 PM, "Christopher J. Morrone" <morrone2 at llnl.gov> wrote:
+> 
+>> We would like to see the ldiskfs tree removed from the lustre tree and 
+>> made an independent package.  I have been floating this idea 
+>> unofficially for a while, but I would like to now officially propose 
+>> this for Lustre 2.2.
+>> 
+>> With the OBD changes that are taking place on the Orion branch, we want 
+>> to make lustre be able to use any of a number of backend filesystems. 
+>> The current tree and configure tools make it very hard to build without 
+>> ldiskfs (instead using zfs, btrfs, or something we haven't thought of 
+>> yet).  As part of cleaning that up, moving ldiskfs external to lustre 
+>> will help ensure that we don't have unnecessary dependencies crop up in 
+>> the future.
+>> 
+>> We have created an external package of the ldiskfs tree and put it up on 
+>> github:
+>> 
+>> https://github.com/chaos/ldiskfs
+>> 
+>> To use the new external ldiskfs package with lustre, you will also need 
+>> a few patches to lustre itself.  There are links to the patches in this 
+>> jira ticket:
+>> 
+>> http://jira.whamcloud.com/browse/LU-723
+>> 
+>> On a RHEL system, ldiskfs has a build dependency on the kernel-debuginfo 
+>> packages by default.  That is where we find the ext4 source code.
+>> 
+>> Building should be fairly straight forward.  Build and install ldiskfs 
+>> (in particular the lustre-ldiskfs-devel package), and then build lustre. 
+>> The main new change to lustre is the addition of the configure option 
+>> "--with-ldiskfs-devel".  On a RHEL system if you have the 
+>> lustre-ldiskfs-devel package installed, you won't need to give a path.
+>> 
+>> Note that we have not yet removed the in-tree ldiskfs.  Our first step 
+>> was to get this working.  Once this is accepted, we will be happy to 
+>> submit the patches to remove lustre's copy of ldiskfs and generally 
+>> clean up lustre's autoconf checks involving ldiskfs.
+>> 
+>> We attempted to keep the changes minimal, so we didn't change the name 
+>> of the ldiskfs rpm packages.  But we think is would be nice to change 
+>> the name from "lustre-ldiskfs" to simply "ldiskfs".  If we want to make 
+>> that change, now is the time to do it.
+>> 
+>> Chris
+>> 
+>> _______________________________________________
+>> Lustre-devel mailing list
+>> Lustre-devel at lists.lustre.org
+>> http://lists.lustre.org/mailman/listinfo/lustre-devel
+> 
+> _______________________________________________
+> Lustre-devel mailing list
+> Lustre-devel at lists.lustre.org
+> http://lists.lustre.org/mailman/listinfo/lustre-devel
+______________________________________________________________________
+This email may contain privileged or confidential information, which should only be used for the purpose for which it was sent by Xyratex. No further rights or licenses are granted to use such information. If you are not the intended recipient of this message, please notify the sender by return and delete it. You may not use, copy, disclose or rely on the information contained in it.
+ 
+Internet email is susceptible to data corruption, interception and unauthorised amendment for which Xyratex does not accept liability. While we have taken reasonable precautions to ensure that this email is free of viruses, Xyratex does not accept liability for the presence of any computer viruses in this email, nor for any losses caused as a result of viruses.
+ 
+Xyratex Technology Limited (03134912), Registered in England & Wales, Registered Office, Langstone Road, Havant, Hampshire, PO9 1SA.
+ 
+The Xyratex group of companies also includes, Xyratex Ltd, registered in Bermuda, Xyratex International Inc, registered in California, Xyratex (Malaysia) Sdn Bhd registered in Malaysia, Xyratex Technology (Wuxi) Co Ltd registered in The People's Republic of China and Xyratex Japan Limited registered in Japan.
+______________________________________________________________________
+ 
+
+
+
+From adilger at whamcloud.com  Thu Oct 13 19:14:08 2011
+From: adilger at whamcloud.com (Andreas Dilger)
+Date: Thu, 13 Oct 2011 20:14:08 -0600
+Subject: [Lustre-devel] Moving ldiskfs external to the Lustre tree
+In-Reply-To: <73AED5C780AE05478241DB067651A921023788A5@XYUS-EX22.xyus.xyratex.com>
+References: <4E960A40.9040509@llnl.gov>
+	<2B361165-F4ED-4339-BA05-D216AE62A4AC@whamcloud.com>
+	<73AED5C780AE05478241DB067651A921023788A5@XYUS-EX22.xyus.xyratex.com>
+Message-ID: <88AF06C1-9A91-4652-B43F-6C4ABCAC039C@whamcloud.com>
+
+On 2011-10-13, at 4:30 PM, "Nathan Rutman" <Nathan_Rutman at xyratex.com> wrote:
+> On Oct 12, 2011, at 7:05 PM, Andreas Dilger wrote:
+>> I'm not against this in principle, but I think it may be more difficult to actually implement before the OSD changes from Orion are landed to master.  
+> 
+> You mean, it will make it more difficult to land Orion changes, right?  
+> Chris already has implemented the external build.
+
+No, I mean it will make it harder to maintain Lustre and ldiskfs separately before we get to the OSD API that has a better abstraction than the current fsfilt/lvfs interface that is used in the current Lustre code. 
+
+Granted that we don't have to change this code very often recently, it does change on occasion, and maintaining compatibility between arbitrary versions of ldiskfs and Lustre is a headache that we don't really need right now.
+
+The fact that Chris has a point-in-time version of ldiskfs and Lustre that are working together is great, but given that the OSD code migration is already underway it doesn't make sense to add a lot of code churn before that happens. 
+
+I'm not against making this change if there is no expectation that there is lomg-term compatibility between different ldiskfs and Lustre builds. If it works, great, but if there is an interface change needed then both packages will need to be upgraded. 
+
+Hopefully once we have the OSD API in use for the OSS, MGS, and the ZFS is working there will be fewer API changes needed and the number of dependent package updates can be reduced.
+
+Cheers, Andreas
+
+>> In the past we also thought about making ldiskfs as a separate package, before ext4 started in the kernel. 
+>> 
+>> I've seen Prakash working on those patches but will not have time to look at them until at least next week. 
+>> 
+>> Are those patches against the master branch or against Orion?  Also, what kernels are supported?
+>> 
+>> Cheers, Andreas
+>> 
+>> On 2011-10-12, at 3:44 PM, "Christopher J. Morrone" <morrone2 at llnl.gov> wrote:
+>> 
+>>> We would like to see the ldiskfs tree removed from the lustre tree and 
+>>> made an independent package.  I have been floating this idea 
+>>> unofficially for a while, but I would like to now officially propose 
+>>> this for Lustre 2.2.
+>>> 
+>>> With the OBD changes that are taking place on the Orion branch, we want 
+>>> to make lustre be able to use any of a number of backend filesystems. 
+>>> The current tree and configure tools make it very hard to build without 
+>>> ldiskfs (instead using zfs, btrfs, or something we haven't thought of 
+>>> yet).  As part of cleaning that up, moving ldiskfs external to lustre 
+>>> will help ensure that we don't have unnecessary dependencies crop up in 
+>>> the future.
+>>> 
+>>> We have created an external package of the ldiskfs tree and put it up on 
+>>> github:
+>>> 
+>>> https://github.com/chaos/ldiskfs
+>>> 
+>>> To use the new external ldiskfs package with lustre, you will also need 
+>>> a few patches to lustre itself.  There are links to the patches in this 
+>>> jira ticket:
+>>> 
+>>> http://jira.whamcloud.com/browse/LU-723
+>>> 
+>>> On a RHEL system, ldiskfs has a build dependency on the kernel-debuginfo 
+>>> packages by default.  That is where we find the ext4 source code.
+>>> 
+>>> Building should be fairly straight forward.  Build and install ldiskfs 
+>>> (in particular the lustre-ldiskfs-devel package), and then build lustre. 
+>>> The main new change to lustre is the addition of the configure option 
+>>> "--with-ldiskfs-devel".  On a RHEL system if you have the 
+>>> lustre-ldiskfs-devel package installed, you won't need to give a path.
+>>> 
+>>> Note that we have not yet removed the in-tree ldiskfs.  Our first step 
+>>> was to get this working.  Once this is accepted, we will be happy to 
+>>> submit the patches to remove lustre's copy of ldiskfs and generally 
+>>> clean up lustre's autoconf checks involving ldiskfs.
+>>> 
+>>> We attempted to keep the changes minimal, so we didn't change the name 
+>>> of the ldiskfs rpm packages.  But we think is would be nice to change 
+>>> the name from "lustre-ldiskfs" to simply "ldiskfs".  If we want to make 
+>>> that change, now is the time to do it.
+>>> 
+>>> Chris
+>>> 
+>>> _______________________________________________
+>>> Lustre-devel mailing list
+>>> Lustre-devel at lists.lustre.org
+>>> http://lists.lustre.org/mailman/listinfo/lustre-devel
+>> 
+>> _______________________________________________
+>> Lustre-devel mailing list
+>> Lustre-devel at lists.lustre.org
+>> http://lists.lustre.org/mailman/listinfo/lustre-devel
+> ______________________________________________________________________
+> This email may contain privileged or confidential information, which should only be used for the purpose for which it was sent by Xyratex. No further rights or licenses are granted to use such information. If you are not the intended recipient of this message, please notify the sender by return and delete it. You may not use, copy, disclose or rely on the information contained in it.
+> 
+> Internet email is susceptible to data corruption, interception and unauthorised amendment for which Xyratex does not accept liability. While we have taken reasonable precautions to ensure that this email is free of viruses, Xyratex does not accept liability for the presence of any computer viruses in this email, nor for any losses caused as a result of viruses.
+> 
+> Xyratex Technology Limited (03134912), Registered in England & Wales, Registered Office, Langstone Road, Havant, Hampshire, PO9 1SA.
+> 
+> The Xyratex group of companies also includes, Xyratex Ltd, registered in Bermuda, Xyratex International Inc, registered in California, Xyratex (Malaysia) Sdn Bhd registered in Malaysia, Xyratex Technology (Wuxi) Co Ltd registered in The People's Republic of China and Xyratex Japan Limited registered in Japan.
+> ______________________________________________________________________
+> 
+> 
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20111013/6bc1b75a/attachment.htm>
+
+From adilger at whamcloud.com  Thu Oct 13 20:09:59 2011
+From: adilger at whamcloud.com (Andreas Dilger)
+Date: Thu, 13 Oct 2011 21:09:59 -0600
+Subject: [Lustre-devel] Moving ldiskfs external to the Lustre tree
+In-Reply-To: <20111013154105.GL28548@llnl.gov>
+References: <4E960A40.9040509@llnl.gov>
+	<2B361165-F4ED-4339-BA05-D216AE62A4AC@whamcloud.com>
+	<20111013154105.GL28548@llnl.gov>
+Message-ID: <858C0C43-62EC-4163-B6D0-B6417CF44A5B@whamcloud.com>
+
+On 2011-10-13, at 9:41 AM, Prakash Surya <surya1 at llnl.gov> wrote:
+> On Wed, Oct 12, 2011 at 07:05:51PM -0700, Andreas Dilger wrote:
+>> 
+>> I'm not against this in principle, but I think it may be more difficult to actually implement before the OSD changes from Orion are landed to master.  In the past we also thought about making ldiskfs as a separate package, before ext4 started in the kernel. 
+>> 
+>> I've seen Prakash working on those patches but will not have time to look at them until at least next week. 
+>> 
+>> Are those patches against the master branch or against Orion?  Also, what kernels are supported?
+> 
+> The patches for Lustre are against master. I believe our plan is to
+> have the patches landed and working on master, before we officially
+> integrate them into Orion.
+> 
+> As far as supported kernels, I've tried to keep that consistent with
+> what is already supported; although I admit most testing so far has
+> been done on RHEL.
+> 
+> What kernels are officially supported by Whamcloud? What kernels does it
+> need to support?
+
+So far we only support servers with RHEL-like kernels, but I've also seen patches for SLES kernels submitted, so I don't want to rule those out.
+
+Like I previously wrote, I'm not against the patches in principle, but I haven't had a chance to look at the changes themselves yet since I'm on vacation and not supposed to be working...
+
+Have you had the ldiskfs module externally working for a while?  How much effort is it to coordinate changes in ldiskfs (exports, API changes, etc) with Lustre?
+
+Cheers, Andreas
+>> 
+>> On 2011-10-12, at 3:44 PM, "Christopher J. Morrone" <morrone2 at llnl.gov> wrote:
+>> 
+>>> We would like to see the ldiskfs tree removed from the lustre tree and 
+>>> made an independent package.  I have been floating this idea 
+>>> unofficially for a while, but I would like to now officially propose 
+>>> this for Lustre 2.2.
+>>> 
+>>> With the OBD changes that are taking place on the Orion branch, we want 
+>>> to make lustre be able to use any of a number of backend filesystems. 
+>>> The current tree and configure tools make it very hard to build without 
+>>> ldiskfs (instead using zfs, btrfs, or something we haven't thought of 
+>>> yet).  As part of cleaning that up, moving ldiskfs external to lustre 
+>>> will help ensure that we don't have unnecessary dependencies crop up in 
+>>> the future.
+>>> 
+>>> We have created an external package of the ldiskfs tree and put it up on 
+>>> github:
+>>> 
+>>> https://github.com/chaos/ldiskfs
+>>> 
+>>> To use the new external ldiskfs package with lustre, you will also need 
+>>> a few patches to lustre itself.  There are links to the patches in this 
+>>> jira ticket:
+>>> 
+>>> http://jira.whamcloud.com/browse/LU-723
+>>> 
+>>> On a RHEL system, ldiskfs has a build dependency on the kernel-debuginfo 
+>>> packages by default.  That is where we find the ext4 source code.
+>>> 
+>>> Building should be fairly straight forward.  Build and install ldiskfs 
+>>> (in particular the lustre-ldiskfs-devel package), and then build lustre. 
+>>> The main new change to lustre is the addition of the configure option 
+>>> "--with-ldiskfs-devel".  On a RHEL system if you have the 
+>>> lustre-ldiskfs-devel package installed, you won't need to give a path.
+>>> 
+>>> Note that we have not yet removed the in-tree ldiskfs.  Our first step 
+>>> was to get this working.  Once this is accepted, we will be happy to 
+>>> submit the patches to remove lustre's copy of ldiskfs and generally 
+>>> clean up lustre's autoconf checks involving ldiskfs.
+>>> 
+>>> We attempted to keep the changes minimal, so we didn't change the name 
+>>> of the ldiskfs rpm packages.  But we think is would be nice to change 
+>>> the name from "lustre-ldiskfs" to simply "ldiskfs".  If we want to make 
+>>> that change, now is the time to do it.
+>>> 
+>>> Chris
+>>> 
+>>> _______________________________________________
+>>> Lustre-devel mailing list
+>>> Lustre-devel at lists.lustre.org
+>>> http://lists.lustre.org/mailman/listinfo/lustre-devel
+>> 
+>> _______________________________________________
+>> Lustre-devel mailing list
+>> Lustre-devel at lists.lustre.org
+>> http://lists.lustre.org/mailman/listinfo/lustre-devel
+> 
+> -- 
+> Cheers,
+> Prakash
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20111013/83dc2b90/attachment.htm>
+
+From aik at fnal.gov  Thu Oct 20 09:24:53 2011
+From: aik at fnal.gov (Alex Kulyavtsev)
+Date: Thu, 20 Oct 2011 11:24:53 -0500
+Subject: [Lustre-devel] Wide striping
+In-Reply-To: <73AED5C780AE05478241DB067651A9210237883C@XYUS-EX22.xyus.xyratex.com>
+References: <73AED5C780AE05478241DB067651A9210237883C@XYUS-EX22.xyus.xyratex.com>
+Message-ID: <3EDC1D49-4A97-4F3A-A9DE-BE2C976665E4@fnal.gov>
+
+
+On Oct 3, 2011, at 3:15 PM, Nathan Rutman wrote:
+
+> ... snip...
+> We have been thinking about a different wide-striping method that  
+> doesn't have these problems. The basic idea is to create a new  
+> stripe type that encodes the list of OSTs compactly, and then using  
+> the same (or a calculable) object identifier (or FID) on all these  
+> OSTs.
+>
+>
+> Our version of widestriping does not involve increasing the EA size  
+> at all, but instead utilizes a new stripe pattern.  (This will not  
+> be understandable by older Lustre versions, which will generate an  
+> error locally, or potentially we can convert into the BZ-4424 form  
+> if the layout fits in that format). A bitmap will identify which  
+> OSTs hold a stripe of this file. The bitmap should probably fit into  
+> current ext4 EA size limit, giving us ~32k stripes.
+>
+> Some OST?s may be down at file creation time, or new OSTs added  
+> later; hence there will likely be holes in the bitmap (but  
+> relatively few).
+
+1) There will be holes when OST pools used: if the file can be written  
+only to the set of OST from specific OST POOL and if by the virtue of  
+configuration OSTs in the  pool do not represent continuous set then  
+there will be holes in OST bit map even if all OSTs are online.
+
+2) "relatively few holes [in bitmap]" - did you consider compressing  
+bitmap? Like BBC or WAH described at en.wikipedia.org/wiki/ 
+Bitmap_index#Compression ? Reportedly you can do bitwise operations  
+without decompression. This way you can go up in number of stripes  
+(well, 32k is big number). But it may help control RPC size - you may  
+represent wide striping with few integers effectively representing  
+continuous blocks and OST holes, the size of the descriptor is the  
+function of # of blocks and holes and to the less extent function of  
+number of stripes.
+More:
+It is possible to have two bitmaps:
+0000000111111111000000111111 - one describing general "blocks" of OST  
+= ((beg1,end1),(beg2,end2))
+0000000000000010100100100000 - other describing "corrections" - drop  
+two OST, add two OST ; here 4 bits, compressed to X bytes
+0000000111111101100100011111 - OST map, computed on client as bitwise  
+XOR to uncompressed maps (1) and (2)
+Each of two maps is compressed for transfer, thus shall not take much  
+space.
+
+3) If metadata file format going to be changed, is it right time to  
+reserve descriptors to have few replicas of the file data?
+
+In such case we need to have number of replicas, and layout descriptor  
+for each replica. Each replica may have different number of stripes,  
+thus you can have widely striped file replica on SAS disks (or in  
+flash) and replicate it to slower disk storage with one or "few"  
+stripes for further tape archival.
+  I assume after initial writes file has more or less "stable"  
+content. Replicas can be on different media type, like flash/ SAS/  
+SATA, fast / cheap disks, effectively Hierarchical Storage.
+I'm thinking about "lazy" replication as you implemented to replicate  
+data to another file system but in this case replication is within the  
+same lustre file system. Client became aware of multiple replicas and  
+can chose  what file replica to use (e.g when some OSTs down). It  
+eliminates OST as single point of failure.
+
+Alex.
+
+> ______________________________________________________________________
+> This email may contain privileged or confidential information, which  
+> should only be used for the purpose for which it was sent by  
+> Xyratex. No further rights or licenses are granted to use such  
+> information. If you are not the intended recipient of this message,  
+> please notify the sender by return and delete it. You may not use,  
+> copy, disclose or rely on the information contained in it.
+>
+> Internet email is susceptible to data corruption, interception and  
+> unauthorised amendment for which Xyratex does not accept liability.  
+> While we have taken reasonable precautions to ensure that this email  
+> is free of viruses, Xyratex does not accept liability for the  
+> presence of any computer viruses in this email, nor for any losses  
+> caused as a result of viruses.
+>
+> Xyratex Technology Limited (03134912), Registered in England &  
+> Wales, Registered Office, Langstone Road, Havant, Hampshire, PO9 1SA.
+>
+> The Xyratex group of companies also includes, Xyratex Ltd,  
+> registered in Bermuda, Xyratex International Inc, registered in  
+> California, Xyratex (Malaysia) Sdn Bhd registered in Malaysia,  
+> Xyratex Technology (Wuxi) Co Ltd registered in The People's Republic  
+> of China and Xyratex Japan Limited registered in Japan.
+> ______________________________________________________________________
+>
+>
+> _______________________________________________
+> Lustre-devel mailing list
+> Lustre-devel at lists.lustre.org
+> http://lists.lustre.org/mailman/listinfo/lustre-devel
+
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20111020/a01ee1d3/attachment.htm>
+
+From adilger at whamcloud.com  Thu Oct 20 11:45:34 2011
+From: adilger at whamcloud.com (Andreas Dilger)
+Date: Thu, 20 Oct 2011 12:45:34 -0600
+Subject: [Lustre-devel] Wide striping
+In-Reply-To: <3EDC1D49-4A97-4F3A-A9DE-BE2C976665E4@fnal.gov>
+References: <73AED5C780AE05478241DB067651A9210237883C@XYUS-EX22.xyus.xyratex.com>
+	<3EDC1D49-4A97-4F3A-A9DE-BE2C976665E4@fnal.gov>
+Message-ID: <AC496A61-5807-4E46-B7D9-0717E363F0BD@whamcloud.com>
+
+On 2011-10-20, at 10:24 AM, Alex Kulyavtsev wrote:
+> On Oct 3, 2011, at 3:15 PM, Nathan Rutman wrote:
+>> We have been thinking about a different wide-striping method that doesn't have these problems. The basic idea is to create a new stripe type that encodes the list of OSTs compactly, and then using the same (or a calculable) object identifier (or FID) on all these OSTs.
+>> 
+>> Our version of widestriping does not involve increasing the EA size at all, but instead utilizes a new stripe pattern.  (This will not be understandable by older Lustre versions, which will generate an error locally, or potentially we can convert into the BZ-4424 form if the layout fits in that format). A bitmap will identify which OSTs hold a stripe of this file. The bitmap should probably fit into current ext4 EA size limit, giving us ~32k stripes.
+>> 
+>> Some OST?s may be down at file creation time, or new OSTs added later; hence there will likely be holes in the bitmap (but relatively few). 
+> 
+> 1) There will be holes when OST pools used: if the file can be written only to the set of OST from specific OST POOL and if by the virtue of configuration OSTs in the  pool do not represent continuous set then there will be holes in OST bit map even if all OSTs are online.
+
+Since the membership in a pool can change after a file is allocated,
+there cannot be anything in the layout that depends on the current
+membership of the pool.  In this regard, the layout of a file that
+is allocated in the pool should be identical to a non-pool file, with
+the exception that it saves the pool name in which the file was created.
+That allows future operations (migration, replication, etc) to take the
+originally requested pool of the user into account.
+
+> 2) "relatively few holes [in bitmap]" - did you consider compressing bitmap? Like BBC or WAH described at en.wikipedia.org/wiki/Bitmap_index#Compression ? Reportedly you can do bitwise operations without decompression. This way you can go up in number of stripes (well, 32k is big number). But it may help control RPC size - you may represent wide striping with few integers effectively representing continuous blocks and OST holes, the size of the descriptor is the function of # of blocks and holes and to the less extent function of number of stripes.
+
+I think that having some kind of bitmap compression seems reasonable,
+and extends the number of stripes that can be fit into a single layout
+for most cases.  Originally I was thinking that in addition to saving
+the starting index of the bitmap, we could also save the index at which
+the bitmap wraps back to 0 (i.e. bit N = (start_idx + N) % wrap_idx),
+but if there is bitmap compression then the run of zeroes between the
+starting index and the (lower) ending index could be stored efficiently
+as well.
+
+> More:
+> It is possible to have two bitmaps: 
+> 0000000111111111000000111111 - one describing general "blocks" of OST = ((beg1,end1),(beg2,end2))
+> 0000000000000010100100100000 - other describing "corrections" - drop two OST, add two OST ; here 4 bits, compressed to X bytes 
+> 0000000111111101100100011111 - OST map, computed on client as bitwise XOR to uncompressed maps (1) and (2)
+> Each of two maps is compressed for transfer, thus shall not take much space.
+
+Originally, I was thinking that we don't need to do boolean operations
+on the compressed bitmaps, but then I recall an idea I had many, many
+years ago about clients sending the "desired" (AND "available") OSC
+bitmap to the MDS.  When the MDS is allocating objects on the OSTs it
+can AND the client bitmap with its allocation bitmap ("pool" bitmap AND
+"available objects" bitmap) to get the subset of OSTs where objects can
+be allocated.
+
+If we can do operations directly on the compressed bitmaps, not only does
+it save space, but it also saves cycles doing the operations.
+
+> 3) If metadata file format going to be changed, is it right time to reserve descriptors to have few replicas of the file data?
+>  
+> In such case we need to have number of replicas, and layout descriptor for each replica. Each replica may have different number of stripes, thus you can have widely striped file replica on SAS disks (or in flash) and replicate it to slower disk storage with one or "few" stripes for further tape archival.
+
+Right.  I've always thought that the different replicas of the file
+would have completely independent layouts, to allow what you suggest.
+The striping of a file would be completely different for nearline storage
+and archival storage (different OST counts at each layer vs. tape drives).
+
+>  I assume after initial writes file has more or less "stable" content. Replicas can be on different media type, like flash/ SAS/ SATA, fast / cheap disks, effectively Hierarchical Storage.
+> I'm thinking about "lazy" replication as you implemented to replicate data to another file system but in this case replication is within the same lustre file system. Client became aware of multiple replicas and can chose  what file replica to use (e.g when some OSTs down). It eliminates OST as single point of failure.
+
+Yes, my initial goal is to have background file replication as opposed
+to real-time replication.  The main reason is due to the complexity of
+the implementation being lower.  In fact, once we have decided on a new
+layout format for RAID-1+0 files, background replication and internal
+file migration can largely be implemented with the HSM code.
+
+Cheers, Andreas
+--
+Andreas Dilger 
+Principal Engineer
+Whamcloud, Inc.
+
+
+
+
+
+From aik at fnal.gov  Thu Oct 20 13:15:06 2011
+From: aik at fnal.gov (Alex Kulyavtsev)
+Date: Thu, 20 Oct 2011 15:15:06 -0500
+Subject: [Lustre-devel] Wide striping
+In-Reply-To: <73AED5C780AE05478241DB067651A921023788CF@XYUS-EX22.xyus.xyratex.com>
+References: <73AED5C780AE05478241DB067651A9210237883C@XYUS-EX22.xyus.xyratex.com>
+	<3EDC1D49-4A97-4F3A-A9DE-BE2C976665E4@fnal.gov>
+	<AC496A61-5807-4E46-B7D9-0717E363F0BD@whamcloud.com>
+	<73AED5C780AE05478241DB067651A921023788CF@XYUS-EX22.xyus.xyratex.com>
+Message-ID: <4091F461-E2B7-413A-BEEB-D0460B72E5E1@fnal.gov>
+
+
+On Oct 20, 2011, at 2:08 PM, Nathan Rutman wrote:
+
+>
+> On Oct 20, 2011, at 11:45 AM, Andreas Dilger wrote:
+>
+>> On 2011-10-20, at 10:24 AM, Alex Kulyavtsev wrote:
+>>> On Oct 3, 2011, at 3:15 PM, Nathan Rutman wrote:
+>>>> We have been thinking about a different wide-striping method that  
+>>>> doesn't have these problems. The basic idea is to create a new  
+>>>> stripe type that encodes the list of OSTs compactly, and then  
+>>>> using the same (or a calculable) object identifier (or FID) on  
+>>>> all these OSTs.
+>>>>
+>>>
+>>> 1) There will be holes when OST pools used: if the file can be  
+>>> written only to the set of OST from specific OST POOL and if by  
+>>> the virtue of configuration OSTs in the  pool do not represent  
+>>> continuous set then there will be holes in OST bit map even if all  
+>>> OSTs are online.
+>>
+>> Since the membership in a pool can change after a file is allocated,
+>> there cannot be anything in the layout that depends on the current
+>> membership of the pool.  In this regard, the layout of a file that
+>> is allocated in the pool should be identical to a non-pool file, with
+>> the exception that it saves the pool name in which the file was  
+>> created.
+>> That allows future operations (migration, replication, etc) to take  
+>> the
+>> originally requested pool of the user into account.
+> Yes, exactly like current striping works -- pool name is recorded,  
+> but is only informational: actual striping is explicitly recorded.
+Sorry for not being clear, I agree the file is laid out at creation  
+time.
+I'm just trying to make a point pool configuration is the other source  
+of holes in bitmap in addition to OSTs down.
+
+Suppose user purchased eight OST each year for three years, and  
+allocated four OSTs to pool1, four to pool2.
+OST numbering get mixed and  OSTs are assigned as follows:
+1111 0000   1111 0000   1111 0000 - pool1
+0000 1111   0000 1111   0000 1111 - pool2
+
+All OSTs are up, and file was striped across all OSTs in pool1. Thus  
+the file layout is like
+1111 0000   1111 0000  1111 0000
+The file has holes in OST layout because of pool configuration.
+
+>
+>>
+>>> 2) "relatively few holes [in bitmap]" - did you consider  
+>>> compressing bitmap? Like BBC or WAH described at en.wikipedia.org/ 
+>>> wiki/Bitmap_index#Compression ? Reportedly you can do bitwise  
+>>> operations without decompression. This way you can go up in number  
+>>> of stripes (well, 32k is big number). But it may help control RPC  
+>>> size - you may represent wide striping with few integers  
+>>> effectively representing continuous blocks and OST holes, the size  
+>>> of the descriptor is the function of # of blocks and holes and to  
+>>> the less extent function of number of stripes.
+>>
+>> I think that having some kind of bitmap compression seems reasonable,
+>> and extends the number of stripes that can be fit into a single  
+>> layout
+>> for most cases.  Originally I was thinking that in addition to saving
+>> the starting index of the bitmap, we could also save the index at  
+>> which
+>> the bitmap wraps back to 0 (i.e. bit N = (start_idx + N) % wrap_idx),
+>> but if there is bitmap compression then the run of zeroes between the
+>> starting index and the (lower) ending index could be stored  
+>> efficiently
+>> as well.
+>
+> I don't think there's any point of compressing this.  32,000 stripes  
+> fit in the old EA limit, and there's going to be plenty of other  
+> limits hit before
+> we start using 32,000 OSTs.  And even then, we can use the larger EA  
+> size.   So perhaps we turn the question around and ask, "how many  
+> stripes do you want to support"?
+Frankly, we do not use wide striping at this point and 32k is a "large  
+number."
+Having said that, if you have flash OST on each compute node and/or  
+have replication and can use local disk on compute node for  
+opportunistic storage ("local file replica"), the number of OSTs is  
+O(compute nodes) in the cluster and that can be "large number" too.
+
+Best regards, Alex.
+
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20111020/eff8fe41/attachment.htm>
+
+From surya1 at llnl.gov  Thu Oct 13 08:41:05 2011
+From: surya1 at llnl.gov (Prakash Surya)
+Date: Thu, 13 Oct 2011 08:41:05 -0700
+Subject: [Lustre-devel] Moving ldiskfs external to the Lustre tree
+In-Reply-To: <2B361165-F4ED-4339-BA05-D216AE62A4AC@whamcloud.com>
+References: <4E960A40.9040509@llnl.gov>
+	<2B361165-F4ED-4339-BA05-D216AE62A4AC@whamcloud.com>
+Message-ID: <20111013154105.GL28548@llnl.gov>
+
+On Wed, Oct 12, 2011 at 07:05:51PM -0700, Andreas Dilger wrote:
+> Chris,
+> I'm not against this in principle, but I think it may be more difficult to actually implement before the OSD changes from Orion are landed to master.  In the past we also thought about making ldiskfs as a separate package, before ext4 started in the kernel. 
+> 
+> I've seen Prakash working on those patches but will not have time to look at them until at least next week. 
+> 
+> Are those patches against the master branch or against Orion?  Also, what kernels are supported?
+
+The patches for Lustre are against master. I believe our plan is to
+have the patches landed and working on master, before we officially
+integrate them into Orion.
+
+As far as supported kernels, I've tried to keep that consistent with
+what is already supported; although I admit most testing so far has
+been done on RHEL.
+
+What kernels are officially supported by Whamcloud? What kernels does it
+need to support?
+
+> 
+> Cheers, Andreas
+> 
+> On 2011-10-12, at 3:44 PM, "Christopher J. Morrone" <morrone2 at llnl.gov> wrote:
+> 
+> > We would like to see the ldiskfs tree removed from the lustre tree and 
+> > made an independent package.  I have been floating this idea 
+> > unofficially for a while, but I would like to now officially propose 
+> > this for Lustre 2.2.
+> > 
+> > With the OBD changes that are taking place on the Orion branch, we want 
+> > to make lustre be able to use any of a number of backend filesystems. 
+> > The current tree and configure tools make it very hard to build without 
+> > ldiskfs (instead using zfs, btrfs, or something we haven't thought of 
+> > yet).  As part of cleaning that up, moving ldiskfs external to lustre 
+> > will help ensure that we don't have unnecessary dependencies crop up in 
+> > the future.
+> > 
+> > We have created an external package of the ldiskfs tree and put it up on 
+> > github:
+> > 
+> >  https://github.com/chaos/ldiskfs
+> > 
+> > To use the new external ldiskfs package with lustre, you will also need 
+> > a few patches to lustre itself.  There are links to the patches in this 
+> > jira ticket:
+> > 
+> >  http://jira.whamcloud.com/browse/LU-723
+> > 
+> > On a RHEL system, ldiskfs has a build dependency on the kernel-debuginfo 
+> > packages by default.  That is where we find the ext4 source code.
+> > 
+> > Building should be fairly straight forward.  Build and install ldiskfs 
+> > (in particular the lustre-ldiskfs-devel package), and then build lustre. 
+> > The main new change to lustre is the addition of the configure option 
+> > "--with-ldiskfs-devel".  On a RHEL system if you have the 
+> > lustre-ldiskfs-devel package installed, you won't need to give a path.
+> > 
+> > Note that we have not yet removed the in-tree ldiskfs.  Our first step 
+> > was to get this working.  Once this is accepted, we will be happy to 
+> > submit the patches to remove lustre's copy of ldiskfs and generally 
+> > clean up lustre's autoconf checks involving ldiskfs.
+> > 
+> > We attempted to keep the changes minimal, so we didn't change the name 
+> > of the ldiskfs rpm packages.  But we think is would be nice to change 
+> > the name from "lustre-ldiskfs" to simply "ldiskfs".  If we want to make 
+> > that change, now is the time to do it.
+> > 
+> > Chris
+> > 
+> > _______________________________________________
+> > Lustre-devel mailing list
+> > Lustre-devel at lists.lustre.org
+> > http://lists.lustre.org/mailman/listinfo/lustre-devel
+> 
+> _______________________________________________
+> Lustre-devel mailing list
+> Lustre-devel at lists.lustre.org
+> http://lists.lustre.org/mailman/listinfo/lustre-devel
+
+-- 
+Cheers,
+Prakash
+
+

@@ -1,0 +1,4716 @@
+From elliswilson at microsoft.com  Fri Oct  8 06:04:14 2021
+From: elliswilson at microsoft.com (Ellis Wilson)
+Date: Fri, 8 Oct 2021 13:04:14 +0000
+Subject: [lustre-devel] xattr stat mismatch in sanityn test 73
+Message-ID: <MN2PR21MB1439DBD46F20244F6A7A006BBEB29@MN2PR21MB1439.namprd21.prod.outlook.com>
+
+Hi all,
+
+I'm trying to get to the bottom of a failure I'm seeing while running the lustre unit tests, specifically here for this test in the sanityn suite:
+= sanityn test 73: getxattr should not cause xattr lock cancellation =
+
+I'm running stock lustre 2.14.0 on Ubuntu 18.04 with Linux Kernel 5.4.0.  I have six nodes total for the test: two clients, two mds, two oss.  The test is running from one of the clients.
+
+The error I get is:
+============
+getfattr: Removing leading '/' from absolute path names
+# file: mnt/lustre/f73.sanityn
+user.attr1="value1"
+
+ELLIS: expected 2, but got 5
+ sanityn test_73: @@@@@@ FAIL: not cached in /mnt/lustre 
+  Trace dump:
+  = /usr/lib/lustre/tests/test-framework.sh:6273:error()
+  = /usr/lib/lustre/tests/sanityn.sh:3557:test_73()
+  = /usr/lib/lustre/tests/test-framework.sh:6581:run_one()
+  = /usr/lib/lustre/tests/test-framework.sh:6628:run_one_logged()
+  = /usr/lib/lustre/tests/test-framework.sh:6455:run_test()
+  = /usr/lib/lustre/tests/sanityn.sh:3567:main()
+============
+
+I've instrumented the code to spit out the expected vs. discovered stat values.  The failure indicates the file in question wasn't cached, but in fact the inverse is occurring -- it's both cached and hit more often than expected.
+
+The unadulterated test code follows:
+================
+3549     touch $DIR1/$tfile
+3550     setfattr -n user.attr1 -v value1 $DIR1/$tfile ||
+3551         error "setfattr1 failed"
+3552     getfattr -n user.attr1 $DIR2/$tfile || error "getfattr1 failed"
+3553     getfattr -n user.attr1 $DIR1/$tfile || error "getfattr2 failed"
+3554     clear_stats llite.*.stats
+3555     # PR lock should be cached by now on both clients
+3556     getfattr -n user.attr1 $DIR1/$tfile || error "getfattr3 failed"
+3557     # 2 hits for getfattr(0)+getfattr(size)
+3558     [ $(calc_stats llite.*.stats getxattr_hits) -eq 2 ] ||
+3559         error "not cached in $DIR1"
+================
+
+The failure occurs on line 3558.
+
+Manually performing these actions validates that indeed the jump is by 5, not 2:
+~# lctl get_param llite.*.stats | grep hits
+getxattr_hits             85 samples [reqs]
+getxattr_hits             4 samples [reqs]
+~# getfattr -n user.attr1 /mnt/lustre/f73.sanityn
+getfattr: Removing leading '/' from absolute path names # file: mnt/lustre/f73.sanityn user.attr1="value1"
+~# lctl get_param llite.*.stats | grep hits
+getxattr_hits             90 samples [reqs]
+getxattr_hits             4 samples [reqs]
+
+I straced getfattr as run in the test and found it issues the following:
+23262 lstat("/mnt/lustre/f73.sanityn", {st_mode=S_IFREG|0644, st_size=0, ...}) = 0
+23262 getxattr("/mnt/lustre/f73.sanityn", "user.attr1", NULL, 0) = 6
+23262 getxattr("/mnt/lustre/f73.sanityn", "user.attr1", "value1", 256) = 6
+
+I built a small C program to replicate just the above without all of the other fluff in getfattr, and I see 1 xattr cache hit occurring for the lstat, and two xattr cache hits occurring for each call of getxattr.  So it replicates the 5 xattr cache hits.  It is notable that if one does NOT specify "user.attr1" and instead just uses an empty string you only get a single hit on each getxattr.
+
+I have a patch that revises the expected stat values from 2 to 5 and from 4 to 10, and while that works in my system I wanted to know:
+1. Are these changes expected?  I don't know much about the xattr cache or when it's expected to be hit, but hitting twice for a single getxattr seemed high.
+2. Is there any location online where I can look at release testing results for these unit tests?  I wanted to see if I was alone in hitting this many times, but couldn't locate such a repository of historical test results.
+
+Thanks for any and all help!
+
+Best,
+
+ellis
+
+From jsimmons at infradead.org  Mon Oct 11 10:40:30 2021
+From: jsimmons at infradead.org (James Simmons)
+Date: Mon, 11 Oct 2021 13:40:30 -0400
+Subject: [lustre-devel] [PATCH 01/20] lustre: nfs: don't store parent fid
+In-Reply-To: <1633974049-26490-1-git-send-email-jsimmons@infradead.org>
+References: <1633974049-26490-1-git-send-email-jsimmons@infradead.org>
+Message-ID: <1633974049-26490-2-git-send-email-jsimmons@infradead.org>
+
+From: Lai Siyao <lai.siyao at whamcloud.com>
+
+It's not necessary to store parent fid in lli_pfid, because MDT
+can get it's parent fid from linkea, and now that DNE stripe
+directory stores master inode fid in lli_pfid, stop storing parent
+fid to avoid conflict.
+
+WC-bug-id: https://jira.whamcloud.com/browse/LU-3544
+Lustre-commit: 6512bfc74b152ef ("LU-3544 nfs: don't store parent fid")
+Signed-off-by: Lai Siyao <lai.siyao at whamcloud.com>
+Reviewed-on: http://review.whamcloud.com/10692
+Reviewed-by: Fan Yong <fan.yong at intel.com>
+Reviewed-by: wangdi <di.wang at intel.com>
+Reviewed-by: Nathaniel Clark <nclark at whamcloud.com>
+Reviewed-by: Oleg Drokin <green at whamcloud.com>
+Signed-off-by: James Simmons <jsimmons at infradead.org>
+---
+ fs/lustre/llite/llite_nfs.c | 13 -------------
+ 1 file changed, 13 deletions(-)
+
+diff --git a/fs/lustre/llite/llite_nfs.c b/fs/lustre/llite/llite_nfs.c
+index 6be2309..07fcad6 100644
+--- a/fs/lustre/llite/llite_nfs.c
++++ b/fs/lustre/llite/llite_nfs.c
+@@ -135,19 +135,6 @@ struct inode *search_inode_for_lustre(struct super_block *sb,
+ 	if (IS_ERR(result))
+ 		return result;
+ 
+-	/**
+-	 * In case d_obtain_alias() found a disconnected dentry, always update
+-	 * lli_pfid to allow later operation (normally open) have parent fid,
+-	 * which may be used by MDS to create data.
+-	 */
+-	if (parent) {
+-		struct ll_inode_info *lli = ll_i2info(inode);
+-
+-		spin_lock(&lli->lli_lock);
+-		lli->lli_pfid = *parent;
+-		spin_unlock(&lli->lli_lock);
+-	}
+-
+ 	/*
+ 	 * Need to signal to the ll_intent_file_open that
+ 	 * we came from NFS and so opencache needs to be
+-- 
+1.8.3.1
+
+
+From jsimmons at infradead.org  Mon Oct 11 10:40:36 2021
+From: jsimmons at infradead.org (James Simmons)
+Date: Mon, 11 Oct 2021 13:40:36 -0400
+Subject: [lustre-devel] [PATCH 07/20] lustre: lov: prefer mirrors on
+ non-rotational OSTs
+In-Reply-To: <1633974049-26490-1-git-send-email-jsimmons@infradead.org>
+References: <1633974049-26490-1-git-send-email-jsimmons@infradead.org>
+Message-ID: <1633974049-26490-8-git-send-email-jsimmons@infradead.org>
+
+From: Alex Zhuravlev <bzzz at whamcloud.com>
+
+consider non-rotational OSTs as preferred unless explicit prefer
+flag is set on a mirror.
+
+WC-bug-id: https://jira.whamcloud.com/browse/LU-14996
+Lustre-commit: 8507472dd37ebc07 ("LU-14996 lov: prefer mirrors on non-rotational OSTs")
+Signed-off-by: Alex Zhuravlev <bzzz at whamcloud.com>
+Reviewed-on: https://review.whamcloud.com/44883
+Reviewed-by: John L. Hammond <jhammond at whamcloud.com>
+Reviewed-by: Andreas Dilger <adilger at whamcloud.com>
+Reviewed-by: Oleg Drokin <green at whamcloud.com>
+Signed-off-by: James Simmons <jsimmons at infradead.org>
+---
+ fs/lustre/lov/lov_cl_internal.h |  5 +++--
+ fs/lustre/lov/lov_object.c      | 26 ++++++++++++++++++++++----
+ 2 files changed, 25 insertions(+), 6 deletions(-)
+
+diff --git a/fs/lustre/lov/lov_cl_internal.h b/fs/lustre/lov/lov_cl_internal.h
+index 7fcc327..d48e2df3 100644
+--- a/fs/lustre/lov/lov_cl_internal.h
++++ b/fs/lustre/lov/lov_cl_internal.h
+@@ -225,6 +225,7 @@ struct lov_layout_dom {
+ struct lov_layout_entry {
+ 	u32					lle_type;
+ 	unsigned int				lle_valid:1;
++	unsigned int				lle_preference;
+ 	struct lu_extent			*lle_extent;
+ 	struct lov_stripe_md_entry		*lle_lsme;
+ 	struct lov_comp_layout_entry_ops	*lle_comp_ops;
+@@ -236,12 +237,12 @@ struct lov_layout_entry {
+ 
+ struct lov_mirror_entry {
+ 	unsigned short	lre_mirror_id;
+-	unsigned short	lre_preferred:1,
+-			lre_stale:1,	/* set if any components is stale */
++	unsigned short	lre_stale:1,	/* set if any components is stale */
+ 			lre_valid:1,	/* set if at least one of components
+ 					 * in this mirror is valid
+ 					 */
+ 			lre_foreign:1;	/* set if it is a foreign component */
++	int		lre_preference;	/* overall preference of this mirror */
+ 
+ 	unsigned short	lre_start;	/* index to lo_entries, start index of
+ 					 * this mirror
+diff --git a/fs/lustre/lov/lov_object.c b/fs/lustre/lov/lov_object.c
+index 16fed09..ff0f7fa 100644
+--- a/fs/lustre/lov/lov_object.c
++++ b/fs/lustre/lov/lov_object.c
+@@ -234,6 +234,7 @@ static int lov_init_raid0(const struct lu_env *env, struct lov_device *dev,
+ 		struct lov_oinfo *oinfo = lse->lsme_oinfo[i];
+ 		int ost_idx = oinfo->loi_ost_idx;
+ 		struct cl_device *subdev;
++		struct obd_export *exp;
+ 
+ 		if (lov_oinfo_is_dummy(oinfo))
+ 			continue;
+@@ -250,6 +251,13 @@ static int lov_init_raid0(const struct lu_env *env, struct lov_device *dev,
+ 			goto out;
+ 		}
+ 
++		exp = dev->ld_lov->lov_tgts[ost_idx]->ltd_exp;
++		if (likely(exp)) {
++			/* the more fast OSTs the better */
++			if (exp->exp_obd->obd_osfs.os_state & OS_STATFS_NONROT)
++				lle->lle_preference++;
++		}
++
+ 		subdev = lovsub2cl_dev(dev->ld_target[ost_idx]);
+ 		subconf->u.coc_oinfo = oinfo;
+ 		LASSERTF(subdev, "not init ost %d\n", ost_idx);
+@@ -621,7 +629,7 @@ static int lov_init_composite(const struct lu_env *env, struct lov_device *dev,
+ 	unsigned int mirror_count;
+ 	int result = 0;
+ 	unsigned int seq;
+-	int i, j;
++	int i, j, preference;
+ 	bool dom_size = 0;
+ 
+ 	LASSERT(lsm->lsm_entry_count > 0);
+@@ -661,6 +669,7 @@ static int lov_init_composite(const struct lu_env *env, struct lov_device *dev,
+ 
+ 		lle->lle_lsme = lsm->lsm_entries[i];
+ 		lle->lle_type = lov_entry_type(lle->lle_lsme);
++		lle->lle_preference = 0;
+ 		switch (lle->lle_type) {
+ 		case LOV_PATTERN_RAID0:
+ 			lle->lle_comp_ops = &raid0_ops;
+@@ -722,8 +731,8 @@ static int lov_init_composite(const struct lu_env *env, struct lov_device *dev,
+ 		/* entries must be sorted by mirrors */
+ 		lre->lre_mirror_id = mirror_id;
+ 		lre->lre_start = lre->lre_end = i;
+-		lre->lre_preferred = !!(lle->lle_lsme->lsme_flags &
+-					LCME_FL_PREF_RD);
++		lre->lre_preference = lle->lle_lsme->lsme_flags &
++					LCME_FL_PREF_RD ? 1000 : 0;
+ 		lre->lre_valid = lle->lle_valid;
+ 		lre->lre_stale = !lle->lle_valid;
+ 		lre->lre_foreign = lsme_is_foreign(lle->lle_lsme);
+@@ -771,6 +780,7 @@ static int lov_init_composite(const struct lu_env *env, struct lov_device *dev,
+ 	 * so that different clients would use different mirrors for read.
+ 	 */
+ 	mirror_count = 0;
++	preference = -1;
+ 	seq = hash_long((unsigned long)lov, 8);
+ 	for (i = 0; i < comp->lo_mirror_count; i++) {
+ 		unsigned int idx = (i + seq) % comp->lo_mirror_count;
+@@ -784,8 +794,16 @@ static int lov_init_composite(const struct lu_env *env, struct lov_device *dev,
+ 
+ 		mirror_count++; /* valid mirror */
+ 
+-		if (lre->lre_preferred || comp->lo_preferred_mirror < 0)
++		/* aggregated preference of all involved OSTs */
++		for (j = lre->lre_start; j <= lre->lre_end; j++) {
++			lre->lre_preference +=
++				comp->lo_entries[j].lle_preference;
++		}
++
++		if (lre->lre_preference > preference) {
++			preference = lre->lre_preference;
+ 			comp->lo_preferred_mirror = idx;
++		}
+ 	}
+ 	if (!mirror_count) {
+ 		CDEBUG(D_INODE, DFID
+-- 
+1.8.3.1
+
+
+From jsimmons at infradead.org  Mon Oct 11 10:40:29 2021
+From: jsimmons at infradead.org (James Simmons)
+Date: Mon, 11 Oct 2021 13:40:29 -0400
+Subject: [lustre-devel] [PATCH 00/20] lustre: sync to OpenSFS Oct 11, 2021
+Message-ID: <1633974049-26490-1-git-send-email-jsimmons@infradead.org>
+
+Update to latest OpenSFS work. Fixed a few specific Linux client
+bugs (lu_ref_add and osc_lru_reclaim patches).
+
+Alex Zhuravlev (1):
+  lustre: lov: prefer mirrors on non-rotational OSTs
+
+Alexander Boyko (1):
+  lustre: ptlrpc: handle reply and resend reorder
+
+Andreas Dilger (1):
+  lustre: brw: log T10 GRD tags during checksum calcs
+
+Chris Horn (2):
+  lnet: Ensure round robin selection of local NIs
+  lnet: Ensure round robin selection of peer NIs
+
+James Simmons (3):
+  lustre: llite: harden ll_sbi ll_flags
+  lustre: osc: use original cli for osc_lru_reclaim for debug msg
+  lustre: obdclass: lu_ref_add() called in atomic context
+
+Jian Yu (1):
+  lnet: include linux/ethtool.h
+
+Lai Siyao (1):
+  lustre: nfs: don't store parent fid
+
+Mikhail Pershin (1):
+  lustre: llite: support fallocate() on selected mirror
+
+Mr NeilBrown (1):
+  lustre: ptlrpc: use wait_woken() in ptlrpcd()
+
+Oleg Drokin (2):
+  lustre: update version to 2.14.55
+  lustre: osc: Do not attempt sending empty pages
+
+Sebastien Buisson (4):
+  lustre: sec: filename encryption - symlink support
+  lustre: llite: move env contexts to ll_inode_info level
+  lustre: sec: do not expose security.c to listxattr/getxattr
+  lustre: sec: access to enc file's xattrs
+
+Sergey Cheremencev (1):
+  lustre: mdc: update max_easize on reconnect
+
+Wang Shilong (1):
+  lustre: quota: fix quota with root squash enabled
+
+ fs/lustre/include/lu_object.h           |   7 +
+ fs/lustre/include/obd.h                 |   2 +
+ fs/lustre/llite/acl.c                   |   4 +-
+ fs/lustre/llite/crypto.c                |  31 +-
+ fs/lustre/llite/dir.c                   |  25 +-
+ fs/lustre/llite/file.c                  |  30 +-
+ fs/lustre/llite/llite_foreign_symlink.c |  12 +-
+ fs/lustre/llite/llite_internal.h        | 150 ++++------
+ fs/lustre/llite/llite_lib.c             | 494 ++++++++++++++++----------------
+ fs/lustre/llite/llite_mmap.c            |  17 +-
+ fs/lustre/llite/llite_nfs.c             |  13 -
+ fs/lustre/llite/lproc_llite.c           |  78 ++---
+ fs/lustre/llite/namei.c                 | 111 +++++--
+ fs/lustre/llite/rw.c                    |  36 +--
+ fs/lustre/llite/rw26.c                  |   5 +-
+ fs/lustre/llite/statahead.c             |  27 +-
+ fs/lustre/llite/symlink.c               |  85 +++++-
+ fs/lustre/llite/vvp_dev.c               |   2 +-
+ fs/lustre/llite/xattr.c                 |  53 +++-
+ fs/lustre/llite/xattr_cache.c           |  65 +++--
+ fs/lustre/lov/lov_cl_internal.h         |   5 +-
+ fs/lustre/lov/lov_io.c                  |   3 +-
+ fs/lustre/lov/lov_object.c              |  26 +-
+ fs/lustre/mdc/mdc_dev.c                 |   2 +-
+ fs/lustre/mdc/mdc_request.c             |   1 +
+ fs/lustre/osc/osc_cache.c               |  23 +-
+ fs/lustre/osc/osc_page.c                |  23 +-
+ fs/lustre/osc/osc_quota.c               |   1 +
+ fs/lustre/osc/osc_request.c             |  93 +++---
+ fs/lustre/ptlrpc/client.c               |   5 +-
+ fs/lustre/ptlrpc/events.c               |   3 +-
+ fs/lustre/ptlrpc/ptlrpcd.c              |  23 +-
+ fs/lustre/ptlrpc/wiretest.c             |   2 +
+ include/uapi/linux/lustre/lustre_idl.h  |   4 +-
+ include/uapi/linux/lustre/lustre_ver.h  |   4 +-
+ net/lnet/klnds/o2iblnd/o2iblnd.c        |   4 +-
+ net/lnet/lnet/lib-move.c                |   4 +-
+ 37 files changed, 860 insertions(+), 613 deletions(-)
+
+-- 
+1.8.3.1
+
+
+From jsimmons at infradead.org  Mon Oct 11 10:40:32 2021
+From: jsimmons at infradead.org (James Simmons)
+Date: Mon, 11 Oct 2021 13:40:32 -0400
+Subject: [lustre-devel] [PATCH 03/20] lustre: llite: support fallocate() on
+ selected mirror
+In-Reply-To: <1633974049-26490-1-git-send-email-jsimmons@infradead.org>
+References: <1633974049-26490-1-git-send-email-jsimmons@infradead.org>
+Message-ID: <1633974049-26490-4-git-send-email-jsimmons@infradead.org>
+
+From: Mikhail Pershin <mpershin at whamcloud.com>
+
+- add ability to do fallocate() on designated mirror in
+  FLR file
+- add missing FALLOC_FL_KEEP_SIZE flag to fallocate() call
+  in llapi_hole_punch(). It was just not working without
+  that flag silently
+
+Fixes: 7ce65bb0cd ("lustre: llite: mirror resync to keep sparseness")
+WC-bug-id: https://jira.whamcloud.com/browse/LU-13397
+Lustre-commit: 89736d502cc99f095 ("LU-13397 llite: support fallocate() on selected mirror")
+Signed-off-by: Mikhail Pershin <mpershin at whamcloud.com>
+Reviewed-on: https://review.whamcloud.com/44721
+Reviewed-by: Andreas Dilger <adilger at whamcloud.com>
+Reviewed-by: Arshad Hussain <arshad.hussain at aeoncomputing.com>
+Reviewed-by: Oleg Drokin <green at whamcloud.com>
+Signed-off-by: James Simmons <jsimmons at infradead.org>
+---
+ fs/lustre/llite/file.c | 9 ++++++---
+ fs/lustre/lov/lov_io.c | 3 ++-
+ 2 files changed, 8 insertions(+), 4 deletions(-)
+
+diff --git a/fs/lustre/llite/file.c b/fs/lustre/llite/file.c
+index f340d67..9dd5c8c 100644
+--- a/fs/lustre/llite/file.c
++++ b/fs/lustre/llite/file.c
+@@ -5220,7 +5220,8 @@ int ll_getattr(const struct path *path, struct kstat *stat,
+ 				 false);
+ }
+ 
+-int cl_falloc(struct inode *inode, int mode, loff_t offset, loff_t len)
++int cl_falloc(struct file *file, struct inode *inode, int mode, loff_t offset,
++	      loff_t len)
+ {
+ 	struct lu_env *env;
+ 	struct cl_io *io;
+@@ -5234,6 +5235,8 @@ int cl_falloc(struct inode *inode, int mode, loff_t offset, loff_t len)
+ 
+ 	io = vvp_env_thread_io(env);
+ 	io->ci_obj = ll_i2info(inode)->lli_clob;
++	ll_io_set_mirror(io, file);
++
+ 	io->ci_verify_layout = 1;
+ 	io->u.ci_setattr.sa_parent_fid = lu_object_fid(&io->ci_obj->co_lu);
+ 	io->u.ci_setattr.sa_falloc_mode = mode;
+@@ -5272,7 +5275,7 @@ int cl_falloc(struct inode *inode, int mode, loff_t offset, loff_t len)
+ 
+ long ll_fallocate(struct file *filp, int mode, loff_t offset, loff_t len)
+ {
+-	struct inode *inode = filp->f_path.dentry->d_inode;
++	struct inode *inode = file_inode(filp);
+ 	int rc;
+ 
+ 	if (offset < 0 || len <= 0)
+@@ -5298,7 +5301,7 @@ long ll_fallocate(struct file *filp, int mode, loff_t offset, loff_t len)
+ 
+ 	ll_stats_ops_tally(ll_i2sbi(inode), LPROC_LL_FALLOCATE, 1);
+ 
+-	rc = cl_falloc(inode, mode, offset, len);
++	rc = cl_falloc(filp, inode, mode, offset, len);
+ 	/*
+ 	 * ENOTSUPP (524) is an NFSv3 specific error code erroneously
+ 	 * used by Lustre in several places. Retuning it here would
+diff --git a/fs/lustre/lov/lov_io.c b/fs/lustre/lov/lov_io.c
+index eb71d7a..d5f895f 100644
+--- a/fs/lustre/lov/lov_io.c
++++ b/fs/lustre/lov/lov_io.c
+@@ -322,7 +322,8 @@ static int lov_io_mirror_init(struct lov_io *lio, struct lov_object *obj,
+ 		CDEBUG(D_LAYOUT, "designated I/O mirror state: %d\n",
+ 		      lov_flr_state(obj));
+ 
+-		if ((cl_io_is_trunc(io) || io->ci_type == CIT_WRITE) &&
++		if ((cl_io_is_trunc(io) || io->ci_type == CIT_WRITE ||
++		     cl_io_is_fallocate(io)) &&
+ 		    (io->ci_layout_version != obj->lo_lsm->lsm_layout_gen)) {
+ 			/* For resync I/O, the ci_layout_version was the layout
+ 			 * version when resync starts. If it doesn't match the
+-- 
+1.8.3.1
+
+
+From jsimmons at infradead.org  Mon Oct 11 10:40:33 2021
+From: jsimmons at infradead.org (James Simmons)
+Date: Mon, 11 Oct 2021 13:40:33 -0400
+Subject: [lustre-devel] [PATCH 04/20] lustre: llite: move env contexts to
+ ll_inode_info level
+In-Reply-To: <1633974049-26490-1-git-send-email-jsimmons@infradead.org>
+References: <1633974049-26490-1-git-send-email-jsimmons@infradead.org>
+Message-ID: <1633974049-26490-5-git-send-email-jsimmons@infradead.org>
+
+From: Sebastien Buisson <sbuisson at ddn.com>
+
+Contrary to file, inode is always available, so move the list of
+env contexts from the file data to the ll_inode_info level.
+This is needed because we will have to handle env properties in
+ll_get_context() and ll_xattr_list()/ll_listxattr().
+This also requires changing lli_lock from a spinlock to an rwlock.
+
+WC-bug-id: https://jira.whamcloud.com/browse/LU-14677
+Lustre-commit: 4756af02e1297d145 ("LU-14677 llite: move env contexts to ll_inode_info level")
+WC-bug-id: https://jira.whamcloud.com/browse/LU-15027
+Lustre-commit: 3fb7b6271855c0b12 ("LU-15027 sec: initialize ll_inode_info for fake inode")
+Signed-off-by: Sebastien Buisson <sbuisson at ddn.com>
+Reviewed-on: https://review.whamcloud.com/44198
+Reviewed-on: https://review.whamcloud.com/45023
+Reviewed-by: Andreas Dilger <adilger at whamcloud.com>
+Reviewed-by: Patrick Farrell <pfarrell at whamcloud.com>
+Reviewed-by: Oleg Drokin <green at whamcloud.com>
+Signed-off-by: James Simmons <jsimmons at infradead.org>
+---
+ fs/lustre/llite/acl.c            |  4 ++--
+ fs/lustre/llite/file.c           |  9 +++------
+ fs/lustre/llite/llite_internal.h | 18 ++++++++----------
+ fs/lustre/llite/llite_lib.c      |  4 +++-
+ fs/lustre/llite/llite_mmap.c     | 17 +++++++----------
+ fs/lustre/llite/namei.c          |  1 +
+ fs/lustre/llite/rw.c             | 36 ++++++++++++++++++------------------
+ fs/lustre/llite/rw26.c           |  5 +++--
+ fs/lustre/llite/xattr.c          |  4 ++--
+ 9 files changed, 47 insertions(+), 51 deletions(-)
+
+diff --git a/fs/lustre/llite/acl.c b/fs/lustre/llite/acl.c
+index f4cc149..bd045cc 100644
+--- a/fs/lustre/llite/acl.c
++++ b/fs/lustre/llite/acl.c
+@@ -41,10 +41,10 @@ struct posix_acl *ll_get_acl(struct inode *inode, int type)
+ 	struct ll_inode_info *lli = ll_i2info(inode);
+ 	struct posix_acl *acl = NULL;
+ 
+-	spin_lock(&lli->lli_lock);
++	read_lock(&lli->lli_lock);
+ 	/* VFS' acl_permission_check->check_acl will release the refcount */
+ 	acl = posix_acl_dup(lli->lli_posix_acl);
+-	spin_unlock(&lli->lli_lock);
++	read_unlock(&lli->lli_lock);
+ 
+ 	return acl;
+ }
+diff --git a/fs/lustre/llite/file.c b/fs/lustre/llite/file.c
+index 9dd5c8c..ad1c07e 100644
+--- a/fs/lustre/llite/file.c
++++ b/fs/lustre/llite/file.c
+@@ -751,10 +751,6 @@ static int ll_local_open(struct file *file, struct lookup_intent *it,
+ 	/* turn off the kernel's read-ahead */
+ 	file->f_ra.ra_pages = 0;
+ 
+-	/* ll_cl_context initialize */
+-	rwlock_init(&fd->fd_lock);
+-	INIT_LIST_HEAD(&fd->fd_lccs);
+-
+ 	return 0;
+ }
+ 
+@@ -1718,9 +1714,10 @@ static void ll_heat_add(struct inode *inode, enum cl_io_type iot,
+ 
+ 			range_locked = true;
+ 		}
+-		ll_cl_add(file, env, io, LCC_RW);
++		ll_cl_add(inode, env, io, LCC_RW);
+ 		rc = cl_io_loop(env, io);
+-		ll_cl_remove(file, env);
++		ll_cl_remove(inode, env);
++
+ 		if (range_locked && !is_parallel_dio) {
+ 			CDEBUG(D_VFSTRACE, "Range unlock [%llu, %llu]\n",
+ 			       range.rl_start,
+diff --git a/fs/lustre/llite/llite_internal.h b/fs/lustre/llite/llite_internal.h
+index 25bd460..cfeec14 100644
+--- a/fs/lustre/llite/llite_internal.h
++++ b/fs/lustre/llite/llite_internal.h
+@@ -123,8 +123,7 @@ struct ll_trunc_sem {
+ 
+ struct ll_inode_info {
+ 	u32				lli_inode_magic;
+-
+-	spinlock_t			lli_lock;
++	rwlock_t			lli_lock;
+ 	unsigned long			lli_flags;
+ 	struct posix_acl		*lli_posix_acl;
+ 
+@@ -280,7 +279,8 @@ struct ll_inode_info {
+ 
+ 	struct rw_semaphore		lli_xattrs_list_rwsem;
+ 	struct mutex			lli_xattrs_enq_lock;
+-	struct list_head		lli_xattrs;/* ll_xattr_entry->xe_list */
++	struct list_head		lli_xattrs; /* ll_xattr_entry->xe_list */
++	struct list_head		lli_lccs; /* list of ll_cl_context */
+ };
+ 
+ static inline void ll_trunc_sem_init(struct ll_trunc_sem *sem)
+@@ -376,11 +376,11 @@ static inline void lli_clear_acl(struct ll_inode_info *lli)
+ static inline void lli_replace_acl(struct ll_inode_info *lli,
+ 				   struct lustre_md *md)
+ {
+-	spin_lock(&lli->lli_lock);
++	write_lock(&lli->lli_lock);
+ 	if (lli->lli_posix_acl)
+ 		posix_acl_release(lli->lli_posix_acl);
+ 	lli->lli_posix_acl = md->posix_acl;
+-	spin_unlock(&lli->lli_lock);
++	write_unlock(&lli->lli_lock);
+ }
+ #else
+ static inline void lli_clear_acl(struct ll_inode_info *lli)
+@@ -941,8 +941,6 @@ struct ll_file_data {
+ 	 */
+ 	bool fd_write_failed;
+ 	bool ll_lock_no_expand;
+-	rwlock_t fd_lock; /* protect lcc list */
+-	struct list_head fd_lccs; /* list of ll_cl_context */
+ 	/* Used by mirrored file to lead IOs to a specific mirror, usually
+ 	 * for mirror resync. 0 means default.
+ 	 */
+@@ -1107,10 +1105,10 @@ int ll_io_read_page(const struct lu_env *env, struct cl_io *io,
+ int vvp_io_write_commit(const struct lu_env *env, struct cl_io *io);
+ 
+ enum lcc_type;
+-void ll_cl_add(struct file *file, const struct lu_env *env, struct cl_io *io,
++void ll_cl_add(struct inode *inode, const struct lu_env *env, struct cl_io *io,
+ 	       enum lcc_type type);
+-void ll_cl_remove(struct file *file, const struct lu_env *env);
+-struct ll_cl_context *ll_cl_find(struct file *file);
++void ll_cl_remove(struct inode *inode, const struct lu_env *env);
++struct ll_cl_context *ll_cl_find(struct inode *inode);
+ 
+ static inline void mapping_clear_exiting(struct address_space *mapping)
+ {
+diff --git a/fs/lustre/llite/llite_lib.c b/fs/lustre/llite/llite_lib.c
+index 7a822b8..9ff881c 100644
+--- a/fs/lustre/llite/llite_lib.c
++++ b/fs/lustre/llite/llite_lib.c
+@@ -1080,7 +1080,7 @@ void ll_lli_init(struct ll_inode_info *lli)
+ {
+ 	lli->lli_inode_magic = LLI_INODE_MAGIC;
+ 	lli->lli_flags = 0;
+-	spin_lock_init(&lli->lli_lock);
++	rwlock_init(&lli->lli_lock);
+ 	lli->lli_posix_acl = NULL;
+ 	/* Do not set lli_fid, it has been initialized already. */
+ 	fid_zero(&lli->lli_pfid);
+@@ -1132,6 +1132,8 @@ void ll_lli_init(struct ll_inode_info *lli)
+ 	}
+ 	mutex_init(&lli->lli_layout_mutex);
+ 	memset(lli->lli_jobid, 0, sizeof(lli->lli_jobid));
++	/* ll_cl_context initialize */
++	INIT_LIST_HEAD(&lli->lli_lccs);
+ }
+ 
+ int ll_fill_super(struct super_block *sb)
+diff --git a/fs/lustre/llite/llite_mmap.c b/fs/lustre/llite/llite_mmap.c
+index 8238a4e..8047786 100644
+--- a/fs/lustre/llite/llite_mmap.c
++++ b/fs/lustre/llite/llite_mmap.c
+@@ -270,6 +270,7 @@ static inline vm_fault_t to_fault_error(int result)
+  */
+ static vm_fault_t __ll_fault(struct vm_area_struct *vma, struct vm_fault *vmf)
+ {
++	struct inode *inode = file_inode(vma->vm_file);
+ 	struct lu_env *env;
+ 	struct cl_io *io;
+ 	struct vvp_io *vio = NULL;
+@@ -282,15 +283,15 @@ static vm_fault_t __ll_fault(struct vm_area_struct *vma, struct vm_fault *vmf)
+ 	if (IS_ERR(env))
+ 		return VM_FAULT_ERROR;
+ 
+-	if (ll_sbi_has_fast_read(ll_i2sbi(file_inode(vma->vm_file)))) {
++	if (ll_sbi_has_fast_read(ll_i2sbi(inode))) {
+ 		/* do fast fault */
+ 		bool has_retry = vmf->flags & FAULT_FLAG_RETRY_NOWAIT;
+ 
+ 		/* To avoid loops, instruct downstream to not drop mmap_sem */
+ 		vmf->flags |= FAULT_FLAG_RETRY_NOWAIT;
+-		ll_cl_add(vma->vm_file, env, NULL, LCC_MMAP);
++		ll_cl_add(inode, env, NULL, LCC_MMAP);
+ 		fault_ret = filemap_fault(vmf);
+-		ll_cl_remove(vma->vm_file, env);
++		ll_cl_remove(inode, env);
+ 		if (has_retry)
+ 			vmf->flags &= ~FAULT_FLAG_RETRY_NOWAIT;
+ 
+@@ -318,8 +319,6 @@ static vm_fault_t __ll_fault(struct vm_area_struct *vma, struct vm_fault *vmf)
+ 
+ 	result = io->ci_result;
+ 	if (result == 0) {
+-		struct file *vm_file = vma->vm_file;
+-
+ 		vio = vvp_env_io(env);
+ 		vio->u.fault.ft_vma = vma;
+ 		vio->u.fault.ft_vmpage = NULL;
+@@ -327,15 +326,13 @@ static vm_fault_t __ll_fault(struct vm_area_struct *vma, struct vm_fault *vmf)
+ 		vio->u.fault.ft_flags = 0;
+ 		vio->u.fault.ft_flags_valid = false;
+ 
+-		get_file(vm_file);
+-
+ 		/* May call ll_readpage() */
+-		ll_cl_add(vm_file, env, io, LCC_MMAP);
++		ll_cl_add(inode, env, io, LCC_MMAP);
+ 
+ 		result = cl_io_loop(env, io);
+ 
+-		ll_cl_remove(vm_file, env);
+-		fput(vm_file);
++		ll_cl_remove(inode, env);
++
+ 		/* ft_flags are only valid if we reached
+ 		 * the call to filemap_fault
+ 		 */
+diff --git a/fs/lustre/llite/namei.c b/fs/lustre/llite/namei.c
+index 1812c09..781bb16 100644
+--- a/fs/lustre/llite/namei.c
++++ b/fs/lustre/llite/namei.c
+@@ -1604,6 +1604,7 @@ static int ll_new_node(struct inode *dir, struct dentry *dchild,
+ 			}
+ 			fakeinode->i_sb = dchild->d_sb;
+ 			fakeinode->i_mode |= S_IFLNK;
++			ll_lli_init(ll_i2info(fakeinode));
+ 			err = ll_set_encflags(fakeinode,
+ 					      op_data->op_file_encctx,
+ 					      op_data->op_file_encctx_size,
+diff --git a/fs/lustre/llite/rw.c b/fs/lustre/llite/rw.c
+index 48984aa..c9f29ef 100644
+--- a/fs/lustre/llite/rw.c
++++ b/fs/lustre/llite/rw.c
+@@ -1567,28 +1567,28 @@ int ll_writepages(struct address_space *mapping, struct writeback_control *wbc)
+ 	return result;
+ }
+ 
+-struct ll_cl_context *ll_cl_find(struct file *file)
++struct ll_cl_context *ll_cl_find(struct inode *inode)
+ {
+-	struct ll_file_data *fd = file->private_data;
++	struct ll_inode_info *lli = ll_i2info(inode);
+ 	struct ll_cl_context *lcc;
+ 	struct ll_cl_context *found = NULL;
+ 
+-	read_lock(&fd->fd_lock);
+-	list_for_each_entry(lcc, &fd->fd_lccs, lcc_list) {
++	read_lock(&lli->lli_lock);
++	list_for_each_entry(lcc, &lli->lli_lccs, lcc_list) {
+ 		if (lcc->lcc_cookie == current) {
+ 			found = lcc;
+ 			break;
+ 		}
+ 	}
+-	read_unlock(&fd->fd_lock);
++	read_unlock(&lli->lli_lock);
+ 
+ 	return found;
+ }
+ 
+-void ll_cl_add(struct file *file, const struct lu_env *env, struct cl_io *io,
++void ll_cl_add(struct inode *inode, const struct lu_env *env, struct cl_io *io,
+ 	       enum lcc_type type)
+ {
+-	struct ll_file_data *fd = file->private_data;
++	struct ll_inode_info *lli = ll_i2info(inode);
+ 	struct ll_cl_context *lcc = &ll_env_info(env)->lti_io_ctx;
+ 
+ 	memset(lcc, 0, sizeof(*lcc));
+@@ -1598,19 +1598,19 @@ void ll_cl_add(struct file *file, const struct lu_env *env, struct cl_io *io,
+ 	lcc->lcc_io = io;
+ 	lcc->lcc_type = type;
+ 
+-	write_lock(&fd->fd_lock);
+-	list_add(&lcc->lcc_list, &fd->fd_lccs);
+-	write_unlock(&fd->fd_lock);
++	write_lock(&lli->lli_lock);
++	list_add(&lcc->lcc_list, &lli->lli_lccs);
++	write_unlock(&lli->lli_lock);
+ }
+ 
+-void ll_cl_remove(struct file *file, const struct lu_env *env)
++void ll_cl_remove(struct inode *inode, const struct lu_env *env)
+ {
+-	struct ll_file_data *fd = file->private_data;
++	struct ll_inode_info *lli = ll_i2info(inode);
+ 	struct ll_cl_context *lcc = &ll_env_info(env)->lti_io_ctx;
+ 
+-	write_lock(&fd->fd_lock);
++	write_lock(&lli->lli_lock);
+ 	list_del_init(&lcc->lcc_list);
+-	write_unlock(&fd->fd_lock);
++	write_unlock(&lli->lli_lock);
+ }
+ 
+ int ll_io_read_page(const struct lu_env *env, struct cl_io *io,
+@@ -1815,15 +1815,16 @@ static bool ll_use_fast_io(struct file *file,
+ 
+ int ll_readpage(struct file *file, struct page *vmpage)
+ {
+-	struct cl_object *clob = ll_i2info(file_inode(file))->lli_clob;
++	struct inode *inode = file_inode(file);
++	struct cl_object *clob = ll_i2info(inode)->lli_clob;
+ 	struct ll_cl_context *lcc;
+ 	const struct lu_env *env = NULL;
+ 	struct cl_io *io = NULL;
+ 	struct cl_page *page;
+-	struct ll_sb_info *sbi = ll_i2sbi(file_inode(file));
++	struct ll_sb_info *sbi = ll_i2sbi(inode);
+ 	int result;
+ 
+-	lcc = ll_cl_find(file);
++	lcc = ll_cl_find(inode);
+ 	if (lcc) {
+ 		env = lcc->lcc_env;
+ 		io = lcc->lcc_io;
+@@ -1833,7 +1834,6 @@ int ll_readpage(struct file *file, struct page *vmpage)
+ 		struct ll_file_data *fd = file->private_data;
+ 		struct ll_readahead_state *ras = &fd->fd_ras;
+ 		struct lu_env *local_env = NULL;
+-		struct inode *inode = file_inode(file);
+ 		struct vvp_page *vpg;
+ 
+ 		result = -ENODATA;
+diff --git a/fs/lustre/llite/rw26.c b/fs/lustre/llite/rw26.c
+index e5d80cb..0a271b9 100644
+--- a/fs/lustre/llite/rw26.c
++++ b/fs/lustre/llite/rw26.c
+@@ -355,7 +355,7 @@ static ssize_t ll_direct_IO(struct kiocb *iocb, struct iov_iter *iter)
+ 	if (ll_iov_iter_alignment(iter) & ~PAGE_MASK)
+ 		return -EINVAL;
+ 
+-	lcc = ll_cl_find(file);
++	lcc = ll_cl_find(inode);
+ 	if (!lcc)
+ 		return -EIO;
+ 
+@@ -518,6 +518,7 @@ static int ll_write_begin(struct file *file, struct address_space *mapping,
+ 	const struct lu_env *env = NULL;
+ 	struct cl_io *io = NULL;
+ 	struct cl_page *page = NULL;
++	struct inode *inode = file_inode(file);
+ 	struct cl_object *clob = ll_i2info(mapping->host)->lli_clob;
+ 	pgoff_t index = pos >> PAGE_SHIFT;
+ 	struct page *vmpage = NULL;
+@@ -527,7 +528,7 @@ static int ll_write_begin(struct file *file, struct address_space *mapping,
+ 
+ 	CDEBUG(D_VFSTRACE, "Writing %lu of %d to %d bytes\n", index, from, len);
+ 
+-	lcc = ll_cl_find(file);
++	lcc = ll_cl_find(inode);
+ 	if (!lcc) {
+ 		vmpage = grab_cache_page_nowait(mapping, index);
+ 		result = ll_tiny_write_begin(vmpage, mapping);
+diff --git a/fs/lustre/llite/xattr.c b/fs/lustre/llite/xattr.c
+index cd973eb..001c828 100644
+--- a/fs/lustre/llite/xattr.c
++++ b/fs/lustre/llite/xattr.c
+@@ -453,9 +453,9 @@ static int ll_xattr_get_common(const struct xattr_handler *handler,
+ 		struct ll_inode_info *lli = ll_i2info(inode);
+ 		struct posix_acl *acl;
+ 
+-		spin_lock(&lli->lli_lock);
++		read_lock(&lli->lli_lock);
+ 		acl = posix_acl_dup(lli->lli_posix_acl);
+-		spin_unlock(&lli->lli_lock);
++		read_unlock(&lli->lli_lock);
+ 
+ 		if (!acl)
+ 			return -ENODATA;
+-- 
+1.8.3.1
+
+
+From jsimmons at infradead.org  Mon Oct 11 10:40:40 2021
+From: jsimmons at infradead.org (James Simmons)
+Date: Mon, 11 Oct 2021 13:40:40 -0400
+Subject: [lustre-devel] [PATCH 11/20] lustre: ptlrpc: handle reply and
+ resend reorder
+In-Reply-To: <1633974049-26490-1-git-send-email-jsimmons@infradead.org>
+References: <1633974049-26490-1-git-send-email-jsimmons@infradead.org>
+Message-ID: <1633974049-26490-12-git-send-email-jsimmons@infradead.org>
+
+From: Alexander Boyko <alexander.boyko at hpe.com>
+
+ptlrpc can't detect a bulk transfer timeout
+if rpc and bulk are reordered on router.
+We should fail a bulk for situations where bulk is not
+completed (after bulk timeout LNET_EVENT_UNLINK is set).
+
+HPE-bug-id: LUS-7445, LUS-7569
+WC-bug-id: https://jira.whamcloud.com/browse/LU-12567
+Lustre-commit: f7f31f8f969f410cc ("LU-12567 ptlrpc: handle reply and resend reorder")
+Signed-off-by: Alexander Boyko <alexander.boyko at hpe.com>
+Signed-off-by: Alexey Lyashkov <alexey.lyashkov at hpe.com>
+Reviewed-on: https://review.whamcloud.com/35571
+Reviewed-by: Andreas Dilger <adilger at whamcloud.com>
+Reviewed-by: Oleg Drokin <green at whamcloud.com>
+Signed-off-by: James Simmons <jsimmons at infradead.org>
+---
+ fs/lustre/ptlrpc/client.c | 5 ++++-
+ fs/lustre/ptlrpc/events.c | 3 +--
+ 2 files changed, 5 insertions(+), 3 deletions(-)
+
+diff --git a/fs/lustre/ptlrpc/client.c b/fs/lustre/ptlrpc/client.c
+index 83d269c..e800000 100644
+--- a/fs/lustre/ptlrpc/client.c
++++ b/fs/lustre/ptlrpc/client.c
+@@ -2075,7 +2075,10 @@ int ptlrpc_check_set(const struct lu_env *env, struct ptlrpc_request_set *set)
+ 			 * was good after getting the REPLY for her GET or
+ 			 * the ACK for her PUT.
+ 			 */
+-			DEBUG_REQ(D_ERROR, req, "bulk transfer failed");
++			DEBUG_REQ(D_ERROR, req, "bulk transfer failed %d/%d/%d",
++				  req->rq_status,
++				  req->rq_bulk->bd_nob,
++				  req->rq_bulk->bd_nob_transferred);
+ 			req->rq_status = -EIO;
+ 		}
+ 
+diff --git a/fs/lustre/ptlrpc/events.c b/fs/lustre/ptlrpc/events.c
+index c81181d..559d811 100644
+--- a/fs/lustre/ptlrpc/events.c
++++ b/fs/lustre/ptlrpc/events.c
+@@ -219,10 +219,9 @@ void client_bulk_callback(struct lnet_event *ev)
+ 		spin_lock(&req->rq_lock);
+ 		req->rq_net_err = 1;
+ 		spin_unlock(&req->rq_lock);
++		desc->bd_failure = 1;
+ 	}
+ 
+-	if (ev->status != 0)
+-		desc->bd_failure = 1;
+ 
+ 	/* NB don't unlock till after wakeup; desc can disappear under us
+ 	 * otherwise
+-- 
+1.8.3.1
+
+
+From jsimmons at infradead.org  Mon Oct 11 10:40:44 2021
+From: jsimmons at infradead.org (James Simmons)
+Date: Mon, 11 Oct 2021 13:40:44 -0400
+Subject: [lustre-devel] [PATCH 15/20] lustre: osc: use original cli for
+ osc_lru_reclaim for debug msg
+In-Reply-To: <1633974049-26490-1-git-send-email-jsimmons@infradead.org>
+References: <1633974049-26490-1-git-send-email-jsimmons@infradead.org>
+Message-ID: <1633974049-26490-16-git-send-email-jsimmons@infradead.org>
+
+Before the list cleanup introduced in osc_lru_reclaim() the
+variable cli was both passed in and used to scan the
+cl_client_cache. After the scan was done then we use cli in
+a debug message. It appears to be the original intent was to
+use the original cli passed in for the debug message, not the
+last scanned item. After the list cleanup patch landed now
+cli can be NULL which can crash the node. The fix is to use
+a separate struct client_obd variable for the scan and use
+the original cli passed in for the debug message.
+
+Fixes: ce96138f3692 ("lustre: use list_first_entry() in lustre subdirectory.")
+WC-bug-id: https://jira.whamcloud.com/browse/LU-15013
+Lustre-commit: 3c6a1e94c652685fac7c ("LU-15013 osc: use original cli for osc_lru_reclaim for debug msg")
+Signed-off-by: James Simmons <jsimmons at infradead.org>
+Reviewed-on: https://review.whamcloud.com/44966
+Reviewed-by: Arshad Hussain <arshad.hussain at aeoncomputing.com>
+Reviewed-by: Neil Brown <neilb at suse.de>
+Reviewed-by: Oleg Drokin <green at whamcloud.com>
+---
+ fs/lustre/osc/osc_page.c | 19 ++++++++++---------
+ 1 file changed, 10 insertions(+), 9 deletions(-)
+
+diff --git a/fs/lustre/osc/osc_page.c b/fs/lustre/osc/osc_page.c
+index d471df2..cba5d02 100644
+--- a/fs/lustre/osc/osc_page.c
++++ b/fs/lustre/osc/osc_page.c
+@@ -696,6 +696,7 @@ static long osc_lru_reclaim(struct client_obd *cli, unsigned long npages)
+ {
+ 	struct lu_env *env;
+ 	struct cl_client_cache *cache = cli->cl_cache;
++	struct client_obd *scan;
+ 	int max_scans;
+ 	u16 refcheck;
+ 	long rc = 0;
+@@ -735,20 +736,20 @@ static long osc_lru_reclaim(struct client_obd *cli, unsigned long npages)
+ 
+ 	max_scans = refcount_read(&cache->ccc_users) - 2;
+ 	while (--max_scans > 0 &&
+-	       (cli = list_first_entry_or_null(&cache->ccc_lru,
+-					       struct client_obd,
+-					       cl_lru_osc)) != NULL) {
++	       (scan = list_first_entry_or_null(&cache->ccc_lru,
++						struct client_obd,
++						cl_lru_osc)) != NULL) {
+ 
+ 		CDEBUG(D_CACHE, "%s: cli %p LRU pages: %ld, busy: %ld.\n",
+-		       cli_name(cli), cli,
+-		       atomic_long_read(&cli->cl_lru_in_list),
+-		       atomic_long_read(&cli->cl_lru_busy));
++		       cli_name(scan), scan,
++		       atomic_long_read(&scan->cl_lru_in_list),
++		       atomic_long_read(&scan->cl_lru_busy));
+ 
+-		list_move_tail(&cli->cl_lru_osc, &cache->ccc_lru);
+-		if (osc_cache_too_much(cli) > 0) {
++		list_move_tail(&scan->cl_lru_osc, &cache->ccc_lru);
++		if (osc_cache_too_much(scan) > 0) {
+ 			spin_unlock(&cache->ccc_lru_lock);
+ 
+-			rc = osc_lru_shrink(env, cli, npages, true);
++			rc = osc_lru_shrink(env, scan, npages, true);
+ 			spin_lock(&cache->ccc_lru_lock);
+ 			if (rc >= npages)
+ 				break;
+-- 
+1.8.3.1
+
+
+From jsimmons at infradead.org  Mon Oct 11 10:40:35 2021
+From: jsimmons at infradead.org (James Simmons)
+Date: Mon, 11 Oct 2021 13:40:35 -0400
+Subject: [lustre-devel] [PATCH 06/20] lustre: brw: log T10 GRD tags during
+ checksum calcs
+In-Reply-To: <1633974049-26490-1-git-send-email-jsimmons@infradead.org>
+References: <1633974049-26490-1-git-send-email-jsimmons@infradead.org>
+Message-ID: <1633974049-26490-7-git-send-email-jsimmons@infradead.org>
+
+From: Andreas Dilger <adilger at whamcloud.com>
+
+Log the T10 guard tags during checksum calculation on the client and
+target to help identify where checksum errors are being introduced.
+The added debugging is only active on RPC resend, so will not add
+overhead during the normal IO path.
+
+WC-bug-id: https://jira.whamcloud.com/browse/LU-14895
+Lustre-commit: c628b1b441d0ee191 ("LU-14895 brw: log T10 GRD tags during checksum calcs")
+Signed-off-by: Andreas Dilger <adilger at whamcloud.com>
+Reviewed-on: https://review.whamcloud.com/44655
+Reviewed-by: Li Dongyang <dongyangli at ddn.com>
+Reviewed-by: Alex Zhuravlev <bzzz at whamcloud.com>
+Reviewed-by: Li Xi <lixi at ddn.com>
+Reviewed-by: Oleg Drokin <green at whamcloud.com>
+Signed-off-by: James Simmons <jsimmons at infradead.org>
+---
+ fs/lustre/osc/osc_request.c | 83 ++++++++++++++++++++++++++-------------------
+ 1 file changed, 49 insertions(+), 34 deletions(-)
+
+diff --git a/fs/lustre/osc/osc_request.c b/fs/lustre/osc/osc_request.c
+index db73fce..def2ee7 100644
+--- a/fs/lustre/osc/osc_request.c
++++ b/fs/lustre/osc/osc_request.c
+@@ -1186,7 +1186,7 @@ static int osc_checksum_bulk_t10pi(const char *obd_name, int nob,
+ 				   size_t pg_count, struct brw_page **pga,
+ 				   int opc, obd_dif_csum_fn *fn,
+ 				   int sector_size,
+-				   u32 *check_sum)
++				   u32 *check_sum, bool resend)
+ {
+ 	struct ahash_request *hdesc;
+ 	/* Used Adler as the default checksum type on top of DIF tags */
+@@ -1219,6 +1219,10 @@ static int osc_checksum_bulk_t10pi(const char *obd_name, int nob,
+ 	buffer = kmap(__page);
+ 	guard_start = (u16 *)buffer;
+ 	guard_number = PAGE_SIZE / sizeof(*guard_start);
++	CDEBUG(D_PAGE | (resend ? D_HA : 0),
++	       "GRD tags per page=%u, resend=%u, bytes=%u, pages=%zu\n",
++	       guard_number, resend, nob, pg_count);
++
+ 	while (nob > 0 && pg_count > 0) {
+ 		unsigned int count = pga[i]->count > nob ? nob : pga[i]->count;
+ 
+@@ -1245,6 +1249,12 @@ static int osc_checksum_bulk_t10pi(const char *obd_name, int nob,
+ 						  guard_number - used_number,
+ 						  &used, sector_size,
+ 						  fn);
++		if (unlikely(resend))
++			CDEBUG(D_PAGE | D_HA,
++			       "pga[%u]: used %u off %llu+%u gen checksum: %*phN\n",
++			       i, used, pga[i]->off & ~PAGE_MASK, count,
++			       (int)(used * sizeof(*guard_start)),
++			       guard_start + used_number);
+ 		if (rc)
+ 			break;
+ 
+@@ -1346,7 +1356,7 @@ static int osc_checksum_bulk_rw(const char *obd_name,
+ 				enum cksum_types cksum_type,
+ 				int nob, size_t pg_count,
+ 				struct brw_page **pga, int opc,
+-				u32 *check_sum)
++				u32 *check_sum, bool resend)
+ {
+ 	obd_dif_csum_fn *fn = NULL;
+ 	int sector_size = 0;
+@@ -1356,7 +1366,8 @@ static int osc_checksum_bulk_rw(const char *obd_name,
+ 
+ 	if (fn)
+ 		rc = osc_checksum_bulk_t10pi(obd_name, nob, pg_count, pga,
+-					     opc, fn, sector_size, check_sum);
++					     opc, fn, sector_size, check_sum,
++					     resend);
+ 	else
+ 		rc = osc_checksum_bulk(nob, pg_count, pga, opc, cksum_type,
+ 				       check_sum);
+@@ -1727,14 +1738,15 @@ static int osc_brw_prep_request(int cmd, struct client_obd *cli,
+ 			rc = osc_checksum_bulk_rw(obd_name, cksum_type,
+ 						  requested_nob, page_count,
+ 						  pga, OST_WRITE,
+-						  &body->oa.o_cksum);
++						  &body->oa.o_cksum, resend);
+ 			if (rc < 0) {
+-				CDEBUG(D_PAGE, "failed to checksum, rc = %d\n",
++				CDEBUG(D_PAGE, "failed to checksum: rc = %d\n",
+ 				       rc);
+ 				goto out;
+ 			}
+-			CDEBUG(D_PAGE, "checksum at write origin: %x\n",
+-			       body->oa.o_cksum);
++			CDEBUG(D_PAGE | (resend ? D_HA : 0),
++			       "checksum at write origin: %x (%x)\n",
++			       body->oa.o_cksum, cksum_type);
+ 
+ 			/* save this in 'oa', too, for later checking */
+ 			oa->o_valid |= OBD_MD_FLCKSUM | OBD_MD_FLFLAGS;
+@@ -1814,6 +1826,7 @@ static void dump_all_bulk_pages(struct obdo *oa, u32 page_count,
+ 		 pga[0]->off,
+ 		 pga[page_count - 1]->off + pga[page_count - 1]->count - 1,
+ 		 client_cksum, server_cksum);
++	CWARN("dumping checksum data to %s\n", dbgcksum_file_name);
+ 	filp = filp_open(dbgcksum_file_name,
+ 			 O_CREAT | O_EXCL | O_WRONLY | O_LARGEFILE, 0600);
+ 	if (IS_ERR(filp)) {
+@@ -1840,8 +1853,6 @@ static void dump_all_bulk_pages(struct obdo *oa, u32 page_count,
+ 			}
+ 			len -= rc;
+ 			buf += rc;
+-			CDEBUG(D_INFO, "%s: wrote %d bytes\n",
+-			       dbgcksum_file_name, rc);
+ 		}
+ 		kunmap(pga[i]->pg);
+ 	}
+@@ -1850,6 +1861,8 @@ static void dump_all_bulk_pages(struct obdo *oa, u32 page_count,
+ 	if (rc)
+ 		CERROR("%s: sync returns %d\n", dbgcksum_file_name, rc);
+ 	filp_close(filp, NULL);
++
++	libcfs_debug_dumplog();
+ }
+ 
+ static int check_write_checksum(struct obdo *oa,
+@@ -1902,7 +1915,7 @@ static int check_write_checksum(struct obdo *oa,
+ 		rc = osc_checksum_bulk_t10pi(obd_name, aa->aa_requested_nob,
+ 					     aa->aa_page_count, aa->aa_ppga,
+ 					     OST_WRITE, fn, sector_size,
+-					     &new_cksum);
++					     &new_cksum, true);
+ 	else
+ 		rc = osc_checksum_bulk(aa->aa_requested_nob, aa->aa_page_count,
+ 				       aa->aa_ppga, OST_WRITE, cksum_type,
+@@ -2067,17 +2080,18 @@ static int osc_brw_fini_request(struct ptlrpc_request *req, int rc)
+ 	if (body->oa.o_valid & OBD_MD_FLCKSUM) {
+ 		static int cksum_counter;
+ 		u32 server_cksum = body->oa.o_cksum;
++		int nob = rc;
+ 		char *via = "";
+ 		char *router = "";
+ 		enum cksum_types cksum_type;
+ 		u32 o_flags = body->oa.o_valid & OBD_MD_FLFLAGS ?
+-			body->oa.o_flags : 0;
++			      body->oa.o_flags : 0;
+ 
+ 		cksum_type = obd_cksum_type_unpack(o_flags);
+ 
+-		rc = osc_checksum_bulk_rw(obd_name, cksum_type, rc,
++		rc = osc_checksum_bulk_rw(obd_name, cksum_type, nob,
+ 					  aa->aa_page_count, aa->aa_ppga,
+-					  OST_READ, &client_cksum);
++					  OST_READ, &client_cksum, false);
+ 		if (rc < 0)
+ 			goto out;
+ 
+@@ -2090,7 +2104,11 @@ static int osc_brw_fini_request(struct ptlrpc_request *req, int rc)
+ 		if (server_cksum != client_cksum) {
+ 			u32 page_count = aa->aa_page_count;
+ 			struct ost_body *clbody;
++			u32 client_cksum2;
+ 
++			osc_checksum_bulk_rw(obd_name, cksum_type, nob,
++					     page_count, aa->aa_ppga,
++					     OST_READ, &client_cksum2, true);
+ 			clbody = req_capsule_client_get(&req->rq_pill,
+ 							&RMF_OST_BODY);
+ 			if (cli->cl_checksum_dump)
+@@ -2098,26 +2116,23 @@ static int osc_brw_fini_request(struct ptlrpc_request *req, int rc)
+ 						    aa->aa_ppga, server_cksum,
+ 						    client_cksum);
+ 
+-			LCONSOLE_ERROR_MSG(
+-				0x133,
+-				"%s: BAD READ CHECKSUM: from %s%s%s inode " DFID
+-				" object " DOSTID
+-				" extent [%llu-%llu], client %x, server %x, cksum_type %x\n",
+-				obd_name,
+-				libcfs_nid2str(peer->nid),
+-				via, router,
+-				clbody->oa.o_valid & OBD_MD_FLFID ?
+-				clbody->oa.o_parent_seq : (u64)0,
+-				clbody->oa.o_valid & OBD_MD_FLFID ?
+-				clbody->oa.o_parent_oid : 0,
+-				clbody->oa.o_valid & OBD_MD_FLFID ?
+-				clbody->oa.o_parent_ver : 0,
+-				POSTID(&body->oa.o_oi),
+-				aa->aa_ppga[0]->off,
+-				aa->aa_ppga[page_count - 1]->off +
+-				aa->aa_ppga[page_count - 1]->count - 1,
+-				client_cksum, server_cksum,
+-				cksum_type);
++			LCONSOLE_ERROR_MSG(0x133,
++					   "%s: BAD READ CHECKSUM: from %s%s%s inode "DFID" object "DOSTID" extent [%llu-%llu], client %x/%x, server %x, cksum_type %x\n",
++					   obd_name,
++					   libcfs_nid2str(peer->nid),
++					   via, router,
++					   clbody->oa.o_valid & OBD_MD_FLFID ?
++					   clbody->oa.o_parent_seq : (u64)0,
++					   clbody->oa.o_valid & OBD_MD_FLFID ?
++					   clbody->oa.o_parent_oid : 0,
++					   clbody->oa.o_valid & OBD_MD_FLFID ?
++					   clbody->oa.o_parent_ver : 0,
++					   POSTID(&body->oa.o_oi),
++					   aa->aa_ppga[0]->off,
++					   aa->aa_ppga[page_count - 1]->off +
++					   aa->aa_ppga[page_count - 1]->count - 1,
++					   client_cksum, client_cksum2,
++					   server_cksum, cksum_type);
+ 			cksum_counter = 0;
+ 			aa->aa_oa->o_cksum = client_cksum;
+ 			rc = -EAGAIN;
+@@ -2356,7 +2371,7 @@ static int brw_interpret(const struct lu_env *env,
+ 			       req->rq_import->imp_obd->obd_name,
+ 			       POSTID(&aa->aa_oa->o_oi), rc);
+ 		} else if (rc == -EINPROGRESS ||
+-		    client_should_resend(aa->aa_resends, aa->aa_cli)) {
++			   client_should_resend(aa->aa_resends, aa->aa_cli)) {
+ 			rc = osc_brw_redo_request(req, aa, rc);
+ 		} else {
+ 			CERROR("%s: too many resent retries for object: %llu:%llu, rc = %d.\n",
+-- 
+1.8.3.1
+
+
+From jsimmons at infradead.org  Mon Oct 11 10:40:34 2021
+From: jsimmons at infradead.org (James Simmons)
+Date: Mon, 11 Oct 2021 13:40:34 -0400
+Subject: [lustre-devel] [PATCH 05/20] lustre: sec: do not expose security.c
+ to listxattr/getxattr
+In-Reply-To: <1633974049-26490-1-git-send-email-jsimmons@infradead.org>
+References: <1633974049-26490-1-git-send-email-jsimmons@infradead.org>
+Message-ID: <1633974049-26490-6-git-send-email-jsimmons@infradead.org>
+
+From: Sebastien Buisson <sbuisson at ddn.com>
+
+security.c xattr, which contains encryption context, should not be
+exposed by the xattr-related system calls such as listxattr() and
+getxattr() because of its special semantics.
+Update sanity-sec test_57 to test this.
+
+WC-bug-id: https://jira.whamcloud.com/browse/LU-14677
+Lustre-commit: efb66de719329ce4d ("LU-14677 sec: do not expose security.c to listxattr/getxattr")
+Signed-off-by: Sebastien Buisson <sbuisson at ddn.com>
+Reviewed-on: https://review.whamcloud.com/44101
+Reviewed-by: Andreas Dilger <adilger at whamcloud.com>
+Reviewed-by: Patrick Farrell <pfarrell at whamcloud.com>
+Reviewed-by: Oleg Drokin <green at whamcloud.com>
+Signed-off-by: James Simmons <jsimmons at infradead.org>
+---
+ fs/lustre/llite/crypto.c         | 16 ++++++++++++++++
+ fs/lustre/llite/llite_internal.h |  5 +++++
+ fs/lustre/llite/xattr.c          | 32 +++++++++++++++++++++++++++++++-
+ 3 files changed, 52 insertions(+), 1 deletion(-)
+
+diff --git a/fs/lustre/llite/crypto.c b/fs/lustre/llite/crypto.c
+index 5d99037..0fae9a5 100644
+--- a/fs/lustre/llite/crypto.c
++++ b/fs/lustre/llite/crypto.c
+@@ -32,10 +32,26 @@
+ static int ll_get_context(struct inode *inode, void *ctx, size_t len)
+ {
+ 	struct dentry *dentry = d_find_any_alias(inode);
++	struct lu_env *env;
++	u16 refcheck;
+ 	int rc;
+ 
++	env = cl_env_get(&refcheck);
++	if (IS_ERR(env))
++		return PTR_ERR(env);
++
++	/* Set lcc_getencctx=1 to allow this thread to read
++	 * LL_XATTR_NAME_ENCRYPTION_CONTEXT xattr, as requested by llcrypt.
++	 */
++	ll_cl_add(inode, env, NULL, LCC_RW);
++	ll_env_info(env)->lti_io_ctx.lcc_getencctx = 1;
++
+ 	rc = __vfs_getxattr(dentry, inode, LL_XATTR_NAME_ENCRYPTION_CONTEXT,
+ 			    ctx, len);
++
++	ll_cl_remove(inode, env);
++	cl_env_put(env, &refcheck);
++
+ 	if (dentry)
+ 		dput(dentry);
+ 
+diff --git a/fs/lustre/llite/llite_internal.h b/fs/lustre/llite/llite_internal.h
+index cfeec14..e0fda00 100644
+--- a/fs/lustre/llite/llite_internal.h
++++ b/fs/lustre/llite/llite_internal.h
+@@ -1312,6 +1312,11 @@ struct ll_cl_context {
+ 	struct cl_io   *lcc_io;
+ 	struct cl_page *lcc_page;
+ 	enum lcc_type		 lcc_type;
++	/**
++	 * Get encryption context operation in progress,
++	 * allow getxattr of LL_XATTR_NAME_ENCRYPTION_CONTEXT xattr
++	 */
++	unsigned int		 lcc_getencctx:1;
+ };
+ 
+ struct ll_thread_info {
+diff --git a/fs/lustre/llite/xattr.c b/fs/lustre/llite/xattr.c
+index 001c828..59a1400 100644
+--- a/fs/lustre/llite/xattr.c
++++ b/fs/lustre/llite/xattr.c
+@@ -366,6 +366,21 @@ int ll_xattr_list(struct inode *inode, const char *name, int type, void *buffer,
+ 	void *xdata;
+ 	int rc;
+ 
++	/* Getting LL_XATTR_NAME_ENCRYPTION_CONTEXT xattr is only allowed
++	 * when it comes from ll_get_context(), ie when llcrypt needs to
++	 * know the encryption context.
++	 * Otherwise, any direct reading of this xattr returns -EPERM.
++	 */
++	if (type == XATTR_SECURITY_T &&
++	    !strcmp(name, LL_XATTR_NAME_ENCRYPTION_CONTEXT)) {
++		struct ll_cl_context *lcc = ll_cl_find(inode);
++
++		if (!lcc || !lcc->lcc_getencctx) {
++			rc = -EPERM;
++			goto out_xattr;
++		}
++	}
++
+ 	if (sbi->ll_xattr_cache_enabled && type != XATTR_ACL_ACCESS_T &&
+ 	    (type != XATTR_SECURITY_T || strcmp(name, "security.selinux"))) {
+ 		rc = ll_xattr_cache_get(inode, name, buffer, size, valid);
+@@ -632,9 +647,24 @@ ssize_t ll_listxattr(struct dentry *dentry, char *buffer, size_t size)
+ 	rem = rc;
+ 
+ 	while (rem > 0) {
++		bool hide_xattr = false;
++
++		/* Listing xattrs should not expose
++		 * LL_XATTR_NAME_ENCRYPTION_CONTEXT xattr, unless it comes
++		 * from llcrypt.
++		 */
++		if (get_xattr_type(xattr_name)->flags == XATTR_SECURITY_T &&
++		    !strcmp(xattr_name, LL_XATTR_NAME_ENCRYPTION_CONTEXT)) {
++			struct ll_cl_context *lcc = ll_cl_find(inode);
++
++			if (!lcc || !lcc->lcc_getencctx)
++				hide_xattr = true;
++		}
++
+ 		len = strnlen(xattr_name, rem - 1) + 1;
+ 		rem -= len;
+-		if (!xattr_type_filter(sbi, get_xattr_type(xattr_name))) {
++		if (!xattr_type_filter(sbi, hide_xattr ? NULL :
++				       get_xattr_type(xattr_name))) {
+ 			/* Skip OK xattr type, leave it in buffer. */
+ 			xattr_name += len;
+ 			continue;
+-- 
+1.8.3.1
+
+
+From jsimmons at infradead.org  Mon Oct 11 10:40:41 2021
+From: jsimmons at infradead.org (James Simmons)
+Date: Mon, 11 Oct 2021 13:40:41 -0400
+Subject: [lustre-devel] [PATCH 12/20] lustre: ptlrpc: use wait_woken() in
+ ptlrpcd()
+In-Reply-To: <1633974049-26490-1-git-send-email-jsimmons@infradead.org>
+References: <1633974049-26490-1-git-send-email-jsimmons@infradead.org>
+Message-ID: <1633974049-26490-13-git-send-email-jsimmons@infradead.org>
+
+From: Mr NeilBrown <neilb at suse.de>
+
+Using wait_event() to wait for ptlrpcd_check() to succeed is
+problematic.  ptlrpcd_check() is complex and can wait for other
+events.  This nested waiting can behave differently to expectation and
+generates a warning
+
+do not call blocking ops when !TASK_RUNNING
+
+This happens because the task state is set to TASK_IDLE before
+ptlrpcd_check() is calls.
+
+A better approach (introduce for precisely this use-case) is to use
+wait_woken() and woken_wake_function().
+
+When a wake_up is requested on the waitq, woken_wake_function() sets a
+flag to record the wakeup.  wait_woken() will wait until this flag is
+set.  This way, the task state doesn't need to be set until after
+ptlrpcd_check() has completed.
+
+WC-bug-id: https://jira.whamcloud.com/browse/LU-12362
+Lustre-commit: 885b494632ca16d95 ("LU-12362 ptlrpc: use wait_woken() in ptlrpcd()")
+Signed-off-by: Mr NeilBrown <neilb at suse.de>
+Reviewed-on: https://review.whamcloud.com/45069
+Reviewed-by: James Simmons <jsimmons at infradead.org>
+Reviewed-by: Patrick Farrell <pfarrell at whamcloud.com>
+Reviewed-by: xinliang <xinliang.liu at linaro.org>
+Reviewed-by: Oleg Drokin <green at whamcloud.com>
+Signed-off-by: James Simmons <jsimmons at infradead.org>
+---
+ fs/lustre/ptlrpc/ptlrpcd.c | 23 ++++++++++++++++++-----
+ 1 file changed, 18 insertions(+), 5 deletions(-)
+
+diff --git a/fs/lustre/ptlrpc/ptlrpcd.c b/fs/lustre/ptlrpc/ptlrpcd.c
+index ed3f0e1..9cd9d39 100644
+--- a/fs/lustre/ptlrpc/ptlrpcd.c
++++ b/fs/lustre/ptlrpc/ptlrpcd.c
+@@ -435,18 +435,31 @@ static int ptlrpcd(void *arg)
+ 	 * new_req_list and ptlrpcd_check() moves them into the set.
+ 	 */
+ 	do {
++		DEFINE_WAIT_FUNC(wait, woken_wake_function);
+ 		time64_t timeout;
+ 
+ 		timeout = ptlrpc_set_next_timeout(set);
+ 
+ 		lu_context_enter(&env.le_ctx);
+ 		lu_context_enter(env.le_ses);
+-		/* If timeout==0, wait indefinitely */
+-		if (wait_event_idle_timeout(
+-			    set->set_waitq,
+-			    ptlrpcd_check(&env, pc),
+-			    timeout ? (timeout * HZ) : MAX_SCHEDULE_TIMEOUT) == 0)
++
++		add_wait_queue(&set->set_waitq, &wait);
++		while (!ptlrpcd_check(&env, pc)) {
++			int ret;
++
++			if (timeout == 0)
++				ret = wait_woken(&wait, TASK_IDLE,
++						 MAX_SCHEDULE_TIMEOUT);
++			else
++				ret = wait_woken(&wait, TASK_IDLE,
++						 HZ * timeout);
++			if (ret != 0)
++				continue;
++			/* Timed out */
+ 			ptlrpc_expired_set(set);
++			break;
++		}
++		remove_wait_queue(&set->set_waitq, &wait);
+ 
+ 		lu_context_exit(&env.le_ctx);
+ 		lu_context_exit(env.le_ses);
+-- 
+1.8.3.1
+
+
+From jsimmons at infradead.org  Mon Oct 11 10:40:42 2021
+From: jsimmons at infradead.org (James Simmons)
+Date: Mon, 11 Oct 2021 13:40:42 -0400
+Subject: [lustre-devel] [PATCH 13/20] lustre: quota: fix quota with root
+ squash enabled
+In-Reply-To: <1633974049-26490-1-git-send-email-jsimmons@infradead.org>
+References: <1633974049-26490-1-git-send-email-jsimmons@infradead.org>
+Message-ID: <1633974049-26490-14-git-send-email-jsimmons@infradead.org>
+
+From: Wang Shilong <wshilong at ddn.com>
+
+This patch tries to fix several problems:
+
+1. OSD will ignore quota if IO comes from client
+   cache or root, however since following change:
+
+   LU-12687 osc: consume grants for direct I/O
+
+   DIO now consumes grant too, following check for
+   sync IO is wrong now:
+
+   (lnb[i].lnb_flags & (OBD_BRW_FROM_GRANT | OBD_BRW_SYNC))
+           == OBD_BRW_FROM_GRANT)
+
+   This was originally added to support 1.8 client, it is
+   going to be 2.15 now, so let's remove this broken check.
+
+2. Server side will clear OBD_BRW_NOQUOTA if root squash
+   is enabled, this will revert fixes from:
+
+   "LU-13228 clio: mmap write when overquota"
+
+   We need to separate @ci_noquota and @oi_cap_sys_resource cases,
+   introduce a new flag OBD_BRW_SYS_RESOURCE, and extend test_75
+   to cover this case.
+
+3. LU-14739 missed case that DoM quota should be considered
+   as well.
+
+4. If EDQUOT is returned for root, we check the new root squash
+   flag OBD_FL_ROOT_SQUASH from server side. If this flag is not set,
+   we bypass quota for root, otherwise all root writes become sync
+   writes.
+
+5. Fix a leftover problem with LU-9671 for DOM
+
+Fixes: cd633cfc960b63 ("lustre: quota: nodemap squashed root cannot bypass quota")
+WC-bug-id: https://jira.whamcloud.com/browse/LU-14739
+Lustre-commit: bbfdc7c1670c9274 ("LU-14739 quota: fix quota with root squash enabled")
+Signed-off-by: Wang Shilong <wshilong at ddn.com>
+Signed-off-by: Wang Shilong <wangshilong1991 at gmail.com>
+Signed-off-by: Sebastien Buisson <sbuisson at ddn.com>
+Reviewed-on: https://review.whamcloud.com/44347
+Reviewed-by: Andreas Dilger <adilger at whamcloud.com>
+Reviewed-by: Oleg Drokin <green at whamcloud.com>
+Signed-off-by: James Simmons <jsimmons at infradead.org>
+---
+ fs/lustre/include/obd.h                |  2 ++
+ fs/lustre/osc/osc_cache.c              | 23 ++++++++++++++++++++---
+ fs/lustre/osc/osc_page.c               |  4 ++--
+ fs/lustre/osc/osc_quota.c              |  1 +
+ fs/lustre/osc/osc_request.c            |  4 +++-
+ fs/lustre/ptlrpc/wiretest.c            |  2 ++
+ include/uapi/linux/lustre/lustre_idl.h |  4 +++-
+ 7 files changed, 33 insertions(+), 7 deletions(-)
+
+diff --git a/fs/lustre/include/obd.h b/fs/lustre/include/obd.h
+index 7642973..b3ad511 100644
+--- a/fs/lustre/include/obd.h
++++ b/fs/lustre/include/obd.h
+@@ -233,6 +233,8 @@ struct client_obd {
+ 	struct list_head	cl_grant_chain;
+ 	time64_t		cl_grant_shrink_interval; /* seconds */
+ 
++	int			cl_root_squash; /* if root squash enabled*/
++
+ 	/* A chunk is an optimal size used by osc_extent to determine
+ 	 * the extent size. A chunk is max(PAGE_SIZE, OST block size)
+ 	 */
+diff --git a/fs/lustre/osc/osc_cache.c b/fs/lustre/osc/osc_cache.c
+index 69cf9ba..1211438 100644
+--- a/fs/lustre/osc/osc_cache.c
++++ b/fs/lustre/osc/osc_cache.c
+@@ -2374,11 +2374,16 @@ int osc_queue_async_io(const struct lu_env *env, struct cl_io *io,
+ 
+ 	/* Set the OBD_BRW_SRVLOCK before the page is queued. */
+ 	brw_flags |= ops->ops_srvlock ? OBD_BRW_SRVLOCK : 0;
+-	if (oio->oi_cap_sys_resource || io->ci_noquota) {
++	if (io->ci_noquota) {
+ 		brw_flags |= OBD_BRW_NOQUOTA;
+ 		cmd |= OBD_BRW_NOQUOTA;
+ 	}
+ 
++	if (oio->oi_cap_sys_resource) {
++		brw_flags |= OBD_BRW_SYS_RESOURCE;
++		cmd |= OBD_BRW_SYS_RESOURCE;
++	}
++
+ 	/* check if the file's owner/group is over quota */
+ 	if (!io->ci_noquota) {
+ 		struct cl_object *obj;
+@@ -2395,8 +2400,20 @@ int osc_queue_async_io(const struct lu_env *env, struct cl_io *io,
+ 		qid[USRQUOTA] = attr->cat_uid;
+ 		qid[GRPQUOTA] = attr->cat_gid;
+ 		qid[PRJQUOTA] = attr->cat_projid;
+-		if (rc == 0)
+-			rc = osc_quota_chkdq(cli, qid);
++		/*
++		 * if EDQUOT returned for root, we double check
++		 * if root squash enabled or not updated from server side.
++		 * without root squash, we should bypass quota for root.
++		 */
++		if (rc == 0 && osc_quota_chkdq(cli, qid) == -EDQUOT) {
++			if (oio->oi_cap_sys_resource &&
++			    !cli->cl_root_squash) {
++				io->ci_noquota = 1;
++				rc = 0;
++			} else {
++				rc = -EDQUOT;
++			}
++		}
+ 		if (rc)
+ 			return rc;
+ 	}
+diff --git a/fs/lustre/osc/osc_page.c b/fs/lustre/osc/osc_page.c
+index 8aa21ee..d471df2 100644
+--- a/fs/lustre/osc/osc_page.c
++++ b/fs/lustre/osc/osc_page.c
+@@ -314,8 +314,8 @@ void osc_page_submit(const struct lu_env *env, struct osc_page *opg,
+ 	oap->oap_brw_flags = OBD_BRW_SYNC | brw_flags;
+ 
+ 	if (oio->oi_cap_sys_resource) {
+-		oap->oap_brw_flags |= OBD_BRW_NOQUOTA;
+-		oap->oap_cmd |= OBD_BRW_NOQUOTA;
++		oap->oap_brw_flags |= OBD_BRW_SYS_RESOURCE;
++		oap->oap_cmd |= OBD_BRW_SYS_RESOURCE;
+ 	}
+ 
+ 	opg->ops_submit_time = submit_time;
+diff --git a/fs/lustre/osc/osc_quota.c b/fs/lustre/osc/osc_quota.c
+index 8ff803c..708ad3c 100644
+--- a/fs/lustre/osc/osc_quota.c
++++ b/fs/lustre/osc/osc_quota.c
+@@ -119,6 +119,7 @@ int osc_quota_setdq(struct client_obd *cli, u64 xid, const unsigned int qid[],
+ 		return 0;
+ 
+ 	mutex_lock(&cli->cl_quota_mutex);
++	cli->cl_root_squash = !!(flags & OBD_FL_ROOT_SQUASH);
+ 	/* still mark the quots is running out for the old request, because it
+ 	 * could be processed after the new request at OST, the side effect is
+ 	 * the following request will be processed synchronously, but it will
+diff --git a/fs/lustre/osc/osc_request.c b/fs/lustre/osc/osc_request.c
+index e5b7453..22b7e5e 100644
+--- a/fs/lustre/osc/osc_request.c
++++ b/fs/lustre/osc/osc_request.c
+@@ -1167,7 +1167,8 @@ static inline int can_merge_pages(struct brw_page *p1, struct brw_page *p2)
+ 	if (p1->flag != p2->flag) {
+ 		unsigned int mask = ~(OBD_BRW_FROM_GRANT | OBD_BRW_NOCACHE |
+ 				      OBD_BRW_SYNC | OBD_BRW_ASYNC |
+-				      OBD_BRW_NOQUOTA | OBD_BRW_SOFT_SYNC);
++				      OBD_BRW_NOQUOTA | OBD_BRW_SOFT_SYNC |
++				      OBD_BRW_SYS_RESOURCE);
+ 
+ 		/* warn if we try to combine flags that we don't know to be
+ 		 * safe to combine
+@@ -3548,6 +3549,7 @@ int osc_setup_common(struct obd_device *obd, struct lustre_cfg *lcfg)
+ 		goto out_ptlrpcd_work;
+ 
+ 	cli->cl_grant_shrink_interval = GRANT_SHRINK_INTERVAL;
++	cli->cl_root_squash = 0;
+ 	osc_update_next_shrink(cli);
+ 
+ 	return 0;
+diff --git a/fs/lustre/ptlrpc/wiretest.c b/fs/lustre/ptlrpc/wiretest.c
+index bf09341..a381af4 100644
+--- a/fs/lustre/ptlrpc/wiretest.c
++++ b/fs/lustre/ptlrpc/wiretest.c
+@@ -2058,6 +2058,8 @@ void lustre_assert_wire_constants(void)
+ 		 OBD_BRW_OVER_PRJQUOTA);
+ 	LASSERTF(OBD_BRW_RDMA_ONLY == 0x20000, "found 0x%.8x\n",
+ 		 OBD_BRW_RDMA_ONLY);
++	LASSERTF(OBD_BRW_SYS_RESOURCE == 0x40000, "found 0x%.8x\n",
++		 OBD_BRW_SYS_RESOURCE);
+ 
+ 	/* Checks for struct ost_body */
+ 	LASSERTF((int)sizeof(struct ost_body) == 208, "found %lld\n",
+diff --git a/include/uapi/linux/lustre/lustre_idl.h b/include/uapi/linux/lustre/lustre_idl.h
+index 7d92264..ec25140 100644
+--- a/include/uapi/linux/lustre/lustre_idl.h
++++ b/include/uapi/linux/lustre/lustre_idl.h
+@@ -977,6 +977,7 @@ enum obdo_flags {
+ 	OBD_FL_NOSPC_BLK	= 0x00100000, /* no more block space on OST */
+ 	OBD_FL_FLUSH		= 0x00200000, /* flush pages on the OST */
+ 	OBD_FL_SHORT_IO		= 0x00400000, /* short io request */
++	OBD_FL_ROOT_SQUASH	= 0x00800000, /* root squash */
+ 	/* OBD_FL_LOCAL_MASK = 0xF0000000, was local-only flags until 2.10 */
+ 
+ 	/*
+@@ -1249,7 +1250,7 @@ struct hsm_state_set {
+ #define OBD_BRW_FROM_GRANT	0x20 /* the osc manages this under llite */
+ #define OBD_BRW_GRANTED		0x40 /* the ost manages this */
+ #define OBD_BRW_NOCACHE		0x80 /* this page is a part of non-cached IO */
+-#define OBD_BRW_NOQUOTA	       0x100
++#define OBD_BRW_NOQUOTA	       0x100 /* do not enforce quota */
+ #define OBD_BRW_SRVLOCK	       0x200 /* Client holds no lock over this page */
+ #define OBD_BRW_ASYNC	       0x400 /* Server may delay commit to disk */
+ #define OBD_BRW_MEMALLOC       0x800 /* Client runs in the "kswapd" context */
+@@ -1262,6 +1263,7 @@ struct hsm_state_set {
+ 				      */
+ #define OBD_BRW_OVER_PRJQUOTA 0x8000 /* Running out of project quota */
+ #define OBD_BRW_RDMA_ONLY    0x20000 /* RPC contains RDMA-only pages*/
++#define OBD_BRW_SYS_RESOURCE 0x40000 /* page has CAP_SYS_RESOURCE */
+ 
+ #define OBD_MAX_GRANT 0x7fffffffUL /* Max grant allowed to one client: 2 GiB */
+ 
+-- 
+1.8.3.1
+
+
+From jsimmons at infradead.org  Mon Oct 11 10:40:47 2021
+From: jsimmons at infradead.org (James Simmons)
+Date: Mon, 11 Oct 2021 13:40:47 -0400
+Subject: [lustre-devel] [PATCH 18/20] lnet: Ensure round robin selection of
+ peer NIs
+In-Reply-To: <1633974049-26490-1-git-send-email-jsimmons@infradead.org>
+References: <1633974049-26490-1-git-send-email-jsimmons@infradead.org>
+Message-ID: <1633974049-26490-19-git-send-email-jsimmons@infradead.org>
+
+From: Chris Horn <chris.horn at hpe.com>
+
+Use the peer net sequence number to set the peer NI sequence number to
+ensure round robin selection of peer NIs on each peer net.
+
+HPE-bug-id: LUS-10349
+WC-bug-id: https://jira.whamcloud.com/browse/LU-13575
+Lustre-commit: c51763948abfdbdc8 ("LU-13575 lnet: Ensure round robin selection of peer NIs")
+Signed-off-by: Chris Horn <chris.horn at hpe.com>
+Reviewed-on: https://review.whamcloud.com/45004
+Reviewed-by: Serguei Smirnov <ssmirnov at whamcloud.com>
+Reviewed-by: Andreas Dilger <adilger at whamcloud.com>
+Reviewed-by: Oleg Drokin <green at whamcloud.com>
+Signed-off-by: James Simmons <jsimmons at infradead.org>
+---
+ net/lnet/lnet/lib-move.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/net/lnet/lnet/lib-move.c b/net/lnet/lnet/lib-move.c
+index 0f26001..2b38480 100644
+--- a/net/lnet/lnet/lib-move.c
++++ b/net/lnet/lnet/lib-move.c
+@@ -1650,8 +1650,8 @@ void lnet_usr_translate_stats(struct lnet_ioctl_element_msg_stats *msg_stats,
+ 	 * local ni and local net so that we pick the next ones
+ 	 * in Round Robin.
+ 	 */
+-	best_lpni->lpni_seq++;
+ 	best_lpni->lpni_peer_net->lpn_seq++;
++	best_lpni->lpni_seq = best_lpni->lpni_peer_net->lpn_seq;
+ 	best_ni->ni_net->net_seq++;
+ 	best_ni->ni_seq = best_ni->ni_net->net_seq;
+ 
+-- 
+1.8.3.1
+
+
+From jsimmons at infradead.org  Mon Oct 11 10:40:48 2021
+From: jsimmons at infradead.org (James Simmons)
+Date: Mon, 11 Oct 2021 13:40:48 -0400
+Subject: [lustre-devel] [PATCH 19/20] lustre: mdc: update max_easize on
+ reconnect
+In-Reply-To: <1633974049-26490-1-git-send-email-jsimmons@infradead.org>
+References: <1633974049-26490-1-git-send-email-jsimmons@infradead.org>
+Message-ID: <1633974049-26490-20-git-send-email-jsimmons@infradead.org>
+
+From: Sergey Cheremencev <sergey.cheremencev at hpe.com>
+
+If MDS was restarted to enable ea_inode, clients should get new
+max_easize value. However, cl_max_mds_easize is not updated. This may
+cause lfs getstripe to fail if file has huge stripe number
+(2000 for example):
+
+*** Error in `lfs': free(): invalid pointer: 0x0000000000de09d0 ***
+======= Backtrace: =========
+/lib64/libc.so.6(+0x81299)[0x7f0623c03299]
+/lib64/libc.so.6(closedir+0xd)[0x7f0623c42ddd]
+/lib/liblustreapi.so.1(+0xa557)[0x7f06248b5557]
+/lib/liblustreapi.so.1(+0xad74)[0x7f06248b5d74]
+lfs[0x4105b3]
+/lib/liblustreapi.so.1(Parser_execarg+0x51)[0x7f06248c88e1]
+lfs[0x40448e]
+/lib64/libc.so.6(__libc_start_main+0xf5)[0x7f0623ba4555]
+lfs[0x4044fc]
+
+HPE-bug-id: LUS-9478
+WC-bug-id: https://jira.whamcloud.com/browse/LU-15040
+Lustre-commit: 5f15be0edea5c2d31 ("LU-15040 mdc: update max_easize on reconnect")
+Reviewed-on: https://es-gerrit.dev.cray.com/158100
+Reviewed-by: Alexey Lyashkov <c17817 at cray.com>
+Reviewed-by: Nikitas Angelinas <nangelinas at cray.com>
+Tested-by: Elena Gryaznova <c17455 at cray.com>
+Signed-off-by: Sergey Cheremencev <sergey.cheremencev at hpe.com>
+Reviewed-on: https://review.whamcloud.com/45073
+Reviewed-by: Patrick Farrell <pfarrell at whamcloud.com>
+Reviewed-by: Andreas Dilger <adilger at whamcloud.com>
+Reviewed-by: Oleg Drokin <green at whamcloud.com>
+Signed-off-by: James Simmons <jsimmons at infradead.org>
+---
+ fs/lustre/mdc/mdc_request.c | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/fs/lustre/mdc/mdc_request.c b/fs/lustre/mdc/mdc_request.c
+index 8b94f6c..626f493 100644
+--- a/fs/lustre/mdc/mdc_request.c
++++ b/fs/lustre/mdc/mdc_request.c
+@@ -2720,6 +2720,7 @@ static int mdc_import_event(struct obd_device *obd, struct obd_import *imp,
+ 		if (OCD_HAS_FLAG(ocd, GRANT))
+ 			osc_init_grant(cli, ocd);
+ 
++		md_init_ea_size(obd->obd_self_export, ocd->ocd_max_easize, 0);
+ 		rc = obd_notify_observer(obd, obd, OBD_NOTIFY_OCD);
+ 		break;
+ 	}
+-- 
+1.8.3.1
+
+
+From jsimmons at infradead.org  Mon Oct 11 10:40:49 2021
+From: jsimmons at infradead.org (James Simmons)
+Date: Mon, 11 Oct 2021 13:40:49 -0400
+Subject: [lustre-devel] [PATCH 20/20] lnet: include linux/ethtool.h
+In-Reply-To: <1633974049-26490-1-git-send-email-jsimmons@infradead.org>
+References: <1633974049-26490-1-git-send-email-jsimmons@infradead.org>
+Message-ID: <1633974049-26490-21-git-send-email-jsimmons@infradead.org>
+
+From: Jian Yu <yujian at whamcloud.com>
+
+Kernel 5.11+ removes including linux/ethtool.h from
+linux/netdevice.h, which caused the following build error:
+
+dereferencing pointer to incomplete type 'const struct ethtool_ops'
+
+This patch fixes the above issue by adding the include into
+the file that uses the structure.
+
+WC-bug-id: https://jira.whamcloud.com/browse/LU-15052
+Lustre-commit: b2503cf65a0cb3583 ("LU-15052 lnet: include linux/ethtool.h")
+Signed-off-by: Jian Yu <yujian at whamcloud.com>
+Reviewed-on: https://review.whamcloud.com/45109
+Reviewed-by: Andreas Dilger <adilger at whamcloud.com>
+Reviewed-by: James Simmons <jsimmons at infradead.org>
+Reviewed-by: Oleg Drokin <green at whamcloud.com>
+Signed-off-by: James Simmons <jsimmons at infradead.org>
+---
+ net/lnet/klnds/o2iblnd/o2iblnd.c | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+diff --git a/net/lnet/klnds/o2iblnd/o2iblnd.c b/net/lnet/klnds/o2iblnd/o2iblnd.c
+index fd807c2..36d26b2 100644
+--- a/net/lnet/klnds/o2iblnd/o2iblnd.c
++++ b/net/lnet/klnds/o2iblnd/o2iblnd.c
+@@ -36,9 +36,11 @@
+ 
+ #include <asm/div64.h>
+ #include <asm/page.h>
+-#include "o2iblnd.h"
++#include <linux/ethtool.h>
+ #include <linux/inetdevice.h>
+ 
++#include "o2iblnd.h"
++
+ static struct lnet_lnd the_o2iblnd;
+ 
+ struct kib_data kiblnd_data;
+-- 
+1.8.3.1
+
+
+From jsimmons at infradead.org  Mon Oct 11 10:40:43 2021
+From: jsimmons at infradead.org (James Simmons)
+Date: Mon, 11 Oct 2021 13:40:43 -0400
+Subject: [lustre-devel] [PATCH 14/20] lustre: llite: harden ll_sbi ll_flags
+In-Reply-To: <1633974049-26490-1-git-send-email-jsimmons@infradead.org>
+References: <1633974049-26490-1-git-send-email-jsimmons@infradead.org>
+Message-ID: <1633974049-26490-15-git-send-email-jsimmons@infradead.org>
+
+For most file systems mount flags are straight forward but this
+is not the case for Lustre. We have to consider if the server
+backend supports a mount option. Additionally its possible to
+disable or enable a feature using sysfs during run time. Some
+features can't be managed with a mount option but still can
+be managed with sysfs or based on what is enabled on the server
+node. All these states are reported together in the debugfs
+file sbi_flags. The mount specific options are reported in
+the super block show_option ll_show_option().
+
+With all this complexity it is easy for it to get out of sync
+and report incorrect things. We consolidate this handling by
+moving to using match_table_t that is used by various Linux
+file system to parse options. LL_SBI_FLAGS is replaced by our
+match_table_t, ll_sbi_flags_name, that can be used for mount
+options as well as reporting the sbi_flags in debugfs. We take
+advantage of the fact that mount option parse will stop at the
+first NULL in ll_sbi_flags_name and after that NULL list the
+other features flags that are managed with other methods besides
+mount options.
+
+The next change is the move of ll_flags to a bitmap which gives
+us two advantages. The first is that we can support more than
+32 flags in the future. Second is no need to use bit shifting
+math since we can use th enum LL_SBI_* values directly with
+clear_bit() / set_bit() / test_bit(). Allow these changes should
+miminize future problems with keeping all these states in sync.
+
+WC-bug-id: https://jira.whamcloud.com/browse/LU-12262
+Lustre-commit: 47e6f6abdacd6a3c ("LU-12262 llite: harden ll_sbi ll_flags")
+Signed-off-by: James Simmons <jsimmons at infradead.org>
+Reviewed-on: https://review.whamcloud.com/44541
+Reviewed-by: Andreas Dilger <adilger at whamcloud.com>
+Reviewed-by: Neil Brown <neilb at suse.de>
+Reviewed-by: Oleg Drokin <green at whamcloud.com>
+---
+ fs/lustre/llite/crypto.c                |  15 +-
+ fs/lustre/llite/dir.c                   |  25 +-
+ fs/lustre/llite/file.c                  |  12 +-
+ fs/lustre/llite/llite_foreign_symlink.c |  12 +-
+ fs/lustre/llite/llite_internal.h        | 125 +++-----
+ fs/lustre/llite/llite_lib.c             | 490 ++++++++++++++++----------------
+ fs/lustre/llite/lproc_llite.c           |  78 ++---
+ fs/lustre/llite/namei.c                 |  13 +-
+ fs/lustre/llite/statahead.c             |   3 +-
+ fs/lustre/llite/xattr.c                 |  17 +-
+ 10 files changed, 359 insertions(+), 431 deletions(-)
+
+diff --git a/fs/lustre/llite/crypto.c b/fs/lustre/llite/crypto.c
+index 0fae9a5..0388e360 100644
+--- a/fs/lustre/llite/crypto.c
++++ b/fs/lustre/llite/crypto.c
+@@ -133,7 +133,7 @@ static int ll_set_context(struct inode *inode, const void *ctx, size_t len,
+ 
+ bool ll_sbi_has_test_dummy_encryption(struct ll_sb_info *sbi)
+ {
+-	return unlikely(sbi->ll_flags & LL_SBI_TEST_DUMMY_ENCRYPTION);
++	return unlikely(test_bit(LL_SBI_TEST_DUMMY_ENCRYPTION, sbi->ll_flags));
+ }
+ 
+ static bool ll_dummy_context(struct inode *inode)
+@@ -145,16 +145,17 @@ static bool ll_dummy_context(struct inode *inode)
+ 
+ bool ll_sbi_has_encrypt(struct ll_sb_info *sbi)
+ {
+-	return sbi->ll_flags & LL_SBI_ENCRYPT;
++	return test_bit(LL_SBI_ENCRYPT, sbi->ll_flags);
+ }
+ 
+ void ll_sbi_set_encrypt(struct ll_sb_info *sbi, bool set)
+ {
+-	if (set)
+-		sbi->ll_flags |= LL_SBI_ENCRYPT;
+-	else
+-		sbi->ll_flags &=
+-			~(LL_SBI_ENCRYPT | LL_SBI_TEST_DUMMY_ENCRYPTION);
++	if (set) {
++		set_bit(LL_SBI_ENCRYPT, sbi->ll_flags);
++	} else {
++		clear_bit(LL_SBI_ENCRYPT, sbi->ll_flags);
++		clear_bit(LL_SBI_TEST_DUMMY_ENCRYPTION, sbi->ll_flags);
++	}
+ }
+ 
+ static bool ll_empty_dir(struct inode *inode)
+diff --git a/fs/lustre/llite/dir.c b/fs/lustre/llite/dir.c
+index b7dd2aa..ee49c90 100644
+--- a/fs/lustre/llite/dir.c
++++ b/fs/lustre/llite/dir.c
+@@ -182,7 +182,7 @@ int ll_dir_read(struct inode *inode, u64 *ppos, struct md_op_data *op_data,
+ 	struct ll_sb_info *sbi = ll_i2sbi(inode);
+ 	u64 pos = *ppos;
+ 	bool is_api32 = ll_need_32bit_api(sbi);
+-	bool is_hash64 = sbi->ll_flags & LL_SBI_64BIT_HASH;
++	bool is_hash64 = test_bit(LL_SBI_64BIT_HASH, sbi->ll_flags);
+ 	struct fscrypt_str lltr = FSTR_INIT(NULL, 0);
+ 	struct page *page;
+ 	bool done = false;
+@@ -300,7 +300,7 @@ static int ll_readdir(struct file *filp, struct dir_context *ctx)
+ 	struct ll_file_data *lfd = filp->private_data;
+ 	struct ll_sb_info *sbi	= ll_i2sbi(inode);
+ 	u64 pos = lfd ? lfd->lfd_pos : 0;
+-	int hash64 = sbi->ll_flags & LL_SBI_64BIT_HASH;
++	bool hash64 = test_bit(LL_SBI_64BIT_HASH, sbi->ll_flags);
+ 	bool api32 = ll_need_32bit_api(sbi);
+ 	struct md_op_data *op_data;
+ 	struct lu_fid pfid = { 0 };
+@@ -495,7 +495,7 @@ static int ll_dir_setdirstripe(struct dentry *dparent, struct lmv_user_md *lump,
+ 		encrypt = true;
+ 	}
+ 
+-	if (sbi->ll_flags & LL_SBI_FILE_SECCTX) {
++	if (test_bit(LL_SBI_FILE_SECCTX, sbi->ll_flags)) {
+ 		/*
+ 		 * selinux_dentry_init_security() uses dentry->d_parent and name
+ 		 * to determine the security context for the file. So our fake
+@@ -534,7 +534,7 @@ static int ll_dir_setdirstripe(struct dentry *dparent, struct lmv_user_md *lump,
+ 
+ 	dentry.d_inode = inode;
+ 
+-	if (sbi->ll_flags & LL_SBI_FILE_SECCTX) {
++	if (test_bit(LL_SBI_FILE_SECCTX, sbi->ll_flags)) {
+ 		/* no need to protect selinux_inode_setsecurity() by
+ 		 * inode_lock. Taking it would lead to a client deadlock
+ 		 * LU-13617
+@@ -1270,13 +1270,14 @@ int quotactl_ioctl(struct super_block *sb, struct if_quotactl *qctl)
+ int ll_rmfid(struct file *file, void __user *arg)
+ {
+ 	const struct fid_array __user *ufa = arg;
++	struct inode *inode = file_inode(file);
+ 	struct fid_array *lfa = NULL;
+ 	size_t size;
+ 	unsigned int nr;
+ 	int i, rc, *rcs = NULL;
+ 
+ 	if (!capable(CAP_DAC_READ_SEARCH) &&
+-	    !(ll_i2sbi(file_inode(file))->ll_flags & LL_SBI_USER_FID2PATH))
++	    !test_bit(LL_SBI_USER_FID2PATH, ll_i2sbi(inode)->ll_flags))
+ 		return -EPERM;
+ 	/* Only need to get the buflen */
+ 	if (get_user(nr, &ufa->fa_nr))
+@@ -1719,6 +1720,7 @@ static long ll_dir_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
+ 		u32 __user *lmmsizep = NULL;
+ 		struct lu_fid __user *fidp = NULL;
+ 		int lmmsize;
++		bool api32;
+ 
+ 		if (cmd == IOC_MDC_GETFILEINFO_V1 ||
+ 		    cmd == IOC_MDC_GETFILEINFO_V2 ||
+@@ -1791,6 +1793,7 @@ static long ll_dir_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
+ 			}
+ 			rc = -EOVERFLOW;
+ 		}
++		api32 = test_bit(LL_SBI_32BIT_API, sbi->ll_flags);
+ 
+ 		if (cmd == IOC_MDC_GETFILEINFO_V1 ||
+ 		    cmd == LL_IOC_MDC_GETINFO_V1) {
+@@ -1808,9 +1811,7 @@ static long ll_dir_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
+ 			st.st_atime = body->mbo_atime;
+ 			st.st_mtime = body->mbo_mtime;
+ 			st.st_ctime = body->mbo_ctime;
+-			st.st_ino = cl_fid_build_ino(&body->mbo_fid1,
+-						     sbi->ll_flags &
+-						     LL_SBI_32BIT_API);
++			st.st_ino = cl_fid_build_ino(&body->mbo_fid1, api32);
+ 
+ 			if (copy_to_user(statp, &st, sizeof(st))) {
+ 				rc = -EFAULT;
+@@ -1827,8 +1828,7 @@ static long ll_dir_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
+ 			stx.stx_gid = body->mbo_gid;
+ 			stx.stx_mode = body->mbo_mode;
+ 			stx.stx_ino = cl_fid_build_ino(&body->mbo_fid1,
+-						       sbi->ll_flags &
+-						       LL_SBI_32BIT_API);
++						       api32);
+ 			stx.stx_size = body->mbo_size;
+ 			stx.stx_blocks = body->mbo_blocks;
+ 			stx.stx_atime.tv_sec = body->mbo_atime;
+@@ -2252,10 +2252,13 @@ static loff_t ll_dir_seek(struct file *file, loff_t offset, int origin)
+ 	    ((api32 && offset <= LL_DIR_END_OFF_32BIT) ||
+ 	     (!api32 && offset <= LL_DIR_END_OFF))) {
+ 		if (offset != file->f_pos) {
++			bool hash64;
++
++			hash64 = test_bit(LL_SBI_64BIT_HASH, sbi->ll_flags);
+ 			if ((api32 && offset == LL_DIR_END_OFF_32BIT) ||
+ 			    (!api32 && offset == LL_DIR_END_OFF))
+ 				fd->lfd_pos = MDS_DIR_END_OFF;
+-			else if (api32 && sbi->ll_flags & LL_SBI_64BIT_HASH)
++			else if (api32 && hash64)
+ 				fd->lfd_pos = offset << 32;
+ 			else
+ 				fd->lfd_pos = offset;
+diff --git a/fs/lustre/llite/file.c b/fs/lustre/llite/file.c
+index ad1c07e..1e4ff49 100644
+--- a/fs/lustre/llite/file.c
++++ b/fs/lustre/llite/file.c
+@@ -2625,7 +2625,7 @@ int ll_fid2path(struct inode *inode, void __user *arg)
+ 	int rc;
+ 
+ 	if (!capable(CAP_DAC_READ_SEARCH) &&
+-	    !(ll_i2sbi(inode)->ll_flags & LL_SBI_USER_FID2PATH))
++	    !test_bit(LL_SBI_USER_FID2PATH, ll_i2sbi(inode)->ll_flags))
+ 		return -EPERM;
+ 
+ 	/* Only need to get the buflen */
+@@ -5393,9 +5393,8 @@ int ll_inode_permission(struct inode *inode, int mask)
+ 	squash = &sbi->ll_squash;
+ 	if (unlikely(squash->rsi_uid &&
+ 		     uid_eq(current_fsuid(), GLOBAL_ROOT_UID) &&
+-		     !(sbi->ll_flags & LL_SBI_NOROOTSQUASH))) {
++		     !test_bit(LL_SBI_NOROOTSQUASH, sbi->ll_flags)))
+ 		squash_id = true;
+-	}
+ 
+ 	if (squash_id) {
+ 		CDEBUG(D_OTHER, "squash creds (%d:%d)=>(%d:%d)\n",
+@@ -5494,9 +5493,9 @@ const struct file_operations *ll_select_file_operations(struct ll_sb_info *sbi)
+ {
+ 	const struct file_operations *fops = &ll_file_operations_noflock;
+ 
+-	if (sbi->ll_flags & LL_SBI_FLOCK)
++	if (test_bit(LL_SBI_FLOCK, sbi->ll_flags))
+ 		fops = &ll_file_operations_flock;
+-	else if (sbi->ll_flags & LL_SBI_LOCALFLOCK)
++	else if (test_bit(LL_SBI_LOCALFLOCK, sbi->ll_flags))
+ 		fops = &ll_file_operations;
+ 
+ 	return fops;
+@@ -5787,7 +5786,8 @@ int ll_layout_refresh(struct inode *inode, u32 *gen)
+ 	int rc;
+ 
+ 	*gen = ll_layout_version_get(lli);
+-	if (!(sbi->ll_flags & LL_SBI_LAYOUT_LOCK) || *gen != CL_LAYOUT_GEN_NONE)
++	if (!test_bit(LL_SBI_LAYOUT_LOCK, sbi->ll_flags) ||
++	    *gen != CL_LAYOUT_GEN_NONE)
+ 		return 0;
+ 
+ 	/* sanity checks */
+diff --git a/fs/lustre/llite/llite_foreign_symlink.c b/fs/lustre/llite/llite_foreign_symlink.c
+index 7ba33f4..bfade93 100644
+--- a/fs/lustre/llite/llite_foreign_symlink.c
++++ b/fs/lustre/llite/llite_foreign_symlink.c
+@@ -205,7 +205,7 @@ static int ll_foreign_symlink_parse(struct ll_sb_info *sbi,
+ 	 * of foreign LOV is relative path of faked symlink destination,
+ 	 * to be completed by prefix
+ 	 */
+-	if (!(sbi->ll_flags & LL_SBI_FOREIGN_SYMLINK_UPCALL))
++	if (!test_bit(LL_SBI_FOREIGN_SYMLINK_UPCALL, sbi->ll_flags))
+ 		rc = ll_foreign_symlink_default_parse(sbi, inode, lfm,
+ 						      destname);
+ 	else /* upcall is available */
+@@ -385,7 +385,7 @@ ssize_t foreign_symlink_enable_show(struct kobject *kobj,
+ 					      ll_kset.kobj);
+ 
+ 	return snprintf(buf, PAGE_SIZE, "%d\n",
+-			!!(sbi->ll_flags & LL_SBI_FOREIGN_SYMLINK));
++			test_bit(LL_SBI_FOREIGN_SYMLINK, sbi->ll_flags));
+ }
+ 
+ /*
+@@ -412,9 +412,9 @@ ssize_t foreign_symlink_enable_store(struct kobject *kobj,
+ 		return rc;
+ 
+ 	if (val)
+-		sbi->ll_flags |= LL_SBI_FOREIGN_SYMLINK;
++		set_bit(LL_SBI_FOREIGN_SYMLINK, sbi->ll_flags);
+ 	else
+-		sbi->ll_flags &= ~LL_SBI_FOREIGN_SYMLINK;
++		clear_bit(LL_SBI_FOREIGN_SYMLINK, sbi->ll_flags);
+ 
+ 	return count;
+ }
+@@ -545,7 +545,7 @@ ssize_t foreign_symlink_upcall_store(struct kobject *kobj,
+ 	 * order, we may end up using the format provided by a different
+ 	 * upcall than the one set in ll_foreign_symlink_upcall
+ 	 */
+-	sbi->ll_flags &= ~LL_SBI_FOREIGN_SYMLINK_UPCALL;
++	clear_bit(LL_SBI_FOREIGN_SYMLINK_UPCALL, sbi->ll_flags);
+ 	up_write(&sbi->ll_foreign_symlink_sem);
+ 
+ 	if (strcmp(new, "none")) {
+@@ -692,7 +692,7 @@ ssize_t foreign_symlink_upcall_info_store(struct kobject *kobj,
+ 	old_nb_items = sbi->ll_foreign_symlink_upcall_nb_items;
+ 	sbi->ll_foreign_symlink_upcall_items = new_items;
+ 	sbi->ll_foreign_symlink_upcall_nb_items = nb_items;
+-	sbi->ll_flags |= LL_SBI_FOREIGN_SYMLINK_UPCALL;
++	set_bit(LL_SBI_FOREIGN_SYMLINK_UPCALL, sbi->ll_flags);
+ 	up_write(&sbi->ll_foreign_symlink_sem);
+ 
+ 	/* free old_items */
+diff --git a/fs/lustre/llite/llite_internal.h b/fs/lustre/llite/llite_internal.h
+index afd5c7a..bd49228 100644
+--- a/fs/lustre/llite/llite_internal.h
++++ b/fs/lustre/llite/llite_internal.h
+@@ -45,6 +45,8 @@
+ #include <lustre_mdc.h>
+ #include <lustre_intent.h>
+ #include <linux/compat.h>
++#include <linux/aio.h>
++#include <linux/parser.h>
+ #include <lustre_crypto.h>
+ #include <range_lock.h>
+ #include <linux/namei.h>
+@@ -602,82 +604,41 @@ enum stats_track_type {
+ 	STATS_TRACK_LAST,
+ };
+ 
+-/* flags for sbi->ll_flags */
+-#define LL_SBI_NOLCK	     0x01 /* DLM locking disabled (directio-only) */
+-#define LL_SBI_CHECKSUM	  0x02 /* checksum each page as it's written */
+-#define LL_SBI_FLOCK	     0x04
+-#define LL_SBI_USER_XATTR	0x08 /* support user xattr */
+-#define LL_SBI_ACL	       0x10 /* support ACL */
+-/* LL_SBI_RMT_CLIENT		 0x40	 remote client */
+-#define LL_SBI_MDS_CAPA		 0x80 /* support mds capa, obsolete */
+-#define LL_SBI_OSS_CAPA		0x100 /* support oss capa, obsolete */
+-#define LL_SBI_LOCALFLOCK       0x200 /* Local flocks support by kernel */
+-#define LL_SBI_LRU_RESIZE       0x400 /* lru resize support */
+-#define LL_SBI_LAZYSTATFS       0x800 /* lazystatfs mount option */
+-/*	LL_SBI_SOM_PREVIEW     0x1000    SOM preview mount option, obsolete */
+-#define LL_SBI_32BIT_API       0x2000 /* generate 32 bit inodes. */
+-#define LL_SBI_64BIT_HASH      0x4000 /* support 64-bits dir hash/offset */
+-#define LL_SBI_AGL_ENABLED     0x8000 /* enable agl */
+-#define LL_SBI_VERBOSE	0x10000 /* verbose mount/umount */
+-#define LL_SBI_LAYOUT_LOCK    0x20000 /* layout lock support */
+-#define LL_SBI_USER_FID2PATH  0x40000 /* allow fid2path by unprivileged users */
+-#define LL_SBI_XATTR_CACHE    0x80000 /* support for xattr cache */
+-#define LL_SBI_NOROOTSQUASH	0x100000 /* do not apply root squash */
+-#define LL_SBI_ALWAYS_PING	0x200000 /* always ping even if server
+-					  * suppress_pings
+-					  */
+-#define LL_SBI_FAST_READ	0x400000 /* fast read support */
+-#define LL_SBI_FILE_SECCTX	0x800000 /* set file security context at
+-					  * create
+-					  */
+-#define LL_SBI_TINY_WRITE	0x2000000 /* tiny write support */
+-#define LL_SBI_FILE_HEAT    0x4000000 /* file heat support */
+-#define LL_SBI_TEST_DUMMY_ENCRYPTION	0x8000000 /* test dummy encryption */
+-#define LL_SBI_ENCRYPT	   0x10000000 /* client side encryption */
+-#define LL_SBI_FOREIGN_SYMLINK	0x20000000 /* foreign fake-symlink support */
+-/* foreign fake-symlink upcall registered */
+-#define LL_SBI_FOREIGN_SYMLINK_UPCALL	0x40000000
+-#define LL_SBI_PARALLEL_DIO     0x80000000 /* parallel (async) submission of
+-					    * RPCs for DIO
+-					    */
++enum ll_sbi_flags {
++	LL_SBI_NOLCK,			/* DLM locking disabled directio-only */
++	LL_SBI_CHECKSUM,		/* checksum each page as it's written */
++	LL_SBI_LOCALFLOCK,		/* local flocks instead of fs-wide */
++	LL_SBI_FLOCK,			/* flock enabled */
++	LL_SBI_USER_XATTR,		/* support user xattr */
++	LL_SBI_LRU_RESIZE,		/* lru resize support */
++	LL_SBI_LAZYSTATFS,		/* lazystatfs mount option */
++	LL_SBI_32BIT_API,		/* generate 32 bit inodes. */
++	LL_SBI_USER_FID2PATH,		/* fid2path by unprivileged users */
++	LL_SBI_VERBOSE,			/* verbose mount/umount */
++	LL_SBI_ALWAYS_PING,		/* ping even if server suppress_pings */
++	LL_SBI_TEST_DUMMY_ENCRYPTION,	/* test dummy encryption */
++	LL_SBI_ENCRYPT,			/* client side encryption */
++	LL_SBI_FOREIGN_SYMLINK,		/* foreign fake-symlink support */
++	LL_SBI_FOREIGN_SYMLINK_UPCALL,	/* foreign fake-symlink upcall set */
++	LL_SBI_NUM_MOUNT_OPT,
++
++	LL_SBI_ACL,			/* support ACL */
++	LL_SBI_AGL_ENABLED,		/* enable agl */
++	LL_SBI_64BIT_HASH,		/* support 64-bits dir hash/offset */
++	LL_SBI_LAYOUT_LOCK,		/* layout lock support */
++	LL_SBI_XATTR_CACHE,		/* support for xattr cache */
++	LL_SBI_NOROOTSQUASH,		/* do not apply root squash */
++	LL_SBI_FAST_READ,		/* fast read support */
++	LL_SBI_FILE_SECCTX,		/* file security context at create */
++	LL_SBI_TINY_WRITE,		/* tiny write support */
++	LL_SBI_FILE_HEAT,		/* file heat support */
++	LL_SBI_PARALLEL_DIO,		/* parallel (async) O_DIRECT RPCs */
++	LL_SBI_NUM_FLAGS
++};
+ 
+-#define LL_SBI_FLAGS {	\
+-	"nolck",	\
+-	"checksum",	\
+-	"flock",	\
+-	"user_xattr",	\
+-	"acl",		\
+-	"???",		\
+-	"???",		\
+-	"mds_capa",	\
+-	"oss_capa",	\
+-	"flock",	\
+-	"lru_resize",	\
+-	"lazy_statfs",	\
+-	"som",		\
+-	"32bit_api",	\
+-	"64bit_hash",	\
+-	"agl",		\
+-	"verbose",	\
+-	"layout",	\
+-	"user_fid2path",\
+-	"xattr_cache",	\
+-	"norootsquash",	\
+-	"always_ping",	\
+-	"fast_read",    \
+-	"file_secctx",	\
+-	"pio",		\
+-	"tiny_write",	\
+-	"file_heat",	\
+-	"test_dummy_encryption", \
+-	"noencrypt",	\
+-	"foreign_symlink",	\
+-	"foreign_symlink_upcall",	\
+-	"parallel_dio",	\
+-}
++int ll_sbi_flags_seq_show(struct seq_file *m, void *v);
+ 
+-/*
+- * This is embedded into llite super-blocks to keep track of connect
++/* This is embedded into llite super-blocks to keep track of connect
+  * flags (capabilities) supported by all imports given mount is
+  * connected to.
+  */
+@@ -708,7 +669,7 @@ struct ll_sb_info {
+ 	struct dentry		*ll_debugfs_entry;
+ 	struct lu_fid		ll_root_fid; /* root object fid */
+ 
+-	int			ll_flags;
++	DECLARE_BITMAP(ll_flags, LL_SBI_NUM_FLAGS); /* enum ll_sbi_flags */
+ 	unsigned int		ll_xattr_cache_enabled:1,
+ 				ll_xattr_cache_set:1, /* already set to 0/1 */
+ 				ll_client_common_fill_super_succeeded:1,
+@@ -970,7 +931,7 @@ static inline bool ll_need_32bit_api(struct ll_sb_info *sbi)
+ #if BITS_PER_LONG == 32
+ 	return true;
+ #else
+-	if (unlikely(sbi->ll_flags & LL_SBI_32BIT_API))
++	if (unlikely(test_bit(LL_SBI_32BIT_API, sbi->ll_flags)))
+ 		return true;
+ 
+ #if defined(CONFIG_COMPAT)
+@@ -991,27 +952,27 @@ static inline bool ll_need_32bit_api(struct ll_sb_info *sbi)
+ 
+ static inline bool ll_sbi_has_fast_read(struct ll_sb_info *sbi)
+ {
+-	return !!(sbi->ll_flags & LL_SBI_FAST_READ);
++	return test_bit(LL_SBI_FAST_READ, sbi->ll_flags);
+ }
+ 
+ static inline bool ll_sbi_has_tiny_write(struct ll_sb_info *sbi)
+ {
+-	return !!(sbi->ll_flags & LL_SBI_TINY_WRITE);
++	return test_bit(LL_SBI_TINY_WRITE, sbi->ll_flags);
+ }
+ 
+ static inline bool ll_sbi_has_file_heat(struct ll_sb_info *sbi)
+ {
+-	return !!(sbi->ll_flags & LL_SBI_FILE_HEAT);
++	return test_bit(LL_SBI_FILE_HEAT, sbi->ll_flags);
+ }
+ 
+ static inline bool ll_sbi_has_foreign_symlink(struct ll_sb_info *sbi)
+ {
+-	return !!(sbi->ll_flags & LL_SBI_FOREIGN_SYMLINK);
++	return test_bit(LL_SBI_FOREIGN_SYMLINK, sbi->ll_flags);
+ }
+ 
+ static inline bool ll_sbi_has_parallel_dio(struct ll_sb_info *sbi)
+ {
+-	return !!(sbi->ll_flags & LL_SBI_PARALLEL_DIO);
++	return test_bit(LL_SBI_PARALLEL_DIO, sbi->ll_flags);
+ }
+ 
+ void ll_ras_enter(struct file *f, loff_t pos, size_t count);
+@@ -1615,7 +1576,7 @@ static inline int ll_file_nolock(const struct file *file)
+ 	struct inode *inode = file_inode(file);
+ 
+ 	return ((fd->fd_flags & LL_FILE_IGNORE_LOCK) ||
+-		(ll_i2sbi(inode)->ll_flags & LL_SBI_NOLCK));
++		test_bit(LL_SBI_NOLCK, ll_i2sbi(inode)->ll_flags));
+ }
+ 
+ static inline void ll_set_lock_data(struct obd_export *exp, struct inode *inode,
+diff --git a/fs/lustre/llite/llite_lib.c b/fs/lustre/llite/llite_lib.c
+index 9ff881c..abd470a 100644
+--- a/fs/lustre/llite/llite_lib.c
++++ b/fs/lustre/llite/llite_lib.c
+@@ -155,11 +155,11 @@ static struct ll_sb_info *ll_init_sbi(void)
+ 	sbi->ll_ra_info.ra_max_read_ahead_whole_pages = -1;
+ 	atomic_set(&sbi->ll_ra_info.ra_async_inflight, 0);
+ 
+-	sbi->ll_flags |= LL_SBI_VERBOSE;
+-	sbi->ll_flags |= LL_SBI_CHECKSUM;
+-	sbi->ll_flags |= LL_SBI_FLOCK;
+-	sbi->ll_flags |= LL_SBI_LRU_RESIZE;
+-	sbi->ll_flags |= LL_SBI_LAZYSTATFS;
++	set_bit(LL_SBI_VERBOSE, sbi->ll_flags);
++	set_bit(LL_SBI_CHECKSUM, sbi->ll_flags);
++	set_bit(LL_SBI_FLOCK, sbi->ll_flags);
++	set_bit(LL_SBI_LRU_RESIZE, sbi->ll_flags);
++	set_bit(LL_SBI_LAZYSTATFS, sbi->ll_flags);
+ 
+ 	for (i = 0; i <= LL_PROCESS_HIST_MAX; i++) {
+ 		struct per_process_info *pp_ext;
+@@ -176,10 +176,10 @@ static struct ll_sb_info *ll_init_sbi(void)
+ 	atomic_set(&sbi->ll_sa_wrong, 0);
+ 	atomic_set(&sbi->ll_sa_running, 0);
+ 	atomic_set(&sbi->ll_agl_total, 0);
+-	sbi->ll_flags |= LL_SBI_AGL_ENABLED;
+-	sbi->ll_flags |= LL_SBI_FAST_READ;
+-	sbi->ll_flags |= LL_SBI_TINY_WRITE;
+-	sbi->ll_flags |= LL_SBI_PARALLEL_DIO;
++	set_bit(LL_SBI_AGL_ENABLED, sbi->ll_flags);
++	set_bit(LL_SBI_FAST_READ, sbi->ll_flags);
++	set_bit(LL_SBI_TINY_WRITE, sbi->ll_flags);
++	set_bit(LL_SBI_PARALLEL_DIO, sbi->ll_flags);
+ 	ll_sbi_set_encrypt(sbi, true);
+ 
+ 	/* root squash */
+@@ -257,6 +257,7 @@ static int client_common_fill_super(struct super_block *sb, char *md, char *dt)
+ 	struct lustre_md lmd;
+ 	u64 valid;
+ 	int size, err, checksum;
++	bool api32;
+ 
+ 	sbi->ll_md_obd  = class_name2obd(md);
+ 	if (!sbi->ll_md_obd) {
+@@ -320,7 +321,7 @@ static int client_common_fill_super(struct super_block *sb, char *md, char *dt)
+ 				   OBD_CONNECT2_REP_MBITS |
+ 				   OBD_CONNECT2_ATOMIC_OPEN_LOCK;
+ 
+-	if (sbi->ll_flags & LL_SBI_LRU_RESIZE)
++	if (test_bit(LL_SBI_LRU_RESIZE, sbi->ll_flags))
+ 		data->ocd_connect_flags |= OBD_CONNECT_LRU_RESIZE;
+ 	data->ocd_connect_flags |= OBD_CONNECT_ACL_FLAGS;
+ 
+@@ -337,7 +338,7 @@ static int client_common_fill_super(struct super_block *sb, char *md, char *dt)
+ 
+ 	if (sb_rdonly(sb))
+ 		data->ocd_connect_flags |= OBD_CONNECT_RDONLY;
+-	if (sbi->ll_flags & LL_SBI_USER_XATTR)
++	if (test_bit(LL_SBI_USER_XATTR, sbi->ll_flags))
+ 		data->ocd_connect_flags |= OBD_CONNECT_XATTR;
+ 
+ 	/* Setting this indicates we correctly support S_NOSEC (See kernel
+@@ -348,7 +349,7 @@ static int client_common_fill_super(struct super_block *sb, char *md, char *dt)
+ 	sbi->ll_fop = ll_select_file_operations(sbi);
+ 
+ 	/* always ping even if server suppress_pings */
+-	if (sbi->ll_flags & LL_SBI_ALWAYS_PING)
++	if (test_bit(LL_SBI_ALWAYS_PING, sbi->ll_flags))
+ 		data->ocd_connect_flags &= ~OBD_CONNECT_PINGLESS;
+ 
+ 	obd_connect_set_secctx(data);
+@@ -451,29 +452,29 @@ static int client_common_fill_super(struct super_block *sb, char *md, char *dt)
+ 	sbi->ll_namelen = osfs->os_namelen;
+ 	sbi->ll_mnt.mnt = current->fs->root.mnt;
+ 
+-	if ((sbi->ll_flags & LL_SBI_USER_XATTR) &&
++	if (test_bit(LL_SBI_USER_XATTR, sbi->ll_flags) &&
+ 	    !(data->ocd_connect_flags & OBD_CONNECT_XATTR)) {
+ 		LCONSOLE_INFO("Disabling user_xattr feature because it is not supported on the server\n");
+-		sbi->ll_flags &= ~LL_SBI_USER_XATTR;
++		clear_bit(LL_SBI_USER_XATTR, sbi->ll_flags);
+ 	}
+ 
+ 	if (data->ocd_connect_flags & OBD_CONNECT_ACL) {
+ 		sb->s_flags |= SB_POSIXACL;
+-		sbi->ll_flags |= LL_SBI_ACL;
++		set_bit(LL_SBI_ACL, sbi->ll_flags);
+ 	} else {
+ 		LCONSOLE_INFO("client wants to enable acl, but mdt not!\n");
+ 		sb->s_flags &= ~SB_POSIXACL;
+-		sbi->ll_flags &= ~LL_SBI_ACL;
++		clear_bit(LL_SBI_ACL, sbi->ll_flags);
+ 	}
+ 
+ 	if (data->ocd_connect_flags & OBD_CONNECT_64BITHASH)
+-		sbi->ll_flags |= LL_SBI_64BIT_HASH;
++		set_bit(LL_SBI_64BIT_HASH, sbi->ll_flags);
+ 
+ 	if (data->ocd_connect_flags & OBD_CONNECT_LAYOUTLOCK)
+-		sbi->ll_flags |= LL_SBI_LAYOUT_LOCK;
++		set_bit(LL_SBI_LAYOUT_LOCK, sbi->ll_flags);
+ 
+ 	if (obd_connect_has_secctx(data))
+-		sbi->ll_flags |= LL_SBI_FILE_SECCTX;
++		set_bit(LL_SBI_FILE_SECCTX, sbi->ll_flags);
+ 
+ 	if (ll_sbi_has_encrypt(sbi) && !obd_connect_has_enc(data)) {
+ 		if (ll_sbi_has_test_dummy_encryption(sbi))
+@@ -492,7 +493,7 @@ static int client_common_fill_super(struct super_block *sb, char *md, char *dt)
+ 			 * during processing llog, it won't be enabled here.
+ 			 */
+ 			spin_lock(&sbi->ll_lock);
+-			sbi->ll_flags |= LL_SBI_XATTR_CACHE;
++			set_bit(LL_SBI_XATTR_CACHE, sbi->ll_flags);
+ 			spin_unlock(&sbi->ll_lock);
+ 			sbi->ll_xattr_cache_enabled = 1;
+ 		}
+@@ -542,7 +543,7 @@ static int client_common_fill_super(struct super_block *sb, char *md, char *dt)
+ 	data->ocd_connect_flags |= OBD_CONNECT_LRU_RESIZE;
+ 
+ 	/* always ping even if server suppress_pings */
+-	if (sbi->ll_flags & LL_SBI_ALWAYS_PING)
++	if (test_bit(LL_SBI_ALWAYS_PING, sbi->ll_flags))
+ 		data->ocd_connect_flags &= ~OBD_CONNECT_PINGLESS;
+ 
+ 	if (ll_sbi_has_encrypt(sbi))
+@@ -630,7 +631,7 @@ static int client_common_fill_super(struct super_block *sb, char *md, char *dt)
+ 	 * XXX: move this to after cbd setup?
+ 	 */
+ 	valid = OBD_MD_FLGETATTR | OBD_MD_FLBLOCKS | OBD_MD_FLMODEASIZE;
+-	if (sbi->ll_flags & LL_SBI_ACL)
++	if (test_bit(LL_SBI_ACL, sbi->ll_flags))
+ 		valid |= OBD_MD_FLACL;
+ 
+ 	op_data = kzalloc(sizeof(*op_data), GFP_NOFS);
+@@ -660,9 +661,8 @@ static int client_common_fill_super(struct super_block *sb, char *md, char *dt)
+ 	}
+ 
+ 	LASSERT(fid_is_sane(&sbi->ll_root_fid));
+-	root = ll_iget(sb, cl_fid_build_ino(&sbi->ll_root_fid,
+-					    sbi->ll_flags & LL_SBI_32BIT_API),
+-		       &lmd);
++	api32 = test_bit(LL_SBI_32BIT_API, sbi->ll_flags);
++	root = ll_iget(sb, cl_fid_build_ino(&sbi->ll_root_fid, api32), &lmd);
+ 	md_free_lustre_md(sbi->ll_md_exp, &lmd);
+ 	ptlrpc_req_finished(request);
+ 
+@@ -673,7 +673,7 @@ static int client_common_fill_super(struct super_block *sb, char *md, char *dt)
+ 		goto out_root;
+ 	}
+ 
+-	checksum = sbi->ll_flags & LL_SBI_CHECKSUM;
++	checksum = test_bit(LL_SBI_CHECKSUM, sbi->ll_flags);
+ 	if (sbi->ll_checksum_set) {
+ 		err = obd_set_info_async(NULL, sbi->ll_dt_exp,
+ 					 sizeof(KEY_CHECKSUM), KEY_CHECKSUM,
+@@ -864,183 +864,193 @@ void ll_kill_super(struct super_block *sb)
+ 	}
+ }
+ 
+-static inline int ll_set_opt(const char *opt, char *data, int fl)
++/* Since we use this table for ll_sbi_flags_seq_show make
++ * sure what you want displayed for a specific token that
++ * is listed more than once below be listed first. For
++ * example we want "checksum" displayed, not "nochecksum"
++ * for the sbi_flags.
++ */
++static const match_table_t ll_sbi_flags_name = {
++	{LL_SBI_NOLCK,			"nolock"},
++	{LL_SBI_CHECKSUM,		"checksum"},
++	{LL_SBI_CHECKSUM,		"nochecksum"},
++	{LL_SBI_LOCALFLOCK,		"localflock"},
++	{LL_SBI_FLOCK,			"flock"},
++	{LL_SBI_FLOCK,			"noflock"},
++	{LL_SBI_USER_XATTR,		"user_xattr"},
++	{LL_SBI_USER_XATTR,		"nouser_xattr"},
++	{LL_SBI_LRU_RESIZE,		"lruresize"},
++	{LL_SBI_LRU_RESIZE,		"nolruresize"},
++	{LL_SBI_LAZYSTATFS,		"lazystatfs"},
++	{LL_SBI_LAZYSTATFS,		"nolazystatfs"},
++	{LL_SBI_32BIT_API,		"32bitapi"},
++	{LL_SBI_USER_FID2PATH,		"user_fid2path"},
++	{LL_SBI_USER_FID2PATH,		"nouser_fid2path"},
++	{LL_SBI_VERBOSE,		"verbose"},
++	{LL_SBI_VERBOSE,		"noverbose"},
++	{LL_SBI_ALWAYS_PING,		"always_ping"},
++	{LL_SBI_TEST_DUMMY_ENCRYPTION,	"test_dummy_encryption"},
++	{LL_SBI_ENCRYPT,		"encrypt"},
++	{LL_SBI_ENCRYPT,		"noencrypt"},
++	{LL_SBI_FOREIGN_SYMLINK,	"foreign_symlink=%s"},
++	{LL_SBI_NUM_MOUNT_OPT,		NULL},
++
++	{LL_SBI_ACL,			"acl"},
++	{LL_SBI_AGL_ENABLED,		"agl"},
++	{LL_SBI_64BIT_HASH,		"64bit_hash"},
++	{LL_SBI_LAYOUT_LOCK,		"layout"},
++	{LL_SBI_XATTR_CACHE,		"xattr_cache"},
++	{LL_SBI_NOROOTSQUASH,		"norootsquash"},
++	{LL_SBI_FAST_READ,		"fast_read"},
++	{LL_SBI_FILE_SECCTX,		"file_secctx"},
++	{LL_SBI_TINY_WRITE,		"tiny_write"},
++	{LL_SBI_FILE_HEAT,		"file_heat"},
++	{LL_SBI_PARALLEL_DIO,		"parallel_dio"},
++};
++
++int ll_sbi_flags_seq_show(struct seq_file *m, void *v)
+ {
+-	if (strncmp(opt, data, strlen(opt)) != 0)
+-		return 0;
+-	else
+-		return fl;
++	struct super_block *sb = m->private;
++	int i;
++
++	for (i = 0; i < LL_SBI_NUM_FLAGS; i++) {
++		int j;
++
++		if (!test_bit(i, ll_s2sbi(sb)->ll_flags))
++			continue;
++
++		for (j = 0; j < ARRAY_SIZE(ll_sbi_flags_name); j++) {
++			if (ll_sbi_flags_name[j].token == i &&
++			    ll_sbi_flags_name[j].pattern) {
++				seq_printf(m, "%s ",
++					   ll_sbi_flags_name[j].pattern);
++				break;
++			}
++		}
++	}
++	seq_puts(m, "\b\n");
++	return 0;
+ }
+ 
+ /* non-client-specific mount options are parsed in lmd_parse */
+-static int ll_options(char *options, struct ll_sb_info *sbi)
++static int ll_options(char *options, struct super_block *sb)
+ {
+-	int tmp;
+-	char *s1 = options, *s2;
+-	int *flags = &sbi->ll_flags;
++	struct ll_sb_info *sbi = ll_s2sbi(sb);
++	char *s2, *s1, *opts;
+ 
+ 	if (!options)
+ 		return 0;
+ 
++	/* Don't stomp on lmd_opts */
++	opts = kstrdup(options, GFP_KERNEL);
++	if (!opts)
++		return -ENOMEM;
++	s1 = opts;
++	s2 = opts;
++
+ 	CDEBUG(D_CONFIG, "Parsing opts %s\n", options);
+ 
+-	while (*s1) {
++	while ((s1 = strsep(&opts, ",")) != NULL) {
++		substring_t args[MAX_OPT_ARGS];
++		bool turn_off = false;
++		int token;
++
++		if (!*s1)
++			continue;
++
+ 		CDEBUG(D_SUPER, "next opt=%s\n", s1);
+-		tmp = ll_set_opt("nolock", s1, LL_SBI_NOLCK);
+-		if (tmp) {
+-			*flags |= tmp;
+-			goto next;
+-		}
+-		tmp = ll_set_opt("flock", s1, LL_SBI_FLOCK);
+-		if (tmp) {
+-			*flags = (*flags & ~LL_SBI_LOCALFLOCK) | tmp;
+-			goto next;
+-		}
+-		tmp = ll_set_opt("localflock", s1, LL_SBI_LOCALFLOCK);
+-		if (tmp) {
+-			*flags = (*flags & ~LL_SBI_FLOCK) | tmp;
+-			goto next;
+-		}
+-		tmp = ll_set_opt("noflock", s1,
+-				 LL_SBI_FLOCK | LL_SBI_LOCALFLOCK);
+-		if (tmp) {
+-			*flags &= ~tmp;
+-			goto next;
+-		}
+-		tmp = ll_set_opt("user_xattr", s1, LL_SBI_USER_XATTR);
+-		if (tmp) {
+-			*flags |= tmp;
+-			goto next;
+-		}
+-		tmp = ll_set_opt("nouser_xattr", s1, LL_SBI_USER_XATTR);
+-		if (tmp) {
+-			*flags &= ~tmp;
+-			goto next;
+-		}
+-		tmp = ll_set_opt("context", s1, 1);
+-		if (tmp)
+-			goto next;
+-		tmp = ll_set_opt("fscontext", s1, 1);
+-		if (tmp)
+-			goto next;
+-		tmp = ll_set_opt("defcontext", s1, 1);
+-		if (tmp)
+-			goto next;
+-		tmp = ll_set_opt("rootcontext", s1, 1);
+-		if (tmp)
+-			goto next;
+-		tmp = ll_set_opt("user_fid2path", s1, LL_SBI_USER_FID2PATH);
+-		if (tmp) {
+-			*flags |= tmp;
+-			goto next;
+-		}
+-		tmp = ll_set_opt("nouser_fid2path", s1, LL_SBI_USER_FID2PATH);
+-		if (tmp) {
+-			*flags &= ~tmp;
+-			goto next;
+-		}
++		if (strncmp(s1, "no", 2) == 0)
++			turn_off = true;
+ 
+-		tmp = ll_set_opt("checksum", s1, LL_SBI_CHECKSUM);
+-		if (tmp) {
+-			*flags |= tmp;
+-			sbi->ll_checksum_set = 1;
+-			goto next;
++		/*
++		 * Initialize args struct so we know whether arg was
++		 * found; some options take optional arguments.
++		 */
++		args[0].to = NULL;
++		args[0].from = NULL;
++		token = match_token(s1, ll_sbi_flags_name, args);
++		if (token == LL_SBI_NUM_MOUNT_OPT) {
++			if (match_wildcard("context", s1) ||
++			    match_wildcard("fscontext", s1) ||
++			    match_wildcard("defcontext", s1) ||
++			    match_wildcard("rootcontext", s1))
++				continue;
++
++			LCONSOLE_ERROR_MSG(0x152,
++					   "Unknown option '%s', won't mount.\n",
++					   s1);
++			return -EINVAL;
+ 		}
+-		tmp = ll_set_opt("nochecksum", s1, LL_SBI_CHECKSUM);
+-		if (tmp) {
+-			*flags &= ~tmp;
++
++		switch (token) {
++		case LL_SBI_NOLCK:
++		case LL_SBI_32BIT_API:
++		case LL_SBI_64BIT_HASH:
++		case LL_SBI_ALWAYS_PING:
++			set_bit(token, sbi->ll_flags);
++			break;
++
++		case LL_SBI_FLOCK:
++			clear_bit(LL_SBI_LOCALFLOCK, sbi->ll_flags);
++			if (turn_off)
++				clear_bit(LL_SBI_FLOCK, sbi->ll_flags);
++			else
++				set_bit(token, sbi->ll_flags);
++			break;
++
++		case LL_SBI_LOCALFLOCK:
++			clear_bit(LL_SBI_FLOCK, sbi->ll_flags);
++			set_bit(token, sbi->ll_flags);
++			break;
++
++		case LL_SBI_CHECKSUM:
+ 			sbi->ll_checksum_set = 1;
+-			goto next;
+-		}
+-		tmp = ll_set_opt("lruresize", s1, LL_SBI_LRU_RESIZE);
+-		if (tmp) {
+-			*flags |= tmp;
+-			goto next;
+-		}
+-		tmp = ll_set_opt("nolruresize", s1, LL_SBI_LRU_RESIZE);
+-		if (tmp) {
+-			*flags &= ~tmp;
+-			goto next;
+-		}
+-		tmp = ll_set_opt("lazystatfs", s1, LL_SBI_LAZYSTATFS);
+-		if (tmp) {
+-			*flags |= tmp;
+-			goto next;
+-		}
+-		tmp = ll_set_opt("nolazystatfs", s1, LL_SBI_LAZYSTATFS);
+-		if (tmp) {
+-			*flags &= ~tmp;
+-			goto next;
+-		}
+-		tmp = ll_set_opt("32bitapi", s1, LL_SBI_32BIT_API);
+-		if (tmp) {
+-			*flags |= tmp;
+-			goto next;
+-		}
+-		tmp = ll_set_opt("verbose", s1, LL_SBI_VERBOSE);
+-		if (tmp) {
+-			*flags |= tmp;
+-			goto next;
+-		}
+-		tmp = ll_set_opt("noverbose", s1, LL_SBI_VERBOSE);
+-		if (tmp) {
+-			*flags &= ~tmp;
+-			goto next;
+-		}
+-		tmp = ll_set_opt("always_ping", s1, LL_SBI_ALWAYS_PING);
+-		if (tmp) {
+-			*flags |= tmp;
+-			goto next;
+-		}
+-		tmp = ll_set_opt("test_dummy_encryption", s1,
+-				 LL_SBI_TEST_DUMMY_ENCRYPTION);
+-		if (tmp) {
++			/* fall through */
++		case LL_SBI_USER_XATTR:
++		case LL_SBI_USER_FID2PATH:
++		case LL_SBI_LRU_RESIZE:
++		case LL_SBI_LAZYSTATFS:
++		case LL_SBI_VERBOSE:
++			if (turn_off)
++				clear_bit(token, sbi->ll_flags);
++			else
++				set_bit(token, sbi->ll_flags);
++			break;
++		case LL_SBI_TEST_DUMMY_ENCRYPTION: {
+ #ifdef CONFIG_FS_ENCRYPTION
+-			*flags |= tmp;
++			set_bit(token, sbi->ll_flags);
+ #else
+ 			LCONSOLE_WARN("Test dummy encryption mount option ignored: encryption not supported\n");
+ #endif
+-			goto next;
++			break;
+ 		}
+-		tmp = ll_set_opt("noencrypt", s1, LL_SBI_ENCRYPT);
+-		if (tmp) {
++		case LL_SBI_ENCRYPT:
+ #ifdef CONFIG_FS_ENCRYPTION
+-			*flags &= ~tmp;
++			if (turn_off)
++				clear_bit(token, sbi->ll_flags);
++			else
++				set_bit(token, sbi->ll_flags);
+ #else
+-			LCONSOLE_WARN("noencrypt mount option ignored: encryption not supported\n");
++			LCONSOLE_WARN("noencrypt or encrypt mount option ignored: encryption not supported\n");
+ #endif
+-			goto next;
+-		}
+-		tmp = ll_set_opt("foreign_symlink", s1, LL_SBI_FOREIGN_SYMLINK);
+-		if (tmp) {
+-			int prefix_pos = sizeof("foreign_symlink=") - 1;
+-			int equal_pos = sizeof("foreign_symlink=") - 2;
+-
++			break;
++		case LL_SBI_FOREIGN_SYMLINK:
+ 			/* non-default prefix provided ? */
+-			if (strlen(s1) >= sizeof("foreign_symlink=") &&
+-			    *(s1 + equal_pos) == '=') {
+-				char *old = sbi->ll_foreign_symlink_prefix;
+-				size_t old_len =
+-					sbi->ll_foreign_symlink_prefix_size;
++			if (args->from) {
++				size_t old_len;
++				char *old;
+ 
+ 				/* path must be absolute */
+-				if (*(s1 + sizeof("foreign_symlink=") -
+-				    1) != '/') {
++				if (args->from[0] != '/') {
+ 					LCONSOLE_ERROR_MSG(0x152,
+ 							   "foreign prefix '%s' must be an absolute path\n",
+-							   s1 + prefix_pos);
++							   args->from);
+ 					return -EINVAL;
+ 				}
+-				/* last option ? */
+-				s2 = strchrnul(s1 + prefix_pos, ',');
+-
+-				if (sbi->ll_foreign_symlink_prefix) {
+-					sbi->ll_foreign_symlink_prefix = NULL;
+-					sbi->ll_foreign_symlink_prefix_size = 0;
+-				}
++				old_len = sbi->ll_foreign_symlink_prefix_size;
++				old = sbi->ll_foreign_symlink_prefix;
+ 				/* alloc for path length and '\0' */
+-				sbi->ll_foreign_symlink_prefix = kmalloc(s2 - (s1 + prefix_pos) + 1,
+-									 GFP_KERNEL);
++				sbi->ll_foreign_symlink_prefix = match_strdup(args);
+ 				if (!sbi->ll_foreign_symlink_prefix) {
+ 					/* restore previous */
+ 					sbi->ll_foreign_symlink_prefix = old;
+@@ -1048,31 +1058,22 @@ static int ll_options(char *options, struct ll_sb_info *sbi)
+ 						old_len;
+ 					return -ENOMEM;
+ 				}
+-				kfree(old);
+-				strncpy(sbi->ll_foreign_symlink_prefix,
+-					s1 + prefix_pos,
+-					s2 - (s1 + prefix_pos));
+ 				sbi->ll_foreign_symlink_prefix_size =
+-					s2 - (s1 + prefix_pos) + 1;
++					args->to - args->from + 1;
++				kfree(old);
++
++				/* enable foreign symlink support */
++				set_bit(token, sbi->ll_flags);
+ 			} else {
+ 				LCONSOLE_ERROR_MSG(0x152,
+ 						   "invalid %s option\n", s1);
+ 			}
+-			/* enable foreign symlink support */
+-			*flags |= tmp;
+-			goto next;
+-		}
+-		LCONSOLE_ERROR_MSG(0x152, "Unknown option '%s', won't mount.\n",
+-				   s1);
+-		return -EINVAL;
+-
+-next:
+-		/* Find next opt */
+-		s2 = strchr(s1, ',');
+-		if (!s2)
++		/* fall through */
++		default:
+ 			break;
+-		s1 = s2 + 1;
++		}
+ 	}
++	kfree(opts);
+ 	return 0;
+ }
+ 
+@@ -1168,7 +1169,7 @@ int ll_fill_super(struct super_block *sb)
+ 		goto out_free;
+ 	}
+ 
+-	err = ll_options(lsi->lsi_lmd->lmd_opts, sbi);
++	err = ll_options(lsi->lsi_lmd->lmd_opts, sb);
+ 	if (err)
+ 		goto out_free;
+ 
+@@ -1271,7 +1272,7 @@ int ll_fill_super(struct super_block *sb)
+ 	kfree(cfg);
+ 	if (err)
+ 		ll_put_super(sb);
+-	else if (sbi->ll_flags & LL_SBI_VERBOSE)
++	else if (test_bit(LL_SBI_VERBOSE, sbi->ll_flags))
+ 		LCONSOLE_WARN("Mounted %s\n", profilenm);
+ 
+ 	return err;
+@@ -1339,7 +1340,7 @@ void ll_put_super(struct super_block *sb)
+ 	while ((obd = class_devices_in_group(&sbi->ll_sb_uuid, &next)))
+ 		class_manual_cleanup(obd);
+ 
+-	if (sbi->ll_flags & LL_SBI_VERBOSE)
++	if (test_bit(LL_SBI_VERBOSE, sbi->ll_flags))
+ 		LCONSOLE_WARN("Unmounted %s\n", profilenm ? profilenm : "");
+ 
+ 	if (profilenm)
+@@ -1408,7 +1409,7 @@ static struct inode *ll_iget_anon_dir(struct super_block *sb,
+ 	ino_t ino;
+ 
+ 	LASSERT(md->lmv);
+-	ino = cl_fid_build_ino(fid, sbi->ll_flags & LL_SBI_32BIT_API);
++	ino = cl_fid_build_ino(fid, test_bit(LL_SBI_32BIT_API, sbi->ll_flags));
+ 	inode = iget_locked(sb, ino);
+ 	if (!inode) {
+ 		CERROR("%s: failed get simple inode " DFID ": rc = -ENOENT\n",
+@@ -2207,7 +2208,7 @@ int ll_statfs_internal(struct ll_sb_info *sbi, struct obd_statfs *osfs,
+ 
+ 	max_age = ktime_get_seconds() - sbi->ll_statfs_max_age;
+ 
+-	if (sbi->ll_flags & LL_SBI_LAZYSTATFS)
++	if (test_bit(LL_SBI_LAZYSTATFS, sbi->ll_flags))
+ 		flags |= OBD_STATFS_NODELAY;
+ 
+ 	rc = obd_statfs(NULL, sbi->ll_md_exp, osfs, max_age, flags);
+@@ -2383,6 +2384,7 @@ int ll_update_inode(struct inode *inode, struct lustre_md *md)
+ 	struct ll_inode_info *lli = ll_i2info(inode);
+ 	struct mdt_body *body = md->body;
+ 	struct ll_sb_info *sbi = ll_i2sbi(inode);
++	bool api32;
+ 	int rc = 0;
+ 
+ 	if (body->mbo_valid & OBD_MD_FLEASIZE) {
+@@ -2400,8 +2402,8 @@ int ll_update_inode(struct inode *inode, struct lustre_md *md)
+ 	if (body->mbo_valid & OBD_MD_FLACL)
+ 		lli_replace_acl(lli, md);
+ 
+-	inode->i_ino = cl_fid_build_ino(&body->mbo_fid1,
+-					sbi->ll_flags & LL_SBI_32BIT_API);
++	api32 = test_bit(LL_SBI_32BIT_API, sbi->ll_flags);
++	inode->i_ino = cl_fid_build_ino(&body->mbo_fid1, api32);
+ 	inode->i_generation = cl_fid_build_gen(&body->mbo_fid1);
+ 
+ 	if (body->mbo_valid & OBD_MD_FLATIME) {
+@@ -2782,7 +2784,7 @@ int ll_remount_fs(struct super_block *sb, int *flags, char *data)
+ 		else
+ 			sb->s_flags &= ~SB_RDONLY;
+ 
+-		if (sbi->ll_flags & LL_SBI_VERBOSE)
++		if (test_bit(LL_SBI_VERBOSE, sbi->ll_flags))
+ 			LCONSOLE_WARN("Remounted %s %s\n", profilenm,
+ 				      read_only ?  "read-only" : "read-write");
+ 	}
+@@ -2853,24 +2855,23 @@ int ll_prep_inode(struct inode **inode, struct req_capsule *pill,
+ 		if (rc)
+ 			goto out;
+ 	} else {
++		bool api32 = test_bit(LL_SBI_32BIT_API, sbi->ll_flags);
++		struct lu_fid *fid1 = &md.body->mbo_fid1;
++
+ 		LASSERT(sb);
+ 
+ 		/*
+ 		 * At this point server returns to client's same fid as client
+ 		 * generated for creating. So using ->fid1 is okay here.
+ 		 */
+-		if (!fid_is_sane(&md.body->mbo_fid1)) {
++		if (!fid_is_sane(fid1)) {
+ 			CERROR("%s: Fid is insane " DFID "\n",
+-			       sbi->ll_fsname,
+-			       PFID(&md.body->mbo_fid1));
++			       sbi->ll_fsname, PFID(fid1));
+ 			rc = -EINVAL;
+ 			goto out;
+ 		}
+ 
+-		*inode = ll_iget(sb,
+-				 cl_fid_build_ino(&md.body->mbo_fid1,
+-						  sbi->ll_flags & LL_SBI_32BIT_API),
+-				 &md);
++		*inode = ll_iget(sb, cl_fid_build_ino(fid1, api32), &md);
+ 		if (IS_ERR(*inode)) {
+ 			lmd_clear_acl(&md);
+ 			rc = IS_ERR(*inode) ? PTR_ERR(*inode) : -ENOMEM;
+@@ -3055,7 +3056,7 @@ struct md_op_data *ll_prep_md_op_data(struct md_op_data *op_data,
+ 		fid_zero(&op_data->op_fid2);
+ 	}
+ 
+-	if (ll_i2sbi(i1)->ll_flags & LL_SBI_64BIT_HASH)
++	if (test_bit(LL_SBI_64BIT_HASH, ll_i2sbi(i1)->ll_flags))
+ 		op_data->op_cli_flags |= CLI_HASH64;
+ 
+ 	if (ll_need_32bit_api(ll_i2sbi(i1)))
+@@ -3132,47 +3133,40 @@ void ll_finish_md_op_data(struct md_op_data *op_data)
+ int ll_show_options(struct seq_file *seq, struct dentry *dentry)
+ {
+ 	struct ll_sb_info *sbi;
++	int i;
+ 
+ 	LASSERT(seq && dentry);
+ 	sbi = ll_s2sbi(dentry->d_sb);
+ 
+-	if (sbi->ll_flags & LL_SBI_NOLCK)
+-		seq_puts(seq, ",nolock");
+-
+-	/* "flock" is the default since 2.13, but it wasn't for many years,
+-	 * so it is still useful to print this to show it is enabled.
+-	 * Start to print "noflock" so it is now clear when flock is disabled.
+-	 */
+-	if (sbi->ll_flags & LL_SBI_FLOCK)
+-		seq_puts(seq, ",flock");
+-	else if (sbi->ll_flags & LL_SBI_LOCALFLOCK)
+-		seq_puts(seq, ",localflock");
+-	else
+-		seq_puts(seq, ",noflock");
+-
+-	if (sbi->ll_flags & LL_SBI_USER_XATTR)
+-		seq_puts(seq, ",user_xattr");
+-
+-	if (sbi->ll_flags & LL_SBI_LAZYSTATFS)
+-		seq_puts(seq, ",lazystatfs");
+-
+-	if (sbi->ll_flags & LL_SBI_USER_FID2PATH)
+-		seq_puts(seq, ",user_fid2path");
+-
+-	if (sbi->ll_flags & LL_SBI_ALWAYS_PING)
+-		seq_puts(seq, ",always_ping");
++	if (test_bit(LL_SBI_NOLCK, sbi->ll_flags))
++		seq_puts(seq, "nolock");
+ 
+-	if (ll_sbi_has_test_dummy_encryption(sbi))
+-		seq_puts(seq, ",test_dummy_encryption");
+-
+-	if (ll_sbi_has_encrypt(sbi))
+-		seq_puts(seq, ",encrypt");
+-	else
+-		seq_puts(seq, ",noencrypt");
++	for (i = 1; ll_sbi_flags_name[i].token != LL_SBI_NUM_MOUNT_OPT; i++) {
++		/* match_table in some cases has patterns for both enabled and
++		 * disabled cases. Ignore 'no'xxx versions if bit is set.
++		 */
++		if (test_bit(ll_sbi_flags_name[i].token, sbi->ll_flags) &&
++		    strncmp(ll_sbi_flags_name[i].pattern, "no", 2)) {
++			if (ll_sbi_flags_name[i].token ==
++			    LL_SBI_FOREIGN_SYMLINK) {
++				seq_show_option(seq, "foreign_symlink",
++						sbi->ll_foreign_symlink_prefix);
++			} else {
++				seq_printf(seq, ",%s",
++					   ll_sbi_flags_name[i].pattern);
++			}
+ 
+-	if (sbi->ll_flags & LL_SBI_FOREIGN_SYMLINK) {
+-		seq_puts(seq, ",foreign_symlink=");
+-		seq_puts(seq, sbi->ll_foreign_symlink_prefix);
++			/* You can have either localflock or flock but not
++			 * both. If localflock is set don't print flock or
++			 * noflock.
++			 */
++			if (ll_sbi_flags_name[i].token == LL_SBI_LOCALFLOCK)
++				i += 2;
++		} else if (!test_bit(ll_sbi_flags_name[i].token, sbi->ll_flags) &&
++			   !strncmp(ll_sbi_flags_name[i].pattern, "no", 2)) {
++			seq_printf(seq, ",%s",
++				   ll_sbi_flags_name[i].pattern);
++		}
+ 	}
+ 
+ 	return 0;
+@@ -3276,12 +3270,9 @@ void ll_compute_rootsquash_state(struct ll_sb_info *sbi)
+ 	/* Update norootsquash flag */
+ 	spin_lock(&squash->rsi_lock);
+ 	if (list_empty(&squash->rsi_nosquash_nids)) {
+-		spin_lock(&sbi->ll_lock);
+-		sbi->ll_flags &= ~LL_SBI_NOROOTSQUASH;
+-		spin_unlock(&sbi->ll_lock);
++		clear_bit(LL_SBI_NOROOTSQUASH, sbi->ll_flags);
+ 	} else {
+-		/*
+-		 * Do not apply root squash as soon as one of our NIDs is
++		/* Do not apply root squash as soon as one of our NIDs is
+ 		 * in the nosquash_nids list
+ 		 */
+ 		matched = false;
+@@ -3297,10 +3288,9 @@ void ll_compute_rootsquash_state(struct ll_sb_info *sbi)
+ 		}
+ 		spin_lock(&sbi->ll_lock);
+ 		if (matched)
+-			sbi->ll_flags |= LL_SBI_NOROOTSQUASH;
++			set_bit(LL_SBI_NOROOTSQUASH, sbi->ll_flags);
+ 		else
+-			sbi->ll_flags &= ~LL_SBI_NOROOTSQUASH;
+-		spin_unlock(&sbi->ll_lock);
++			clear_bit(LL_SBI_NOROOTSQUASH, sbi->ll_flags);
+ 	}
+ 	spin_unlock(&squash->rsi_lock);
+ }
+@@ -3375,7 +3365,7 @@ int ll_getparent(struct file *file, struct getparent __user *arg)
+ 	int rc;
+ 
+ 	if (!capable(CAP_DAC_READ_SEARCH) &&
+-	    !(ll_i2sbi(inode)->ll_flags & LL_SBI_USER_FID2PATH))
++	    !test_bit(LL_SBI_USER_FID2PATH, ll_i2sbi(inode)->ll_flags))
+ 		return -EPERM;
+ 
+ 	if (get_user(name_size, &arg->gp_name_size))
+diff --git a/fs/lustre/llite/lproc_llite.c b/fs/lustre/llite/lproc_llite.c
+index 3b4f60c..eac905d 100644
+--- a/fs/lustre/llite/lproc_llite.c
++++ b/fs/lustre/llite/lproc_llite.c
+@@ -610,7 +610,8 @@ static ssize_t checksums_show(struct kobject *kobj, struct attribute *attr,
+ 	struct ll_sb_info *sbi = container_of(kobj, struct ll_sb_info,
+ 					      ll_kset.kobj);
+ 
+-	return sprintf(buf, "%u\n", (sbi->ll_flags & LL_SBI_CHECKSUM) ? 1 : 0);
++	return scnprintf(buf, PAGE_SIZE, "%u\n",
++			 test_bit(LL_SBI_CHECKSUM, sbi->ll_flags));
+ }
+ 
+ static ssize_t checksums_store(struct kobject *kobj, struct attribute *attr,
+@@ -630,12 +631,10 @@ static ssize_t checksums_store(struct kobject *kobj, struct attribute *attr,
+ 	if (rc)
+ 		return rc;
+ 
+-	spin_lock(&sbi->ll_lock);
+ 	if (val)
+-		sbi->ll_flags |= LL_SBI_CHECKSUM;
++		set_bit(LL_SBI_CHECKSUM, sbi->ll_flags);
+ 	else
+-		sbi->ll_flags &= ~LL_SBI_CHECKSUM;
+-	spin_unlock(&sbi->ll_lock);
++		clear_bit(LL_SBI_CHECKSUM, sbi->ll_flags);
+ 	tmp = val;
+ 
+ 	rc = obd_set_info_async(NULL, sbi->ll_dt_exp, sizeof(KEY_CHECKSUM),
+@@ -809,7 +808,8 @@ static ssize_t statahead_agl_show(struct kobject *kobj,
+ 	struct ll_sb_info *sbi = container_of(kobj, struct ll_sb_info,
+ 					      ll_kset.kobj);
+ 
+-	return sprintf(buf, "%u\n", sbi->ll_flags & LL_SBI_AGL_ENABLED ? 1 : 0);
++	return scnprintf(buf, PAGE_SIZE, "%u\n",
++			 test_bit(LL_SBI_AGL_ENABLED, sbi->ll_flags));
+ }
+ 
+ static ssize_t statahead_agl_store(struct kobject *kobj,
+@@ -826,12 +826,10 @@ static ssize_t statahead_agl_store(struct kobject *kobj,
+ 	if (rc)
+ 		return rc;
+ 
+-	spin_lock(&sbi->ll_lock);
+ 	if (val)
+-		sbi->ll_flags |= LL_SBI_AGL_ENABLED;
++		set_bit(LL_SBI_AGL_ENABLED, sbi->ll_flags);
+ 	else
+-		sbi->ll_flags &= ~LL_SBI_AGL_ENABLED;
+-	spin_unlock(&sbi->ll_lock);
++		clear_bit(LL_SBI_AGL_ENABLED, sbi->ll_flags);
+ 
+ 	return count;
+ }
+@@ -861,7 +859,8 @@ static ssize_t lazystatfs_show(struct kobject *kobj,
+ 	struct ll_sb_info *sbi = container_of(kobj, struct ll_sb_info,
+ 					      ll_kset.kobj);
+ 
+-	return sprintf(buf, "%u\n", sbi->ll_flags & LL_SBI_LAZYSTATFS ? 1 : 0);
++	return scnprintf(buf, PAGE_SIZE, "%u\n",
++			 test_bit(LL_SBI_LAZYSTATFS, sbi->ll_flags));
+ }
+ 
+ static ssize_t lazystatfs_store(struct kobject *kobj,
+@@ -878,12 +877,10 @@ static ssize_t lazystatfs_store(struct kobject *kobj,
+ 	if (rc)
+ 		return rc;
+ 
+-	spin_lock(&sbi->ll_lock);
+ 	if (val)
+-		sbi->ll_flags |= LL_SBI_LAZYSTATFS;
++		set_bit(LL_SBI_LAZYSTATFS, sbi->ll_flags);
+ 	else
+-		sbi->ll_flags &= ~LL_SBI_LAZYSTATFS;
+-	spin_unlock(&sbi->ll_lock);
++		clear_bit(LL_SBI_LAZYSTATFS, sbi->ll_flags);
+ 
+ 	return count;
+ }
+@@ -1006,29 +1003,6 @@ static ssize_t default_easize_store(struct kobject *kobj,
+ }
+ LUSTRE_RW_ATTR(default_easize);
+ 
+-static int ll_sbi_flags_seq_show(struct seq_file *m, void *v)
+-{
+-	const char *const str[] = LL_SBI_FLAGS;
+-	struct super_block *sb = m->private;
+-	int flags = ll_s2sbi(sb)->ll_flags;
+-	int i = 0;
+-
+-	while (flags != 0) {
+-		if (ARRAY_SIZE(str) <= i) {
+-			CERROR("%s: Revise array LL_SBI_FLAGS to match sbi flags please.\n",
+-			       ll_s2sbi(sb)->ll_fsname);
+-			return -EINVAL;
+-		}
+-
+-		if (flags & 0x1)
+-			seq_printf(m, "%s ", str[i]);
+-		flags >>= 1;
+-		++i;
+-	}
+-	seq_puts(m, "\b\n");
+-	return 0;
+-}
+-
+ LDEBUGFS_SEQ_FOPS_RO(ll_sbi_flags);
+ 
+ static ssize_t xattr_cache_show(struct kobject *kobj,
+@@ -1055,7 +1029,7 @@ static ssize_t xattr_cache_store(struct kobject *kobj,
+ 	if (rc)
+ 		return rc;
+ 
+-	if (val && !(sbi->ll_flags & LL_SBI_XATTR_CACHE))
++	if (val && !test_bit(LL_SBI_XATTR_CACHE, sbi->ll_flags))
+ 		return -ENOTSUPP;
+ 
+ 	sbi->ll_xattr_cache_enabled = val;
+@@ -1072,7 +1046,8 @@ static ssize_t tiny_write_show(struct kobject *kobj,
+ 	struct ll_sb_info *sbi = container_of(kobj, struct ll_sb_info,
+ 					      ll_kset.kobj);
+ 
+-	return sprintf(buf, "%u\n", !!(sbi->ll_flags & LL_SBI_TINY_WRITE));
++	return scnprintf(buf, PAGE_SIZE, "%u\n",
++			 test_bit(LL_SBI_TINY_WRITE, sbi->ll_flags));
+ }
+ 
+ static ssize_t tiny_write_store(struct kobject *kobj,
+@@ -1091,9 +1066,9 @@ static ssize_t tiny_write_store(struct kobject *kobj,
+ 
+ 	spin_lock(&sbi->ll_lock);
+ 	if (val)
+-		sbi->ll_flags |= LL_SBI_TINY_WRITE;
++		set_bit(LL_SBI_TINY_WRITE, sbi->ll_flags);
+ 	else
+-		sbi->ll_flags &= ~LL_SBI_TINY_WRITE;
++		clear_bit(LL_SBI_TINY_WRITE, sbi->ll_flags);
+ 	spin_unlock(&sbi->ll_lock);
+ 
+ 	return count;
+@@ -1108,7 +1083,7 @@ static ssize_t parallel_dio_show(struct kobject *kobj,
+ 					      ll_kset.kobj);
+ 
+ 	return snprintf(buf, PAGE_SIZE, "%u\n",
+-		       !!(sbi->ll_flags & LL_SBI_PARALLEL_DIO));
++			test_bit(LL_SBI_PARALLEL_DIO, sbi->ll_flags));
+ }
+ 
+ static ssize_t parallel_dio_store(struct kobject *kobj,
+@@ -1127,9 +1102,9 @@ static ssize_t parallel_dio_store(struct kobject *kobj,
+ 
+ 	spin_lock(&sbi->ll_lock);
+ 	if (val)
+-		sbi->ll_flags |= LL_SBI_PARALLEL_DIO;
++		set_bit(LL_SBI_PARALLEL_DIO, sbi->ll_flags);
+ 	else
+-		sbi->ll_flags &= ~LL_SBI_PARALLEL_DIO;
++		clear_bit(LL_SBI_PARALLEL_DIO, sbi->ll_flags);
+ 	spin_unlock(&sbi->ll_lock);
+ 
+ 	return count;
+@@ -1274,7 +1249,8 @@ static ssize_t fast_read_show(struct kobject *kobj,
+ 	struct ll_sb_info *sbi = container_of(kobj, struct ll_sb_info,
+ 					      ll_kset.kobj);
+ 
+-	return sprintf(buf, "%u\n", !!(sbi->ll_flags & LL_SBI_FAST_READ));
++	return scnprintf(buf, PAGE_SIZE, "%u\n",
++			 test_bit(LL_SBI_FAST_READ, sbi->ll_flags));
+ }
+ 
+ static ssize_t fast_read_store(struct kobject *kobj,
+@@ -1293,9 +1269,9 @@ static ssize_t fast_read_store(struct kobject *kobj,
+ 
+ 	spin_lock(&sbi->ll_lock);
+ 	if (val)
+-		sbi->ll_flags |= LL_SBI_FAST_READ;
++		set_bit(LL_SBI_FAST_READ, sbi->ll_flags);
+ 	else
+-		sbi->ll_flags &= ~LL_SBI_FAST_READ;
++		clear_bit(LL_SBI_FAST_READ, sbi->ll_flags);
+ 	spin_unlock(&sbi->ll_lock);
+ 
+ 	return count;
+@@ -1310,7 +1286,7 @@ static ssize_t file_heat_show(struct kobject *kobj,
+ 					      ll_kset.kobj);
+ 
+ 	return scnprintf(buf, PAGE_SIZE, "%u\n",
+-			 !!(sbi->ll_flags & LL_SBI_FILE_HEAT));
++			 test_bit(LL_SBI_FILE_HEAT, sbi->ll_flags));
+ }
+ 
+ static ssize_t file_heat_store(struct kobject *kobj,
+@@ -1329,9 +1305,9 @@ static ssize_t file_heat_store(struct kobject *kobj,
+ 
+ 	spin_lock(&sbi->ll_lock);
+ 	if (val)
+-		sbi->ll_flags |= LL_SBI_FILE_HEAT;
++		set_bit(LL_SBI_FILE_HEAT, sbi->ll_flags);
+ 	else
+-		sbi->ll_flags &= ~LL_SBI_FILE_HEAT;
++		clear_bit(LL_SBI_FILE_HEAT, sbi->ll_flags);
+ 	spin_unlock(&sbi->ll_lock);
+ 
+ 	return count;
+diff --git a/fs/lustre/llite/namei.c b/fs/lustre/llite/namei.c
+index 781bb16..f942179 100644
+--- a/fs/lustre/llite/namei.c
++++ b/fs/lustre/llite/namei.c
+@@ -880,7 +880,7 @@ static struct dentry *ll_lookup_it(struct inode *parent, struct dentry *dentry,
+ 		it->it_create_mode &= ~current_umask();
+ 
+ 	if (it->it_op & IT_CREAT &&
+-	    ll_i2sbi(parent)->ll_flags & LL_SBI_FILE_SECCTX) {
++	    test_bit(LL_SBI_FILE_SECCTX, ll_i2sbi(parent)->ll_flags)) {
+ 		rc = ll_dentry_init_security(dentry, it->it_create_mode,
+ 					     &dentry->d_name,
+ 					     &op_data->op_file_secctx_name,
+@@ -1424,7 +1424,8 @@ static int ll_create_it(struct inode *dir, struct dentry *dentry,
+ 	if (IS_ERR(inode))
+ 		return PTR_ERR(inode);
+ 
+-	if ((ll_i2sbi(inode)->ll_flags & LL_SBI_FILE_SECCTX) && secctx) {
++	if (test_bit(LL_SBI_FILE_SECCTX, ll_i2sbi(inode)->ll_flags) &&
++	    secctx) {
+ 		/* must be done before d_instantiate, because it calls
+ 		 * security_d_instantiate, which means a getxattr if security
+ 		 * context is not set yet
+@@ -1446,7 +1447,7 @@ static int ll_create_it(struct inode *dir, struct dentry *dentry,
+ 			return rc;
+ 	}
+ 
+-	if (!(ll_i2sbi(inode)->ll_flags & LL_SBI_FILE_SECCTX)) {
++	if (!test_bit(LL_SBI_FILE_SECCTX, ll_i2sbi(inode)->ll_flags)) {
+ 		rc = ll_inode_init_security(dentry, inode, dir);
+ 		if (rc)
+ 			return rc;
+@@ -1562,7 +1563,7 @@ static int ll_new_node(struct inode *dir, struct dentry *dchild,
+ 	if (S_ISDIR(mode))
+ 		ll_qos_mkdir_prep(op_data, dir);
+ 
+-	if (sbi->ll_flags & LL_SBI_FILE_SECCTX) {
++	if (test_bit(LL_SBI_FILE_SECCTX, sbi->ll_flags)) {
+ 		err = ll_dentry_init_security(dchild, mode, &dchild->d_name,
+ 					      &op_data->op_file_secctx_name,
+ 					      &op_data->op_file_secctx,
+@@ -1707,7 +1708,7 @@ static int ll_new_node(struct inode *dir, struct dentry *dchild,
+ 	if (err)
+ 		goto err_exit;
+ 
+-	if (sbi->ll_flags & LL_SBI_FILE_SECCTX) {
++	if (test_bit(LL_SBI_FILE_SECCTX, sbi->ll_flags)) {
+ 		/* must be done before d_instantiate, because it calls
+ 		 * security_d_instantiate, which means a getxattr if security
+ 		 * context is not set yet
+@@ -1747,7 +1748,7 @@ static int ll_new_node(struct inode *dir, struct dentry *dchild,
+ 		}
+ 	}
+ 
+-	if (!(sbi->ll_flags & LL_SBI_FILE_SECCTX))
++	if (!test_bit(LL_SBI_FILE_SECCTX, sbi->ll_flags))
+ 		err = ll_inode_init_security(dchild, inode, dir);
+ err_exit:
+ 	if (request)
+diff --git a/fs/lustre/llite/statahead.c b/fs/lustre/llite/statahead.c
+index 15b95b7..4806e99 100644
+--- a/fs/lustre/llite/statahead.c
++++ b/fs/lustre/llite/statahead.c
+@@ -1667,7 +1667,8 @@ static int start_statahead_thread(struct inode *dir, struct dentry *dentry,
+ 		goto out;
+ 	}
+ 
+-	if (ll_i2sbi(parent->d_inode)->ll_flags & LL_SBI_AGL_ENABLED && agl)
++	if (test_bit(LL_SBI_AGL_ENABLED, ll_i2sbi(parent->d_inode)->ll_flags) &&
++	    agl)
+ 		ll_start_agl(parent, sai);
+ 
+ 	atomic_inc(&ll_i2sbi(parent->d_inode)->ll_sa_total);
+diff --git a/fs/lustre/llite/xattr.c b/fs/lustre/llite/xattr.c
+index 59a1400..b67b822 100644
+--- a/fs/lustre/llite/xattr.c
++++ b/fs/lustre/llite/xattr.c
+@@ -67,11 +67,11 @@ static int xattr_type_filter(struct ll_sb_info *sbi,
+ 
+ 	if ((handler->flags == XATTR_ACL_ACCESS_T ||
+ 	     handler->flags == XATTR_ACL_DEFAULT_T) &&
+-	   !(sbi->ll_flags & LL_SBI_ACL))
++	   !test_bit(LL_SBI_ACL, sbi->ll_flags))
+ 		return -EOPNOTSUPP;
+ 
+ 	if (handler->flags == XATTR_USER_T &&
+-	    !(sbi->ll_flags & LL_SBI_USER_XATTR))
++	    !test_bit(LL_SBI_USER_XATTR, sbi->ll_flags))
+ 		return -EOPNOTSUPP;
+ 
+ 	if (handler->flags == XATTR_TRUSTED_T &&
+@@ -153,9 +153,7 @@ static int ll_xattr_set_common(const struct xattr_handler *handler,
+ 	if (rc) {
+ 		if (rc == -EOPNOTSUPP && handler->flags == XATTR_USER_T) {
+ 			LCONSOLE_INFO("Disabling user_xattr feature because it is not supported on the server\n");
+-			spin_lock(&sbi->ll_lock);
+-			sbi->ll_flags &= ~LL_SBI_USER_XATTR;
+-			spin_unlock(&sbi->ll_lock);
++			clear_bit(LL_SBI_USER_XATTR, sbi->ll_flags);
+ 		}
+ 		return rc;
+ 	}
+@@ -431,12 +429,9 @@ int ll_xattr_list(struct inode *inode, const char *name, int type, void *buffer,
+ 
+ out_xattr:
+ 	if (rc == -EOPNOTSUPP && type == XATTR_USER_T) {
+-		LCONSOLE_INFO(
+-			"%s: disabling user_xattr feature because it is not supported on the server: rc = %d\n",
+-			sbi->ll_fsname, rc);
+-		spin_lock(&sbi->ll_lock);
+-		sbi->ll_flags &= ~LL_SBI_USER_XATTR;
+-		spin_unlock(&sbi->ll_lock);
++		LCONSOLE_INFO("%s: disabling user_xattr feature because it is not supported on the server: rc = %d\n",
++			      sbi->ll_fsname, rc);
++		clear_bit(LL_SBI_USER_XATTR, sbi->ll_flags);
+ 	}
+ out:
+ 	ptlrpc_req_finished(req);
+-- 
+1.8.3.1
+
+
+From jsimmons at infradead.org  Mon Oct 11 10:40:39 2021
+From: jsimmons at infradead.org (James Simmons)
+Date: Mon, 11 Oct 2021 13:40:39 -0400
+Subject: [lustre-devel] [PATCH 10/20] lustre: osc: Do not attempt sending
+ empty pages
+In-Reply-To: <1633974049-26490-1-git-send-email-jsimmons@infradead.org>
+References: <1633974049-26490-1-git-send-email-jsimmons@infradead.org>
+Message-ID: <1633974049-26490-11-git-send-email-jsimmons@infradead.org>
+
+From: Oleg Drokin <green at whamcloud.com>
+
+Do not crash if trying to send a lock-prolonging emtpy read
+to an old server, if the server does not support short reads.
+Otherwise the client crashes when access the NULL page.
+
+Fixes: 1febc3615e2b ("lustre: osc: Notify server if cache discard takes a long time")
+WC-bug-id: https://jira.whamcloud.com/browse/LU-14711
+Lustre-commit: 1a409a3e6a7468597 ("LU-14711 osc: Do not attempt sending empty pages")
+Signed-off-by: Oleg Drokin <green at whamcloud.com>
+Reviewed-on: https://review.whamcloud.com/44654
+Reviewed-by: Patrick Farrell <pfarrell at whamcloud.com>
+Signed-off-by: James Simmons <jsimmons at infradead.org>
+---
+ fs/lustre/osc/osc_request.c | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+diff --git a/fs/lustre/osc/osc_request.c b/fs/lustre/osc/osc_request.c
+index def2ee7..e5b7453 100644
+--- a/fs/lustre/osc/osc_request.c
++++ b/fs/lustre/osc/osc_request.c
+@@ -1567,6 +1567,12 @@ static int osc_brw_prep_request(int cmd, struct client_obd *cli,
+ 	    !imp_connect_shortio(cli->cl_import))
+ 		short_io_size = 0;
+ 
++	/* If this is an empty RPC to old server, just ignore it */
++	if (!short_io_size && !pga[0]->pg) {
++		ptlrpc_request_free(req);
++		return -ENODATA;
++	}
++
+ 	req_capsule_set_size(pill, &RMF_SHORT_IO, RCL_CLIENT,
+ 			     opc == OST_READ ? 0 : short_io_size);
+ 	if (opc == OST_READ)
+-- 
+1.8.3.1
+
+
+From jsimmons at infradead.org  Mon Oct 11 10:40:37 2021
+From: jsimmons at infradead.org (James Simmons)
+Date: Mon, 11 Oct 2021 13:40:37 -0400
+Subject: [lustre-devel] [PATCH 08/20] lustre: sec: access to enc file's
+ xattrs
+In-Reply-To: <1633974049-26490-1-git-send-email-jsimmons@infradead.org>
+References: <1633974049-26490-1-git-send-email-jsimmons@infradead.org>
+Message-ID: <1633974049-26490-9-git-send-email-jsimmons@infradead.org>
+
+From: Sebastien Buisson <sbuisson at ddn.com>
+
+Encryption context is stored in 'security.c' xattr. This is put in the
+xattr cache via ll_xattr_cache_insert() to avoid sending a getxattr
+request to the server. But this operation declares the xattr cache for
+the inode as 'valid', with two consequences. It prevents any further
+filling with other xattrs, and trying to read an xattr value will
+directly return -ENODATA, without any attempt to fetch the xattr from
+the server.
+This is solved by adding a new ll_file_flags 'LLIF_XATTR_CACHE_FILLED'
+that tells if the xattr cache for the inode has been filled. This bit
+is set only by ll_xattr_cache_refill(), and 'valid' now just means the
+xattr cache for the inode has been initialized.
+
+Fixes: 71d77bbe7e ("lustre: sec: atomicity of encryption context getting/setting")
+WC-bug-id: https://jira.whamcloud.com/browse/LU-14989
+Lustre-commit: 1faf54e8bf19c28a4 ("LU-14989 sec: access to enc file's xattrs")
+Signed-off-by: Sebastien Buisson <sbuisson at ddn.com>
+Reviewed-on: https://review.whamcloud.com/44855
+Reviewed-by: Andreas Dilger <adilger at whamcloud.com>
+Reviewed-by: Patrick Farrell <pfarrell at whamcloud.com>
+Reviewed-by: Oleg Drokin <green at whamcloud.com>
+Signed-off-by: James Simmons <jsimmons at infradead.org>
+---
+ fs/lustre/llite/llite_internal.h |  2 ++
+ fs/lustre/llite/statahead.c      | 24 +++++++++++++++
+ fs/lustre/llite/xattr_cache.c    | 65 +++++++++++++++++++++++++++++-----------
+ 3 files changed, 73 insertions(+), 18 deletions(-)
+
+diff --git a/fs/lustre/llite/llite_internal.h b/fs/lustre/llite/llite_internal.h
+index e0fda00..afd5c7a 100644
+--- a/fs/lustre/llite/llite_internal.h
++++ b/fs/lustre/llite/llite_internal.h
+@@ -109,6 +109,8 @@ enum ll_file_flags {
+ 	LLIF_FOREIGN_REMOVABLE	= 5,
+ 	/* setting encryption context in progress */
+ 	LLIF_SET_ENC_CTX	= 6,
++	/* Xattr cache is filled */
++	LLIF_XATTR_CACHE_FILLED	= 7,
+ };
+ 
+ /* See comment on trunc_sem_down_read_nowait */
+diff --git a/fs/lustre/llite/statahead.c b/fs/lustre/llite/statahead.c
+index cb435d5..15b95b7 100644
+--- a/fs/lustre/llite/statahead.c
++++ b/fs/lustre/llite/statahead.c
+@@ -666,6 +666,30 @@ static void sa_instantiate(struct ll_statahead_info *sai,
+ 	if (rc)
+ 		goto out;
+ 
++	/* If encryption context was returned by MDT, put it in
++	 * inode now to save an extra getxattr.
++	 */
++	if (body->mbo_valid & OBD_MD_ENCCTX) {
++		void *encctx = req_capsule_server_get(&req->rq_pill,
++						      &RMF_FILE_ENCCTX);
++		u32 encctxlen = req_capsule_get_size(&req->rq_pill,
++						     &RMF_FILE_ENCCTX,
++						     RCL_SERVER);
++
++		if (encctxlen) {
++			CDEBUG(D_SEC,
++			       "server returned encryption ctx for "DFID"\n",
++			       PFID(ll_inode2fid(child)));
++			rc = ll_xattr_cache_insert(child,
++						   LL_XATTR_NAME_ENCRYPTION_CONTEXT,
++						   encctx, encctxlen);
++			if (rc)
++				CWARN("%s: cannot set enc ctx for "DFID": rc = %d\n",
++				      ll_i2sbi(child)->ll_fsname,
++				      PFID(ll_inode2fid(child)), rc);
++		}
++	}
++
+ 	CDEBUG(D_READA, "%s: setting %.*s" DFID " l_data to inode %p\n",
+ 	       ll_i2sbi(dir)->ll_fsname, entry->se_qstr.len,
+ 	       entry->se_qstr.name, PFID(ll_inode2fid(child)), child);
+diff --git a/fs/lustre/llite/xattr_cache.c b/fs/lustre/llite/xattr_cache.c
+index fee1cf5..0641f73 100644
+--- a/fs/lustre/llite/xattr_cache.c
++++ b/fs/lustre/llite/xattr_cache.c
+@@ -109,6 +109,12 @@ static int ll_xattr_cache_add(struct list_head *cache,
+ 	struct ll_xattr_entry *xattr;
+ 
+ 	if (ll_xattr_cache_find(cache, xattr_name, &xattr) == 0) {
++		if (!strcmp(xattr_name, LL_XATTR_NAME_ENCRYPTION_CONTEXT))
++			/* it means enc ctx was already in cache,
++			 * ignore error as it cannot be modified
++			 */
++			return 0;
++
+ 		CDEBUG(D_CACHE, "duplicate xattr: [%s]\n", xattr_name);
+ 		return -EPROTO;
+ 	}
+@@ -211,7 +217,7 @@ static int ll_xattr_cache_list(struct list_head *cache,
+ }
+ 
+ /**
+- * Check if the xattr cache is initialized (filled).
++ * Check if the xattr cache is initialized.
+  *
+  * Return:	0 @cache is not initialized
+  *		1 @cache is initialized
+@@ -222,6 +228,17 @@ static int ll_xattr_cache_valid(struct ll_inode_info *lli)
+ }
+ 
+ /**
++ * Check if the xattr cache is filled.
++ *
++ * \retval 0 @cache is not filled
++ * \retval 1 @cache is filled
++ */
++static int ll_xattr_cache_filled(struct ll_inode_info *lli)
++{
++	return test_bit(LLIF_XATTR_CACHE_FILLED, &lli->lli_flags);
++}
++
++/**
+  * This finalizes the xattr cache.
+  *
+  * Free all xattr memory. @lli is the inode info pointer.
+@@ -236,6 +253,7 @@ static int ll_xattr_cache_destroy_locked(struct ll_inode_info *lli)
+ 	while (ll_xattr_cache_del(&lli->lli_xattrs, NULL) == 0)
+ 		; /* empty loop */
+ 
++	clear_bit(LLIF_XATTR_CACHE_FILLED, &lli->lli_flags);
+ 	clear_bit(LLIF_XATTR_CACHE, &lli->lli_flags);
+ 
+ 	return 0;
+@@ -259,7 +277,8 @@ int ll_xattr_cache_destroy(struct inode *inode)
+  * Find or request an LDLM lock with xattr data.
+  * Since LDLM does not provide API for atomic match_or_enqueue,
+  * the function handles it with a separate enq lock.
+- * If successful, the function exits with the list lock held.
++ * If successful, the function exits with a write lock held
++ * on lli_xattrs_list_rwsem.
+  *
+  * Return:	0 no error occurred
+  *		-ENOMEM not enough memory
+@@ -280,7 +299,7 @@ static int ll_xattr_find_get_lock(struct inode *inode,
+ 	/* inode may have been shrunk and recreated, so data is gone, match lock
+ 	 * only when data exists.
+ 	 */
+-	if (ll_xattr_cache_valid(lli)) {
++	if (ll_xattr_cache_filled(lli)) {
+ 		/* Try matching first. */
+ 		mode = ll_take_md_lock(inode, MDS_INODELOCK_XATTR, &lockh, 0,
+ 				       LCK_PR);
+@@ -324,7 +343,9 @@ static int ll_xattr_find_get_lock(struct inode *inode,
+ /**
+  * Refill the xattr cache.
+  *
+- * Fetch and cache the whole of xattrs for @inode, acquiring a read lock.
++ * Fetch and cache the whole of xattrs for @inode, thanks to the write lock
++ * on lli_xattrs_list_rwsem obtained from ll_xattr_find_get_lock().
++ * If successful, this write lock is kept.
+  *
+  * Return:		0 no error occurred
+  *			-EPROTO network protocol error
+@@ -346,7 +367,7 @@ static int ll_xattr_cache_refill(struct inode *inode)
+ 		goto err_req;
+ 
+ 	/* Do we have the data at this point? */
+-	if (ll_xattr_cache_valid(lli)) {
++	if (ll_xattr_cache_filled(lli)) {
+ 		ll_stats_ops_tally(sbi, LPROC_LL_GETXATTR_HITS, 1);
+ 		ll_intent_drop_lock(&oit);
+ 		rc = 0;
+@@ -385,7 +406,8 @@ static int ll_xattr_cache_refill(struct inode *inode)
+ 
+ 	CDEBUG(D_CACHE, "caching: xdata=%p xtail=%p\n", xdata, xtail);
+ 
+-	ll_xattr_cache_init(lli);
++	if (!ll_xattr_cache_valid(lli))
++		ll_xattr_cache_init(lli);
+ 
+ 	for (i = 0; i < body->mbo_max_mdsize; i++) {
+ 		CDEBUG(D_CACHE, "caching [%s]=%.*s\n", xdata, *xsizes, xval);
+@@ -422,6 +444,8 @@ static int ll_xattr_cache_refill(struct inode *inode)
+ 
+ 	if (xdata != xtail || xval != xvtail)
+ 		CERROR("a hole in xattr data\n");
++	else
++		set_bit(LLIF_XATTR_CACHE_FILLED, &lli->lli_flags);
+ 
+ 	ll_set_lock_data(sbi->ll_md_exp, inode, &oit, NULL);
+ 	ll_intent_drop_lock(&oit);
+@@ -466,16 +490,29 @@ int ll_xattr_cache_get(struct inode *inode, const char *name, char *buffer,
+ 	LASSERT(!!(valid & OBD_MD_FLXATTR) ^ !!(valid & OBD_MD_FLXATTRLS));
+ 
+ 	down_read(&lli->lli_xattrs_list_rwsem);
+-	if (!ll_xattr_cache_valid(lli)) {
++	/* For performance reasons, we do not want to refill complete xattr
++	 * cache if we are just interested in encryption context.
++	 */
++	if ((valid & OBD_MD_FLXATTRLS ||
++	     strcmp(name, LL_XATTR_NAME_ENCRYPTION_CONTEXT) != 0) &&
++	    !ll_xattr_cache_valid(lli)) {
+ 		up_read(&lli->lli_xattrs_list_rwsem);
+ 		rc = ll_xattr_cache_refill(inode);
+ 		if (rc)
+ 			return rc;
++		/* Turn the write lock obtained in ll_xattr_cache_refill()
++		 * into a read lock.
++		 */
+ 		downgrade_write(&lli->lli_xattrs_list_rwsem);
+ 	} else {
+ 		ll_stats_ops_tally(ll_i2sbi(inode), LPROC_LL_GETXATTR_HITS, 1);
+ 	}
+ 
++	if (!ll_xattr_cache_valid(lli)) {
++		rc = -ENODATA;
++		goto out;
++	}
++
+ 	if (valid & OBD_MD_FLXATTR) {
+ 		struct ll_xattr_entry *xattr;
+ 
+@@ -521,18 +558,10 @@ int ll_xattr_cache_insert(struct inode *inode,
+ 	struct ll_inode_info *lli = ll_i2info(inode);
+ 	int rc;
+ 
+-	down_read(&lli->lli_xattrs_list_rwsem);
++	down_write(&lli->lli_xattrs_list_rwsem);
+ 	if (!ll_xattr_cache_valid(lli))
+ 		ll_xattr_cache_init(lli);
+-	rc = ll_xattr_cache_add(&lli->lli_xattrs, name, buffer,
+-				size);
+-	up_read(&lli->lli_xattrs_list_rwsem);
+-
+-	if (rc == -EPROTO &&
+-	    strcmp(name, LL_XATTR_NAME_ENCRYPTION_CONTEXT) == 0)
+-		/* it means enc ctx was already in cache,
+-		 * ignore error as it cannot be modified
+-		 */
+-		rc = 0;
++	rc = ll_xattr_cache_add(&lli->lli_xattrs, name, buffer, size);
++	up_write(&lli->lli_xattrs_list_rwsem);
+ 	return rc;
+ }
+-- 
+1.8.3.1
+
+
+From jsimmons at infradead.org  Mon Oct 11 10:40:45 2021
+From: jsimmons at infradead.org (James Simmons)
+Date: Mon, 11 Oct 2021 13:40:45 -0400
+Subject: [lustre-devel] [PATCH 16/20] lustre: obdclass: lu_ref_add() called
+ in atomic context
+In-Reply-To: <1633974049-26490-1-git-send-email-jsimmons@infradead.org>
+References: <1633974049-26490-1-git-send-email-jsimmons@infradead.org>
+Message-ID: <1633974049-26490-17-git-send-email-jsimmons@infradead.org>
+
+For the native Linux client testing I turn on lu_ref
+debugging. When turned on the following errors occur:
+
+[ 2885.946815] Call Trace:
+[ 2885.951240]  dump_stack+0x68/0x9b
+[ 2885.956523]  ___might_sleep+0x205/0x260
+[ 2885.962245]  lu_ref_add+0x25/0x40 [obdclass]
+[ 2885.968442]  vvp_pgcache_current+0x101/0x1a0 [lustre]
+[ 2885.975370]  seq_read+0x1ab/0x3c0
+
+and
+
+[ 7042.102529]  dump_stack+0x68/0x9b
+[ 7042.107328]  ___might_sleep+0x205/0x260
+[ 7042.112647]  lu_ref_add+0x25/0x40 [obdclass]
+[ 7042.118385]  mdc_lock_upcall+0x154/0x4d0 [mdc]
+[ 7042.124275]  mdc_enqueue_send+0x508/0x580 [mdc]
+[ 7042.130225]  ? mdc_lock_lvb_update+0x280/0x280 [mdc]
+
+This is easily fixed with introducing a lu_object_ref_add_atomic()
+function.
+
+WC-bug-id: https://jira.whamcloud.com/browse/LU-15014
+Lustre-commit: 5a37bc9577d4c871 ("LU-15014 obdclass: lu_ref_add() called in atomic context")
+Signed-off-by: James Simmons <jsimmons at infradead.org>
+Reviewed-on: https://review.whamcloud.com/44969
+Reviewed-by: Patrick Farrell <pfarrell at whamcloud.com>
+Reviewed-by: Andreas Dilger <adilger at whamcloud.com>
+Reviewed-by: Alex Zhuravlev <bzzz at whamcloud.com>
+Reviewed-by: Oleg Drokin <green at whamcloud.com>
+---
+ fs/lustre/include/lu_object.h | 7 +++++++
+ fs/lustre/llite/vvp_dev.c     | 2 +-
+ fs/lustre/mdc/mdc_dev.c       | 2 +-
+ 3 files changed, 9 insertions(+), 2 deletions(-)
+
+diff --git a/fs/lustre/include/lu_object.h b/fs/lustre/include/lu_object.h
+index 84e0489..146398a 100644
+--- a/fs/lustre/include/lu_object.h
++++ b/fs/lustre/include/lu_object.h
+@@ -829,6 +829,13 @@ static inline u32 lu_object_attr(const struct lu_object *o)
+ 	return o->lo_header->loh_attr;
+ }
+ 
++static inline void lu_object_ref_add_atomic(struct lu_object *o,
++					    const char *scope,
++					    const void *source)
++{
++	lu_ref_add_atomic(&o->lo_header->loh_reference, scope, source);
++}
++
+ static inline void lu_object_ref_add(struct lu_object *o,
+ 				     const char *scope,
+ 				     const void *source)
+diff --git a/fs/lustre/llite/vvp_dev.c b/fs/lustre/llite/vvp_dev.c
+index fda48bb..0c417d8 100644
+--- a/fs/lustre/llite/vvp_dev.c
++++ b/fs/lustre/llite/vvp_dev.c
+@@ -399,7 +399,7 @@ static struct page *vvp_pgcache_current(struct vvp_seq_private *priv)
+ 				continue;
+ 
+ 			priv->vsp_clob = lu2cl(lu_obj);
+-			lu_object_ref_add(lu_obj, "dump", current);
++			lu_object_ref_add_atomic(lu_obj, "dump", current);
+ 			priv->vsp_page_index = 0;
+ 		}
+ 
+diff --git a/fs/lustre/mdc/mdc_dev.c b/fs/lustre/mdc/mdc_dev.c
+index 4777b47..b2f60ea 100644
+--- a/fs/lustre/mdc/mdc_dev.c
++++ b/fs/lustre/mdc/mdc_dev.c
+@@ -461,7 +461,7 @@ static void mdc_lock_granted(const struct lu_env *env, struct osc_lock *oscl,
+ 	/* lock reference taken by ldlm_handle2lock_long() is
+ 	 * owned by osc_lock and released in osc_lock_detach()
+ 	 */
+-	lu_ref_add(&dlmlock->l_reference, "osc_lock", oscl);
++	lu_ref_add_atomic(&dlmlock->l_reference, "osc_lock", oscl);
+ 	oscl->ols_has_ref = 1;
+ 
+ 	LASSERT(!oscl->ols_dlmlock);
+-- 
+1.8.3.1
+
+
+From jsimmons at infradead.org  Mon Oct 11 10:40:46 2021
+From: jsimmons at infradead.org (James Simmons)
+Date: Mon, 11 Oct 2021 13:40:46 -0400
+Subject: [lustre-devel] [PATCH 17/20] lnet: Ensure round robin selection of
+ local NIs
+In-Reply-To: <1633974049-26490-1-git-send-email-jsimmons@infradead.org>
+References: <1633974049-26490-1-git-send-email-jsimmons@infradead.org>
+Message-ID: <1633974049-26490-18-git-send-email-jsimmons@infradead.org>
+
+From: Chris Horn <chris.horn at hpe.com>
+
+Use the net sequence number to set the NI sequence number to ensure
+round robin selection of NIs on each net.
+
+HPE-bug-id: LUS-10349
+WC-bug-id: https://jira.whamcloud.com/browse/LU-13575
+Lustre-commit: a18c4a16246e6185 ("LU-13575 lnet: Ensure round robin selection of local NIs")
+Signed-off-by: Chris Horn <chris.horn at hpe.com>
+Reviewed-on: https://review.whamcloud.com/45003
+Reviewed-by: Serguei Smirnov <ssmirnov at whamcloud.com>
+Reviewed-by: Andreas Dilger <adilger at whamcloud.com>
+Reviewed-by: Oleg Drokin <green at whamcloud.com>
+Signed-off-by: James Simmons <jsimmons at infradead.org>
+---
+ net/lnet/lnet/lib-move.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/net/lnet/lnet/lib-move.c b/net/lnet/lnet/lib-move.c
+index b9b322a..0f26001 100644
+--- a/net/lnet/lnet/lib-move.c
++++ b/net/lnet/lnet/lib-move.c
+@@ -1652,8 +1652,8 @@ void lnet_usr_translate_stats(struct lnet_ioctl_element_msg_stats *msg_stats,
+ 	 */
+ 	best_lpni->lpni_seq++;
+ 	best_lpni->lpni_peer_net->lpn_seq++;
+-	best_ni->ni_seq++;
+ 	best_ni->ni_net->net_seq++;
++	best_ni->ni_seq = best_ni->ni_net->net_seq;
+ 
+ 	CDEBUG(D_NET,
+ 	       "%s NI seq info: [%d:%d:%d:%u] %s LPNI seq info [%d:%d:%d:%u]\n",
+-- 
+1.8.3.1
+
+
+From jsimmons at infradead.org  Mon Oct 11 10:40:38 2021
+From: jsimmons at infradead.org (James Simmons)
+Date: Mon, 11 Oct 2021 13:40:38 -0400
+Subject: [lustre-devel] [PATCH 09/20] lustre: update version to 2.14.55
+In-Reply-To: <1633974049-26490-1-git-send-email-jsimmons@infradead.org>
+References: <1633974049-26490-1-git-send-email-jsimmons@infradead.org>
+Message-ID: <1633974049-26490-10-git-send-email-jsimmons@infradead.org>
+
+From: Oleg Drokin <green at whamcloud.com>
+
+New tag 2.14.55
+
+Signed-off-by: Oleg Drokin <green at whamcloud.com>
+Signed-off-by: James Simmons <jsimmons at infradead.org>
+---
+ include/uapi/linux/lustre/lustre_ver.h | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/include/uapi/linux/lustre/lustre_ver.h b/include/uapi/linux/lustre/lustre_ver.h
+index 90254ed..d4ca95e 100644
+--- a/include/uapi/linux/lustre/lustre_ver.h
++++ b/include/uapi/linux/lustre/lustre_ver.h
+@@ -3,9 +3,9 @@
+ 
+ #define LUSTRE_MAJOR 2
+ #define LUSTRE_MINOR 14
+-#define LUSTRE_PATCH 54
++#define LUSTRE_PATCH 55
+ #define LUSTRE_FIX 0
+-#define LUSTRE_VERSION_STRING "2.14.54"
++#define LUSTRE_VERSION_STRING "2.14.55"
+ 
+ #define OBD_OCD_VERSION(major, minor, patch, fix)			\
+ 	(((major) << 24) + ((minor) << 16) + ((patch) << 8) + (fix))
+-- 
+1.8.3.1
+
+
+From jsimmons at infradead.org  Mon Oct 11 10:40:31 2021
+From: jsimmons at infradead.org (James Simmons)
+Date: Mon, 11 Oct 2021 13:40:31 -0400
+Subject: [lustre-devel] [PATCH 02/20] lustre: sec: filename encryption -
+ symlink support
+In-Reply-To: <1633974049-26490-1-git-send-email-jsimmons@infradead.org>
+References: <1633974049-26490-1-git-send-email-jsimmons@infradead.org>
+Message-ID: <1633974049-26490-3-git-send-email-jsimmons@infradead.org>
+
+From: Sebastien Buisson <sbuisson at ddn.com>
+
+On client side, call the appropriate fscrypt primitives from llite,
+to proceed with symlink encryption before sending requests to servers
+and symlink decryption upon request receipt.
+The tricky part is that fscrypt needs an inode to encrypt the target
+name. But by the time we prepare the symlink creation request to be
+sent to the server with the target name (in ll_new_node), we do not
+have an inode yet (it will be obtained only after we get the server
+reply). So we create a fake inode and associate the right encryption
+context to it, so that the symlink gets encrypted properly.
+
+In order to report the correct size for an encrypted symlink (which is
+ought to be the length of the symlink target), we need to read the
+symlink target and decrypt or decode it in ->getattr(). This has a
+performance hit, but given that the symlink target is cached in
+->i_link (when the key is available), the symlink will not have to be
+read and decrypted again later when it is actually followed,
+readlink() is called, or lstat() is called again.
+This part of the patch is adapted from kernel commit
+d18760560593e5af921f51a8c9b64b6109d634c2
+"fscrypt: add fscrypt_symlink_getattr() for computing st_size"
+
+With encrypted file names, a symlink target is binary. So make sure
+server side can handle that, by switching sp_symname to a
+struct lu_name in struct md_op_spec.
+
+WC-bug-id: https://jira.whamcloud.com/browse/LU-13717
+Lustre-commit: e735298935b64541f ("LU-13717 sec: filename encryption - symlink support")
+Signed-off-by: Sebastien Buisson <sbuisson at ddn.com>
+Reviewed-on: https://review.whamcloud.com/43394
+Reviewed-by: Patrick Farrell <pfarrell at whamcloud.com>
+Reviewed-by: Andreas Dilger <adilger at whamcloud.com>
+Reviewed-by: Oleg Drokin <green at whamcloud.com>
+Signed-off-by: James Simmons <jsimmons at infradead.org>
+---
+ fs/lustre/llite/namei.c   | 97 ++++++++++++++++++++++++++++++++++++++---------
+ fs/lustre/llite/symlink.c | 85 ++++++++++++++++++++++++++++++++++++++---
+ 2 files changed, 158 insertions(+), 24 deletions(-)
+
+diff --git a/fs/lustre/llite/namei.c b/fs/lustre/llite/namei.c
+index f0f10da..1812c09 100644
+--- a/fs/lustre/llite/namei.c
++++ b/fs/lustre/llite/namei.c
+@@ -1531,25 +1531,29 @@ static void ll_qos_mkdir_prep(struct md_op_data *op_data, struct inode *dir)
+ 	up_read(&rlli->lli_lsm_sem);
+ }
+ 
+-static int ll_new_node(struct inode *dir, struct dentry *dentry,
+-		       const char *tgt, umode_t mode, int rdev,
++static int ll_new_node(struct inode *dir, struct dentry *dchild,
++		       const char *tgt, umode_t mode, u64 rdev,
+ 		       u32 opc)
+ {
++	struct qstr *name = &dchild->d_name;
+ 	struct ptlrpc_request *request = NULL;
+ 	struct md_op_data *op_data = NULL;
+ 	struct inode *inode = NULL;
+ 	struct ll_sb_info *sbi = ll_i2sbi(dir);
+-	int tgt_len = 0;
++	struct fscrypt_str *disk_link = NULL;
+ 	bool encrypt = false;
+ 	int err;
+ 
+-	if (unlikely(tgt))
+-		tgt_len = strlen(tgt) + 1;
++	if (unlikely(tgt)) {
++		disk_link = (struct fscrypt_str *)rdev;
++		rdev = 0;
++		if (!disk_link)
++			return -EINVAL;
++	}
++
+ again:
+-	op_data = ll_prep_md_op_data(NULL, dir, NULL,
+-				     dentry->d_name.name,
+-				     dentry->d_name.len,
+-				     0, opc, NULL);
++	op_data = ll_prep_md_op_data(NULL, dir, NULL, name->name,
++				     name->len, 0, opc, NULL);
+ 	if (IS_ERR(op_data)) {
+ 		err = PTR_ERR(op_data);
+ 		goto err_exit;
+@@ -1559,7 +1563,7 @@ static int ll_new_node(struct inode *dir, struct dentry *dentry,
+ 		ll_qos_mkdir_prep(op_data, dir);
+ 
+ 	if (sbi->ll_flags & LL_SBI_FILE_SECCTX) {
+-		err = ll_dentry_init_security(dentry, mode, &dentry->d_name,
++		err = ll_dentry_init_security(dchild, mode, &dchild->d_name,
+ 					      &op_data->op_file_secctx_name,
+ 					      &op_data->op_file_secctx,
+ 					      &op_data->op_file_secctx_size);
+@@ -1585,9 +1589,40 @@ static int ll_new_node(struct inode *dir, struct dentry *dentry,
+ 		err = fscrypt_inherit_context(dir, NULL, op_data, false);
+ 		if (err)
+ 			goto err_exit;
++
++		if (S_ISLNK(mode)) {
++			/* fscrypt needs inode to encrypt target name, so create
++			 * a fake inode and associate encryption context got
++			 * from fscrypt_inherit_context.
++			 */
++			struct inode *fakeinode =
++				dchild->d_sb->s_op->alloc_inode(dchild->d_sb);
++
++			if (!fakeinode) {
++				err = -ENOMEM;
++				goto err_exit;
++			}
++			fakeinode->i_sb = dchild->d_sb;
++			fakeinode->i_mode |= S_IFLNK;
++			err = ll_set_encflags(fakeinode,
++					      op_data->op_file_encctx,
++					      op_data->op_file_encctx_size,
++					      true);
++			if (!err)
++				err = __fscrypt_encrypt_symlink(fakeinode, tgt,
++								strlen(tgt),
++								disk_link);
++
++			ll_xattr_cache_destroy(fakeinode);
++			fscrypt_put_encryption_info(fakeinode);
++			dchild->d_sb->s_op->destroy_inode(fakeinode);
++			if (err)
++				goto err_exit;
++		}
+ 	}
+ 
+-	err = md_create(sbi->ll_md_exp, op_data, tgt, tgt_len, mode,
++	err = md_create(sbi->ll_md_exp, op_data, tgt ? disk_link->name : NULL,
++			tgt ? disk_link->len : 0, mode,
+ 			from_kuid(&init_user_ns, current_fsuid()),
+ 			from_kgid(&init_user_ns, current_fsgid()),
+ 			current_cap(), rdev, &request);
+@@ -1687,16 +1722,32 @@ static int ll_new_node(struct inode *dir, struct dentry *dentry,
+ 			goto err_exit;
+ 	}
+ 
+-	d_instantiate(dentry, inode);
++	d_instantiate(dchild, inode);
+ 
+ 	if (encrypt) {
+ 		err = fscrypt_inherit_context(dir, inode, NULL, true);
+ 		if (err)
+ 			goto err_exit;
++
++		if (S_ISLNK(mode)) {
++			struct ll_inode_info *lli = ll_i2info(inode);
++
++			/* Cache the plaintext symlink target
++			 * for later use by get_link()
++			 */
++			lli->lli_symlink_name = kzalloc(strlen(tgt) + 1,
++							GFP_NOFS);
++			/* do not return an error if we cannot
++			 * cache the symlink locally
++			 */
++			if (lli->lli_symlink_name)
++				memcpy(lli->lli_symlink_name,
++				       tgt, strlen(tgt) + 1);
++		}
+ 	}
+ 
+ 	if (!(sbi->ll_flags & LL_SBI_FILE_SECCTX))
+-		err = ll_inode_init_security(dentry, inode, dir);
++		err = ll_inode_init_security(dchild, inode, dir);
+ err_exit:
+ 	if (request)
+ 		ptlrpc_req_finished(request);
+@@ -1894,17 +1945,27 @@ static int ll_rmdir(struct inode *dir, struct dentry *dchild)
+ 	return rc;
+ }
+ 
+-static int ll_symlink(struct inode *dir, struct dentry *dentry,
+-		      const char *oldname)
++static int ll_symlink(struct inode *dir, struct dentry *dchild,
++		      const char *oldpath)
+ {
+ 	ktime_t kstart = ktime_get();
++	int len = strlen(oldpath);
++	struct fscrypt_str disk_link;
+ 	int err;
+ 
+ 	CDEBUG(D_VFSTRACE, "VFS Op:name=%pd, dir=" DFID "(%p),target=%.*s\n",
+-	       dentry, PFID(ll_inode2fid(dir)), dir, 3000, oldname);
++	       dchild, PFID(ll_inode2fid(dir)), dir, 3000, oldpath);
++
++	err = fscrypt_prepare_symlink(dir, oldpath, len, dir->i_sb->s_blocksize,
++				      &disk_link);
++	if (err)
++		return err;
++
++	err = ll_new_node(dir, dchild, oldpath, S_IFLNK | 0777,
++			  (u64)&disk_link, LUSTRE_OPC_SYMLINK);
+ 
+-	err = ll_new_node(dir, dentry, oldname, S_IFLNK | 0777,
+-			  0, LUSTRE_OPC_SYMLINK);
++	if (disk_link.name != (unsigned char *)oldpath)
++		kfree(disk_link.name);
+ 
+ 	if (!err)
+ 		ll_stats_ops_tally(ll_i2sbi(dir), LPROC_LL_SYMLINK,
+diff --git a/fs/lustre/llite/symlink.c b/fs/lustre/llite/symlink.c
+index cf5ad9e..8ea16bb 100644
+--- a/fs/lustre/llite/symlink.c
++++ b/fs/lustre/llite/symlink.c
+@@ -38,8 +38,13 @@
+ #include "llite_internal.h"
+ 
+ /* Must be called with lli_size_mutex locked */
++/* HAVE_IOP_GET_LINK is defined from kernel 4.5, whereas
++ * IS_ENCRYPTED is brought by kernel 4.14.
++ * So there is no need to handle encryption case otherwise.
++ */
+ static int ll_readlink_internal(struct inode *inode,
+-				struct ptlrpc_request **request, char **symname)
++				struct ptlrpc_request **request,
++				char **symname, struct delayed_call *done)
+ {
+ 	struct ll_inode_info *lli = ll_i2info(inode);
+ 	struct ll_sb_info *sbi = ll_i2sbi(inode);
+@@ -97,7 +102,9 @@ static int ll_readlink_internal(struct inode *inode,
+ 	}
+ 
+ 	*symname = req_capsule_server_get(&(*request)->rq_pill, &RMF_MDT_MD);
+-	if (!*symname || strnlen(*symname, symlen) != symlen - 1) {
++	if (!*symname ||
++	    (!IS_ENCRYPTED(inode) &&
++	     strnlen(*symname, symlen) != symlen - 1)) {
+ 		/* not full/NULL terminated */
+ 		CERROR("%s: inode " DFID ": symlink not NULL terminated string of length %d\n",
+ 		       ll_i2sbi(inode)->ll_fsname,
+@@ -106,6 +113,21 @@ static int ll_readlink_internal(struct inode *inode,
+ 		goto failed;
+ 	}
+ 
++	if (IS_ENCRYPTED(inode)) {
++		const char *target = fscrypt_get_symlink(inode, *symname,
++							 symlen, done);
++		if (IS_ERR(target))
++			return PTR_ERR(target);
++		symlen = strlen(target) + 1;
++		*symname = (char *)target;
++
++		/* Do not cache symlink targets encoded without the key,
++		 * since those become outdated once the key is added.
++		 */
++		if (!fscrypt_has_encryption_key(inode))
++			return 0;
++	}
++
+ 	lli->lli_symlink_name = kzalloc(symlen, GFP_NOFS);
+ 	/* do not return an error if we cannot cache the symlink locally */
+ 	if (lli->lli_symlink_name) {
+@@ -131,12 +153,12 @@ static const char *ll_get_link(struct dentry *dentry,
+ 	int rc;
+ 	char *symname = NULL;
+ 
++	CDEBUG(D_VFSTRACE, "VFS Op:name=%pd, inode="DFID"(%p)\n",
++	       dentry, PFID(ll_inode2fid(inode)), inode);
+ 	if (!dentry)
+ 		return ERR_PTR(-ECHILD);
+-
+-	CDEBUG(D_VFSTRACE, "VFS Op\n");
+ 	ll_inode_size_lock(inode);
+-	rc = ll_readlink_internal(inode, &request, &symname);
++	rc = ll_readlink_internal(inode, &request, &symname, done);
+ 	ll_inode_size_unlock(inode);
+ 	if (rc) {
+ 		ptlrpc_req_finished(request);
+@@ -151,10 +173,61 @@ static const char *ll_get_link(struct dentry *dentry,
+ 	return symname;
+ }
+ 
++/**
++ * ll_getattr_link() - link-specific getattr to set the correct st_size
++ *		       for encrypted symlinks
++ *
++ * Override st_size of encrypted symlinks to be the length of the decrypted
++ * symlink target (or the no-key encoded symlink target, if the key is
++ * unavailable) rather than the length of the encrypted symlink target. This is
++ * necessary for st_size to match the symlink target that userspace actually
++ * sees.  POSIX requires this, and some userspace programs depend on it.
++ *
++ * For non encrypted symlinks, this is a just calling ll_getattr().
++ * For encrypted symlinks, this additionally requires reading the symlink target
++ * from disk if needed, setting up the inode's encryption key if possible, and
++ * then decrypting or encoding the symlink target.  This makes lstat() more
++ * heavyweight than is normally the case.  However, decrypted symlink targets
++ * will be cached in ->i_link, so usually the symlink won't have to be read and
++ * decrypted again later if/when it is actually followed, readlink() is called,
++ * or lstat() is called again.
++ *
++ * Return: 0 on success, -errno on failure
++ */
++static int ll_getattr_link(const struct path *path, struct kstat *stat,
++			   u32 request_mask, unsigned int flags)
++{
++	struct dentry *dentry = path->dentry;
++	struct inode *inode = d_inode(dentry);
++	DEFINE_DELAYED_CALL(done);
++	const char *link;
++	int rc;
++
++	rc = ll_getattr(path, stat, request_mask, flags);
++	if (rc || !IS_ENCRYPTED(inode))
++		return rc;
++
++	/*
++	 * To get the symlink target that userspace will see (whether it's the
++	 * decrypted target or the no-key encoded target), we can just get it
++	 * in the same way the VFS does during path resolution and readlink().
++	 */
++	link = READ_ONCE(inode->i_link);
++	if (!link) {
++		link = inode->i_op->get_link(dentry, inode, &done);
++		if (IS_ERR(link))
++			return PTR_ERR(link);
++	}
++	stat->size = strlen(link);
++	do_delayed_call(&done);
++	return 0;
++}
++
++
+ const struct inode_operations ll_fast_symlink_inode_operations = {
+ 	.setattr	= ll_setattr,
+ 	.get_link	= ll_get_link,
+-	.getattr	= ll_getattr,
++	.getattr	= ll_getattr_link,
+ 	.permission	= ll_inode_permission,
+ 	.listxattr	= ll_listxattr,
+ };
+-- 
+1.8.3.1
+
+
+From elliswilson at microsoft.com  Mon Oct 11 18:31:08 2021
+From: elliswilson at microsoft.com (Ellis Wilson)
+Date: Tue, 12 Oct 2021 01:31:08 +0000
+Subject: [lustre-devel] xattr stat mismatch in sanityn test 73
+In-Reply-To: <MN2PR21MB1439DBD46F20244F6A7A006BBEB29@MN2PR21MB1439.namprd21.prod.outlook.com>
+References: <MN2PR21MB1439DBD46F20244F6A7A006BBEB29@MN2PR21MB1439.namprd21.prod.outlook.com>
+Message-ID: <MN2PR21MB1439C536D75DED3DF32C1DCBBEB69@MN2PR21MB1439.namprd21.prod.outlook.com>
+
+Apologies if somebody responded and it got spammed or I missed it -- in any event I got to root cause and figured I'd answer my own questions in case somebody went looking.
+
+The additional three getxattrs are caused by inode audit code in the kernel, which is triggered if there are any filesystem specific rules in-place (e.g., log to audit file if directory /etc/auditd is modified).
+
+You can see the additional stack traces with eBPF stackcount:
+
+  ll_xattr_cache_get
+  ll_xattr_get_common
+  __vfs_getxattr
+  vfs_getxattr
+  getxattr
+  path_getxattr
+  __x64_sys_getxattr
+  do_syscall_64
+  entry_SYSCALL_64_after_hwframe
+  [unknown]
+  [unknown]
+    getfattr [19698]
+    1  
+
+  ll_xattr_cache_get
+  ll_xattr_get_common
+  __vfs_getxattr
+  vfs_getxattr
+  getxattr
+  path_getxattr
+  __x64_sys_getxattr
+  do_syscall_64
+  entry_SYSCALL_64_after_hwframe
+  [unknown]
+  [unknown]
+    getfattr [19698]
+    1  
+
+  ll_xattr_cache_get
+  ll_xattr_get_common
+  __vfs_getxattr
+  get_vfs_caps_from_disk
+  audit_copy_inode
+  __audit_inode
+  filename_lookup
+  user_path_at_empty
+  vfs_statx
+  __do_sys_newlstat
+  __x64_sys_newlstat
+  do_syscall_64
+  entry_SYSCALL_64_after_hwframe
+  [unknown]
+    getfattr [19698]
+    1  
+
+  ll_xattr_cache_get
+  ll_xattr_get_common
+  __vfs_getxattr
+  get_vfs_caps_from_disk
+  audit_copy_inode
+  __audit_inode
+  filename_lookup
+  user_path_at_empty
+  path_getxattr
+  __x64_sys_getxattr
+  do_syscall_64
+  entry_SYSCALL_64_after_hwframe
+  [unknown]
+  [unknown]
+    getfattr [19698]
+    2
+
+Only the ones without "__audit_inode" in them are doing "real" work.  The remaining three are simply performing getxattrs against the path being operated on as part of filename_lookup for audit.  So long as auditctl shows enabled AND there is at least a single rule that relates to the filesystem (e.g., audit all modifications to /etc/audit), every single lookup will result in a get(x)attr to get VFS caps.  Relevant call path through the kernel is:
+
+filename_lookup
+audit_inode
+__audit_inode
+audit_copy_inode
+audit_copy_fcaps
+get_vfs_caps_from_disk
+
+Disabling auditd completely via auditctl -e0 returns the total number of getxattrs to the expected value of 2.
+
+Overall, the check in-place for this test is arguably too overfitted.  At some point I'll put together a PR such that the check is assuring there are at least 2 getxattr_hits rather than exactly 2 unless somebody objects to that solution.
+
+Also, I found maloo and got an account so I could review upstream unit test results.
+
+Best,
+
+ellis
+
+
+-----Original Message-----
+From: Ellis Wilson 
+Sent: Friday, October 8, 2021 9:04 AM
+To: lustre-devel at lists.lustre.org
+Subject: xattr stat mismatch in sanityn test 73
+
+Hi all,
+
+I'm trying to get to the bottom of a failure I'm seeing while running the lustre unit tests, specifically here for this test in the sanityn suite:
+= sanityn test 73: getxattr should not cause xattr lock cancellation =
+
+I'm running stock lustre 2.14.0 on Ubuntu 18.04 with Linux Kernel 5.4.0.  I have six nodes total for the test: two clients, two mds, two oss.  The test is running from one of the clients.
+
+The error I get is:
+============
+getfattr: Removing leading '/' from absolute path names # file: mnt/lustre/f73.sanityn user.attr1="value1"
+
+ELLIS: expected 2, but got 5
+ sanityn test_73: @@@@@@ FAIL: not cached in /mnt/lustre
+  Trace dump:
+  = /usr/lib/lustre/tests/test-framework.sh:6273:error()
+  = /usr/lib/lustre/tests/sanityn.sh:3557:test_73()
+  = /usr/lib/lustre/tests/test-framework.sh:6581:run_one()
+  = /usr/lib/lustre/tests/test-framework.sh:6628:run_one_logged()
+  = /usr/lib/lustre/tests/test-framework.sh:6455:run_test()
+  = /usr/lib/lustre/tests/sanityn.sh:3567:main()
+============
+
+I've instrumented the code to spit out the expected vs. discovered stat values.  The failure indicates the file in question wasn't cached, but in fact the inverse is occurring -- it's both cached and hit more often than expected.
+
+The unadulterated test code follows:
+================
+3549     touch $DIR1/$tfile
+3550     setfattr -n user.attr1 -v value1 $DIR1/$tfile ||
+3551         error "setfattr1 failed"
+3552     getfattr -n user.attr1 $DIR2/$tfile || error "getfattr1 failed"
+3553     getfattr -n user.attr1 $DIR1/$tfile || error "getfattr2 failed"
+3554     clear_stats llite.*.stats
+3555     # PR lock should be cached by now on both clients
+3556     getfattr -n user.attr1 $DIR1/$tfile || error "getfattr3 failed"
+3557     # 2 hits for getfattr(0)+getfattr(size)
+3558     [ $(calc_stats llite.*.stats getxattr_hits) -eq 2 ] ||
+3559         error "not cached in $DIR1"
+================
+
+The failure occurs on line 3558.
+
+Manually performing these actions validates that indeed the jump is by 5, not 2:
+~# lctl get_param llite.*.stats | grep hits
+getxattr_hits             85 samples [reqs]
+getxattr_hits             4 samples [reqs]
+~# getfattr -n user.attr1 /mnt/lustre/f73.sanityn
+getfattr: Removing leading '/' from absolute path names # file: mnt/lustre/f73.sanityn user.attr1="value1"
+~# lctl get_param llite.*.stats | grep hits
+getxattr_hits             90 samples [reqs]
+getxattr_hits             4 samples [reqs]
+
+I straced getfattr as run in the test and found it issues the following:
+23262 lstat("/mnt/lustre/f73.sanityn", {st_mode=S_IFREG|0644, st_size=0, ...}) = 0
+23262 getxattr("/mnt/lustre/f73.sanityn", "user.attr1", NULL, 0) = 6
+23262 getxattr("/mnt/lustre/f73.sanityn", "user.attr1", "value1", 256) = 6
+
+I built a small C program to replicate just the above without all of the other fluff in getfattr, and I see 1 xattr cache hit occurring for the lstat, and two xattr cache hits occurring for each call of getxattr.  So it replicates the 5 xattr cache hits.  It is notable that if one does NOT specify "user.attr1" and instead just uses an empty string you only get a single hit on each getxattr.
+
+I have a patch that revises the expected stat values from 2 to 5 and from 4 to 10, and while that works in my system I wanted to know:
+1. Are these changes expected?  I don't know much about the xattr cache or when it's expected to be hit, but hitting twice for a single getxattr seemed high.
+2. Is there any location online where I can look at release testing results for these unit tests?  I wanted to see if I was alone in hitting this many times, but couldn't locate such a repository of historical test results.
+
+Thanks for any and all help!
+
+Best,
+
+ellis
+
+From adilger at whamcloud.com  Thu Oct 14 23:18:47 2021
+From: adilger at whamcloud.com (Andreas Dilger)
+Date: Fri, 15 Oct 2021 06:18:47 +0000
+Subject: [lustre-devel] xattr stat mismatch in sanityn test 73
+In-Reply-To: <MN2PR21MB1439DBD46F20244F6A7A006BBEB29@MN2PR21MB1439.namprd21.prod.outlook.com>
+References: <MN2PR21MB1439DBD46F20244F6A7A006BBEB29@MN2PR21MB1439.namprd21.prod.outlook.com>
+Message-ID: <7947C4DF-8BEF-4AA9-8EFE-C3679EAFE252@ddn.com>
+
+Ellis, the getfattr code has a poor "optimization", in that it first calls getxattr(buf=NULL, size=0) to have the kernel report the xattr size to allocate a buffer of exactly the right size.  However, IMHO while this avoids a "too large" allocation (maybe a few bytes vs. 64KB), it is inefficient by doubling the number of syscalls into the filesystem.
+
+The other getxattr cache hit during lstat() is likely because of the kernel accessing an selinux/security xattr.
+
+On Oct 8, 2021, at 07:04, Ellis Wilson via lustre-devel <lustre-devel at lists.lustre.org<mailto:lustre-devel at lists.lustre.org>> wrote:
+
+Hi all,
+
+I'm trying to get to the bottom of a failure I'm seeing while running the lustre unit tests, specifically here for this test in the sanityn suite:
+= sanityn test 73: getxattr should not cause xattr lock cancellation =
+
+I'm running stock lustre 2.14.0 on Ubuntu 18.04 with Linux Kernel 5.4.0.  I have six nodes total for the test: two clients, two mds, two oss.  The test is running from one of the clients.
+
+The error I get is:
+============
+getfattr: Removing leading '/' from absolute path names
+# file: mnt/lustre/f73.sanityn
+user.attr1="value1"
+
+ELLIS: expected 2, but got 5
+sanityn test_73: @@@@@@ FAIL: not cached in /mnt/lustre
+ Trace dump:
+ = /usr/lib/lustre/tests/test-framework.sh:6273:error()
+ = /usr/lib/lustre/tests/sanityn.sh:3557:test_73()
+ = /usr/lib/lustre/tests/test-framework.sh:6581:run_one()
+ = /usr/lib/lustre/tests/test-framework.sh:6628:run_one_logged()
+ = /usr/lib/lustre/tests/test-framework.sh:6455:run_test()
+ = /usr/lib/lustre/tests/sanityn.sh:3567:main()
+============
+
+I've instrumented the code to spit out the expected vs. discovered stat values.  The failure indicates the file in question wasn't cached, but in fact the inverse is occurring -- it's both cached and hit more often than expected.
+
+The unadulterated test code follows:
+================
+3549     touch $DIR1/$tfile
+3550     setfattr -n user.attr1 -v value1 $DIR1/$tfile ||
+3551         error "setfattr1 failed"
+3552     getfattr -n user.attr1 $DIR2/$tfile || error "getfattr1 failed"
+3553     getfattr -n user.attr1 $DIR1/$tfile || error "getfattr2 failed"
+3554     clear_stats llite.*.stats
+3555     # PR lock should be cached by now on both clients
+3556     getfattr -n user.attr1 $DIR1/$tfile || error "getfattr3 failed"
+3557     # 2 hits for getfattr(0)+getfattr(size)
+3558     [ $(calc_stats llite.*.stats getxattr_hits) -eq 2 ] ||
+3559         error "not cached in $DIR1"
+================
+
+The failure occurs on line 3558.
+
+Manually performing these actions validates that indeed the jump is by 5, not 2:
+~# lctl get_param llite.*.stats | grep hits
+getxattr_hits             85 samples [reqs]
+getxattr_hits             4 samples [reqs]
+~# getfattr -n user.attr1 /mnt/lustre/f73.sanityn
+getfattr: Removing leading '/' from absolute path names # file: mnt/lustre/f73.sanityn user.attr1="value1"
+~# lctl get_param llite.*.stats | grep hits
+getxattr_hits             90 samples [reqs]
+getxattr_hits             4 samples [reqs]
+
+I straced getfattr as run in the test and found it issues the following:
+23262 lstat("/mnt/lustre/f73.sanityn", {st_mode=S_IFREG|0644, st_size=0, ...}) = 0
+23262 getxattr("/mnt/lustre/f73.sanityn", "user.attr1", NULL, 0) = 6
+23262 getxattr("/mnt/lustre/f73.sanityn", "user.attr1", "value1", 256) = 6
+
+I built a small C program to replicate just the above without all of the other fluff in getfattr, and I see 1 xattr cache hit occurring for the lstat, and two xattr cache hits occurring for each call of getxattr.  So it replicates the 5 xattr cache hits.  It is notable that if one does NOT specify "user.attr1" and instead just uses an empty string you only get a single hit on each getxattr.
+
+I have a patch that revises the expected stat values from 2 to 5 and from 4 to 10, and while that works in my system I wanted to know:
+1. Are these changes expected?  I don't know much about the xattr cache or when it's expected to be hit, but hitting twice for a single getxattr seemed high.
+2. Is there any location online where I can look at release testing results for these unit tests?  I wanted to see if I was alone in hitting this many times, but couldn't locate such a repository of historical test results.
+
+Thanks for any and all help!
+
+Cheers, Andreas
+--
+Andreas Dilger
+Lustre Principal Architect
+Whamcloud
+
+
+
+
+
+
+
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20211015/c33fd991/attachment.html>
+
+From elliswilson at microsoft.com  Fri Oct 15 07:25:32 2021
+From: elliswilson at microsoft.com (Ellis Wilson)
+Date: Fri, 15 Oct 2021 14:25:32 +0000
+Subject: [lustre-devel] xattr stat mismatch in sanityn test 73
+In-Reply-To: <7947C4DF-8BEF-4AA9-8EFE-C3679EAFE252@ddn.com>
+References: <MN2PR21MB1439DBD46F20244F6A7A006BBEB29@MN2PR21MB1439.namprd21.prod.outlook.com>
+ <7947C4DF-8BEF-4AA9-8EFE-C3679EAFE252@ddn.com>
+Message-ID: <MN2PR21MB1439B848E85A1275B8711B43BEB99@MN2PR21MB1439.namprd21.prod.outlook.com>
+
+Hi Andreas,
+
+Yea - I noticed that.  What makes it even funnier is that it makes allocation calls in statically defined chunk sizes, so it's not even like it's exactly the right size in truth.  If you look at my follow-up email you'll see that I RC'd this to auditd mechanics in the kernel, which was enabled on my system.
+
+I'm going to open a bug and submit a patch for the test to be more forgiving for test systems that have auditd enabled next week.  In short, it will assert that it saw at minimum two getxattr hits, rather than exactly two getxattrs hits.  That's behaved well for me since I revised it locally.  Let me know if you see any issue with this simple solution.
+
+Best,
+
+ellis
+
+From: Andreas Dilger <adilger at whamcloud.com>
+Sent: Friday, October 15, 2021 2:19 AM
+To: Ellis Wilson <elliswilson at microsoft.com>
+Cc: lustre-devel at lists.lustre.org
+Subject: [EXTERNAL] Re: [lustre-devel] xattr stat mismatch in sanityn test 73
+
+Ellis, the getfattr code has a poor "optimization", in that it first calls getxattr(buf=NULL, size=0) to have the kernel report the xattr size to allocate a buffer of exactly the right size.  However, IMHO while this avoids a "too large" allocation (maybe a few bytes vs. 64KB), it is inefficient by doubling the number of syscalls into the filesystem.
+
+The other getxattr cache hit during lstat() is likely because of the kernel accessing an selinux/security xattr.
+
+
+On Oct 8, 2021, at 07:04, Ellis Wilson via lustre-devel <lustre-devel at lists.lustre.org<mailto:lustre-devel at lists.lustre.org>> wrote:
+
+Hi all,
+
+I'm trying to get to the bottom of a failure I'm seeing while running the lustre unit tests, specifically here for this test in the sanityn suite:
+= sanityn test 73: getxattr should not cause xattr lock cancellation =
+
+I'm running stock lustre 2.14.0 on Ubuntu 18.04 with Linux Kernel 5.4.0.  I have six nodes total for the test: two clients, two mds, two oss.  The test is running from one of the clients.
+
+The error I get is:
+============
+getfattr: Removing leading '/' from absolute path names
+# file: mnt/lustre/f73.sanityn
+user.attr1="value1"
+
+ELLIS: expected 2, but got 5
+sanityn test_73: @@@@@@ FAIL: not cached in /mnt/lustre
+ Trace dump:
+ = /usr/lib/lustre/tests/test-framework.sh:6273:error()
+ = /usr/lib/lustre/tests/sanityn.sh:3557:test_73()
+ = /usr/lib/lustre/tests/test-framework.sh:6581:run_one()
+ = /usr/lib/lustre/tests/test-framework.sh:6628:run_one_logged()
+ = /usr/lib/lustre/tests/test-framework.sh:6455:run_test()
+ = /usr/lib/lustre/tests/sanityn.sh:3567:main()
+============
+
+I've instrumented the code to spit out the expected vs. discovered stat values.  The failure indicates the file in question wasn't cached, but in fact the inverse is occurring -- it's both cached and hit more often than expected.
+
+The unadulterated test code follows:
+================
+3549     touch $DIR1/$tfile
+3550     setfattr -n user.attr1 -v value1 $DIR1/$tfile ||
+3551         error "setfattr1 failed"
+3552     getfattr -n user.attr1 $DIR2/$tfile || error "getfattr1 failed"
+3553     getfattr -n user.attr1 $DIR1/$tfile || error "getfattr2 failed"
+3554     clear_stats llite.*.stats
+3555     # PR lock should be cached by now on both clients
+3556     getfattr -n user.attr1 $DIR1/$tfile || error "getfattr3 failed"
+3557     # 2 hits for getfattr(0)+getfattr(size)
+3558     [ $(calc_stats llite.*.stats getxattr_hits) -eq 2 ] ||
+3559         error "not cached in $DIR1"
+================
+
+The failure occurs on line 3558.
+
+Manually performing these actions validates that indeed the jump is by 5, not 2:
+~# lctl get_param llite.*.stats | grep hits
+getxattr_hits             85 samples [reqs]
+getxattr_hits             4 samples [reqs]
+~# getfattr -n user.attr1 /mnt/lustre/f73.sanityn
+getfattr: Removing leading '/' from absolute path names # file: mnt/lustre/f73.sanityn user.attr1="value1"
+~# lctl get_param llite.*.stats | grep hits
+getxattr_hits             90 samples [reqs]
+getxattr_hits             4 samples [reqs]
+
+I straced getfattr as run in the test and found it issues the following:
+23262 lstat("/mnt/lustre/f73.sanityn", {st_mode=S_IFREG|0644, st_size=0, ...}) = 0
+23262 getxattr("/mnt/lustre/f73.sanityn", "user.attr1", NULL, 0) = 6
+23262 getxattr("/mnt/lustre/f73.sanityn", "user.attr1", "value1", 256) = 6
+
+I built a small C program to replicate just the above without all of the other fluff in getfattr, and I see 1 xattr cache hit occurring for the lstat, and two xattr cache hits occurring for each call of getxattr.  So it replicates the 5 xattr cache hits.  It is notable that if one does NOT specify "user.attr1" and instead just uses an empty string you only get a single hit on each getxattr.
+
+I have a patch that revises the expected stat values from 2 to 5 and from 4 to 10, and while that works in my system I wanted to know:
+1. Are these changes expected?  I don't know much about the xattr cache or when it's expected to be hit, but hitting twice for a single getxattr seemed high.
+2. Is there any location online where I can look at release testing results for these unit tests?  I wanted to see if I was alone in hitting this many times, but couldn't locate such a repository of historical test results.
+
+Thanks for any and all help!
+
+Cheers, Andreas
+--
+Andreas Dilger
+Lustre Principal Architect
+Whamcloud
+
+
+
+
+
+
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20211015/72e2f47e/attachment-0001.html>
+
+From adilger at whamcloud.com  Fri Oct 15 23:33:19 2021
+From: adilger at whamcloud.com (Andreas Dilger)
+Date: Sat, 16 Oct 2021 06:33:19 +0000
+Subject: [lustre-devel] xattr stat mismatch in sanityn test 73
+In-Reply-To: <MN2PR21MB1439B848E85A1275B8711B43BEB99@MN2PR21MB1439.namprd21.prod.outlook.com>
+References: <MN2PR21MB1439DBD46F20244F6A7A006BBEB29@MN2PR21MB1439.namprd21.prod.outlook.com>
+ <7947C4DF-8BEF-4AA9-8EFE-C3679EAFE252@ddn.com>
+ <MN2PR21MB1439B848E85A1275B8711B43BEB99@MN2PR21MB1439.namprd21.prod.outlook.com>
+Message-ID: <56FC2BDD-E7B4-4093-80D5-12EB4AFBAF14@whamcloud.com>
+
+The simple solution is fine with me.
+
+Is there a way to make the kernel itself more efficient in this regard?
+For example, limit the checks to a specific directory tree rather than
+the whole filesystem?  Granted the cache avoids network RPCs, but it
+would be even better if the VFS is skipping these unnecessary checks.
+
+Cheers, Andreas
+
+On Oct 15, 2021, at 08:25, Ellis Wilson <elliswilson at microsoft.com> wrote:
+
+?
+Hi Andreas,
+
+Yea ? I noticed that.  What makes it even funnier is that it makes allocation calls in statically defined chunk sizes, so it?s not even like it?s exactly the right size in truth.  If you look at my follow-up email you?ll see that I RC?d this to auditd mechanics in the kernel, which was enabled on my system.
+
+I?m going to open a bug and submit a patch for the test to be more forgiving for test systems that have auditd enabled next week.  In short, it will assert that it saw at minimum two getxattr hits, rather than exactly two getxattrs hits.  That?s behaved well for me since I revised it locally.  Let me know if you see any issue with this simple solution.
+
+Best,
+
+ellis
+
+From: Andreas Dilger <adilger at whamcloud.com>
+Sent: Friday, October 15, 2021 2:19 AM
+To: Ellis Wilson <elliswilson at microsoft.com>
+Cc: lustre-devel at lists.lustre.org
+Subject: [EXTERNAL] Re: [lustre-devel] xattr stat mismatch in sanityn test 73
+
+Ellis, the getfattr code has a poor "optimization", in that it first calls getxattr(buf=NULL, size=0) to have the kernel report the xattr size to allocate a buffer of exactly the right size.  However, IMHO while this avoids a "too large" allocation (maybe a few bytes vs. 64KB), it is inefficient by doubling the number of syscalls into the filesystem.
+
+The other getxattr cache hit during lstat() is likely because of the kernel accessing an selinux/security xattr.
+
+
+On Oct 8, 2021, at 07:04, Ellis Wilson via lustre-devel <lustre-devel at lists.lustre.org<mailto:lustre-devel at lists.lustre.org>> wrote:
+
+Hi all,
+
+I'm trying to get to the bottom of a failure I'm seeing while running the lustre unit tests, specifically here for this test in the sanityn suite:
+= sanityn test 73: getxattr should not cause xattr lock cancellation =
+
+I'm running stock lustre 2.14.0 on Ubuntu 18.04 with Linux Kernel 5.4.0.  I have six nodes total for the test: two clients, two mds, two oss.  The test is running from one of the clients.
+
+The error I get is:
+============
+getfattr: Removing leading '/' from absolute path names
+# file: mnt/lustre/f73.sanityn
+user.attr1="value1"
+
+ELLIS: expected 2, but got 5
+sanityn test_73: @@@@@@ FAIL: not cached in /mnt/lustre
+ Trace dump:
+ = /usr/lib/lustre/tests/test-framework.sh:6273:error()
+ = /usr/lib/lustre/tests/sanityn.sh:3557:test_73()
+ = /usr/lib/lustre/tests/test-framework.sh:6581:run_one()
+ = /usr/lib/lustre/tests/test-framework.sh:6628:run_one_logged()
+ = /usr/lib/lustre/tests/test-framework.sh:6455:run_test()
+ = /usr/lib/lustre/tests/sanityn.sh:3567:main()
+============
+
+I've instrumented the code to spit out the expected vs. discovered stat values.  The failure indicates the file in question wasn't cached, but in fact the inverse is occurring -- it's both cached and hit more often than expected.
+
+The unadulterated test code follows:
+================
+3549     touch $DIR1/$tfile
+3550     setfattr -n user.attr1 -v value1 $DIR1/$tfile ||
+3551         error "setfattr1 failed"
+3552     getfattr -n user.attr1 $DIR2/$tfile || error "getfattr1 failed"
+3553     getfattr -n user.attr1 $DIR1/$tfile || error "getfattr2 failed"
+3554     clear_stats llite.*.stats
+3555     # PR lock should be cached by now on both clients
+3556     getfattr -n user.attr1 $DIR1/$tfile || error "getfattr3 failed"
+3557     # 2 hits for getfattr(0)+getfattr(size)
+3558     [ $(calc_stats llite.*.stats getxattr_hits) -eq 2 ] ||
+3559         error "not cached in $DIR1"
+================
+
+The failure occurs on line 3558.
+
+Manually performing these actions validates that indeed the jump is by 5, not 2:
+~# lctl get_param llite.*.stats | grep hits
+getxattr_hits             85 samples [reqs]
+getxattr_hits             4 samples [reqs]
+~# getfattr -n user.attr1 /mnt/lustre/f73.sanityn
+getfattr: Removing leading '/' from absolute path names # file: mnt/lustre/f73.sanityn user.attr1="value1"
+~# lctl get_param llite.*.stats | grep hits
+getxattr_hits             90 samples [reqs]
+getxattr_hits             4 samples [reqs]
+
+I straced getfattr as run in the test and found it issues the following:
+23262 lstat("/mnt/lustre/f73.sanityn", {st_mode=S_IFREG|0644, st_size=0, ...}) = 0
+23262 getxattr("/mnt/lustre/f73.sanityn", "user.attr1", NULL, 0) = 6
+23262 getxattr("/mnt/lustre/f73.sanityn", "user.attr1", "value1", 256) = 6
+
+I built a small C program to replicate just the above without all of the other fluff in getfattr, and I see 1 xattr cache hit occurring for the lstat, and two xattr cache hits occurring for each call of getxattr.  So it replicates the 5 xattr cache hits.  It is notable that if one does NOT specify "user.attr1" and instead just uses an empty string you only get a single hit on each getxattr.
+
+I have a patch that revises the expected stat values from 2 to 5 and from 4 to 10, and while that works in my system I wanted to know:
+1. Are these changes expected?  I don't know much about the xattr cache or when it's expected to be hit, but hitting twice for a single getxattr seemed high.
+2. Is there any location online where I can look at release testing results for these unit tests?  I wanted to see if I was alone in hitting this many times, but couldn't locate such a repository of historical test results.
+
+Thanks for any and all help!
+
+Cheers, Andreas
+--
+Andreas Dilger
+Lustre Principal Architect
+Whamcloud
+
+
+
+
+
+
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20211016/d7d5453e/attachment-0001.html>
+

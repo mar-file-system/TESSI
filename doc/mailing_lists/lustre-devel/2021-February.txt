@@ -1,0 +1,2553 @@
+From cory.spitz at hpe.com  Mon Feb  1 10:18:48 2021
+From: cory.spitz at hpe.com (Spitz, Cory James)
+Date: Mon, 1 Feb 2021 18:18:48 +0000
+Subject: [lustre-devel] Lustre log question(s)
+In-Reply-To: <CABnqofyAXbb1nwkerUDAB8cdpY+ieQDoQ6MOH77mJk_0cKbbiw@mail.gmail.com>
+References: <CABnqofzHf0GdzqiXebSzbkDHHoGwxoAyCnja7_=YqWGVOnn7jA@mail.gmail.com>
+ <2BA3D230-5DA3-4323-A7F0-2CAA21E7782F@amazon.com>,
+ <CABnqofyAXbb1nwkerUDAB8cdpY+ieQDoQ6MOH77mJk_0cKbbiw@mail.gmail.com>
+Message-ID: <AT5PR8401MB105937EE4A01282B931D06FF85B69@AT5PR8401MB1059.NAMPRD84.PROD.OUTLOOK.COM>
+
+> I am trying to get a 30,000 ft overview of how lustre replay/recovery works
+
+This old slide deck might be useful to you:
+https://wiki.lustre.org/images/0/00/A_Deep_Dive_into_Lustre_Recovery_Mechanisms.pdf
+
+Granted, it may not be 100% correct any longer.
+
+-Cory
+
+On 1/30/21, 11:08 AM, "lustre-devel" <lustre-devel-bounces at lists.lustre.org> wrote:
+
+Thank you for the explanation on LLOG and changelog.  With respect to the following statement :
+
+>> Lustre has its own mechanisms to guarantee transaction are committed to disk and handle crash. Basicly, I/O are not acknowledge to Lustre clients before the data is actually on disk. In case of server crash, the Lustre client will replay all non-acknowledge I/Os to ensure none of them are lost.
+
+For example:
+
+Let us say that I have 4 clients (cli1, cli2, cli3 and cli4) and all are writing and reading data.  I have 1 host with 4 disks (2 OSTs, 1 MDT, 1 MGT).
+1.       cli1 issues a directory remove (rm -rf /mnt/lustre/dir1)
+2.       cli1 loses connection with Lustre targets.
+3.       cli2 wants to now create a file under /mnt/lustre/dir1/file100 and write some data to file100
+All of these are happening in parallel.
+?         Does cli2 get an error that /mnt/lustre/dir1 has been removed and it has to first issue additional I/O to create /mnt/lustre/dir1 before reissuing the I/O to write file100 ?
+?         If a transaction from cli2 happens before cli1, then this would lead to data lost situation for cli2, if cli2 tries to read/write data from/to file100 after sometime.
+?         What is the role of last_rcvd file in this entire picture ?
+I am trying to get a 30,000 ft overview of how lustre replay/recovery works.
+
+Thanks again and appreciate your timely response.
+
+On Fri, Jan 29, 2021 at 1:22 AM Degremont, Aurelien <degremoa at amazon.com<mailto:degremoa at amazon.com>> wrote:
+Hi,
+
+This is not totally correct.
+
+First, LLOG is the underlying technology used to store and handle Lustre Changelogs. But LLOG is used for other Lustre mechanisms, like lustre configuration.
+Second, Changelog is similar to an audit feature. Changelog only logs different filesystem change, mostly metadata change, but definitely not the file content change. They don't play a role at all in transaction or failure recovery. This is only an admin feature.
+
+At the end, indeed ZIL cannot be used and Lustre has its own mechanisms to guarantee transaction are committed to disk and handle crash. Basicly, I/O are not acknowledge to Lustre clients before the data is actually on disk. In case of server crash, the Lustre client will replay all non-acknowledge I/Os to ensure none of them are lost.
+
+Changelog is not needed in your case.
+
+Aur?lien
+
+De : lustre-devel <lustre-devel-bounces at lists.lustre.org<mailto:lustre-devel-bounces at lists.lustre.org>> au nom de Sudheendra Sampath <sudheendra.sampath at gmail.com<mailto:sudheendra.sampath at gmail.com>>
+Date : jeudi 28 janvier 2021 ? 21:43
+? : "lustre-devel at lists.lustre.org<mailto:lustre-devel at lists.lustre.org>" <lustre-devel at lists.lustre.org<mailto:lustre-devel at lists.lustre.org>>
+Objet : [EXTERNAL] [lustre-devel] Lustre log question(s)
+
+
+CAUTION: This email originated from outside of the organization. Do not click links or open attachments unless you can confirm the sender and know the content is safe.
+
+Hi,
+
+I am trying to evaluate osd-zfs based MDS and OST deployment on a 2 node setup.
+
+I have the following questions about Lustre log:
+1.       Is changelog and llog both the same, in the sense are they synonymous with each other?
+2.       I understand that ZIL is currently not supported in Lustre version 2.12.2.  My question is :
+1.       My understanding is that transactions (in general) need some logging mechanism for it to work in 'all or none' scenarios.  Please correct me if my understanding is incorrect.   I understand that changelog has to be enabled so that filesystem changes are recorded to be replayed after a crash.  How does Lustre transactions work if there is no intent log/changelog ?
+2.       Does it mean that if changelog is NOT enabled and there is a crash, we risk losing all changes/updates to the filesystem ?
+Appreciate your timely response and Thank you for your help.
+
+--
+Regards
+
+Sudheendra Sampath
+
+
+--
+Regards
+
+Sudheendra Sampath
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20210201/5e685603/attachment-0001.html>
+
+From adilger at whamcloud.com  Mon Feb  1 20:14:57 2021
+From: adilger at whamcloud.com (Andreas Dilger)
+Date: Tue, 2 Feb 2021 04:14:57 +0000
+Subject: [lustre-devel] Lustre log question(s)
+In-Reply-To: <AT5PR8401MB105937EE4A01282B931D06FF85B69@AT5PR8401MB1059.NAMPRD84.PROD.OUTLOOK.COM>
+References: <CABnqofzHf0GdzqiXebSzbkDHHoGwxoAyCnja7_=YqWGVOnn7jA@mail.gmail.com>
+ <2BA3D230-5DA3-4323-A7F0-2CAA21E7782F@amazon.com>
+ <CABnqofyAXbb1nwkerUDAB8cdpY+ieQDoQ6MOH77mJk_0cKbbiw@mail.gmail.com>
+ <AT5PR8401MB105937EE4A01282B931D06FF85B69@AT5PR8401MB1059.NAMPRD84.PROD.OUTLOOK.COM>
+Message-ID: <0F37779F-EED0-4BAA-8B2E-928C759D78C0@whamcloud.com>
+
+It is worthwhile to note that the proposed scenario is racy even for local filesystems, regardless of whether recovery is involved or not.
+
+If (1) and (3) are happening on two clients at the same time:
+- if (1) happens first, then (3) will fail with ENOENT ("no such file or directory") because "dir1" is gone.
+- if (3) happens first, then (1) may delete "file100", but that is not the filesystem's fault, the user on cli1 asked for everything in "dir1" to be deleted.
+- in some cases, "file100" may be created after (1) has passed that part of the directory traversal (it depends on how large the tree under "dir1" is), and then (3) will fail the final rmdir("dir1") with EBUSY ("directory is not empty") because "file100" still exists there.  This is the classic "TOCTOU" race ("Time of Creation/Time of Use").
+
+Cheers, Andreas
+
+On Feb 1, 2021, at 11:18, Spitz, Cory James <cory.spitz at hpe.com<mailto:cory.spitz at hpe.com>> wrote:
+
+> I am trying to get a 30,000 ft overview of how lustre replay/recovery works
+
+This old slide deck might be useful to you:
+https://wiki.lustre.org/images/0/00/A_Deep_Dive_into_Lustre_Recovery_Mechanisms.pdf
+
+Granted, it may not be 100% correct any longer.
+
+-Cory
+
+On 1/30/21, 11:08 AM, "lustre-devel" <lustre-devel-bounces at lists.lustre.org<mailto:lustre-devel-bounces at lists.lustre.org>> wrote:
+
+Thank you for the explanation on LLOG and changelog.  With respect to the following statement :
+
+>> Lustre has its own mechanisms to guarantee transaction are committed to disk and handle crash. Basicly, I/O are not acknowledge to Lustre clients before the data is actually on disk. In case of server crash, the Lustre client will replay all non-acknowledge I/Os to ensure none of them are lost.
+
+For example:
+
+Let us say that I have 4 clients (cli1, cli2, cli3 and cli4) and all are writing and reading data.  I have 1 host with 4 disks (2 OSTs, 1 MDT, 1 MGT).
+1.       cli1 issues a directory remove (rm -rf /mnt/lustre/dir1)
+2.       cli1 loses connection with Lustre targets.
+3.       cli2 wants to now create a file under /mnt/lustre/dir1/file100 and write some data to file100
+All of these are happening in parallel.
+?         Does cli2 get an error that /mnt/lustre/dir1 has been removed and it has to first issue additional I/O to create /mnt/lustre/dir1 before reissuing the I/O to write file100 ?
+?         If a transaction from cli2 happens before cli1, then this would lead to data lost situation for cli2, if cli2 tries to read/write data from/to file100 after sometime.
+?         What is the role of last_rcvd file in this entire picture ?
+I am trying to get a 30,000 ft overview of how lustre replay/recovery works.
+
+Thanks again and appreciate your timely response.
+
+On Fri, Jan 29, 2021 at 1:22 AM Degremont, Aurelien <degremoa at amazon.com<mailto:degremoa at amazon.com>> wrote:
+Hi,
+
+This is not totally correct.
+
+First, LLOG is the underlying technology used to store and handle Lustre Changelogs. But LLOG is used for other Lustre mechanisms, like lustre configuration.
+Second, Changelog is similar to an audit feature. Changelog only logs different filesystem change, mostly metadata change, but definitely not the file content change. They don't play a role at all in transaction or failure recovery. This is only an admin feature.
+
+At the end, indeed ZIL cannot be used and Lustre has its own mechanisms to guarantee transaction are committed to disk and handle crash. Basicly, I/O are not acknowledge to Lustre clients before the data is actually on disk. In case of server crash, the Lustre client will replay all non-acknowledge I/Os to ensure none of them are lost.
+
+Changelog is not needed in your case.
+
+Aur?lien
+
+De : lustre-devel <lustre-devel-bounces at lists.lustre.org<mailto:lustre-devel-bounces at lists.lustre.org>> au nom de Sudheendra Sampath <sudheendra.sampath at gmail.com<mailto:sudheendra.sampath at gmail.com>>
+Date : jeudi 28 janvier 2021 ? 21:43
+? : "lustre-devel at lists.lustre.org<mailto:lustre-devel at lists.lustre.org>" <lustre-devel at lists.lustre.org<mailto:lustre-devel at lists.lustre.org>>
+Objet : [EXTERNAL] [lustre-devel] Lustre log question(s)
+
+
+CAUTION: This email originated from outside of the organization. Do not click links or open attachments unless you can confirm the sender and know the content is safe.
+
+
+Hi,
+
+I am trying to evaluate osd-zfs based MDS and OST deployment on a 2 node setup.
+
+I have the following questions about Lustre log:
+1.       Is changelog and llog both the same, in the sense are they synonymous with each other?
+2.       I understand that ZIL is currently not supported in Lustre version 2.12.2.  My question is :
+1.       My understanding is that transactions (in general) need some logging mechanism for it to work in 'all or none' scenarios.  Please correct me if my understanding is incorrect.   I understand that changelog has to be enabled so that filesystem changes are recorded to be replayed after a crash.  How does Lustre transactions work if there is no intent log/changelog ?
+2.       Does it mean that if changelog is NOT enabled and there is a crash, we risk losing all changes/updates to the filesystem ?
+Appreciate your timely response and Thank you for your help.
+
+--
+Regards
+
+Sudheendra Sampath
+
+
+--
+Regards
+
+Sudheendra Sampath
+_______________________________________________
+lustre-devel mailing list
+lustre-devel at lists.lustre.org<mailto:lustre-devel at lists.lustre.org>
+http://lists.lustre.org/listinfo.cgi/lustre-devel-lustre.org
+
+Cheers, Andreas
+--
+Andreas Dilger
+Principal Lustre Architect
+Whamcloud
+
+
+
+
+
+
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20210202/376eaf4e/attachment-0001.html>
+
+From jsimmons at infradead.org  Mon Feb  8 16:54:18 2021
+From: jsimmons at infradead.org (James Simmons)
+Date: Mon,  8 Feb 2021 19:54:18 -0500
+Subject: [lustre-devel] [PATCH 0/9] Sync to OpenSFS as of Feb 8, 2021
+Message-ID: <1612832067-1449-1-git-send-email-jsimmons@infradead.org>
+
+Bring the Linux client up to date with the OpenSFS branch as of
+Feb 8, 2021
+
+Andreas Dilger (2):
+  lustre: llite: send file mode with rename RPC
+  lustre: osc: avoid crash if ocd reset
+
+Bobi Jam (1):
+  lustre: osc: correctly update size/kms for fallocate
+
+Emoly Liu (1):
+  lustre: lov: return stripe_count=1 instead of 0 for DoM files
+
+Mikhail Pershin (1):
+  lustre: ldlm: don't change GROUP lock GID on client
+
+Qian Yingjin (1):
+  lustre: flr: skip unknown FLR component types
+
+Sebastien Buisson (1):
+  lustre: sec: get rid of bad rss-counter state messages
+
+Wang Shilong (1):
+  lustre: obdclass: connect vs disconnect race
+
+Yang Sheng (1):
+  lustre: obdclass: add option %H for jobid
+
+ fs/lustre/include/cl_object.h           |  6 +++
+ fs/lustre/include/lustre_crypto.h       |  8 +++
+ fs/lustre/include/obd.h                 |  8 +--
+ fs/lustre/ldlm/ldlm_inodebits.c         |  5 +-
+ fs/lustre/llite/namei.c                 |  9 +++-
+ fs/lustre/llite/rw26.c                  | 23 ++-------
+ fs/lustre/llite/vvp_io.c                |  2 +-
+ fs/lustre/lov/lov_cl_internal.h         |  7 ++-
+ fs/lustre/lov/lov_ea.c                  | 66 ++++++++++++++++++------
+ fs/lustre/lov/lov_internal.h            | 15 +++++-
+ fs/lustre/lov/lov_io.c                  | 25 ++++++---
+ fs/lustre/lov/lov_object.c              | 22 +++++++-
+ fs/lustre/lov/lov_pack.c                |  8 +++
+ fs/lustre/obdclass/cl_io.c              | 11 ----
+ fs/lustre/obdclass/cl_page.c            |  1 +
+ fs/lustre/obdclass/jobid.c              | 13 ++++-
+ fs/lustre/obdclass/obd_config.c         |  4 --
+ fs/lustre/osc/osc_cache.c               |  3 +-
+ fs/lustre/osc/osc_io.c                  | 33 ++++++------
+ fs/lustre/osc/osc_object.c              |  4 +-
+ fs/lustre/osc/osc_request.c             | 89 ++++++++++++++++++++++++++-------
+ include/uapi/linux/lustre/lustre_user.h |  1 +
+ 22 files changed, 258 insertions(+), 105 deletions(-)
+
+-- 
+1.8.3.1
+
+
+From jsimmons at infradead.org  Mon Feb  8 16:54:21 2021
+From: jsimmons at infradead.org (James Simmons)
+Date: Mon,  8 Feb 2021 19:54:21 -0500
+Subject: [lustre-devel] [PATCH 3/9] lustre: obdclass: connect vs disconnect
+ race
+In-Reply-To: <1612832067-1449-1-git-send-email-jsimmons@infradead.org>
+References: <1612832067-1449-1-git-send-email-jsimmons@infradead.org>
+Message-ID: <1612832067-1449-4-git-send-email-jsimmons@infradead.org>
+
+From: Wang Shilong <wshilong at ddn.com>
+
+There might be a possible race if setup (connect)
+and cleanup (disconnect) are tangled together(similar
+comments in osc_disconnect()):
+
+  Thread1:                              Thread2:
+    connecting                            class_cleanup
+      ptlrpc_connect_interpret
+                                            obd->obd_setup = 0
+      obd_import_event
+        if (obd->obd_set_up)
+            osc_init_grant() /*skipped*/
+        ptlrpc_activate_import..
+
+And If RPC was waked up and send out before
+class_disconnect_exports(), It might hit divide zero crash
+in osc_announce_cached() because @cl_max_extent_pages is zero.
+
+The problem is we clear @obd_setup too early, It should be cleared
+when OBD is really shutdown.
+
+Fixes: cfd750 ("lustre: obdclass: obd_device improvement")
+WC-bug-id: https://jira.whamcloud.com/browse/LU-14283
+Lustre-commit: 4f689a30fb5d870 ("LU-14283 obdclass: connect vs disconnect race")
+Signed-off-by: Wang Shilong <wshilong at ddn.com>
+Reviewed-on: https://review.whamcloud.com/41256
+Reviewed-by: Sebastien Buisson <sbuisson at ddn.com>
+Reviewed-by: Andreas Dilger <adilger at whamcloud.com>
+Reviewed-by: John L. Hammond <jhammond at whamcloud.com>
+Reviewed-by: Oleg Drokin <green at whamcloud.com>
+Signed-off-by: James Simmons <jsimmons at infradead.org>
+---
+ fs/lustre/obdclass/obd_config.c | 4 ----
+ 1 file changed, 4 deletions(-)
+
+diff --git a/fs/lustre/obdclass/obd_config.c b/fs/lustre/obdclass/obd_config.c
+index 09dee7b..8f062bb 100644
+--- a/fs/lustre/obdclass/obd_config.c
++++ b/fs/lustre/obdclass/obd_config.c
+@@ -467,10 +467,6 @@ static int class_cleanup(struct obd_device *obd, struct lustre_cfg *lcfg)
+ 	}
+ 	/* Leave this on forever */
+ 	obd->obd_stopping = 1;
+-	/* function can't return error after that point, so clear setup flag
+-	 * as early as possible to avoid finding via obd_devs / hash
+-	 */
+-	obd->obd_set_up = 0;
+ 	spin_unlock(&obd->obd_dev_lock);
+ 
+ 	while (obd->obd_conn_inprogress > 0)
+-- 
+1.8.3.1
+
+
+From jsimmons at infradead.org  Mon Feb  8 16:54:22 2021
+From: jsimmons at infradead.org (James Simmons)
+Date: Mon,  8 Feb 2021 19:54:22 -0500
+Subject: [lustre-devel] [PATCH 4/9] lustre: osc: correctly update size/kms
+ for fallocate
+In-Reply-To: <1612832067-1449-1-git-send-email-jsimmons@infradead.org>
+References: <1612832067-1449-1-git-send-email-jsimmons@infradead.org>
+Message-ID: <1612832067-1449-5-git-send-email-jsimmons@infradead.org>
+
+From: Bobi Jam <bobijam at whamcloud.com>
+
+* fallocate chose oa->o_size for falloc_offset and o->o_blocks for
+  falloc_end, but forgot to change attr->cat_size and attr->cat_kms
+  to use sa_attr.lvb_size to update osc's lvb and kms if it expands
+  the file's size.
+
+  Other setattr IO uses @size (sa_falloc_offset in fallocate case) to
+  update the lvb and kms.
+
+* lock request extent for fallocate should be
+  [sa_falloc_offset, sa_falloc_end)
+
+* calculate sa_attr.lvb_size correctly for osc objects
+  (lov_io_sub_inherit())
+
+Fixes: d748d2ffa1bc ("lustre: fallocate: Implement fallocate preallocate operation")
+WC-bug-id: https://jira.whamcloud.com/browse/LU-14326
+Lustre-commit: 43979e4e257e78d ("LU-14326 osc: correctly update size/kms for fallocate")
+Signed-off-by: Bobi Jam <bobijam at whamcloud.com>
+Reviewed-on: https://review.whamcloud.com/41272
+Reviewed-by: Arshad Hussain <arshad.hussain at aeoncomputing.com>
+Reviewed-by: Bobi Jam <bobijam at hotmail.com>
+Reviewed-by: Andreas Dilger <adilger at whamcloud.com>
+Reviewed-by: Oleg Drokin <green at whamcloud.com>
+Signed-off-by: James Simmons <jsimmons at infradead.org>
+---
+ fs/lustre/llite/vvp_io.c   |  2 +-
+ fs/lustre/lov/lov_io.c     | 11 +++++------
+ fs/lustre/osc/osc_cache.c  |  3 ++-
+ fs/lustre/osc/osc_io.c     | 33 +++++++++++++++++----------------
+ fs/lustre/osc/osc_object.c |  4 +++-
+ 5 files changed, 28 insertions(+), 25 deletions(-)
+
+diff --git a/fs/lustre/llite/vvp_io.c b/fs/lustre/llite/vvp_io.c
+index b0b31c37..ac6aef0 100644
+--- a/fs/lustre/llite/vvp_io.c
++++ b/fs/lustre/llite/vvp_io.c
+@@ -647,7 +647,7 @@ static int vvp_io_setattr_lock(const struct lu_env *env,
+ 			enqflags = CEF_DISCARD_DATA;
+ 	} else if (cl_io_is_fallocate(io)) {
+ 		lock_start = io->u.ci_setattr.sa_falloc_offset;
+-		lock_end = lock_start + io->u.ci_setattr.sa_attr.lvb_size;
++		lock_end = io->u.ci_setattr.sa_falloc_end;
+ 	} else {
+ 		unsigned int valid = io->u.ci_setattr.sa_avalid;
+ 
+diff --git a/fs/lustre/lov/lov_io.c b/fs/lustre/lov/lov_io.c
+index c9600bc..2297e53 100644
+--- a/fs/lustre/lov/lov_io.c
++++ b/fs/lustre/lov/lov_io.c
+@@ -677,17 +677,16 @@ static void lov_io_sub_inherit(struct lov_io_sub *sub, struct lov_io *lio,
+ 			parent->u.ci_setattr.sa_parent_fid;
+ 		/* For SETATTR(fallocate) pass the subtype to lower IO */
+ 		io->u.ci_setattr.sa_subtype = parent->u.ci_setattr.sa_subtype;
+-		if (cl_io_is_trunc(io)) {
++		if (cl_io_is_fallocate(io)) {
++			io->u.ci_setattr.sa_falloc_offset = start;
++			io->u.ci_setattr.sa_falloc_end = end;
++		}
++		if (cl_io_is_trunc(io) || cl_io_is_fallocate(io)) {
+ 			loff_t new_size = parent->u.ci_setattr.sa_attr.lvb_size;
+ 
+ 			new_size = lov_size_to_stripe(lsm, index, new_size,
+ 						      stripe);
+ 			io->u.ci_setattr.sa_attr.lvb_size = new_size;
+-		} else if (cl_io_is_fallocate(io)) {
+-			io->u.ci_setattr.sa_falloc_offset = start;
+-			io->u.ci_setattr.sa_falloc_end = end;
+-			io->u.ci_setattr.sa_attr.lvb_size =
+-				parent->u.ci_setattr.sa_attr.lvb_size;
+ 		}
+ 		lov_lsm2layout(lsm, lsm->lsm_entries[index],
+ 			       &io->u.ci_setattr.sa_layout);
+diff --git a/fs/lustre/osc/osc_cache.c b/fs/lustre/osc/osc_cache.c
+index d511ece..4abe8ba 100644
+--- a/fs/lustre/osc/osc_cache.c
++++ b/fs/lustre/osc/osc_cache.c
+@@ -1159,7 +1159,8 @@ static int osc_extent_make_ready(const struct lu_env *env,
+ 		int last_oap_count = osc_refresh_count(env, last,
+ 						       OBD_BRW_WRITE);
+ 
+-		LASSERT(last_oap_count > 0);
++		LASSERTF(last_oap_count > 0,
++			 "last_oap_count %d\n", last_oap_count);
+ 		LASSERT(last->oap_page_off + last_oap_count <= PAGE_SIZE);
+ 		last->oap_count = last_oap_count;
+ 		spin_lock(&last->oap_lock);
+diff --git a/fs/lustre/osc/osc_io.c b/fs/lustre/osc/osc_io.c
+index a0537b8..ce0f7ec 100644
+--- a/fs/lustre/osc/osc_io.c
++++ b/fs/lustre/osc/osc_io.c
+@@ -569,8 +569,14 @@ static int osc_io_setattr_start(const struct lu_env *env,
+ 			unsigned int cl_valid = 0;
+ 
+ 			if (ia_avalid & ATTR_SIZE) {
+-				attr->cat_size = size;
+-				attr->cat_kms = size;
++				if (io_is_falloc) {
++					attr->cat_size =
++						io->u.ci_setattr.sa_attr.lvb_size;
++					attr->cat_kms = attr->cat_size;
++				} else {
++					attr->cat_size = size;
++					attr->cat_kms = size;
++				}
+ 				cl_valid = CAT_SIZE | CAT_KMS;
+ 			}
+ 			if (ia_avalid & ATTR_MTIME_SET) {
+@@ -707,22 +713,17 @@ void osc_io_setattr_end(const struct lu_env *env,
+ 	}
+ 
+ 	if (cl_io_is_fallocate(io)) {
+-		cl_object_attr_lock(obj);
+-
+-		/* update blocks */
+-		if (oa->o_valid & OBD_MD_FLBLOCKS) {
+-			attr->cat_blocks = oa->o_blocks;
+-			cl_valid |= CAT_BLOCKS;
+-		}
++		if (result == 0) {
++			cl_object_attr_lock(obj);
++			/* update blocks */
++			if (oa->o_valid & OBD_MD_FLBLOCKS) {
++				attr->cat_blocks = oa->o_blocks;
++				cl_valid |= CAT_BLOCKS;
++			}
+ 
+-		/* update size */
+-		if (oa->o_valid & OBD_MD_FLSIZE) {
+-			attr->cat_size = oa->o_size;
+-			cl_valid |= CAT_SIZE;
++			cl_object_attr_update(env, obj, attr, cl_valid);
++			cl_object_attr_unlock(obj);
+ 		}
+-
+-		cl_object_attr_update(env, obj, attr, cl_valid);
+-		cl_object_attr_unlock(obj);
+ 	}
+ }
+ EXPORT_SYMBOL(osc_io_setattr_end);
+diff --git a/fs/lustre/osc/osc_object.c b/fs/lustre/osc/osc_object.c
+index 273098a..00f2800 100644
+--- a/fs/lustre/osc/osc_object.c
++++ b/fs/lustre/osc/osc_object.c
+@@ -218,7 +218,9 @@ static int osc_object_ast_clear(struct ldlm_lock *lock, void *data)
+ 			   lvb->lvb_atime, oinfo->loi_lvb.lvb_size,
+ 			   oinfo->loi_lvb.lvb_blocks, oinfo->loi_lvb.lvb_ctime,
+ 			   oinfo->loi_lvb.lvb_mtime, oinfo->loi_lvb.lvb_atime);
+-		LASSERT(oinfo->loi_lvb.lvb_size >= oinfo->loi_kms);
++		LASSERTF(oinfo->loi_lvb.lvb_size >= oinfo->loi_kms,
++			 "lvb_size %#llx, loi_kms %#llx\n",
++			 oinfo->loi_lvb.lvb_size, oinfo->loi_kms);
+ 
+ 		cl_object_attr_lock(&osc->oo_cl);
+ 		memcpy(lvb, &oinfo->loi_lvb, sizeof(oinfo->loi_lvb));
+-- 
+1.8.3.1
+
+
+From jsimmons at infradead.org  Mon Feb  8 16:54:23 2021
+From: jsimmons at infradead.org (James Simmons)
+Date: Mon,  8 Feb 2021 19:54:23 -0500
+Subject: [lustre-devel] [PATCH 5/9] lustre: ldlm: don't change GROUP lock
+ GID on client
+In-Reply-To: <1612832067-1449-1-git-send-email-jsimmons@infradead.org>
+References: <1612832067-1449-1-git-send-email-jsimmons@infradead.org>
+Message-ID: <1612832067-1449-6-git-send-email-jsimmons@infradead.org>
+
+From: Mikhail Pershin <mpershin at whamcloud.com>
+
+GROUP lock GID is part of inodebits policy and is passed
+to the server from client in policy li_gid field.
+Meanwhile the ldlm_ibits_policy_wire_to_local() is used on
+client also when server reply or completion AST is processed,
+so client original GID can be overwritten by server value.
+This is not problem if both server and client have the same
+Lustre version but if server is older then it can have garbage
+in li_gid field and client lock policy is updated with it.
+
+Considering that GROUP lock GID is never changed and server should
+not do that, the solution is to ignore returned li_gid from server
+and never update original GID of GROUP lock on client from server
+response.
+
+WC-bug-id: https://jira.whamcloud.com/browse/LU-14312
+Lustre-commit: da18ad5628556cb ("LU-14312 ldlm: don't change GROUP lock GID on client")
+Signed-off-by: Mikhail Pershin <mpershin at whamcloud.com>
+Reviewed-on: https://review.whamcloud.com/41268
+Reviewed-by: Andreas Dilger <adilger at whamcloud.com>
+Reviewed-by: Oleg Drokin <green at whamcloud.com>
+Signed-off-by: James Simmons <jsimmons at infradead.org>
+---
+ fs/lustre/ldlm/ldlm_inodebits.c | 5 ++++-
+ 1 file changed, 4 insertions(+), 1 deletion(-)
+
+diff --git a/fs/lustre/ldlm/ldlm_inodebits.c b/fs/lustre/ldlm/ldlm_inodebits.c
+index a367ff1..32de9b9 100644
+--- a/fs/lustre/ldlm/ldlm_inodebits.c
++++ b/fs/lustre/ldlm/ldlm_inodebits.c
+@@ -59,7 +59,10 @@ void ldlm_ibits_policy_wire_to_local(const union ldlm_wire_policy_data *wpolicy,
+ 				     union ldlm_policy_data *lpolicy)
+ {
+ 	lpolicy->l_inodebits.bits = wpolicy->l_inodebits.bits;
+-	lpolicy->l_inodebits.li_gid = wpolicy->l_inodebits.li_gid;
++	/**
++	 * try_bits and li_gid are to be handled outside of generic
++	 * write_to_local due to different behavior on a server and client.
++	 */
+ }
+ 
+ void ldlm_ibits_policy_local_to_wire(const union ldlm_policy_data *lpolicy,
+-- 
+1.8.3.1
+
+
+From jsimmons at infradead.org  Mon Feb  8 16:54:20 2021
+From: jsimmons at infradead.org (James Simmons)
+Date: Mon,  8 Feb 2021 19:54:20 -0500
+Subject: [lustre-devel] [PATCH 2/9] lustre: flr: skip unknown FLR component
+ types
+In-Reply-To: <1612832067-1449-1-git-send-email-jsimmons@infradead.org>
+References: <1612832067-1449-1-git-send-email-jsimmons@infradead.org>
+Message-ID: <1612832067-1449-3-git-send-email-jsimmons@infradead.org>
+
+From: Qian Yingjin <qian at ddn.com>
+
+Currently, in lov_init_composite() it will quit with error when
+reading an unknown LOV pattern.
+Since FLR will be used for upcoming new features, like PCC-RO,
+an old client should be able to read the old format of the
+component types, ignore and skip the new types of FLR component.
+
+WC-bug-id: https://jira.whamcloud.com/browse/LU-13602
+Lustre-commit: 61a002cd8631ecd ("LU-13602 flr: skip unknown FLR component types")
+Signed-off-by: Qian Yingjin <qian at ddn.com>
+Reviewed-on: https://review.whamcloud.com/39513
+Reviewed-by: Andreas Dilger <adilger at whamcloud.com>
+Reviewed-by: Oleg Drokin <green at whamcloud.com>
+Signed-off-by: James Simmons <jsimmons at infradead.org>
+---
+ fs/lustre/lov/lov_cl_internal.h         |  7 +++-
+ fs/lustre/lov/lov_ea.c                  | 66 +++++++++++++++++++++++++--------
+ fs/lustre/lov/lov_internal.h            | 15 +++++++-
+ fs/lustre/lov/lov_io.c                  | 14 ++++++-
+ fs/lustre/lov/lov_object.c              | 22 ++++++++++-
+ include/uapi/linux/lustre/lustre_user.h |  1 +
+ 6 files changed, 102 insertions(+), 23 deletions(-)
+
+diff --git a/fs/lustre/lov/lov_cl_internal.h b/fs/lustre/lov/lov_cl_internal.h
+index f86176a..e9ef5aa 100644
+--- a/fs/lustre/lov/lov_cl_internal.h
++++ b/fs/lustre/lov/lov_cl_internal.h
+@@ -151,7 +151,8 @@ static inline char *llt2str(enum lov_layout_type llt)
+ static inline u32 lov_entry_type(struct lov_stripe_md_entry *lsme)
+ {
+ 	if ((lov_pattern(lsme->lsme_pattern) & LOV_PATTERN_RAID0) ||
+-	    (lov_pattern(lsme->lsme_pattern) == LOV_PATTERN_MDT))
++	    (lov_pattern(lsme->lsme_pattern) == LOV_PATTERN_MDT) ||
++	    (lov_pattern(lsme->lsme_pattern) == LOV_PATTERN_FOREIGN))
+ 		return lov_pattern(lsme->lsme_pattern &
+ 				   ~LOV_PATTERN_OVERSTRIPING);
+ 	return 0;
+@@ -239,9 +240,11 @@ struct lov_mirror_entry {
+ 	unsigned short	lre_mirror_id;
+ 	unsigned short	lre_preferred:1,
+ 			lre_stale:1,	/* set if any components is stale */
+-			lre_valid:1;	/* set if at least one of components
++			lre_valid:1,	/* set if at least one of components
+ 					 * in this mirror is valid
+ 					 */
++			lre_foreign:1;	/* set if it is a foreign component */
++
+ 	unsigned short	lre_start;	/* index to lo_entries, start index of
+ 					 * this mirror
+ 					 */
+diff --git a/fs/lustre/lov/lov_ea.c b/fs/lustre/lov/lov_ea.c
+index 13f47ee..75a19a4 100644
+--- a/fs/lustre/lov/lov_ea.c
++++ b/fs/lustre/lov/lov_ea.c
+@@ -125,9 +125,22 @@ static int lsm_lmm_verify_v1v3(struct lov_mds_md *lmm, size_t lmm_size,
+ 
+ static void lsme_free(struct lov_stripe_md_entry *lsme)
+ {
+-	unsigned int stripe_count = lsme->lsme_stripe_count;
++	unsigned int stripe_count;
+ 	unsigned int i;
+ 
++	if (lsme->lsme_magic == LOV_MAGIC_FOREIGN) {
++		/*
++		 * TODO: In addition to HSM foreign layout, It needs to add
++		 * support for other kinds of foreign layout types such as
++		 * DAOS, S3. When add these supports, it will use non-inline
++		 * @lov_hsm_base to store layout information, and need to
++		 * free extra allocated buffer.
++		 */
++		kvfree(lsme);
++		return;
++	}
++
++	stripe_count = lsme->lsme_stripe_count;
+ 	if (!lsme_inited(lsme) ||
+ 	    lsme->lsme_pattern & LOV_PATTERN_F_RELEASED)
+ 		stripe_count = 0;
+@@ -183,8 +196,7 @@ void lsm_free(struct lov_stripe_md *lsm)
+ 	else
+ 		stripe_count = le16_to_cpu(lmm->lmm_stripe_count);
+ 
+-	if (buf_size < (magic == LOV_MAGIC_V1 ? sizeof(struct lov_mds_md_v1) :
+-						sizeof(struct lov_mds_md_v3))) {
++	if (buf_size < lov_mds_md_size(stripe_count, magic)) {
+ 		CERROR("LOV EA %s too small: %zu, need %u\n",
+ 		       magic == LOV_MAGIC_V1 ? "V1" : "V3", buf_size,
+ 		       lov_mds_md_size(stripe_count, magic == LOV_MAGIC_V1 ?
+@@ -407,36 +419,58 @@ static int lsm_verify_comp_md_v1(struct lov_comp_md_v1 *lcm,
+ }
+ 
+ static struct lov_stripe_md_entry *
+-lsme_unpack_comp(struct lov_obd *lov, struct lov_mds_md *lmm,
+-		 size_t lmm_buf_size, bool inited, loff_t *maxbytes)
++lsme_unpack_foreign(struct lov_obd *lov, void *buf, size_t buf_size,
++		    bool inited, loff_t *maxbytes)
+ {
+-	unsigned int stripe_count;
+-	unsigned int magic;
++	struct lov_stripe_md_entry *lsme;
++	struct lov_foreign_md *lfm = buf;
++	u32 magic;
+ 
+-	stripe_count = le16_to_cpu(lmm->lmm_stripe_count);
+-	if (stripe_count == 0 &&
+-	    lov_pattern(le32_to_cpu(lmm->lmm_pattern)) != LOV_PATTERN_MDT)
++	magic = le32_to_cpu(lfm->lfm_magic);
++	if (magic != LOV_MAGIC_FOREIGN)
+ 		return ERR_PTR(-EINVAL);
+ 
+-	/* un-instantiated lmm contains no ost id info, i.e. lov_ost_data_v1 */
+-	if (!inited)
+-		stripe_count = 0;
++	lsme = kvzalloc(sizeof(*lsme), GFP_NOFS);
++	if (!lsme)
++		return ERR_PTR(-ENOMEM);
++
++	lsme->lsme_magic = magic;
++	lsme->lsme_pattern = LOV_PATTERN_FOREIGN;
++	lsme->lsme_flags = 0;
++
++	if (maxbytes)
++		*maxbytes = MAX_LFS_FILESIZE;
++
++	return lsme;
++}
++
++static struct lov_stripe_md_entry *
++lsme_unpack_comp(struct lov_obd *lov, struct lov_mds_md *lmm,
++		 size_t lmm_buf_size, bool inited, loff_t *maxbytes)
++{
++	unsigned int magic;
+ 
+ 	magic = le32_to_cpu(lmm->lmm_magic);
+-	if (magic != LOV_MAGIC_V1 && magic != LOV_MAGIC_V3)
++	if (magic != LOV_MAGIC_V1 && magic != LOV_MAGIC_V3 &&
++	    magic != LOV_MAGIC_FOREIGN)
+ 		return ERR_PTR(-EINVAL);
+ 
+-	if (lmm_buf_size < lov_mds_md_size(stripe_count, magic))
++	if (magic != LOV_MAGIC_FOREIGN &&
++	    le16_to_cpu(lmm->lmm_stripe_count) == 0 &&
++	    lov_pattern(le32_to_cpu(lmm->lmm_pattern)) != LOV_PATTERN_MDT)
+ 		return ERR_PTR(-EINVAL);
+ 
+ 	if (magic == LOV_MAGIC_V1) {
+ 		return lsme_unpack(lov, lmm, lmm_buf_size, NULL,
+ 				   inited, lmm->lmm_objects, maxbytes);
+-	} else {
++	} else if (magic == LOV_MAGIC_V3) {
+ 		struct lov_mds_md_v3 *lmm3 = (struct lov_mds_md_v3 *)lmm;
+ 
+ 		return lsme_unpack(lov, lmm, lmm_buf_size, lmm3->lmm_pool_name,
+ 				   inited, lmm3->lmm_objects, maxbytes);
++	} else { /* LOV_MAGIC_FOREIGN */
++		return lsme_unpack_foreign(lov, lmm, lmm_buf_size,
++					   inited, maxbytes);
+ 	}
+ }
+ 
+diff --git a/fs/lustre/lov/lov_internal.h b/fs/lustre/lov/lov_internal.h
+index 5d726fd..81adce4 100644
+--- a/fs/lustre/lov/lov_internal.h
++++ b/fs/lustre/lov/lov_internal.h
+@@ -100,6 +100,17 @@ struct lov_stripe_md {
+ 
+ #define lsm_foreign(lsm) (lsm->lsm_entries[0])
+ 
++static inline bool lsme_is_foreign(const struct lov_stripe_md_entry *lsme)
++{
++	return lsme->lsme_magic == LOV_MAGIC_FOREIGN;
++}
++
++static inline bool lsm_entry_is_foreign(const struct lov_stripe_md *lsm,
++					int index)
++{
++	return lsme_is_foreign(lsm->lsm_entries[index]);
++}
++
+ static inline bool lsme_inited(const struct lov_stripe_md_entry *lsme)
+ {
+ 	return lsme->lsme_flags & LCME_FL_INIT;
+@@ -130,7 +141,8 @@ static inline size_t lov_comp_md_size(const struct lov_stripe_md *lsm)
+ 
+ 	LASSERT(lsm->lsm_magic == LOV_MAGIC_COMP_V1);
+ 
+-	size = sizeof(struct lov_comp_md_v1);
++	size = sizeof(struct lov_comp_md_v1) +
++	       sizeof(struct lov_comp_md_entry_v1) * lsm->lsm_entry_count;
+ 	for (entry = 0; entry < lsm->lsm_entry_count; entry++) {
+ 		u16 stripe_count;
+ 
+@@ -141,7 +153,6 @@ static inline size_t lov_comp_md_size(const struct lov_stripe_md *lsm)
+ 		else
+ 			stripe_count = 0;
+ 
+-		size += sizeof(*lsme);
+ 		size += lov_mds_md_size(stripe_count,
+ 					lsme->lsme_magic);
+ 	}
+diff --git a/fs/lustre/lov/lov_io.c b/fs/lustre/lov/lov_io.c
+index daceab0..c9600bc 100644
+--- a/fs/lustre/lov/lov_io.c
++++ b/fs/lustre/lov/lov_io.c
+@@ -398,6 +398,9 @@ static int lov_io_mirror_init(struct lov_io *lio, struct lov_object *obj,
+ 		if (!lre->lre_valid)
+ 			continue;
+ 
++		if (lre->lre_foreign)
++			continue;
++
+ 		lov_foreach_mirror_layout_entry(obj, lle, lre) {
+ 			if (!lle->lle_valid)
+ 				continue;
+@@ -802,6 +805,9 @@ static int lov_io_iter_init(const struct lu_env *env,
+ 			continue;
+ 		}
+ 
++		if (lsm_entry_is_foreign(lsm, index))
++			continue;
++
+ 		if (!le->lle_valid && !ios->cis_io->ci_designated_mirror) {
+ 			CERROR("I/O to invalid component: %d, mirror: %d\n",
+ 			       index, lio->lis_mirror_index);
+@@ -931,6 +937,9 @@ static int lov_io_rw_iter_init(const struct lu_env *env,
+ 
+ 	lse = lov_lse(lio->lis_object, index);
+ 
++	if (lsme_is_foreign(lse))
++		return -EINVAL;
++
+ 	next = MAX_LFS_FILESIZE;
+ 	if (lse->lsme_stripe_count > 1) {
+ 		unsigned long ssize = lse->lsme_stripe_size;
+@@ -1107,7 +1116,8 @@ static int lov_io_read_ahead(const struct lu_env *env,
+ 
+ 	offset = cl_offset(obj, start);
+ 	index = lov_io_layout_at(lio, offset);
+-	if (index < 0 || !lsm_entry_inited(loo->lo_lsm, index))
++	if (index < 0 || !lsm_entry_inited(loo->lo_lsm, index) ||
++	    lsm_entry_is_foreign(loo->lo_lsm, index))
+ 		return -ENODATA;
+ 
+ 	/* avoid readahead to expand to stale components */
+@@ -1760,6 +1770,8 @@ int lov_io_layout_at(struct lov_io *lio, u64 offset)
+ 	for (i = start_index; i <= end_index; i++) {
+ 		struct lov_layout_entry *lle = lov_entry(lov, i);
+ 
++		LASSERT(!lsme_is_foreign(lle->lle_lsme));
++
+ 		if ((offset >= lle->lle_extent->e_start &&
+ 		     offset < lle->lle_extent->e_end) ||
+ 		    (offset == OBD_OBJECT_EOF &&
+diff --git a/fs/lustre/lov/lov_object.c b/fs/lustre/lov/lov_object.c
+index d9729c8..5d0e257 100644
+--- a/fs/lustre/lov/lov_object.c
++++ b/fs/lustre/lov/lov_object.c
+@@ -681,6 +681,9 @@ static int lov_init_composite(const struct lu_env *env, struct lov_device *dev,
+ 			}
+ 			lle->lle_comp_ops = &dom_ops;
+ 			break;
++		case LOV_PATTERN_FOREIGN:
++			lle->lle_comp_ops = NULL;
++			break;
+ 		default:
+ 			CERROR("%s: unknown composite layout entry type %i\n",
+ 			       lov2obd(dev->ld_lov)->obd_name,
+@@ -700,6 +703,8 @@ static int lov_init_composite(const struct lu_env *env, struct lov_device *dev,
+ 			if (mirror_id == lre->lre_mirror_id) {
+ 				lre->lre_valid |= lle->lle_valid;
+ 				lre->lre_stale |= !lle->lle_valid;
++				lre->lre_foreign |=
++					lsme_is_foreign(lle->lle_lsme);
+ 				lre->lre_end = i;
+ 				continue;
+ 			}
+@@ -722,6 +727,7 @@ static int lov_init_composite(const struct lu_env *env, struct lov_device *dev,
+ 					LCME_FL_PREF_RD);
+ 		lre->lre_valid = lle->lle_valid;
+ 		lre->lre_stale = !lle->lle_valid;
++		lre->lre_foreign = lsme_is_foreign(lle->lle_lsme);
+ 	}
+ 
+ 	/* sanity check for FLR */
+@@ -746,6 +752,9 @@ static int lov_init_composite(const struct lu_env *env, struct lov_device *dev,
+ 		if (!lsme_inited(lle->lle_lsme))
+ 			continue;
+ 
++		if (lsme_is_foreign(lle->lle_lsme))
++			continue;
++
+ 		result = lle->lle_comp_ops->lco_init(env, dev, lov, index,
+ 						     conf, lle);
+ 		if (result < 0)
+@@ -771,6 +780,9 @@ static int lov_init_composite(const struct lu_env *env, struct lov_device *dev,
+ 		if (lre->lre_stale)
+ 			continue;
+ 
++		if (lre->lre_foreign)
++			continue;
++
+ 		mirror_count++; /* valid mirror */
+ 
+ 		if (lre->lre_preferred || comp->lo_preferred_mirror < 0)
+@@ -847,8 +859,12 @@ static int lov_delete_composite(const struct lu_env *env,
+ 
+ 	lov_layout_wait(env, lov);
+ 	if (comp->lo_entries)
+-		lov_foreach_layout_entry(lov, entry)
++		lov_foreach_layout_entry(lov, entry) {
++			if (lsme_is_foreign(entry->lle_lsme))
++				continue;
++
+ 			lov_delete_raid0(env, lov, entry);
++		}
+ 
+ 	return 0;
+ }
+@@ -921,7 +937,9 @@ static int lov_print_composite(const struct lu_env *env, void *cookie,
+ 		     lse->lsme_id, lse->lsme_pattern, lse->lsme_layout_gen,
+ 		     lse->lsme_flags, lse->lsme_stripe_count,
+ 		     lse->lsme_stripe_size);
+-		lov_print_raid0(env, cookie, p, lle);
++
++		if (!lsme_is_foreign(lse))
++			lov_print_raid0(env, cookie, p, lle);
+ 	}
+ 
+ 	return 0;
+diff --git a/include/uapi/linux/lustre/lustre_user.h b/include/uapi/linux/lustre/lustre_user.h
+index 835ffce..0f195a4 100644
+--- a/include/uapi/linux/lustre/lustre_user.h
++++ b/include/uapi/linux/lustre/lustre_user.h
+@@ -422,6 +422,7 @@ struct ll_ioc_lease_id {
+ #define LOV_PATTERN_RAID1		0x002
+ #define LOV_PATTERN_MDT			0x100
+ #define LOV_PATTERN_OVERSTRIPING	0x200
++#define LOV_PATTERN_FOREIGN		0x400
+ 
+ #define LOV_PATTERN_F_MASK	0xffff0000
+ #define LOV_PATTERN_F_HOLE	0x40000000 /* there is hole in LOV EA */
+-- 
+1.8.3.1
+
+
+From jsimmons at infradead.org  Mon Feb  8 16:54:24 2021
+From: jsimmons at infradead.org (James Simmons)
+Date: Mon,  8 Feb 2021 19:54:24 -0500
+Subject: [lustre-devel] [PATCH 6/9] lustre: sec: get rid of bad rss-counter
+ state messages
+In-Reply-To: <1612832067-1449-1-git-send-email-jsimmons@infradead.org>
+References: <1612832067-1449-1-git-send-email-jsimmons@infradead.org>
+Message-ID: <1612832067-1449-7-git-send-email-jsimmons@infradead.org>
+
+From: Sebastien Buisson <sbuisson at ddn.com>
+
+When doing O_DIRECT IOs on encrypted files, messages about bad
+rss-counter state can be seen in the console. The mm get confused
+because we twist the Lustre pages used for RPCs so that they are
+suitable for llcrypt API.
+In order to do this properly, the original mapping on these pages
+must be preserved outside of the encryption/decryption needs.
+
+Fixes: feca6b62a6 ("lustre: sec: O_DIRECT for encrypted file")
+WC-bug-id: https://jira.whamcloud.com/browse/LU-14306
+Lustre-commit: a71e0dd7f7aa445 ("LU-14306 sec: get rid of bad rss-counter state messages")
+Signed-off-by: Sebastien Buisson <sbuisson at ddn.com>
+Reviewed-on: https://review.whamcloud.com/41199
+Reviewed-by: Andreas Dilger <adilger at whamcloud.com>
+Reviewed-by: John L. Hammond <jhammond at whamcloud.com>
+Reviewed-by: Oleg Drokin <green at whamcloud.com>
+Signed-off-by: James Simmons <jsimmons at infradead.org>
+---
+ fs/lustre/include/cl_object.h     |  6 +++
+ fs/lustre/include/lustre_crypto.h |  8 ++++
+ fs/lustre/llite/rw26.c            | 23 +++---------
+ fs/lustre/obdclass/cl_io.c        | 11 ------
+ fs/lustre/obdclass/cl_page.c      |  1 +
+ fs/lustre/osc/osc_request.c       | 78 +++++++++++++++++++++++++++++++++------
+ 6 files changed, 86 insertions(+), 41 deletions(-)
+
+diff --git a/fs/lustre/include/cl_object.h b/fs/lustre/include/cl_object.h
+index d2cee34..4f34e5d 100644
+--- a/fs/lustre/include/cl_object.h
++++ b/fs/lustre/include/cl_object.h
+@@ -741,6 +741,12 @@ struct cl_page {
+ 	struct cl_object		*cp_obj;
+ 	/** vmpage */
+ 	struct page			*cp_vmpage;
++	/**
++	 * Assigned if doing direct IO, because in this case cp_vmpage is not
++	 * a valid page cache page, hence the inode cannot be inferred from
++	 * cp_vmpage->mapping->host.
++	 */
++	struct inode			*cp_inode;
+ 	/** Linkage of pages within group. Pages must be owned */
+ 	struct list_head		 cp_batch;
+ 	/** array of slices offset. Immutable after creation. */
+diff --git a/fs/lustre/include/lustre_crypto.h b/fs/lustre/include/lustre_crypto.h
+index b80147f..01b5e85 100644
+--- a/fs/lustre/include/lustre_crypto.h
++++ b/fs/lustre/include/lustre_crypto.h
+@@ -48,8 +48,12 @@ int ll_set_encflags(struct inode *inode, void *encctx, u32 encctxlen,
+ #define llcrypt_has_encryption_key(inode) fscrypt_has_encryption_key(inode)
+ #define llcrypt_encrypt_pagecache_blocks(page, len, offs, gfp_flags)	\
+ 	fscrypt_encrypt_pagecache_blocks(page, len, offs, gfp_flags)
++#define llcrypt_encrypt_block_inplace(inode, page, len, offs, lblk, gfp_flags) \
++	fscrypt_encrypt_block_inplace(inode, page, len, offs, lblk, gfp_flags)
+ #define llcrypt_decrypt_pagecache_blocks(page, len, offs)	\
+ 	fscrypt_decrypt_pagecache_blocks(page, len, offs)
++#define llcrypt_decrypt_block_inplace(inode, page, len, offs, lblk_num)        \
++	fscrypt_decrypt_block_inplace(inode, page, len, offs, lblk_num)
+ #define llcrypt_inherit_context(parent, child, fs_data, preload)	\
+ 	fscrypt_inherit_context(parent, child, fs_data, preload)
+ #define llcrypt_get_encryption_info(inode) fscrypt_get_encryption_info(inode)
+@@ -82,7 +86,11 @@ int ll_set_encflags(struct inode *inode, void *encctx, u32 encctxlen,
+ #define llcrypt_has_encryption_key(inode) false
+ #define llcrypt_encrypt_pagecache_blocks(page, len, offs, gfp_flags)	\
+ 	ERR_PTR(-EOPNOTSUPP)
++#define llcrypt_encrypt_block_inplace(inode, page, len, offs, lblk, gfp_flags) \
++	-EOPNOTSUPP
+ #define llcrypt_decrypt_pagecache_blocks(page, len, offs)	-EOPNOTSUPP
++#define llcrypt_decrypt_block_inplace(inode, page, len, offs, lblk_num)	       \
++	-EOPNOTSUPP
+ #define llcrypt_inherit_context(parent, child, fs_data, preload)     -EOPNOTSUPP
+ #define llcrypt_get_encryption_info(inode)			-EOPNOTSUPP
+ #define llcrypt_put_encryption_info(inode)			do {} while (0)
+diff --git a/fs/lustre/llite/rw26.c b/fs/lustre/llite/rw26.c
+index 28c0a75..91a05ac 100644
+--- a/fs/lustre/llite/rw26.c
++++ b/fs/lustre/llite/rw26.c
+@@ -236,7 +236,6 @@ struct ll_dio_pages {
+ 	int io_pages = 0;
+ 	size_t page_size = cl_page_size(obj);
+ 	int i;
+-	pgoff_t index = offset >> PAGE_SHIFT;
+ 	ssize_t rc = 0;
+ 
+ 	cl_2queue_init(queue);
+@@ -257,26 +256,14 @@ struct ll_dio_pages {
+ 
+ 		page->cp_sync_io = anchor;
+ 		if (inode && IS_ENCRYPTED(inode)) {
+-			struct page *vmpage = cl_page_vmpage(page);
+-
+ 			/* In case of Direct IO on encrypted file, we need to
+-			 * set the correct page index, and add a reference to
+-			 * the mapping. This is required by llcrypt to proceed
+-			 * to encryption/decryption, because each block is
+-			 * encrypted independently, and each block's IV is set
+-			 * to the logical block number within the file.
++			 * add a reference to the inode on the cl_page.
++			 * This info is required by llcrypt to proceed
++			 * to encryption/decryption.
+ 			 * This is safe because we know these pages are private
+-			 * to the thread doing the Direct IO, and despite
+-			 * setting a mapping on the pages, cached lookups will
+-			 * not find them.
+-			 * Set PageChecked to detect special case of Direct IO
+-			 * in osc_brw_fini_request().
+-			 * Reference to the mapping and PageChecked flag are
+-			 * removed in cl_aio_end().
++			 * to the thread doing the Direct IO.
+ 			 */
+-			vmpage->index = index++;
+-			vmpage->mapping = inode->i_mapping;
+-			SetPageChecked(vmpage);
++			page->cp_inode = inode;
+ 		}
+ 		cl_page_list_add(&queue->c2_qin, page);
+ 		/*
+diff --git a/fs/lustre/obdclass/cl_io.c b/fs/lustre/obdclass/cl_io.c
+index 37b0828..c57a3766 100644
+--- a/fs/lustre/obdclass/cl_io.c
++++ b/fs/lustre/obdclass/cl_io.c
+@@ -1081,19 +1081,8 @@ static void cl_aio_end(const struct lu_env *env, struct cl_sync_io *anchor)
+ 	/* release pages */
+ 	while (aio->cda_pages.pl_nr > 0) {
+ 		struct cl_page *page = cl_page_list_first(&aio->cda_pages);
+-		struct page *vmpage = cl_page_vmpage(page);
+-		struct inode *inode = vmpage ? page2inode(vmpage) : NULL;
+ 
+ 		cl_page_get(page);
+-		/* We end up here in case of Direct IO only. For encrypted file,
+-		 * mapping was set on pages in ll_direct_rw_pages(), so it has
+-		 * to be cleared now before page cleanup.
+-		 * PageChecked flag was also set there, so we clean up here.
+-		 */
+-		if (inode && IS_ENCRYPTED(inode)) {
+-			vmpage->mapping = NULL;
+-			ClearPageChecked(vmpage);
+-		}
+ 		cl_page_list_del(env, &aio->cda_pages, page);
+ 		cl_page_delete(env, page);
+ 		cl_page_put(env, page);
+diff --git a/fs/lustre/obdclass/cl_page.c b/fs/lustre/obdclass/cl_page.c
+index 53f88a7..2cf8d30 100644
+--- a/fs/lustre/obdclass/cl_page.c
++++ b/fs/lustre/obdclass/cl_page.c
+@@ -231,6 +231,7 @@ struct cl_page *cl_page_alloc(const struct lu_env *env, struct cl_object *o,
+ 		cl_page->cp_vmpage = vmpage;
+ 		cl_page->cp_state = CPS_CACHED;
+ 		cl_page->cp_type = type;
++		cl_page->cp_inode = NULL;
+ 		INIT_LIST_HEAD(&cl_page->cp_batch);
+ 		lu_ref_init(&cl_page->cp_reference);
+ 		cl_object_for_each(o2, o) {
+diff --git a/fs/lustre/osc/osc_request.c b/fs/lustre/osc/osc_request.c
+index a6a8cac..8d3688f 100644
+--- a/fs/lustre/osc/osc_request.c
++++ b/fs/lustre/osc/osc_request.c
+@@ -1409,8 +1409,21 @@ static int osc_brw_prep_request(int cmd, struct client_obd *cli,
+ 	void *short_io_buf;
+ 	const char *obd_name = cli->cl_import->imp_obd->obd_name;
+ 	struct inode *inode;
++	bool directio = false;
+ 
+ 	inode = page2inode(pga[0]->pg);
++	if (!inode) {
++		/* Try to get reference to inode from cl_page if we are
++		 * dealing with direct IO, as handled pages are not
++		 * actual page cache pages.
++		 */
++		struct osc_async_page *oap = brw_page2oap(pga[0]);
++		struct cl_page *clpage = oap2cl_page(oap);
++
++		inode = clpage->cp_inode;
++		if (inode)
++			directio = true;
++	}
+ 	if (OBD_FAIL_CHECK(OBD_FAIL_OSC_BRW_PREP_REQ))
+ 		return -ENOMEM; /* Recoverable */
+ 	if (OBD_FAIL_CHECK(OBD_FAIL_OSC_BRW_PREP_REQ2))
+@@ -1435,6 +1448,8 @@ static int osc_brw_prep_request(int cmd, struct client_obd *cli,
+ 			bool retried = false;
+ 			bool lockedbymyself;
+ 			u32 nunits = (pg->off & ~PAGE_MASK) + pg->count;
++			struct address_space *map_orig = NULL;
++			pgoff_t index_orig;
+ 
+ retry_encrypt:
+ 			if (nunits & ~LUSTRE_ENCRYPTION_MASK)
+@@ -1450,10 +1465,20 @@ static int osc_brw_prep_request(int cmd, struct client_obd *cli,
+ 			 * which means only once the page is fully processed.
+ 			 */
+ 			lockedbymyself = trylock_page(pg->pg);
++			if (directio) {
++				map_orig = pg->pg->mapping;
++				pg->pg->mapping = inode->i_mapping;
++				index_orig = pg->pg->index;
++				pg->pg->index = pg->off >> PAGE_SHIFT;
++			}
+ 			data_page =
+ 				llcrypt_encrypt_pagecache_blocks(pg->pg,
+ 								 nunits, 0,
+ 								 GFP_NOFS);
++			if (directio) {
++				pg->pg->mapping = map_orig;
++				pg->pg->index = index_orig;
++			}
+ 			if (lockedbymyself)
+ 				unlock_page(pg->pg);
+ 			if (IS_ERR(data_page)) {
+@@ -1921,6 +1946,7 @@ static int osc_brw_fini_request(struct ptlrpc_request *req, int rc)
+ 	struct ost_body *body;
+ 	u32 client_cksum = 0;
+ 	struct inode *inode;
++	unsigned int blockbits = 0, blocksize = 0;
+ 
+ 	if (rc < 0 && rc != -EDQUOT) {
+ 		DEBUG_REQ(D_INFO, req, "Failed request: rc = %d", rc);
+@@ -2113,6 +2139,19 @@ static int osc_brw_fini_request(struct ptlrpc_request *req, int rc)
+ 	}
+ 
+ 	inode = page2inode(aa->aa_ppga[0]->pg);
++	if (!inode) {
++		/* Try to get reference to inode from cl_page if we are
++		 * dealing with direct IO, as handled pages are not
++		 * actual page cache pages.
++		 */
++		struct osc_async_page *oap = brw_page2oap(aa->aa_ppga[0]);
++
++		inode = oap2cl_page(oap)->cp_inode;
++		if (inode) {
++			blockbits = inode->i_blkbits;
++			blocksize = 1 << blockbits;
++		}
++	}
+ 	if (inode && IS_ENCRYPTED(inode)) {
+ 		int idx;
+ 
+@@ -2137,18 +2176,33 @@ static int osc_brw_fini_request(struct ptlrpc_request *req, int rc)
+ 					break;
+ 				}
+ 
+-				/* The page is already locked when we arrive
+-				 * here, except when we deal with a twisted
+-				 * page for specific Direct IO support, in
+-				 * which case PageChecked flag is set on page.
+-				 */
+-				if (PageChecked(pg->pg))
+-					lock_page(pg->pg);
+-				rc = llcrypt_decrypt_pagecache_blocks(pg->pg,
+-								      LUSTRE_ENCRYPTION_UNIT_SIZE,
+-								      offs);
+-				if (PageChecked(pg->pg))
+-					unlock_page(pg->pg);
++				if (blockbits) {
++					/* This is direct IO case. Directly call
++					 * decrypt function that takes inode as
++					 * input parameter. Page does not need
++					 * to be locked.
++					 */
++					u64 lblk_num =
++						((u64)(pg->off >> PAGE_SHIFT) <<
++						      (PAGE_SHIFT - blockbits)) +
++						      (offs >> blockbits);
++					unsigned int i;
++
++					for (i = offs;
++					     i < offs + LUSTRE_ENCRYPTION_UNIT_SIZE;
++					     i += blocksize, lblk_num++) {
++						rc = llcrypt_decrypt_block_inplace(inode,
++										   pg->pg,
++										   blocksize, i,
++										   lblk_num);
++						if (rc)
++							break;
++					}
++				} else {
++					rc = llcrypt_decrypt_pagecache_blocks(pg->pg,
++									      LUSTRE_ENCRYPTION_UNIT_SIZE,
++									      offs);
++				}
+ 				if (rc)
+ 					goto out;
+ 
+-- 
+1.8.3.1
+
+
+From jsimmons at infradead.org  Mon Feb  8 16:54:19 2021
+From: jsimmons at infradead.org (James Simmons)
+Date: Mon,  8 Feb 2021 19:54:19 -0500
+Subject: [lustre-devel] [PATCH 1/9] lustre: llite: send file mode with
+ rename RPC
+In-Reply-To: <1612832067-1449-1-git-send-email-jsimmons@infradead.org>
+References: <1612832067-1449-1-git-send-email-jsimmons@infradead.org>
+Message-ID: <1612832067-1449-2-git-send-email-jsimmons@infradead.org>
+
+From: Andreas Dilger <adilger at whamcloud.com>
+
+In preparation for parallel rename operations, send renamed file mode
+to the MDS in order to allow the rename locking to be more efficient.
+
+WC-bug-id: https://jira.whamcloud.com/browse/LU-12125
+Lustre-commit: 47576dc68cd9006 ("LU-12125 llite: send file mode with rename RPC")
+Signed-off-by: Andreas Dilger <adilger at whamcloud.com>
+Reviewed-on: https://review.whamcloud.com/41184
+Reviewed-by: Lai Siyao <lai.siyao at whamcloud.com>
+Reviewed-by: Yingjin Qian <qian at ddn.com>
+Reviewed-by: Oleg Drokin <green at whamcloud.com>
+Signed-off-by: James Simmons <jsimmons at infradead.org>
+---
+ fs/lustre/llite/namei.c | 9 ++++++++-
+ 1 file changed, 8 insertions(+), 1 deletion(-)
+
+diff --git a/fs/lustre/llite/namei.c b/fs/lustre/llite/namei.c
+index b24f097..1095fa9 100644
+--- a/fs/lustre/llite/namei.c
++++ b/fs/lustre/llite/namei.c
+@@ -1745,6 +1745,7 @@ static int ll_rename(struct inode *src, struct dentry *src_dchild,
+ 	struct ll_sb_info *sbi = ll_i2sbi(src);
+ 	struct md_op_data *op_data;
+ 	ktime_t kstart = ktime_get();
++	umode_t mode = 0;
+ 	int err;
+ 
+ 	if (flags)
+@@ -1762,7 +1763,13 @@ static int ll_rename(struct inode *src, struct dentry *src_dchild,
+ 	if (err)
+ 		return err;
+ 
+-	op_data = ll_prep_md_op_data(NULL, src, tgt, NULL, 0, 0,
++	if (src_dchild->d_inode)
++		mode = src_dchild->d_inode->i_mode;
++
++	if (tgt_dchild->d_inode)
++		mode = tgt_dchild->d_inode->i_mode;
++
++	op_data = ll_prep_md_op_data(NULL, src, tgt, NULL, 0, mode,
+ 				     LUSTRE_OPC_ANY, NULL);
+ 	if (IS_ERR(op_data))
+ 		return PTR_ERR(op_data);
+-- 
+1.8.3.1
+
+
+From jsimmons at infradead.org  Mon Feb  8 16:54:26 2021
+From: jsimmons at infradead.org (James Simmons)
+Date: Mon,  8 Feb 2021 19:54:26 -0500
+Subject: [lustre-devel] [PATCH 8/9] lustre: osc: avoid crash if ocd reset
+In-Reply-To: <1612832067-1449-1-git-send-email-jsimmons@infradead.org>
+References: <1612832067-1449-1-git-send-email-jsimmons@infradead.org>
+Message-ID: <1612832067-1449-9-git-send-email-jsimmons@infradead.org>
+
+From: Andreas Dilger <adilger at whamcloud.com>
+
+Avoid divide-by-zero if OSC obd_connect_data is not fully initialized.
+cl_ocd_grant_param is only set after cl_max_extent_pages is OK to use.
+
+WC-bug-id: https://jira.whamcloud.com/browse/LU-14283
+Lustre-commit: 1ec58a2e6ef98ba ("LU-14283 osc: avoid crash if ocd reset")
+Signed-off-by: Andreas Dilger <adilger at whamcloud.com>
+Reviewed-on: https://review.whamcloud.com/41225
+Reviewed-by: John L. Hammond <jhammond at whamcloud.com>
+Reviewed-by: Wang Shilong <wshilong at whamcloud.com>
+Reviewed-by: Oleg Drokin <green at whamcloud.com>
+Signed-off-by: James Simmons <jsimmons at infradead.org>
+---
+ fs/lustre/include/obd.h     |  8 +++++---
+ fs/lustre/osc/osc_request.c | 11 +++++------
+ 2 files changed, 10 insertions(+), 9 deletions(-)
+
+diff --git a/fs/lustre/include/obd.h b/fs/lustre/include/obd.h
+index de62005..9957105 100644
+--- a/fs/lustre/include/obd.h
++++ b/fs/lustre/include/obd.h
+@@ -206,6 +206,11 @@ struct client_obd {
+ 	 */
+ 	u32			 cl_dom_min_inline_repsize;
+ 
++	/* checksumming for data sent over the network */
++	unsigned int		 cl_checksum:1,	/* 0 = disabled, 1 = enabled */
++				 cl_checksum_dump:1, /* same */
++				 cl_ocd_grant_param:1;
++	/* supported checksum types that are worked out at connect time */
+ 	enum lustre_sec_part     cl_sp_me;
+ 	enum lustre_sec_part     cl_sp_to;
+ 	struct sptlrpc_flavor    cl_flvr_mgc;   /* fixed flavor of mgc->mgs */
+@@ -334,9 +339,6 @@ struct client_obd {
+ 	struct list_head	 cl_flight_waiters;
+ 	u32			 cl_rpcs_in_flight;
+ 
+-	/* checksumming for data sent over the network */
+-	unsigned int		cl_checksum:1,	/* 0 = disabled, 1 = enabled */
+-				cl_checksum_dump:1; /* same */
+ 	/* supported checksum types that are worked out at connect time */
+ 	u32			cl_supp_cksum_types;
+ 	/* checksum algorithm to be used */
+diff --git a/fs/lustre/osc/osc_request.c b/fs/lustre/osc/osc_request.c
+index 8d3688f..be722c9 100644
+--- a/fs/lustre/osc/osc_request.c
++++ b/fs/lustre/osc/osc_request.c
+@@ -702,7 +702,7 @@ static void osc_announce_cached(struct client_obd *cli, struct obdo *oa,
+ 
+ 	oa->o_valid |= bits;
+ 	spin_lock(&cli->cl_loi_list_lock);
+-	if (OCD_HAS_FLAG(&cli->cl_import->imp_connect_data, GRANT_PARAM))
++	if (cli->cl_ocd_grant_param)
+ 		oa->o_dirty = cli->cl_dirty_grant;
+ 	else
+ 		oa->o_dirty = cli->cl_dirty_pages << PAGE_SHIFT;
+@@ -735,8 +735,7 @@ static void osc_announce_cached(struct client_obd *cli, struct obdo *oa,
+ 		nrpages *= cli->cl_max_rpcs_in_flight + 1;
+ 		nrpages = max(nrpages, cli->cl_dirty_max_pages);
+ 		undirty = nrpages << PAGE_SHIFT;
+-		if (OCD_HAS_FLAG(&cli->cl_import->imp_connect_data,
+-				 GRANT_PARAM)) {
++		if (cli->cl_ocd_grant_param) {
+ 			int nrextents;
+ 
+ 			/*
+@@ -1070,10 +1069,10 @@ void osc_init_grant(struct client_obd *cli, struct obd_connect_data *ocd)
+ 					     ~chunk_mask) & chunk_mask;
+ 		/* determine maximum extent size, in #pages */
+ 		size = (u64)ocd->ocd_grant_max_blks << ocd->ocd_grant_blkbits;
+-		cli->cl_max_extent_pages = size >> PAGE_SHIFT;
+-		if (!cli->cl_max_extent_pages)
+-			cli->cl_max_extent_pages = 1;
++		cli->cl_max_extent_pages = (size >> PAGE_SHIFT) ? : 1;
++		cli->cl_ocd_grant_param = 1;
+ 	} else {
++		cli->cl_ocd_grant_param = 0;
+ 		cli->cl_grant_extent_tax = 0;
+ 		cli->cl_chunkbits = PAGE_SHIFT;
+ 		cli->cl_max_extent_pages = DT_MAX_BRW_PAGES;
+-- 
+1.8.3.1
+
+
+From jsimmons at infradead.org  Mon Feb  8 16:54:25 2021
+From: jsimmons at infradead.org (James Simmons)
+Date: Mon,  8 Feb 2021 19:54:25 -0500
+Subject: [lustre-devel] [PATCH 7/9] lustre: obdclass: add option %H for jobid
+In-Reply-To: <1612832067-1449-1-git-send-email-jsimmons@infradead.org>
+References: <1612832067-1449-1-git-send-email-jsimmons@infradead.org>
+Message-ID: <1612832067-1449-8-git-send-email-jsimmons@infradead.org>
+
+From: Yang Sheng <ys at whamcloud.com>
+
+Add a option %H to avoid jobid too long in some cases.
+
+WC-bug-id: https://jira.whamcloud.com/browse/LU-14339
+Lustre-commit: cf72ee174bbf7e6 ("LU-14339 obdclass: add option %H for jobid")
+Signed-off-by: Yang Sheng <ys at whamcloud.com>
+Reviewed-on: https://review.whamcloud.com/41262
+Reviewed-by: Andreas Dilger <adilger at whamcloud.com>
+Reviewed-by: Jian Yu <yujian at whamcloud.com>
+Signed-off-by: James Simmons <jsimmons at infradead.org>
+---
+ fs/lustre/obdclass/jobid.c | 13 ++++++++++++-
+ 1 file changed, 12 insertions(+), 1 deletion(-)
+
+diff --git a/fs/lustre/obdclass/jobid.c b/fs/lustre/obdclass/jobid.c
+index 3ee9d40..52ba398 100644
+--- a/fs/lustre/obdclass/jobid.c
++++ b/fs/lustre/obdclass/jobid.c
+@@ -206,6 +206,7 @@ static void jobid_prune_expedite(void)
+  *   %e = executable
+  *   %g = gid
+  *   %h = hostname
++ *   %H = short hostname
+  *   %j = per-session
+  *   %p = pid
+  *   %u = uid
+@@ -222,7 +223,7 @@ static int jobid_interpret_string(const char *jobfmt, char *jobid,
+ 	char c;
+ 
+ 	while ((c = *jobfmt++) && joblen > 1) {
+-		char f;
++		char f, *p;
+ 		int l;
+ 
+ 		if (isspace(c)) /* Don't allow embedded spaces */
+@@ -232,6 +233,7 @@ static int jobid_interpret_string(const char *jobfmt, char *jobid,
+ 			*jobid = c;
+ 			joblen--;
+ 			jobid++;
++			*jobid = '\0';
+ 			continue;
+ 		}
+ 
+@@ -247,6 +249,15 @@ static int jobid_interpret_string(const char *jobfmt, char *jobid,
+ 			l = snprintf(jobid, joblen, "%s",
+ 				     init_utsname()->nodename);
+ 			break;
++		case 'H': /* short hostname. Cut at first dot */
++			l = snprintf(jobid, joblen, "%s",
++				     init_utsname()->nodename);
++			p = strnchr(jobid, joblen, '.');
++			if (p) {
++				*p = '\0';
++				l = p - jobid;
++			}
++			break;
+ 		case 'j': /* jobid requested by process */
+ 			l = snprintf(jobid, joblen, "%s",
+ 				     jobid_current() ?: "jobid");
+-- 
+1.8.3.1
+
+
+From jsimmons at infradead.org  Mon Feb  8 16:54:27 2021
+From: jsimmons at infradead.org (James Simmons)
+Date: Mon,  8 Feb 2021 19:54:27 -0500
+Subject: [lustre-devel] [PATCH 9/9] lustre: lov: return stripe_count=1
+ instead of 0 for DoM files
+In-Reply-To: <1612832067-1449-1-git-send-email-jsimmons@infradead.org>
+References: <1612832067-1449-1-git-send-email-jsimmons@infradead.org>
+Message-ID: <1612832067-1449-10-git-send-email-jsimmons@infradead.org>
+
+From: Emoly Liu <emoly at whamcloud.com>
+
+Return stripe_count=1 instead of 0 for DoM files to avoid
+divide-by-zero for older userspace that calls this ioctl,
+e.g. lustre ADIO driver.
+
+WC-bug-id: https://jira.whamcloud.com/browse/LU-14337
+Lustre-commit: b538826f2bdb39b ("LU-14337 lov: return stripe_count=1 instead of 0 for DoM files")
+Signed-off-by: Emoly Liu <emoly at whamcloud.com>
+Reviewed-on: https://review.whamcloud.com/41265
+Reviewed-by: Andreas Dilger <adilger at whamcloud.com>
+Reviewed-by: Mike Pershin <mpershin at whamcloud.com>
+Reviewed-by: Oleg Drokin <green at whamcloud.com>
+Signed-off-by: James Simmons <jsimmons at infradead.org>
+---
+ fs/lustre/lov/lov_pack.c | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+
+diff --git a/fs/lustre/lov/lov_pack.c b/fs/lustre/lov/lov_pack.c
+index d200a62..ffe9687 100644
+--- a/fs/lustre/lov/lov_pack.c
++++ b/fs/lustre/lov/lov_pack.c
+@@ -456,6 +456,14 @@ int lov_getstripe(const struct lu_env *env, struct lov_object *obj,
+ 		lmm = lmmk;
+ 		lmm_size = lmmk_size;
+ 	}
++
++	/**
++	 * Return stripe_count=1 instead of 0 for DoM files to avoid
++	 * divide-by-zero for older userspace that calls this ioctl,
++	 * e.g. lustre ADIO driver.
++	 */
++	if ((lum.lmm_stripe_count == 0) && (lum.lmm_pattern & LOV_PATTERN_MDT))
++		lum.lmm_stripe_count = 1;
+ 	/**
+ 	 * User specified limited buffer size, usually the buffer is
+ 	 * from ll_lov_setstripe(), and the buffer can only hold basic
+-- 
+1.8.3.1
+
+
+From c.kuntz at opendrives.com  Fri Feb 12 15:07:47 2021
+From: c.kuntz at opendrives.com (Christian Kuntz)
+Date: Fri, 12 Feb 2021 15:07:47 -0800
+Subject: [lustre-devel] Testing 2.14 on Debian + ZFS
+Message-ID: <CANdLGj7=6X1ixcyNOguUAzxTTnegD3h2zfgaEso+Fv5E7YejVA@mail.gmail.com>
+
+Hello,
+
+I hope I'm communicating in the right place here, I'm currently working to
+compile Lustre 2.14.0-RC2 on Debian 10.7 with ZFS 2.0.2 for OSDs. If
+there's anything I can do to help with the testing effort or help Lustre's
+Debian support be more robust, please let me know! I hope I'm not too late
+in the release cycle to contribute.
+
+On the topic of compiling, I'm currently working to get debian packages
+made and running into a compilation issue that didn't seem to present on my
+previous endeavors with 2.13 and 0.7. I've got the kernel and zfs locally
+built and their packages made, and lustre's configure step successfully
+completes, but when it comes to compiling it appears that the osd-zfs
+portion has some broken include links:
+
+In file included from /zfs-linux-2.0.2/include/sys/arc.h:32,
+                 from /lustre-debian/lustre/osd-zfs/osd_internal.h:51,
+                 from /lustre-debian/lustre/osd-zfs/osd_handler.c:52:
+/zfs-linux-2.0.2/include/sys/zfs_context.h:45:10: fatal error: sys/types.h:
+No such file or directory
+ #include <sys/types.h>
+
+For reference, my configure and make looks like:
+./configure --with-linux=/linux-4.19.171-2/  \
+
+ --with-linux-obj=linux-4.19.171-2/debian/build/build_amd64_none_amd64 \
+             --with-zfs=/zfs-linux-2.0.2 \
+              --enable-server --enable-modules --disable-ldiskfs
+make -j"$(nproc)" debs
+
+
+>From the error and some probing, it looks like zfs_context.h expects some
+header files to be in their libc standard `/usr/include/sys` (or somewhere
+abouts), but lustre's make process is pulling them from the linux sources
+in `SRC/include/linux/`. Predictably, I found this out the hard way by
+adding `-I/usr/include` to the Makefile for the zfs osds and getting
+battered with errors and warnings about duplicate definitions.
+
+I'm more than happy to provide more detailed information on my setup, and
+any and all suggestions/guidance is greatly appreciated!
+
+
+
+Best regards,
+Christian
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20210212/f7ea2834/attachment.html>
+
+From sudheendra.sampath at gmail.com  Tue Feb 16 11:37:41 2021
+From: sudheendra.sampath at gmail.com (Sudheendra Sampath)
+Date: Tue, 16 Feb 2021 11:37:41 -0800
+Subject: [lustre-devel] ldiskfs vs zfs
+Message-ID: <CABnqofwyT0toGXgoPrkBFLCJjuQXs=+jqmWjoK6K5NgHtBJbBA@mail.gmail.com>
+
+Hi,
+
+I am trying to evaluate SSD based Lustre setup in our lab.  I am looking
+for some answers for the following questions:
+
+   1. Which of the 2 underlying file systems is popular among the global
+   HPC community and reasons behind it ?
+   2. Since I am using SSD based setup, if any data/links mention the
+   overhead of using one over the other.
+
+Appreciate any online links to understand the validation done.
+
+Thanks for your help.
+-- 
+Regards
+
+Sudheendra Sampath
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20210216/f840b89d/attachment.html>
+
+From sudheendra.sampath at gmail.com  Tue Feb 16 13:35:41 2021
+From: sudheendra.sampath at gmail.com (Sudheendra Sampath)
+Date: Tue, 16 Feb 2021 13:35:41 -0800
+Subject: [lustre-devel] Rationale behind pre-create objects
+Message-ID: <CABnqofwzxyZW5DGGn5sXS-=KG6K40MJVTUBrbA6CVOR=K1eT=Q@mail.gmail.com>
+
+Hi,
+
+I am curious to find the reason behind 'pre-create object' for a new
+file/directory creation.
+
+My wild guess is that when you are using 'spinning disks' as the backend
+storage, pre-creating objects before the actual data comes will minimize
+latency overhead of disk seek.
+
+If my wild guess is correct, my follow-up question is:
+
+If I am using SSD based devices as backend storage, do we need this
+pre-create anymore given that SSD are super-fast compared to spinning media
+?
+
+Appreciate if anyone can provide some insight into this.
+
+Thanks,
+
+-- 
+Regards
+
+Sudheendra Sampath
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20210216/7406f233/attachment.html>
+
+From adilger at whamcloud.com  Wed Feb 17 01:00:29 2021
+From: adilger at whamcloud.com (Andreas Dilger)
+Date: Wed, 17 Feb 2021 09:00:29 +0000
+Subject: [lustre-devel] Rationale behind pre-create objects
+In-Reply-To: <CABnqofwzxyZW5DGGn5sXS-=KG6K40MJVTUBrbA6CVOR=K1eT=Q@mail.gmail.com>
+References: <CABnqofwzxyZW5DGGn5sXS-=KG6K40MJVTUBrbA6CVOR=K1eT=Q@mail.gmail.com>
+Message-ID: <014C0DC0-67B8-4B5C-8D86-79F021FF88D2@whamcloud.com>
+
+Yes, precreating OST objects avoids latency, but it is as much for network latency as it is for disk latency.  For ldiskfs the inode allocation is in memory and journaled, so does not depend on seek latency at all. 
+
+Another reason to precreate objects is to ensure that the OST does not run out of inodes for files that the MDS already created.  For ldiskfs this is an issue because the number of OST inodes is fixed at format time. For ZFS it is an issue because regular file IO can consume all the space and prevent inode allocation. 
+
+Finally, object precreation simplifies recovery because we have a good idea whether/which objects should exist or not after a server restart. 
+
+Cheers, Andreas
+
+> On Feb 16, 2021, at 14:36, Sudheendra Sampath <sudheendra.sampath at gmail.com> wrote:
+> 
+> ?
+> Hi,
+> 
+> I am curious to find the reason behind 'pre-create object' for a new file/directory creation.
+> 
+> My wild guess is that when you are using 'spinning disks' as the backend storage, pre-creating objects before the actual data comes will minimize latency overhead of disk seek.  
+> 
+> If my wild guess is correct, my follow-up question is:  
+> 
+> If I am using SSD based devices as backend storage, do we need this pre-create anymore given that SSD are super-fast compared to spinning media ?
+> 
+> Appreciate if anyone can provide some insight into this.
+> 
+> Thanks,
+> 
+> -- 
+> Regards
+> 
+> Sudheendra Sampath
+> _______________________________________________
+> lustre-devel mailing list
+> lustre-devel at lists.lustre.org
+> http://lists.lustre.org/listinfo.cgi/lustre-devel-lustre.org
+
+From adilger at whamcloud.com  Thu Feb 18 03:09:37 2021
+From: adilger at whamcloud.com (Andreas Dilger)
+Date: Thu, 18 Feb 2021 11:09:37 +0000
+Subject: [lustre-devel] Testing 2.14 on Debian + ZFS
+In-Reply-To: <CANdLGj7=6X1ixcyNOguUAzxTTnegD3h2zfgaEso+Fv5E7YejVA@mail.gmail.com>
+References: <CANdLGj7=6X1ixcyNOguUAzxTTnegD3h2zfgaEso+Fv5E7YejVA@mail.gmail.com>
+Message-ID: <477F0D07-A7E1-488A-8E06-FE6C2E748FE1@whamcloud.com>
+
+On Feb 12, 2021, at 16:07, Christian Kuntz <c.kuntz at opendrives.com<mailto:c.kuntz at opendrives.com>> wrote:
+
+Hello,
+
+I hope I'm communicating in the right place here, I'm currently working to compile Lustre 2.14.0-RC2 on Debian 10.7 with ZFS 2.0.2 for OSDs. If there's anything I can do to help with the testing effort or help Lustre's Debian support be more robust, please let me know! I hope I'm not too late in the release cycle to contribute.
+
+Thanks for the offer of testing.  Unfortunately we are very late in the 2.14.0 release cycle (we are hoping to make the final release in the next week or so, barring any critical defects).  However, even if any changes miss the final 2.14.0 release, having patches available to fix any issues you run into will make it easier for the next person to build on Debian.
+
+Ideally, any required fixes for Debian building should go into the Lustre tree directly rather than into a separate "downstream" package, so that "make debs" works out-of-the-box.  We do build Ubuntu 18.04 and 20.04 clients regularly, and ZFS 2.0 servers on RHEL7/8, but I don't know if anyone is building the server code on Debian/Ubuntu on a regular basis.
+
+On the topic of compiling, I'm currently working to get debian packages made and running into a compilation issue that didn't seem to present on my previous endeavors with 2.13 and 0.7. I've got the kernel and zfs locally built and their packages made, and lustre's configure step successfully completes, but when it comes to compiling it appears that the osd-zfs portion has some broken include links:
+
+In file included from /zfs-linux-2.0.2/include/sys/arc.h:32,
+                 from /lustre-debian/lustre/osd-zfs/osd_internal.h:51,
+                 from /lustre-debian/lustre/osd-zfs/osd_handler.c:52:
+/zfs-linux-2.0.2/include/sys/zfs_context.h:45:10: fatal error: sys/types.h: No such file or directory
+ #include <sys/types.h>
+
+For reference, my configure and make looks like:
+./configure --with-linux=/linux-4.19.171-2/  \
+             --with-linux-obj=linux-4.19.171-2/debian/build/build_amd64_none_amd64 \
+             --with-zfs=/zfs-linux-2.0.2 \
+              --enable-server --enable-modules --disable-ldiskfs
+make -j"$(nproc)" debs
+
+
+>From the error and some probing, it looks like zfs_context.h expects some header files to be in their libc standard `/usr/include/sys` (or somewhere abouts), but lustre's make process is pulling them from the linux sources in `SRC/include/linux/`. Predictably, I found this out the hard way by adding `-I/usr/include` to the Makefile for the zfs osds and getting battered with errors and warnings about duplicate definitions.
+
+It may be that you are looking at this from the wrong angle.  Rather than trying to include more userspace headers, it might be worthwhile to see why <sys/arc.h> is being included by osd_internal.h and maybe there is a more appropriate header that could be used in the kernel?  Failing that, it isn't clear wh zfs_context.h is including the <sys/type.h> header from userspace when building with __KERNEL__ set?  Kernel code should be using <linux/types.h>.
+
+Cheers, Andreas
+--
+Andreas Dilger
+Principal Lustre Architect
+Whamcloud
+
+
+
+
+
+
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20210218/00659609/attachment.html>
+
+From c.kuntz at opendrives.com  Fri Feb 19 01:11:06 2021
+From: c.kuntz at opendrives.com (Christian Kuntz)
+Date: Fri, 19 Feb 2021 01:11:06 -0800
+Subject: [lustre-devel] Testing 2.14 on Debian + ZFS
+In-Reply-To: <477F0D07-A7E1-488A-8E06-FE6C2E748FE1@whamcloud.com>
+References: <CANdLGj7=6X1ixcyNOguUAzxTTnegD3h2zfgaEso+Fv5E7YejVA@mail.gmail.com>
+ <477F0D07-A7E1-488A-8E06-FE6C2E748FE1@whamcloud.com>
+Message-ID: <CANdLGj7o4yJf3byyM4LaAm+ZfNkAswTjU+HSUeK2yK+Yw4cvVg@mail.gmail.com>
+
+Thanks for your time and the thoughtful response.
+
+Looking at this a bit more, it seems to be caused by the recent ZFS 2.0
+changes for linux and freebsd support, namely the `include/os/linux` paths
+that provide `<sys/types.h>` that ZFS is trying to use. Adding them into
+the includes for the osd-zfs directory has fixed the references being
+broken, and now I'm contending some redefinitions and argument type
+mismatches. I'll try and sort this out, in the meantime is there a better
+place for me to place messages about this? I know this mailing list isn't
+used very frequently and I'd hate to flood it with such off-the-beaten-path
+stuff.
+
+Best,
+Christian
+
+On Thu, Feb 18, 2021 at 3:09 AM Andreas Dilger <adilger at whamcloud.com>
+wrote:
+
+> On Feb 12, 2021, at 16:07, Christian Kuntz <c.kuntz at opendrives.com> wrote:
+>
+>
+> Hello,
+>
+> I hope I'm communicating in the right place here, I'm currently working to
+> compile Lustre 2.14.0-RC2 on Debian 10.7 with ZFS 2.0.2 for OSDs. If
+> there's anything I can do to help with the testing effort or help Lustre's
+> Debian support be more robust, please let me know! I hope I'm not too late
+> in the release cycle to contribute.
+>
+>
+> Thanks for the offer of testing.  Unfortunately we are very late in the
+> 2.14.0 release cycle (we are hoping to make the final release in the next
+> week or so, barring any critical defects).  However, even if any changes
+> miss the final 2.14.0 release, having patches available to fix any issues
+> you run into will make it easier for the next person to build on Debian.
+>
+> Ideally, any required fixes for Debian building should go into the Lustre
+> tree directly rather than into a separate "downstream" package, so that
+> "make debs" works out-of-the-box.  We do build Ubuntu 18.04 and 20.04
+> clients regularly, and ZFS 2.0 servers on RHEL7/8, but I don't know if
+> anyone is building the server code on Debian/Ubuntu on a regular basis.
+>
+> On the topic of compiling, I'm currently working to get debian packages
+> made and running into a compilation issue that didn't seem to present on my
+> previous endeavors with 2.13 and 0.7. I've got the kernel and zfs locally
+> built and their packages made, and lustre's configure step successfully
+> completes, but when it comes to compiling it appears that the osd-zfs
+> portion has some broken include links:
+>
+> In file included from /zfs-linux-2.0.2/include/sys/arc.h:32,
+>                  from /lustre-debian/lustre/osd-zfs/osd_internal.h:51,
+>                  from /lustre-debian/lustre/osd-zfs/osd_handler.c:52:
+> /zfs-linux-2.0.2/include/sys/zfs_context.h:45:10: fatal error:
+> sys/types.h: No such file or directory
+>  #include <sys/types.h>
+>
+> For reference, my configure and make looks like:
+> ./configure --with-linux=/linux-4.19.171-2/  \
+>
+>  --with-linux-obj=linux-4.19.171-2/debian/build/build_amd64_none_amd64 \
+>              --with-zfs=/zfs-linux-2.0.2 \
+>               --enable-server --enable-modules --disable-ldiskfs
+> make -j"$(nproc)" debs
+>
+>
+> From the error and some probing, it looks like zfs_context.h expects some
+> header files to be in their libc standard `/usr/include/sys` (or somewhere
+> abouts), but lustre's make process is pulling them from the linux sources
+> in `SRC/include/linux/`. Predictably, I found this out the hard way by
+> adding `-I/usr/include` to the Makefile for the zfs osds and getting
+> battered with errors and warnings about duplicate definitions.
+>
+>
+> It may be that you are looking at this from the wrong angle.  Rather than
+> trying to include more userspace headers, it might be worthwhile to see why
+> <sys/arc.h> is being included by osd_internal.h and maybe there is a more
+> appropriate header that could be used in the kernel?  Failing that, it
+> isn't clear wh zfs_context.h is including the <sys/type.h> header from
+> userspace when building with __KERNEL__ set?  Kernel code should be using
+> <linux/types.h>.
+>
+> Cheers, Andreas
+> --
+> Andreas Dilger
+> Principal Lustre Architect
+> Whamcloud
+>
+>
+>
+>
+>
+>
+>
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20210219/60afff37/attachment.html>
+
+From cory.spitz at hpe.com  Fri Feb 19 06:17:29 2021
+From: cory.spitz at hpe.com (Spitz, Cory James)
+Date: Fri, 19 Feb 2021 14:17:29 +0000
+Subject: [lustre-devel] Testing 2.14 on Debian + ZFS
+In-Reply-To: <CANdLGj7o4yJf3byyM4LaAm+ZfNkAswTjU+HSUeK2yK+Yw4cvVg@mail.gmail.com>
+References: <CANdLGj7=6X1ixcyNOguUAzxTTnegD3h2zfgaEso+Fv5E7YejVA@mail.gmail.com>
+ <477F0D07-A7E1-488A-8E06-FE6C2E748FE1@whamcloud.com>,
+ <CANdLGj7o4yJf3byyM4LaAm+ZfNkAswTjU+HSUeK2yK+Yw4cvVg@mail.gmail.com>
+Message-ID: <AT5PR8401MB10590B46FE66B8103C91D04F85849@AT5PR8401MB1059.NAMPRD84.PROD.OUTLOOK.COM>
+
+Hello!
+
+>  I know this mailing list isn't used very frequently and I'd hate to flood it with such off-the-beaten-path stuff.
+
+No worries, Christian.  Any related devel topics are welcome here.  You are in the right place!
+
+-Cory
+
+On 2/19/21, 4:11 AM, "lustre-devel" <lustre-devel-bounces at lists.lustre.org> wrote:
+
+Thanks for your time and the thoughtful response.
+
+Looking at this a bit more, it seems to be caused by the recent ZFS 2.0 changes for linux and freebsd support, namely the `include/os/linux` paths that provide `<sys/types.h>` that ZFS is trying to use. Adding them into the includes for the osd-zfs directory has fixed the references being broken, and now I'm contending some redefinitions and argument type mismatches. I'll try and sort this out, in the meantime is there a better place for me to place messages about this? I know this mailing list isn't used very frequently and I'd hate to flood it with such off-the-beaten-path stuff.
+
+Best,
+Christian
+
+On Thu, Feb 18, 2021 at 3:09 AM Andreas Dilger <adilger at whamcloud.com<mailto:adilger at whamcloud.com>> wrote:
+On Feb 12, 2021, at 16:07, Christian Kuntz <c.kuntz at opendrives.com<mailto:c.kuntz at opendrives.com>> wrote:
+
+Hello,
+
+I hope I'm communicating in the right place here, I'm currently working to compile Lustre 2.14.0-RC2 on Debian 10.7 with ZFS 2.0.2 for OSDs. If there's anything I can do to help with the testing effort or help Lustre's Debian support be more robust, please let me know! I hope I'm not too late in the release cycle to contribute.
+
+Thanks for the offer of testing.  Unfortunately we are very late in the 2.14.0 release cycle (we are hoping to make the final release in the next week or so, barring any critical defects).  However, even if any changes miss the final 2.14.0 release, having patches available to fix any issues you run into will make it easier for the next person to build on Debian.
+
+Ideally, any required fixes for Debian building should go into the Lustre tree directly rather than into a separate "downstream" package, so that "make debs" works out-of-the-box.  We do build Ubuntu 18.04 and 20.04 clients regularly, and ZFS 2.0 servers on RHEL7/8, but I don't know if anyone is building the server code on Debian/Ubuntu on a regular basis.
+
+
+On the topic of compiling, I'm currently working to get debian packages made and running into a compilation issue that didn't seem to present on my previous endeavors with 2.13 and 0.7. I've got the kernel and zfs locally built and their packages made, and lustre's configure step successfully completes, but when it comes to compiling it appears that the osd-zfs portion has some broken include links:
+
+In file included from /zfs-linux-2.0.2/include/sys/arc.h:32,
+                 from /lustre-debian/lustre/osd-zfs/osd_internal.h:51,
+                 from /lustre-debian/lustre/osd-zfs/osd_handler.c:52:
+/zfs-linux-2.0.2/include/sys/zfs_context.h:45:10: fatal error: sys/types.h: No such file or directory
+ #include <sys/types.h>
+
+For reference, my configure and make looks like:
+./configure --with-linux=/linux-4.19.171-2/  \
+             --with-linux-obj=linux-4.19.171-2/debian/build/build_amd64_none_amd64 \
+             --with-zfs=/zfs-linux-2.0.2 \
+              --enable-server --enable-modules --disable-ldiskfs
+make -j"$(nproc)" debs
+
+
+>From the error and some probing, it looks like zfs_context.h expects some header files to be in their libc standard `/usr/include/sys` (or somewhere abouts), but lustre's make process is pulling them from the linux sources in `SRC/include/linux/`. Predictably, I found this out the hard way by adding `-I/usr/include` to the Makefile for the zfs osds and getting battered with errors and warnings about duplicate definitions.
+
+It may be that you are looking at this from the wrong angle.  Rather than trying to include more userspace headers, it might be worthwhile to see why <sys/arc.h> is being included by osd_internal.h and maybe there is a more appropriate header that could be used in the kernel?  Failing that, it isn't clear wh zfs_context.h is including the <sys/type.h> header from userspace when building with __KERNEL__ set?  Kernel code should be using <linux/types.h>.
+
+Cheers, Andreas
+--
+Andreas Dilger
+Principal Lustre Architect
+Whamcloud
+
+
+
+
+
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20210219/96da1d04/attachment-0001.html>
+
+From adilger at whamcloud.com  Fri Feb 19 12:12:58 2021
+From: adilger at whamcloud.com (Andreas Dilger)
+Date: Fri, 19 Feb 2021 20:12:58 +0000
+Subject: [lustre-devel] Testing 2.14 on Debian + ZFS
+In-Reply-To: <CANdLGj7o4yJf3byyM4LaAm+ZfNkAswTjU+HSUeK2yK+Yw4cvVg@mail.gmail.com>
+References: <CANdLGj7=6X1ixcyNOguUAzxTTnegD3h2zfgaEso+Fv5E7YejVA@mail.gmail.com>
+ <477F0D07-A7E1-488A-8E06-FE6C2E748FE1@whamcloud.com>,
+ <CANdLGj7o4yJf3byyM4LaAm+ZfNkAswTjU+HSUeK2yK+Yw4cvVg@mail.gmail.com>
+Message-ID: <E4233477-F17B-4DD4-BC89-4DEAAD4590E5@whamcloud.com>
+
+This is exactly the right place for such discussions.
+
+Once you have patches, please submit to Gerrit for review, testing, and landing:
+
+https://wiki.lustre.org/Using_Gerrit
+
+Cheers, Andreas
+
+On Feb 19, 2021, at 02:11, Christian Kuntz <c.kuntz at opendrives.com> wrote:
+
+?
+Thanks for your time and the thoughtful response.
+
+Looking at this a bit more, it seems to be caused by the recent ZFS 2.0 changes for linux and freebsd support, namely the `include/os/linux` paths that provide `<sys/types.h>` that ZFS is trying to use. Adding them into the includes for the osd-zfs directory has fixed the references being broken, and now I'm contending some redefinitions and argument type mismatches. I'll try and sort this out, in the meantime is there a better place for me to place messages about this? I know this mailing list isn't used very frequently and I'd hate to flood it with such off-the-beaten-path stuff.
+
+Best,
+Christian
+
+On Thu, Feb 18, 2021 at 3:09 AM Andreas Dilger <adilger at whamcloud.com<mailto:adilger at whamcloud.com>> wrote:
+On Feb 12, 2021, at 16:07, Christian Kuntz <c.kuntz at opendrives.com<mailto:c.kuntz at opendrives.com>> wrote:
+
+Hello,
+
+I hope I'm communicating in the right place here, I'm currently working to compile Lustre 2.14.0-RC2 on Debian 10.7 with ZFS 2.0.2 for OSDs. If there's anything I can do to help with the testing effort or help Lustre's Debian support be more robust, please let me know! I hope I'm not too late in the release cycle to contribute.
+
+Thanks for the offer of testing.  Unfortunately we are very late in the 2.14.0 release cycle (we are hoping to make the final release in the next week or so, barring any critical defects).  However, even if any changes miss the final 2.14.0 release, having patches available to fix any issues you run into will make it easier for the next person to build on Debian.
+
+Ideally, any required fixes for Debian building should go into the Lustre tree directly rather than into a separate "downstream" package, so that "make debs" works out-of-the-box.  We do build Ubuntu 18.04 and 20.04 clients regularly, and ZFS 2.0 servers on RHEL7/8, but I don't know if anyone is building the server code on Debian/Ubuntu on a regular basis.
+
+On the topic of compiling, I'm currently working to get debian packages made and running into a compilation issue that didn't seem to present on my previous endeavors with 2.13 and 0.7. I've got the kernel and zfs locally built and their packages made, and lustre's configure step successfully completes, but when it comes to compiling it appears that the osd-zfs portion has some broken include links:
+
+In file included from /zfs-linux-2.0.2/include/sys/arc.h:32,
+                 from /lustre-debian/lustre/osd-zfs/osd_internal.h:51,
+                 from /lustre-debian/lustre/osd-zfs/osd_handler.c:52:
+/zfs-linux-2.0.2/include/sys/zfs_context.h:45:10: fatal error: sys/types.h: No such file or directory
+ #include <sys/types.h>
+
+For reference, my configure and make looks like:
+./configure --with-linux=/linux-4.19.171-2/  \
+             --with-linux-obj=linux-4.19.171-2/debian/build/build_amd64_none_amd64 \
+             --with-zfs=/zfs-linux-2.0.2 \
+              --enable-server --enable-modules --disable-ldiskfs
+make -j"$(nproc)" debs
+
+
+From the error and some probing, it looks like zfs_context.h expects some header files to be in their libc standard `/usr/include/sys` (or somewhere abouts), but lustre's make process is pulling them from the linux sources in `SRC/include/linux/`. Predictably, I found this out the hard way by adding `-I/usr/include` to the Makefile for the zfs osds and getting battered with errors and warnings about duplicate definitions.
+
+It may be that you are looking at this from the wrong angle.  Rather than trying to include more userspace headers, it might be worthwhile to see why <sys/arc.h> is being included by osd_internal.h and maybe there is a more appropriate header that could be used in the kernel?  Failing that, it isn't clear wh zfs_context.h is including the <sys/type.h> header from userspace when building with __KERNEL__ set?  Kernel code should be using <linux/types.h>.
+
+Cheers, Andreas
+--
+Andreas Dilger
+Principal Lustre Architect
+Whamcloud
+
+
+
+
+
+
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20210219/ed0633e9/attachment.html>
+
+From pjones at whamcloud.com  Fri Feb 19 16:26:55 2021
+From: pjones at whamcloud.com (Peter Jones)
+Date: Sat, 20 Feb 2021 00:26:55 +0000
+Subject: [lustre-devel] Lustre 2.14.0 released
+Message-ID: <3F52E2D3-F101-4519-A5E1-9BABDF659B7E@ddn.com>
+
+We are pleased to announce that the Lustre 2.14.0 Release has been declared GA and is available for download<https://downloads.whamcloud.com/public/lustre/lustre-2.14.0/> <https://downloads.hpdd.intel.com/public/lustre/lustre-2.11.0/> . You can also grab the source from git<https://git.whamcloud.com/?p=fs/lustre-release.git;a=commit;h=e1635c6afbccf97c73cc9079a4e47079b5a2341f>
+
+This major release includes new features:
+
+Client Data Encryption A mechanism leveraging fscrypt has been introduced to allow file data to be encrypted on the client before network transfer and persistent OST and MDT storage (LU-12275<https://jira.whamcloud.com/browse/LU-12275>)
+
+OST Pool Quota The quotas framework has been extended to allow the enforcement of quotas to be on the basis of OST pools (LU-11023<https://jira.whamcloud.com/browse/LU-11023>)
+
+DNE Auto Restriping Striped directories can now adjust how many MDTs they are striped over based on size thresholds defined by the administrator, similar to Progressive File Layouts for directories (LU-11025<https://jira.whamcloud.com/browse/LU-11025>)
+
+Fuller details can be found in the 2.14 wiki page <http://wiki.lustre.org/Release_2.14.0> (including the change log <http://wiki.lustre.org/Lustre_2.14.0_Changelog> and test matrix<http://wiki.lustre.org/Release_2.14.0#Test_Matrix>)
+
+Please log any issues found in the issue tracking system<https://jira.whamcloud.com/>
+
+Thanks to all those who have contributed to the creation of this release.
+
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20210220/6c04eb9a/attachment.html>
+
+From c.kuntz at opendrives.com  Fri Feb 19 19:00:53 2021
+From: c.kuntz at opendrives.com (Christian Kuntz)
+Date: Fri, 19 Feb 2021 19:00:53 -0800
+Subject: [lustre-devel] Testing 2.14 on Debian + ZFS
+In-Reply-To: <E4233477-F17B-4DD4-BC89-4DEAAD4590E5@whamcloud.com>
+References: <CANdLGj7=6X1ixcyNOguUAzxTTnegD3h2zfgaEso+Fv5E7YejVA@mail.gmail.com>
+ <477F0D07-A7E1-488A-8E06-FE6C2E748FE1@whamcloud.com>
+ <CANdLGj7o4yJf3byyM4LaAm+ZfNkAswTjU+HSUeK2yK+Yw4cvVg@mail.gmail.com>
+ <E4233477-F17B-4DD4-BC89-4DEAAD4590E5@whamcloud.com>
+Message-ID: <CANdLGj4nJPfc6WA1ZrOeGhfjX+60QX_v_2xC7XDbHuSMXN3KCA@mail.gmail.com>
+
+Thanks for the confirmation!
+
+After going in a few circles, I think I've got it figured out and would
+appreciate some pointers on how to proceed:
+
+To preface, the way I'm building is from source-dirs after a package build
+(which is admittedly kind of janky as I write it out now). It would appear
+that the configure scripting will look in "zfs/include", and thus miss the
+new "zfs/include/os/..." directories that hold some important header files,
+causing configuration variables to miss-set in config.h thus creating the
+compile-time problems of type mismatches and redefinitions I was seeing.
+
+ I was able to confirm manually setting some of the configuration defs and
+adding the new header dirs to the makefile fixed the problem, but I'm a
+little confused as to how to proceed in patching. Since the configuration
+scripting and the makefiles seem to expect only a single include-dir of
+header files for both zfs and spl respectively, I'm wondering what the best
+approach to patching this behavior would be.
+
+Thanks for your time and consideration,
+Christian
+
+On Fri, Feb 19, 2021 at 12:13 PM Andreas Dilger <adilger at whamcloud.com>
+wrote:
+
+> This is exactly the right place for such discussions.
+>
+> Once you have patches, please submit to Gerrit for review, testing, and
+> landing:
+>
+> https://wiki.lustre.org/Using_Gerrit
+>
+> Cheers, Andreas
+>
+> On Feb 19, 2021, at 02:11, Christian Kuntz <c.kuntz at opendrives.com> wrote:
+>
+> ?
+> Thanks for your time and the thoughtful response.
+>
+> Looking at this a bit more, it seems to be caused by the recent ZFS 2.0
+> changes for linux and freebsd support, namely the `include/os/linux` paths
+> that provide `<sys/types.h>` that ZFS is trying to use. Adding them into
+> the includes for the osd-zfs directory has fixed the references being
+> broken, and now I'm contending some redefinitions and argument type
+> mismatches. I'll try and sort this out, in the meantime is there a better
+> place for me to place messages about this? I know this mailing list isn't
+> used very frequently and I'd hate to flood it with such off-the-beaten-path
+> stuff.
+>
+> Best,
+> Christian
+>
+> On Thu, Feb 18, 2021 at 3:09 AM Andreas Dilger <adilger at whamcloud.com>
+> wrote:
+>
+>> On Feb 12, 2021, at 16:07, Christian Kuntz <c.kuntz at opendrives.com>
+>> wrote:
+>>
+>>
+>> Hello,
+>>
+>> I hope I'm communicating in the right place here, I'm currently working
+>> to compile Lustre 2.14.0-RC2 on Debian 10.7 with ZFS 2.0.2 for OSDs. If
+>> there's anything I can do to help with the testing effort or help Lustre's
+>> Debian support be more robust, please let me know! I hope I'm not too late
+>> in the release cycle to contribute.
+>>
+>>
+>> Thanks for the offer of testing.  Unfortunately we are very late in the
+>> 2.14.0 release cycle (we are hoping to make the final release in the next
+>> week or so, barring any critical defects).  However, even if any changes
+>> miss the final 2.14.0 release, having patches available to fix any issues
+>> you run into will make it easier for the next person to build on Debian.
+>>
+>> Ideally, any required fixes for Debian building should go into the Lustre
+>> tree directly rather than into a separate "downstream" package, so that
+>> "make debs" works out-of-the-box.  We do build Ubuntu 18.04 and 20.04
+>> clients regularly, and ZFS 2.0 servers on RHEL7/8, but I don't know if
+>> anyone is building the server code on Debian/Ubuntu on a regular basis.
+>>
+>> On the topic of compiling, I'm currently working to get debian packages
+>> made and running into a compilation issue that didn't seem to present on my
+>> previous endeavors with 2.13 and 0.7. I've got the kernel and zfs locally
+>> built and their packages made, and lustre's configure step successfully
+>> completes, but when it comes to compiling it appears that the osd-zfs
+>> portion has some broken include links:
+>>
+>> In file included from /zfs-linux-2.0.2/include/sys/arc.h:32,
+>>                  from /lustre-debian/lustre/osd-zfs/osd_internal.h:51,
+>>                  from /lustre-debian/lustre/osd-zfs/osd_handler.c:52:
+>> /zfs-linux-2.0.2/include/sys/zfs_context.h:45:10: fatal error:
+>> sys/types.h: No such file or directory
+>>  #include <sys/types.h>
+>>
+>> For reference, my configure and make looks like:
+>> ./configure --with-linux=/linux-4.19.171-2/  \
+>>
+>>  --with-linux-obj=linux-4.19.171-2/debian/build/build_amd64_none_amd64 \
+>>              --with-zfs=/zfs-linux-2.0.2 \
+>>               --enable-server --enable-modules --disable-ldiskfs
+>> make -j"$(nproc)" debs
+>>
+>>
+>> From the error and some probing, it looks like zfs_context.h expects some
+>> header files to be in their libc standard `/usr/include/sys` (or somewhere
+>> abouts), but lustre's make process is pulling them from the linux sources
+>> in `SRC/include/linux/`. Predictably, I found this out the hard way by
+>> adding `-I/usr/include` to the Makefile for the zfs osds and getting
+>> battered with errors and warnings about duplicate definitions.
+>>
+>>
+>> It may be that you are looking at this from the wrong angle.  Rather than
+>> trying to include more userspace headers, it might be worthwhile to see why
+>> <sys/arc.h> is being included by osd_internal.h and maybe there is a more
+>> appropriate header that could be used in the kernel?  Failing that, it
+>> isn't clear wh zfs_context.h is including the <sys/type.h> header from
+>> userspace when building with __KERNEL__ set?  Kernel code should be using
+>> <linux/types.h>.
+>>
+>> Cheers, Andreas
+>> --
+>> Andreas Dilger
+>> Principal Lustre Architect
+>> Whamcloud
+>>
+>>
+>>
+>>
+>>
+>>
+>>
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20210219/6c94503e/attachment-0001.html>
+
+From sudheendra.sampath at gmail.com  Sat Feb 20 20:36:54 2021
+From: sudheendra.sampath at gmail.com (Sudheendra Sampath)
+Date: Sat, 20 Feb 2021 20:36:54 -0800
+Subject: [lustre-devel] Determine MDT object min, max and average size
+Message-ID: <CABnqofzJUKPhjr2i=C-y64oLU-6_Eh86sQ0nnfjJZh42S8MB2A@mail.gmail.com>
+
+Hi,
+
+I am trying to gather the MDT object size.  Can someone please point me to
+the code where the object size is calculated?
+
+Thanks,
+
+--
+Regards
+
+Sudheendra Sampath
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20210220/c93d563a/attachment.html>
+
+From sudheendra.sampath at gmail.com  Sun Feb 21 00:32:36 2021
+From: sudheendra.sampath at gmail.com (Sudheendra Sampath)
+Date: Sun, 21 Feb 2021 00:32:36 -0800
+Subject: [lustre-devel] Which of the following size fields correspond to
+ metadata object size for a file/directory ?
+Message-ID: <CABnqofyUntOrjc5GWoSdCnja3PQBXwGSO1TgX+tQCjZepSOb1Q@mail.gmail.com>
+
+Hello,
+
+[Sun Feb 21 00:05:27 2021] mdt_pack_attr2body: size 11776 bytes, eadatasize
+0, acl_size 0, max_mdsize 0
+[Sun Feb 21 00:05:42 2021] mdt_pack_attr2body: size 12800 bytes, eadatasize
+0, acl_size 0, max_mdsize 0
+[Sun Feb 21 00:20:26 2021] mdt_pack_attr2body: size 512 bytes, eadatasize
+0, acl_size 0, max_mdsize 0
+[Sun Feb 21 00:20:38 2021] mdt_pack_attr2body: size 11776 bytes, eadatasize
+0, acl_size 0, max_mdsize 0
+[Sun Feb 21 00:20:38 2021] mdt_getattr_internal: mbo_max_mdsize 128
+[Sun Feb 21 00:20:38 2021] mdt_getxattr_all: mbo_aclsize 77, mbo_max_mdsize
+3
+[Sun Feb 21 00:20:38 2021] mdt_getxattr: easize 2500
+[Sun Feb 21 00:20:38 2021] mdt_pack_attr2body: size 11776 bytes, eadatasize
+0, acl_size 0, max_mdsize 0
+[Sun Feb 21 00:21:22 2021] mdt_pack_attr2body: size 0 bytes, eadatasize 0,
+acl_size 0, max_mdsize 0
+[Sun Feb 21 00:21:38 2021] mdt_pack_attr2body: size 0 bytes, eadatasize 0,
+acl_size 0, max_mdsize 0
+[Sun Feb 21 00:21:38 2021] mdt_getattr_internal: mbo_max_mdsize 128
+[Sun Feb 21 00:21:38 2021] mdt_getxattr_all: mbo_aclsize 162,
+mbo_max_mdsize 5
+[Sun Feb 21 00:21:38 2021] mdt_getxattr: easize 2500
+
+
+I am printing different fields as below:
+
+   1. printk("%s: size %llu bytes, eadatasize %u, acl_size %u, max_mdsize
+   %u\n", __func__, b->mbo_size, b->mbo_eadatasize, b->mbo_aclsize,
+   b->mbo_max_mdsize);    ==>  mdt_pack_attr2body()
+   2. printk("%s: mbo_max_mdsize %u\n", __func__,
+   repbody->mbo_max_mdsize);
+
+                  ==> mdt_getattr_internal()
+   3. printk("%s: mbo_aclsize %u, mbo_max_mdsize %u\n", __func__, eavallen,
+   eavallens);
+
+   ==> mdt_getxattr_all()
+   4. printk("%s: easize %d\n", __func__, easize);
+
+
+                     ==> mdt_getxattr()
+
+
+Any help appreciated.
+
+-- 
+Regards
+
+Sudheendra Sampath
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20210221/4a0a4261/attachment.html>
+
+From faaland1 at llnl.gov  Mon Feb 22 11:58:32 2021
+From: faaland1 at llnl.gov (Faaland, Olaf P.)
+Date: Mon, 22 Feb 2021 19:58:32 +0000
+Subject: [lustre-devel] Testing 2.14 on Debian + ZFS
+In-Reply-To: <CANdLGj4nJPfc6WA1ZrOeGhfjX+60QX_v_2xC7XDbHuSMXN3KCA@mail.gmail.com>
+References: <CANdLGj7=6X1ixcyNOguUAzxTTnegD3h2zfgaEso+Fv5E7YejVA@mail.gmail.com>
+ <477F0D07-A7E1-488A-8E06-FE6C2E748FE1@whamcloud.com>
+ <CANdLGj7o4yJf3byyM4LaAm+ZfNkAswTjU+HSUeK2yK+Yw4cvVg@mail.gmail.com>
+ <E4233477-F17B-4DD4-BC89-4DEAAD4590E5@whamcloud.com>,
+ <CANdLGj4nJPfc6WA1ZrOeGhfjX+60QX_v_2xC7XDbHuSMXN3KCA@mail.gmail.com>
+Message-ID: <BY5PR09MB5427C96986B487A6E8BCDF86F8819@BY5PR09MB5427.namprd09.prod.outlook.com>
+
+Hi Christian,
+
+Can you explain in more detail what you mean by "building ... from source-dirs after a package build"?  And can you identify the lines in config/lustre-build-zfs.m4 that you're referring to?
+
+thank you,
+-Olaf
+
+________________________________________
+From: Christian Kuntz <c.kuntz at opendrives.com>
+Sent: Friday, February 19, 2021 7:00 PM
+To: Andreas Dilger
+Cc: Lustre-devel; Behlendorf, Brian D.; Faaland, Olaf P.
+Subject: Re: [lustre-devel] Testing 2.14 on Debian + ZFS
+
+Thanks for the confirmation!
+
+After going in a few circles, I think I've got it figured out and would appreciate some pointers on how to proceed:
+
+To preface, the way I'm building is from source-dirs after a package build (which is admittedly kind of janky as I write it out now). It would appear that the configure scripting will look in "zfs/include", and thus miss the new "zfs/include/os/..." directories that hold some important header files, causing configuration variables to miss-set in config.h thus creating the compile-time problems of type mismatches and redefinitions I was seeing.
+
+ I was able to confirm manually setting some of the configuration defs and adding the new header dirs to the makefile fixed the problem, but I'm a little confused as to how to proceed in patching. Since the configuration scripting and the makefiles seem to expect only a single include-dir of header files for both zfs and spl respectively, I'm wondering what the best approach to patching this behavior would be.
+
+Thanks for your time and consideration,
+Christian
+
+On Fri, Feb 19, 2021 at 12:13 PM Andreas Dilger <adilger at whamcloud.com<mailto:adilger at whamcloud.com>> wrote:
+This is exactly the right place for such discussions.
+
+Once you have patches, please submit to Gerrit for review, testing, and landing:
+
+https://wiki.lustre.org/Using_Gerrit<https://urldefense.us/v2/url?u=https-3A__wiki.lustre.org_Using-5FGerrit&d=DwMFaQ&c=pKoAVQro6qDbLoK0T8588B4mZJhJhC4e6QXJy0XnJec&r=2dxT0LLEUx0IbhFF8HRJVCTO_ihbEwKLn9gF7Kc8aG0&m=SU5sac04cekvaRvbUcheoU02W7EUu-F4sVkkrWHUnoE&s=gTcuGMUi5PycREbMB4La1s0dVNM8a5STb9pDVXZt-Lw&e=>
+
+Cheers, Andreas
+
+On Feb 19, 2021, at 02:11, Christian Kuntz <c.kuntz at opendrives.com<mailto:c.kuntz at opendrives.com>> wrote:
+
+?
+Thanks for your time and the thoughtful response.
+
+Looking at this a bit more, it seems to be caused by the recent ZFS 2.0 changes for linux and freebsd support, namely the `include/os/linux` paths that provide `<sys/types.h>` that ZFS is trying to use. Adding them into the includes for the osd-zfs directory has fixed the references being broken, and now I'm contending some redefinitions and argument type mismatches. I'll try and sort this out, in the meantime is there a better place for me to place messages about this? I know this mailing list isn't used very frequently and I'd hate to flood it with such off-the-beaten-path stuff.
+
+Best,
+Christian
+
+On Thu, Feb 18, 2021 at 3:09 AM Andreas Dilger <adilger at whamcloud.com<mailto:adilger at whamcloud.com>> wrote:
+On Feb 12, 2021, at 16:07, Christian Kuntz <c.kuntz at opendrives.com<mailto:c.kuntz at opendrives.com>> wrote:
+
+Hello,
+
+I hope I'm communicating in the right place here, I'm currently working to compile Lustre 2.14.0-RC2 on Debian 10.7 with ZFS 2.0.2 for OSDs. If there's anything I can do to help with the testing effort or help Lustre's Debian support be more robust, please let me know! I hope I'm not too late in the release cycle to contribute.
+
+Thanks for the offer of testing.  Unfortunately we are very late in the 2.14.0 release cycle (we are hoping to make the final release in the next week or so, barring any critical defects).  However, even if any changes miss the final 2.14.0 release, having patches available to fix any issues you run into will make it easier for the next person to build on Debian.
+
+Ideally, any required fixes for Debian building should go into the Lustre tree directly rather than into a separate "downstream" package, so that "make debs" works out-of-the-box.  We do build Ubuntu 18.04 and 20.04 clients regularly, and ZFS 2.0 servers on RHEL7/8, but I don't know if anyone is building the server code on Debian/Ubuntu on a regular basis.
+
+On the topic of compiling, I'm currently working to get debian packages made and running into a compilation issue that didn't seem to present on my previous endeavors with 2.13 and 0.7. I've got the kernel and zfs locally built and their packages made, and lustre's configure step successfully completes, but when it comes to compiling it appears that the osd-zfs portion has some broken include links:
+
+In file included from /zfs-linux-2.0.2/include/sys/arc.h:32,
+                 from /lustre-debian/lustre/osd-zfs/osd_internal.h:51,
+                 from /lustre-debian/lustre/osd-zfs/osd_handler.c:52:
+/zfs-linux-2.0.2/include/sys/zfs_context.h:45:10: fatal error: sys/types.h: No such file or directory
+ #include <sys/types.h>
+
+For reference, my configure and make looks like:
+./configure --with-linux=/linux-4.19.171-2/  \
+             --with-linux-obj=linux-4.19.171-2/debian/build/build_amd64_none_amd64 \
+             --with-zfs=/zfs-linux-2.0.2 \
+              --enable-server --enable-modules --disable-ldiskfs
+make -j"$(nproc)" debs
+
+
+From the error and some probing, it looks like zfs_context.h expects some header files to be in their libc standard `/usr/include/sys` (or somewhere abouts), but lustre's make process is pulling them from the linux sources in `SRC/include/linux/`. Predictably, I found this out the hard way by adding `-I/usr/include` to the Makefile for the zfs osds and getting battered with errors and warnings about duplicate definitions.
+
+It may be that you are looking at this from the wrong angle.  Rather than trying to include more userspace headers, it might be worthwhile to see why <sys/arc.h> is being included by osd_internal.h and maybe there is a more appropriate header that could be used in the kernel?  Failing that, it isn't clear wh zfs_context.h is including the <sys/type.h> header from userspace when building with __KERNEL__ set?  Kernel code should be using <linux/types.h>.
+
+Cheers, Andreas
+--
+Andreas Dilger
+Principal Lustre Architect
+Whamcloud
+
+
+
+
+
+
+
+From c.kuntz at opendrives.com  Mon Feb 22 19:41:30 2021
+From: c.kuntz at opendrives.com (Christian Kuntz)
+Date: Mon, 22 Feb 2021 19:41:30 -0800
+Subject: [lustre-devel] Testing 2.14 on Debian + ZFS
+In-Reply-To: <BY5PR09MB5427C96986B487A6E8BCDF86F8819@BY5PR09MB5427.namprd09.prod.outlook.com>
+References: <CANdLGj7=6X1ixcyNOguUAzxTTnegD3h2zfgaEso+Fv5E7YejVA@mail.gmail.com>
+ <477F0D07-A7E1-488A-8E06-FE6C2E748FE1@whamcloud.com>
+ <CANdLGj7o4yJf3byyM4LaAm+ZfNkAswTjU+HSUeK2yK+Yw4cvVg@mail.gmail.com>
+ <E4233477-F17B-4DD4-BC89-4DEAAD4590E5@whamcloud.com>
+ <CANdLGj4nJPfc6WA1ZrOeGhfjX+60QX_v_2xC7XDbHuSMXN3KCA@mail.gmail.com>
+ <BY5PR09MB5427C96986B487A6E8BCDF86F8819@BY5PR09MB5427.namprd09.prod.outlook.com>
+Message-ID: <CANdLGj6VBe2Po8NK8Ypcm-0P8ewHzbUqLOZo4bG6Fa58qAG8gQ@mail.gmail.com>
+
+Hi Olaf,
+
+Sure! For reference this is how I build zfs:
+
+./autogen.sh
+fakeroot dpkg-buildpackage -us -uc -b -j$cpus
+# Build the kernel modules, not just dkms
+KVERS=$KERNEL_ABI KSRC=$WITHLINUX_HDR KOBJ=$WITHLINUXOBJ fakeroot
+debian/rules override_dh_binary-modules
+
+Then, when I build lustre, I do like:
+sh autogen.sh
+./configure --with-linux=$WITHLINUX_HDR --with-linux-obj=$WITHLINUXOBJ
+--with-zfs=$ZFS_SRC --enable-server --enable-modules --disable-ldiskfs
+make  debs
+
+My zfs source is given as the root zfs source directory, not the contents
+of explicit package dirs in ZFS_SRC/debian/ which is technically where all
+the build artifacts live (for instance, the development headers that would
+end up on the machine would be in debian/libzfslinux-dev/usr/include) after
+a package build. After fiddling around with autoconf a bit (and learning
+it's just shell!), I landed on changing this bit of the autoconf:
+config/lustre-build-zfs.m4
+
+AC_DEFUN([LB_ZFS_USER], [
+dnl #
+dnl # Detect user space zfs development headers.
+dnl #
+AC_MSG_CHECKING([zfs devel headers])
+    AS_IF([test -z "${zfsinc}"], [
+        AS_IF([test -d "${zfssrc}/include/os/linux"], [
+              zfsinc="-I${zfssrc}/include/os/linux/kernel
+-I${zfssrc}/include/os/linux/spl -I${zfssrc}/include/os/linux/zfs
+-I${zfssrc}/include"
+              zfslib="-L$zfssrc/lib/libzfs/.libs/
+-L$zfssrc/lib/libnvpair/.libs"
+           ], [test -e "${zfssrc}/include/libzfs.h" && test -e
+"${zfssrc}/lib/libspl/include"], [
+              zfsinc="-I $zfssrc/lib/libspl/include -I $zfssrc/include"
+              zfslib="-L$zfssrc/lib/libzfs/.libs/
+-L$zfssrc/lib/libnvpair/.libs"
+          ], [test -d /usr/include/libzfs && test -d /usr/include/libspl], [
+               zfsinc="-I/usr/include/libspl -I /usr/include/libzfs"
+               zfslib=""
+         ], [
+      zfsinc="[Not Found]"
+      zfslib=""
+     enable_zfs=no
+   ])
+])
+AC_MSG_RESULT([$zfsinc])
+
+I added a check around the new include/os style of the zfs header
+directories, which seems to be working OK, every config test is behaving as
+expected on my machine except for the multihost support one, which I'm
+chasing down a bit (sys/spa.h requires sys/sysmacros.h which requires...
+and so on). I also found that I had to modify the contents of
+config/lustre-build-linux.m4 to reflect the include dir change:
+
+AC_DEFUN([LB_LINUX_COMPILE_IFELSE],
+[m4_ifvaln([$1], [AC_LANG_CONFTEST([AC_LANG_SOURCE([$1])])])dnl
+rm -f build/conftest.o build/conftest.mod.c build/conftest.ko
+SUBARCH=$(echo $target_cpu | sed -e 's/powerpc.*/powerpc/' -e
+'s/ppc.*/powerpc/' -e 's/x86_64/x86/' -e 's/i.86/x86/' -e 's/k1om/x86/' -e
+'s/aarch64.*/arm64/' -e 's/armv7.*/arm/')
+AS_IF([AC_TRY_COMMAND(cp conftest.c build && make -d [$2] LDFLAGS=
+${LD:+LD="$LD"} CC="$CC" -f $PWD/build/Makefile
+LUSTRE_LINUX_CONFIG=$LINUX_CONFIG LINUXINCLUDE="$EXTRA_CHECK_INCLUDE
+-I$LINUX/arch/$SUBARCH/include -Iinclude -Iarch/$SUBARCH/include/generated
+-I$LINUX/include -Iinclude2 -I$LINUX/include/uapi -Iinclude/generated
+-I$LINUX/arch/$SUBARCH/include/uapi -Iarch/$SUBARCH/include/generated/uapi
+-I$LINUX/include/uapi -Iinclude/generated/uapi ${SPL_OBJ:+-include
+$SPL_OBJ/spl_config.h} ${ZFS_OBJ:+-include $ZFS_OBJ/zfs_config.h}
+${SPL:+-I$ZFS/lib/libspl/include/ } ${ZFS:+-I$ZFS/include/os/linux/
+-I$ZFS/include/os/linux/kernel -I$ZFS/include/os/linux/spl
+-I$ZFS/include/os/linux/zfs -I$ZFS/include } -include $CONFIG_INCLUDE"
+KBUILD_EXTRA_SYMBOLS="${ZFS_OBJ:+$ZFS_OBJ/Module.symvers}
+$KBUILD_EXTRA_SYMBOLS" -o tmp_include_depends -o scripts -o
+include/config/MARKER -C $LINUX_OBJ
+EXTRA_CFLAGS="-Werror-implicit-function-declaration $EXTRA_KCFLAGS"
+$MODULE_TARGET=$PWD/build) >/dev/null && AC_TRY_COMMAND([$3])],
+
+I *think* I'll need to adjust the SPL variable in there, but not sure thus
+far.
+
+With the above settings I've gotten everything to succesfully compile and
+package up aside from a small modification I had to make
+to lustre/utils/libmount_utils_zfs.c to prevent a name collision with
+spa_get_hostid. I believe this occurs because the configuration doesn't set
+HAVE_ZFS_MULTIHOST appropriately.
+
+
+As you can see, I worked on it a little on the weekend :)
+
+Cheers,
+Christian
+
+On Mon, Feb 22, 2021 at 11:58 AM Faaland, Olaf P. <faaland1 at llnl.gov> wrote:
+
+> Hi Christian,
+>
+> Can you explain in more detail what you mean by "building ... from
+> source-dirs after a package build"?  And can you identify the lines in
+> config/lustre-build-zfs.m4 that you're referring to?
+>
+> thank you,
+> -Olaf
+>
+> ________________________________________
+> From: Christian Kuntz <c.kuntz at opendrives.com>
+> Sent: Friday, February 19, 2021 7:00 PM
+> To: Andreas Dilger
+> Cc: Lustre-devel; Behlendorf, Brian D.; Faaland, Olaf P.
+> Subject: Re: [lustre-devel] Testing 2.14 on Debian + ZFS
+>
+> Thanks for the confirmation!
+>
+> After going in a few circles, I think I've got it figured out and would
+> appreciate some pointers on how to proceed:
+>
+> To preface, the way I'm building is from source-dirs after a package build
+> (which is admittedly kind of janky as I write it out now). It would appear
+> that the configure scripting will look in "zfs/include", and thus miss the
+> new "zfs/include/os/..." directories that hold some important header files,
+> causing configuration variables to miss-set in config.h thus creating the
+> compile-time problems of type mismatches and redefinitions I was seeing.
+>
+>  I was able to confirm manually setting some of the configuration defs and
+> adding the new header dirs to the makefile fixed the problem, but I'm a
+> little confused as to how to proceed in patching. Since the configuration
+> scripting and the makefiles seem to expect only a single include-dir of
+> header files for both zfs and spl respectively, I'm wondering what the best
+> approach to patching this behavior would be.
+>
+> Thanks for your time and consideration,
+> Christian
+>
+> On Fri, Feb 19, 2021 at 12:13 PM Andreas Dilger <adilger at whamcloud.com
+> <mailto:adilger at whamcloud.com>> wrote:
+> This is exactly the right place for such discussions.
+>
+> Once you have patches, please submit to Gerrit for review, testing, and
+> landing:
+>
+> https://wiki.lustre.org/Using_Gerrit<
+> https://urldefense.us/v2/url?u=https-3A__wiki.lustre.org_Using-5FGerrit&d=DwMFaQ&c=pKoAVQro6qDbLoK0T8588B4mZJhJhC4e6QXJy0XnJec&r=2dxT0LLEUx0IbhFF8HRJVCTO_ihbEwKLn9gF7Kc8aG0&m=SU5sac04cekvaRvbUcheoU02W7EUu-F4sVkkrWHUnoE&s=gTcuGMUi5PycREbMB4La1s0dVNM8a5STb9pDVXZt-Lw&e=
+> >
+>
+> Cheers, Andreas
+>
+> On Feb 19, 2021, at 02:11, Christian Kuntz <c.kuntz at opendrives.com<mailto:
+> c.kuntz at opendrives.com>> wrote:
+>
+> ?
+> Thanks for your time and the thoughtful response.
+>
+> Looking at this a bit more, it seems to be caused by the recent ZFS 2.0
+> changes for linux and freebsd support, namely the `include/os/linux` paths
+> that provide `<sys/types.h>` that ZFS is trying to use. Adding them into
+> the includes for the osd-zfs directory has fixed the references being
+> broken, and now I'm contending some redefinitions and argument type
+> mismatches. I'll try and sort this out, in the meantime is there a better
+> place for me to place messages about this? I know this mailing list isn't
+> used very frequently and I'd hate to flood it with such off-the-beaten-path
+> stuff.
+>
+> Best,
+> Christian
+>
+> On Thu, Feb 18, 2021 at 3:09 AM Andreas Dilger <adilger at whamcloud.com
+> <mailto:adilger at whamcloud.com>> wrote:
+> On Feb 12, 2021, at 16:07, Christian Kuntz <c.kuntz at opendrives.com<mailto:
+> c.kuntz at opendrives.com>> wrote:
+>
+> Hello,
+>
+> I hope I'm communicating in the right place here, I'm currently working to
+> compile Lustre 2.14.0-RC2 on Debian 10.7 with ZFS 2.0.2 for OSDs. If
+> there's anything I can do to help with the testing effort or help Lustre's
+> Debian support be more robust, please let me know! I hope I'm not too late
+> in the release cycle to contribute.
+>
+> Thanks for the offer of testing.  Unfortunately we are very late in the
+> 2.14.0 release cycle (we are hoping to make the final release in the next
+> week or so, barring any critical defects).  However, even if any changes
+> miss the final 2.14.0 release, having patches available to fix any issues
+> you run into will make it easier for the next person to build on Debian.
+>
+> Ideally, any required fixes for Debian building should go into the Lustre
+> tree directly rather than into a separate "downstream" package, so that
+> "make debs" works out-of-the-box.  We do build Ubuntu 18.04 and 20.04
+> clients regularly, and ZFS 2.0 servers on RHEL7/8, but I don't know if
+> anyone is building the server code on Debian/Ubuntu on a regular basis.
+>
+> On the topic of compiling, I'm currently working to get debian packages
+> made and running into a compilation issue that didn't seem to present on my
+> previous endeavors with 2.13 and 0.7. I've got the kernel and zfs locally
+> built and their packages made, and lustre's configure step successfully
+> completes, but when it comes to compiling it appears that the osd-zfs
+> portion has some broken include links:
+>
+> In file included from /zfs-linux-2.0.2/include/sys/arc.h:32,
+>                  from /lustre-debian/lustre/osd-zfs/osd_internal.h:51,
+>                  from /lustre-debian/lustre/osd-zfs/osd_handler.c:52:
+> /zfs-linux-2.0.2/include/sys/zfs_context.h:45:10: fatal error:
+> sys/types.h: No such file or directory
+>  #include <sys/types.h>
+>
+> For reference, my configure and make looks like:
+> ./configure --with-linux=/linux-4.19.171-2/  \
+>
+>  --with-linux-obj=linux-4.19.171-2/debian/build/build_amd64_none_amd64 \
+>              --with-zfs=/zfs-linux-2.0.2 \
+>               --enable-server --enable-modules --disable-ldiskfs
+> make -j"$(nproc)" debs
+>
+>
+> From the error and some probing, it looks like zfs_context.h expects some
+> header files to be in their libc standard `/usr/include/sys` (or somewhere
+> abouts), but lustre's make process is pulling them from the linux sources
+> in `SRC/include/linux/`. Predictably, I found this out the hard way by
+> adding `-I/usr/include` to the Makefile for the zfs osds and getting
+> battered with errors and warnings about duplicate definitions.
+>
+> It may be that you are looking at this from the wrong angle.  Rather than
+> trying to include more userspace headers, it might be worthwhile to see why
+> <sys/arc.h> is being included by osd_internal.h and maybe there is a more
+> appropriate header that could be used in the kernel?  Failing that, it
+> isn't clear wh zfs_context.h is including the <sys/type.h> header from
+> userspace when building with __KERNEL__ set?  Kernel code should be using
+> <linux/types.h>.
+>
+> Cheers, Andreas
+> --
+> Andreas Dilger
+> Principal Lustre Architect
+> Whamcloud
+>
+>
+>
+>
+>
+>
+>
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20210222/957c76b8/attachment.html>
+

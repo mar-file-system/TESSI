@@ -1,0 +1,933 @@
+From adilger at clusterfs.com  Thu Sep 27 01:52:46 2007
+From: adilger at clusterfs.com (Andreas Dilger)
+Date: Thu, 27 Sep 2007 02:52:46 -0600
+Subject: [Lustre-discuss] Fwd: max_sectors_kb change doesn't help
+In-Reply-To: <200709271040.03639.efocht@hpce.nec.com>
+References: <200709261750.39428.efocht@hpce.nec.com>
+	<20070926232012.GZ32520@schatzie.adilger.int>
+	<200709271040.03639.efocht@hpce.nec.com>
+Message-ID: <20070927085246.GA25472@mail.clusterfs.com>
+
+On Sep 27, 2007  10:40 +0200, Erich Focht wrote:
+> On Thursday 27 September 2007 01:20, Andreas Dilger wrote:
+> > On Sep 26, 2007  17:50 +0200, Erich Focht wrote:
+> > > in 512K pieces. Following the Lustre manual I changed
+> > > /sys/block/DEVICE/queue/max_sectors_kb to 1024 but the I/O sizes in Lustre
+> > > didn't change.
+> > 
+> > Did you try remounting the OSTs after changing the setting?
+> 
+> Yes, actually when I changed the settings the lustre modules were not loaded,
+> yet. Where is the detection of the maximally allowed I/O size done in Lustre?
+
+In fact there isn't any such detection in Lustre - it will push pages into
+an IO until the block layer tells it to stop.
+
+Please check /proc/fs/lustre/obdfilter/*/brw_stats to see if the IO requests
+coming from the client are 1MB in size (256 pages), and if yes then the issue
+would likely be in the block layer.
+
+Cheers, Andreas
+--
+Andreas Dilger
+Principal Software Engineer
+Cluster File Systems, Inc.
+
+
+
+From Niklas.Edmundsson at hpc2n.umu.se  Thu Sep 27 01:53:26 2007
+From: Niklas.Edmundsson at hpc2n.umu.se (Niklas Edmundsson)
+Date: Thu, 27 Sep 2007 10:53:26 +0200 (MEST)
+Subject: [Lustre-discuss] Lustre 1.6.2 + 2.6.18 - Directory index full!
+Message-ID: <Pine.GSO.4.64.0709271046100.2659@kleopatra.acc.umu.se>
+
+
+While doing some more file creation tests we hit another interesting 
+bug.
+
+We have 13701222 files in one directory, and creating more files there 
+fails even though we have lots of free inodes in the filesystem.
+
+On MDS we get this in the kernel log:
+[692361.061558] LDISKFS-fs warning (device sdb2): ldiskfs_dx_add_entry: Directory index full!
+
+On client:
+# lfs df -i
+UUID                    Inodes     IUsed     IFree IUse% Mounted on
+hpfs-MDT0000_UUID     35651584  13967459  21684125   39% /hpfs[MDT:0]
+hpfs-OST0000_UUID     76292096   3486442  72805654    4% /hpfs[OST:0]
+hpfs-OST0001_UUID     76292096   3484250  72807846    4% /hpfs[OST:1]
+hpfs-OST0002_UUID     76292096   3486534  72805562    4% /hpfs[OST:2]
+hpfs-OST0003_UUID     76292096   3486889  72805207    4% /hpfs[OST:3]
+
+filesystem summary:   35651584  13967459  21684125   39% /hpfs
+
+
+
+/Nikke
+-- 
+-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
+  Niklas Edmundsson, Admin @ {acc,hpc2n}.umu.se     |    nikke at hpc2n.umu.se
+---------------------------------------------------------------------------
+  If rabbits feet are lucky, what happened to the bunny
+=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+
+
+
+From adilger at clusterfs.com  Thu Sep 27 02:05:28 2007
+From: adilger at clusterfs.com (Andreas Dilger)
+Date: Thu, 27 Sep 2007 03:05:28 -0600
+Subject: [Lustre-discuss] Lustre 1.6.2 + 2.6.18 - Directory index full!
+In-Reply-To: <Pine.GSO.4.64.0709271046100.2659@kleopatra.acc.umu.se>
+References: <Pine.GSO.4.64.0709271046100.2659@kleopatra.acc.umu.se>
+Message-ID: <20070927090528.GA32520@schatzie.adilger.int>
+
+On Sep 27, 2007  10:53 +0200, Niklas Edmundsson wrote:
+> We have 13701222 files in one directory, and creating more files there 
+> fails even though we have lots of free inodes in the filesystem.
+
+We generally only test up to 10M files in a single directory.  If you had
+a perfect hash distribution you might be able to get to 25M files in the
+directory.
+
+I suspect if you run "e2fsck -fD" it might help you (its job is to pack
+the directories), but I suspect it has never been run on such a large
+directory and might conceivably use too much RAM to run on the system.
+
+> On MDS we get this in the kernel log:
+> [692361.061558] LDISKFS-fs warning (device sdb2): ldiskfs_dx_add_entry: Directory index full!
+
+This is one of the reasons we are moving to ZFS for the back-end storage.
+
+Cheers, Andreas
+--
+Andreas Dilger
+Principal Software Engineer
+Cluster File Systems, Inc.
+
+
+
+From efocht at hpce.nec.com  Thu Sep 27 02:28:50 2007
+From: efocht at hpce.nec.com (Erich Focht)
+Date: Thu, 27 Sep 2007 11:28:50 +0200
+Subject: [Lustre-discuss] Fwd: max_sectors_kb change doesn't help
+In-Reply-To: <20070927085246.GA25472@mail.clusterfs.com>
+References: <200709261750.39428.efocht@hpce.nec.com>
+	<200709271040.03639.efocht@hpce.nec.com>
+	<20070927085246.GA25472@mail.clusterfs.com>
+Message-ID: <200709271128.50704.efocht@hpce.nec.com>
+
+On Thursday 27 September 2007 10:52, Andreas Dilger wrote:
+
+> In fact there isn't any such detection in Lustre - it will push pages into
+> an IO until the block layer tells it to stop.
+> 
+> Please check /proc/fs/lustre/obdfilter/*/brw_stats to see if the IO requests
+> coming from the client are 1MB in size (256 pages), and if yes then the issue
+> would likely be in the block layer.
+
+The output is below. I see 256 pages per transfer. But I also see "disk
+fragmented I/Os". Sounds somehow related, but can I influence the
+fragmentation?
+
+BTW: I'm running on a RHEL5 system, with noop I/O scheduler. The disks are
+now connected through Emulex FC controllers, but I see the same behavior
+with SAS storage attached through LSI Logic HCAs.
+
+                           read      |     write
+pages per bulk r/w     rpcs  % cum % |  rpcs  % cum %
+256:                     0   0   0   |  955 100 100
+
+                           read      |     write
+discontiguous pages    rpcs  % cum % |  rpcs  % cum %
+0:                       0   0   0   |  955 100 100
+
+                           read      |     write
+discontiguous blocks   rpcs  % cum % |  rpcs  % cum %
+0:                       0   0   0   |  955 100 100
+
+                           read      |     write
+disk fragmented I/Os   ios   % cum % |  ios   % cum %
+2:                       0   0   0   |  955 100 100
+
+                           read      |     write
+disk I/Os in flight    ios   % cum % |  ios   % cum %
+1:                       0   0   0   |  216  11  11
+2:                       0   0   0   |  220  11  22
+3:                       0   0   0   |  194  10  32
+4:                       0   0   0   |  198  10  43
+5:                       0   0   0   |  166   8  52
+6:                       0   0   0   |  165   8  60
+7:                       0   0   0   |  122   6  67
+8:                       0   0   0   |  121   6  73
+9:                       0   0   0   |  116   6  79
+10:                      0   0   0   |  115   6  85
+11:                      0   0   0   |   95   4  90
+12:                      0   0   0   |   94   4  95
+13:                      0   0   0   |   35   1  97
+14:                      0   0   0   |   32   1  98
+15:                      0   0   0   |    9   0  99
+16:                      0   0   0   |    9   0  99
+17:                      0   0   0   |    2   0  99
+18:                      0   0   0   |    1   0 100
+
+                           read      |     write
+I/O time (1/1000s)     ios   % cum % |  ios   % cum %
+4:                       0   0   0   |    3   0   0
+8:                       0   0   0   |   17   1   2
+16:                      0   0   0   |   98  10  12
+32:                      0   0   0   |  326  34  46
+64:                      0   0   0   |  370  38  85
+128:                     0   0   0   |  129  13  98
+256:                     0   0   0   |   10   1  99
+512:                     0   0   0   |    2   0 100
+
+                           read      |     write
+disk I/O size          ios   % cum % |  ios   % cum %
+512K:                    0   0   0   | 1910 100 100
+
+
+Thanks,
+best regards,
+Erich
+
+
+-- 
+Dr. Erich Focht
+Solution Architecture Group, Linux R&D
+NEC High Performance Computing  Europe
+
+
+
+From adilger at clusterfs.com  Thu Sep 27 03:34:57 2007
+From: adilger at clusterfs.com (Andreas Dilger)
+Date: Thu, 27 Sep 2007 04:34:57 -0600
+Subject: [Lustre-discuss] Fwd: max_sectors_kb change doesn't help
+In-Reply-To: <200709271128.50704.efocht@hpce.nec.com>
+References: <200709261750.39428.efocht@hpce.nec.com>
+	<200709271040.03639.efocht@hpce.nec.com>
+	<20070927085246.GA25472@mail.clusterfs.com>
+	<200709271128.50704.efocht@hpce.nec.com>
+Message-ID: <20070927103457.GF32520@schatzie.adilger.int>
+
+On Sep 27, 2007  11:28 +0200, Erich Focht wrote:
+> On Thursday 27 September 2007 10:52, Andreas Dilger wrote:
+> > In fact there isn't any such detection in Lustre - it will push pages into
+> > an IO until the block layer tells it to stop.
+> > 
+> > Please check /proc/fs/lustre/obdfilter/*/brw_stats to see if the IO requests
+> > coming from the client are 1MB in size (256 pages), and if yes then the issue
+> > would likely be in the block layer.
+> 
+> The output is below. I see 256 pages per transfer. But I also see "disk
+> fragmented I/Os". Sounds somehow related, but can I influence the
+> fragmentation?
+> 
+> pages per bulk r/w     rpcs  % cum % |  rpcs  % cum %
+> 256:                     0   0   0   |  955 100 100
+> 
+>                            read      |     write
+> disk fragmented I/Os   ios   % cum % |  ios   % cum %
+> 2:                       0   0   0   |  955 100 100
+> 
+>                            read      |     write
+> disk I/O size          ios   % cum % |  ios   % cum %
+> 512K:                    0   0   0   | 1910 100 100
+
+This generally points to the underlying layer fragmenting the IO, since the
+"disk fragmented I/O" counter is only when we can't add a page to the exising
+bio (see "frags" in lustre/obdfilter/filter_io_26/filter_do_bio()).  The
+culprit is in "can_be_merged()" or "bio_add_page()".
+
+Cheers, Andreas
+--
+Andreas Dilger
+Principal Software Engineer
+Cluster File Systems, Inc.
+
+
+
+From jgeorger at ll.mit.edu  Thu Sep 27 05:13:00 2007
+From: jgeorger at ll.mit.edu (Joe Georger)
+Date: Thu, 27 Sep 2007 08:13:00 -0400
+Subject: [Lustre-discuss] sles10: installing module-binaries: "error: Failed
+ dependencies: ksym(panic) .."
+Message-ID: <46FB9E4C.8060804@ll.mit.edu>
+
+Hi all, new to the Lustre, new to the list.  I'm trying to install
+lustre-modules-1.6.2-2.6.16_46_0.14_lustre.1.6.2bigsmp.i686.rpm on a 
+32-bit SLES10 system and I'm running into this problem as well.  The 
+patch referenced below did not help.  I have been unable to download a
+working version of SLES10 SP1.  Can anyone offer any assistance?
+
+Thanks,
+Joe
+
+--------------------------------------------------------------------------
+Hi,
+
+This ksym stuff is somewhat fixed in SLES 10 SP1  you might just want to
+update.  If you don't want to that then attached is a patch that we used
+to get around this before.
+
+Hope it helps.
+
+Rene
+
+
+
+
+On Fri, 2007-08-31 at 10:25 +0100, Q Linux wrote:
+>/ Hi,
+/>/  
+/>/ After some hard trying to use lustre on our debian servers with an
+/>/ up2date kernel I decided to buy sles10 to make everything more
+/>/ comftable: 
+/>/  
+/>/ I installed (rpm -i) the new kernelbinaries from 1.6.2/sles10-i686 to
+/>/ a sles10 test box (AMD64).  
+/>/  
+/>/ When i try to install the modules form 1.6.2/sles10-i686 it says :
+/>/  
+/>/ sles2:/usr/src/lustre # rpm -i
+/>/ lustre-modules-1.6.2-2.6.16_46_0.14_lustre.1.6.2bigsmp.i686.rpm 
+/>/ error: Failed dependencies:
+/>/         ksym(panic) = 1075bf0 is needed by
+/>/ lustre-modules-1.6.2-2.6.16_46_0.14_lustre.1.6.2bigsmp.i686
+/>/         ksym(__get_free_pages) = 107d6ba3 is needed by
+/>/ lustre-modules-1.6.2-2.6.16_46_0.14_lustre.1.6.2bigsmp.i686
+/>/         ksym(malloc_sizes) = 1095f2e0 is needed by
+/>/ lustre-modules-1.6.2-2.6.16_46_0.14_lustre.1.6.2bigsmp.i686
+/>/         ksym(proc_symlink) = 1109102e is needed by
+/>/ lustre-modules-1.6.2-2.6.16_46_0.14_lustre.1.6.2bigsmp.i686
+/>/         ksym(groups_free) = 111bcb2c is needed by
+/>/ lustre-modules-1.6.2-2.6.16_46_0.14_lustre.1.6.2bigsmp.i686
+/>/         ksym(create_proc_entry) = 11653586 is needed by
+/>/ lustre-modules-1.6.2-2.6.16_46_0.14_lustre.1.6.2bigsmp.i686
+/>/         ksym(putname) = 118f01ea is needed by
+/>/ lustre-modules-1.6.2-2.6.16_46_0.14_lustre.1.6.2bigsmp.i686
+/>/         ksym(__kmalloc) = 12da5bb2 is needed by
+/>/ lustre-modules-1.6.2-2.6.16_46_0.14_lustre.1.6.2bigsmp.i686
+/>/  
+/>/         ... many more ...
+/>/  
+/>/         ksym(ldiskfs_force_commit) = fe59a5d5 is needed by
+/>/ lustre-modules-1.6.2-2.6.16_46_0.14_lustre.1.6.2bigsmp.i686
+/>/         ksym(default_wake_function) = ffd5a395 is needed by
+/>/ lustre-modules-1.6.2-2.6.16_46_0.14_lustre.1.6.2bigsmp.i686
+/>/  
+/>/ 
+/>/ Novellsupport told me that they only support lustre-clients with
+/>/ unpatched kernels. I bought sles to make it easier but now I'm left
+/>/ alone at a much earlier step then I was with debian. I hope some
+/>/ people out there already solved this installing issues with sles10.
+/>/  
+/>/ Michael Park/
+
+
+
+From frank.mietke at informatik.tu-chemnitz.de  Thu Sep 27 05:47:35 2007
+From: frank.mietke at informatik.tu-chemnitz.de (Frank Mietke)
+Date: Thu, 27 Sep 2007 14:47:35 +0200
+Subject: [Lustre-discuss] Problem with OST state
+Message-ID: <20070927124735.GN8834@saul.informatik.tu-chemnitz.de>
+
+Hi,
+
+we have a problem with lustre-1.6.0b7 installation where two OSTs are running
+on one server but only one of the OSTs is in state FULL and the other in
+DISCONN. Both are successfully mounted and the recovery_status is "Complete".
+
+cat /proc/fs/lustre/osc/chicfs-OST0002-osc/ost_server_uuid
+chicfs-OST0002_UUID     DISCONN
+
+cat /proc/fs/lustre/osc/chicfs-OST0000-osc/ost_server_uuid
+chicfs-OST0000_UUID     FULL
+
+Is there a way to start a connection attempt again?
+
+Best Regards,
+Frank
+
+-- 
+Dipl.-Inf. Frank Mietke     |     Fakult?tsrechen- und Informationszentrum
+Tel.: 0371 - 531 - 35538    |     Fak. f?r Informatik
+Fax:  0371 - 531 8 35538    |     TU-Chemnitz
+Key-ID: 60F59599            |     frank.mietke at informatik.tu-chemnitz.de
+
+
+
+From rjh+lustre at cita.utoronto.ca  Thu Sep 27 05:48:07 2007
+From: rjh+lustre at cita.utoronto.ca (Robin Humble)
+Date: Thu, 27 Sep 2007 08:48:07 -0400
+Subject: [Lustre-discuss] Lustre 1.6.2 + 2.6.18 - Directory index full!
+In-Reply-To: <Pine.GSO.4.64.0709271046100.2659@kleopatra.acc.umu.se>
+References: <Pine.GSO.4.64.0709271046100.2659@kleopatra.acc.umu.se>
+Message-ID: <20070927124807.GA6755@lemming.cita.utoronto.ca>
+
+On Thu, Sep 27, 2007 at 10:53:26AM +0200, Niklas Edmundsson wrote:
+>We have 13701222 files in one directory, and creating more files there 
+>fails even though we have lots of free inodes in the filesystem.
+
+performance on ext3 is dismal with >1m files in a dir
+  http://oss.oracle.com/projects/btrfs/dist/documentation/benchmark.html
+so I suspect lustre's ext3+/ext4 ldiskfs's are similarly not suited to
+this workload either.
+
+so err, just don't do it? :-)
+
+cheers,
+robin
+
+
+
+From rjh+lustre at cita.utoronto.ca  Thu Sep 27 05:53:00 2007
+From: rjh+lustre at cita.utoronto.ca (Robin Humble)
+Date: Thu, 27 Sep 2007 08:53:00 -0400
+Subject: [Lustre-discuss] formatting options
+Message-ID: <20070927125300.GB6755@lemming.cita.utoronto.ca>
+
+-i 1024 is often recommended when mkfs'ing the MDS/MDT.
+what about -b 1024?
+as most of the files on the MDT are 0 sized would this help too?
+less seeking, more files allowed?
+
+cheers,
+robin
+
+
+
+From Niklas.Edmundsson at hpc2n.umu.se  Thu Sep 27 06:49:09 2007
+From: Niklas.Edmundsson at hpc2n.umu.se (Niklas Edmundsson)
+Date: Thu, 27 Sep 2007 15:49:09 +0200 (MEST)
+Subject: [Lustre-discuss] Lustre 1.6.2 + 2.6.18 - Directory index full!
+In-Reply-To: <20070927124807.GA6755@lemming.cita.utoronto.ca>
+References: <Pine.GSO.4.64.0709271046100.2659@kleopatra.acc.umu.se>
+	<20070927124807.GA6755@lemming.cita.utoronto.ca>
+Message-ID: <Pine.GSO.4.64.0709271545120.25577@kleopatra.acc.umu.se>
+
+On Thu, 27 Sep 2007, Robin Humble wrote:
+
+> On Thu, Sep 27, 2007 at 10:53:26AM +0200, Niklas Edmundsson wrote:
+>> We have 13701222 files in one directory, and creating more files there
+>> fails even though we have lots of free inodes in the filesystem.
+>
+> performance on ext3 is dismal with >1m files in a dir
+>  http://oss.oracle.com/projects/btrfs/dist/documentation/benchmark.html
+> so I suspect lustre's ext3+/ext4 ldiskfs's are similarly not suited to
+> this workload either.
+
+Is this with dir_index enabled? Without dir_index you'll certainly 
+loose ;)
+
+> so err, just don't do it? :-)
+
+Don't worry, I won't.
+
+However, some bright user might, and thus we needs to know whether 
+lustre will behave nicely or emit some wonderfully cryptic error 
+message and go belly up.
+
+With 13M files in one directory it's surprisingly snappy though, 1m17s 
+stat:ing all those files isn't too bad considering we're only using 
+regular GigE.
+
+/Nikke
+-- 
+-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
+  Niklas Edmundsson, Admin @ {acc,hpc2n}.umu.se     |    nikke at hpc2n.umu.se
+---------------------------------------------------------------------------
+  Good girls go to heaven..bad girls go EVERYWHERE!!!
+=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+
+
+
+From Niklas.Edmundsson at hpc2n.umu.se  Thu Sep 27 07:10:16 2007
+From: Niklas.Edmundsson at hpc2n.umu.se (Niklas Edmundsson)
+Date: Thu, 27 Sep 2007 16:10:16 +0200 (MEST)
+Subject: [Lustre-discuss] Lustre 1.6.2 + 2.6.18 - Directory index full!
+In-Reply-To: <20070927090528.GA32520@schatzie.adilger.int>
+References: <Pine.GSO.4.64.0709271046100.2659@kleopatra.acc.umu.se>
+	<20070927090528.GA32520@schatzie.adilger.int>
+Message-ID: <Pine.GSO.4.64.0709271549350.25577@kleopatra.acc.umu.se>
+
+On Thu, 27 Sep 2007, Andreas Dilger wrote:
+
+> On Sep 27, 2007  10:53 +0200, Niklas Edmundsson wrote:
+>> We have 13701222 files in one directory, and creating more files there
+>> fails even though we have lots of free inodes in the filesystem.
+>
+> We generally only test up to 10M files in a single directory.  If you had
+> a perfect hash distribution you might be able to get to 25M files in the
+> directory.
+
+I suspected something like that. The error message needs some help 
+though, I'd prefer having the directory in question in there if 
+possible, or at least some hint on where to look.
+
+>> On MDS we get this in the kernel log:
+>> [692361.061558] LDISKFS-fs warning (device sdb2): ldiskfs_dx_add_entry: Directory index full!
+>
+> This is one of the reasons we are moving to ZFS for the back-end storage.
+
+Any idea on the timeframe?
+
+
+/Nikke
+-- 
+-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
+  Niklas Edmundsson, Admin @ {acc,hpc2n}.umu.se     |    nikke at hpc2n.umu.se
+---------------------------------------------------------------------------
+  Good girls go to heaven..bad girls go EVERYWHERE!!!
+=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+
+
+
+From alastair.mckinstry at ichec.ie  Thu Sep 27 07:15:52 2007
+From: alastair.mckinstry at ichec.ie (Alastair McKinstry)
+Date: Thu, 27 Sep 2007 15:15:52 +0100
+Subject: [Lustre-discuss] Lustre 1.6.2 + 2.6.18 - Directory index full!
+In-Reply-To: <Pine.GSO.4.64.0709271549350.25577@kleopatra.acc.umu.se>
+References: <Pine.GSO.4.64.0709271046100.2659@kleopatra.acc.umu.se>
+	<20070927090528.GA32520@schatzie.adilger.int>
+	<Pine.GSO.4.64.0709271549350.25577@kleopatra.acc.umu.se>
+Message-ID: <0DF05B3A-DCAB-4C13-A866-B4836DD62D04@ichec.ie>
+
+
+On 27 Sep 2007, at 15:10, Niklas Edmundsson wrote:
+
+> On Thu, 27 Sep 2007, Andreas Dilger wrote:
+>
+>>> On MDS we get this in the kernel log:
+>>> [692361.061558] LDISKFS-fs warning (device sdb2):  
+>>> ldiskfs_dx_add_entry: Directory index full!
+>>
+>> This is one of the reasons we are moving to ZFS for the back-end  
+>> storage.
+>
+>
+Is ZFS open-source ? What implications does this have for the open- 
+source nature of Lustre?
+
+Regards
+Alastair McKinstry
+
+
+-- 
+Alastair McKinstry , <alastair.mckinstry at ichec.ie>
+
+
+
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20070927/5134bcc0/attachment.html>
+
+From adilger at clusterfs.com  Thu Sep 27 10:40:13 2007
+From: adilger at clusterfs.com (Andreas Dilger)
+Date: Thu, 27 Sep 2007 11:40:13 -0600
+Subject: [Lustre-discuss] Problem with OST state
+In-Reply-To: <20070927124735.GN8834@saul.informatik.tu-chemnitz.de>
+References: <20070927124735.GN8834@saul.informatik.tu-chemnitz.de>
+Message-ID: <20070927174013.GI32520@schatzie.adilger.int>
+
+On Sep 27, 2007  14:47 +0200, Frank Mietke wrote:
+> we have a problem with lustre-1.6.0b7 installation where two OSTs are running
+> on one server but only one of the OSTs is in state FULL and the other in
+> DISCONN. Both are successfully mounted and the recovery_status is "Complete".
+> 
+> cat /proc/fs/lustre/osc/chicfs-OST0002-osc/ost_server_uuid
+> chicfs-OST0002_UUID     DISCONN
+> 
+> cat /proc/fs/lustre/osc/chicfs-OST0000-osc/ost_server_uuid
+> chicfs-OST0000_UUID     FULL
+
+You should be able to do "lctl --device %chicfs-OST0002-osc recover"
+
+Cheers, Andreas
+--
+Andreas Dilger
+Principal Software Engineer
+Cluster File Systems, Inc.
+
+
+
+From adilger at clusterfs.com  Thu Sep 27 10:48:35 2007
+From: adilger at clusterfs.com (Andreas Dilger)
+Date: Thu, 27 Sep 2007 11:48:35 -0600
+Subject: [Lustre-discuss] formatting options
+In-Reply-To: <20070927125300.GB6755@lemming.cita.utoronto.ca>
+References: <20070927125300.GB6755@lemming.cita.utoronto.ca>
+Message-ID: <20070927174835.GJ32520@schatzie.adilger.int>
+
+On Sep 27, 2007  08:53 -0400, Robin Humble wrote:
+> -i 1024 is often recommended when mkfs'ing the MDS/MDT.
+> what about -b 1024?
+> as most of the files on the MDT are 0 sized would this help too?
+> less seeking, more files allowed?
+
+There is no file data on the MDS, so that wouldn't help at all.
+It would also severely limit the maximum size of directories
+(something like 100k files).  It adds a LOT more overhead to the
+filesystem metadata.  Also, if you create your inodes at the same
+size as the blocks, and the default is 1 inode/block the entire
+filesystem will be full of inodes and no room for anything else.
+
+In the end, we don't support anything other than 4kB anyways (though
+there is some chance it may work, we've never tested it).
+
+Cheers, Andreas
+--
+Andreas Dilger
+Principal Software Engineer
+Cluster File Systems, Inc.
+
+
+
+From adilger at clusterfs.com  Thu Sep 27 13:09:02 2007
+From: adilger at clusterfs.com (Andreas Dilger)
+Date: Thu, 27 Sep 2007 14:09:02 -0600
+Subject: [Lustre-discuss] Lustre 1.6.2 + 2.6.18 - Directory index full!
+In-Reply-To: <Pine.GSO.4.64.0709271549350.25577@kleopatra.acc.umu.se>
+References: <Pine.GSO.4.64.0709271046100.2659@kleopatra.acc.umu.se>
+	<20070927090528.GA32520@schatzie.adilger.int>
+	<Pine.GSO.4.64.0709271549350.25577@kleopatra.acc.umu.se>
+Message-ID: <20070927200902.GL32520@schatzie.adilger.int>
+
+On Sep 27, 2007  16:10 +0200, Niklas Edmundsson wrote:
+> On Thu, 27 Sep 2007, Andreas Dilger wrote:
+> >On Sep 27, 2007  10:53 +0200, Niklas Edmundsson wrote:
+> >>We have 13701222 files in one directory, and creating more files there
+> >>fails even though we have lots of free inodes in the filesystem.
+> >
+> >We generally only test up to 10M files in a single directory.  If you had
+> >a perfect hash distribution you might be able to get to 25M files in the
+> >directory.
+> 
+> I suspected something like that. The error message needs some help 
+> though, I'd prefer having the directory in question in there if 
+> possible, or at least some hint on where to look.
+> 
+> >>On MDS we get this in the kernel log:
+> >>[692361.061558] LDISKFS-fs warning (device sdb2): ldiskfs_dx_add_entry: 
+> >>Directory index full!
+> >
+> >This is one of the reasons we are moving to ZFS for the back-end storage.
+> 
+> Any idea on the timeframe?
+
+The 1.8 release (planned Q1 2008) will allow new filesystems to be created
+with ZFS OSTs and MDTs.  We will require ZFS for clustered MDTs in 2.0
+(and possibly all backing stores, though it should of course be possible
+to still use 1.8 OSTs if required).
+
+Cheers, Andreas
+--
+Andreas Dilger
+Principal Software Engineer
+Cluster File Systems, Inc.
+
+
+
+From adilger at clusterfs.com  Thu Sep 27 13:10:18 2007
+From: adilger at clusterfs.com (Andreas Dilger)
+Date: Thu, 27 Sep 2007 14:10:18 -0600
+Subject: [Lustre-discuss] Lustre 1.6.2 + 2.6.18 - Directory index full!
+In-Reply-To: <0DF05B3A-DCAB-4C13-A866-B4836DD62D04@ichec.ie>
+References: <Pine.GSO.4.64.0709271046100.2659@kleopatra.acc.umu.se>
+	<20070927090528.GA32520@schatzie.adilger.int>
+	<Pine.GSO.4.64.0709271549350.25577@kleopatra.acc.umu.se>
+	<0DF05B3A-DCAB-4C13-A866-B4836DD62D04@ichec.ie>
+Message-ID: <20070927201018.GM32520@schatzie.adilger.int>
+
+On Sep 27, 2007  15:15 +0100, Alastair McKinstry wrote:
+> On 27 Sep 2007, at 15:10, Niklas Edmundsson wrote:
+> >On Thu, 27 Sep 2007, Andreas Dilger wrote:
+> >
+> >>>On MDS we get this in the kernel log:
+> >>>[692361.061558] LDISKFS-fs warning (device sdb2):  
+> >>>ldiskfs_dx_add_entry: Directory index full!
+> >>
+> >>This is one of the reasons we are moving to ZFS for the back-end  
+> >>storage.
+>
+> Is ZFS open-source ? What implications does this have for the open- 
+> source nature of Lustre?
+
+Yes, ZFS is open source (CDDL is an OSS-approved license), just not GPL.
+There are no implications, Lustre will still be open source.
+
+Cheers, Andreas
+--
+Andreas Dilger
+Principal Software Engineer
+Cluster File Systems, Inc.
+
+
+
+From Kevin.Fox at pnl.gov  Thu Sep 27 13:31:23 2007
+From: Kevin.Fox at pnl.gov (Kevin Fox)
+Date: Thu, 27 Sep 2007 13:31:23 -0700
+Subject: [Lustre-discuss] Lustre 1.6.2 + 2.6.18 - Directory index full!
+In-Reply-To: <20070927201018.GM32520@schatzie.adilger.int>
+References: <Pine.GSO.4.64.0709271046100.2659@kleopatra.acc.umu.se>
+	<20070927090528.GA32520@schatzie.adilger.int>
+	<Pine.GSO.4.64.0709271549350.25577@kleopatra.acc.umu.se>
+	<0DF05B3A-DCAB-4C13-A866-B4836DD62D04@ichec.ie>
+	<20070927201018.GM32520@schatzie.adilger.int>
+Message-ID: <1190925084.4519.48.camel@zathras.emsl.pnl.gov>
+
+How do you plan on mixing ZFS and Lustre code though? I thought CDDL
+code and GPL code were incompatible (That's why its not crammed into the
+kernel proper). Are you looking at having separate processes between the
+ZFS code and Lustre or are you going to re-license Lustre? Either one
+seems bad...
+
+Kevin
+
+On Thu, 2007-09-27 at 14:10 -0600, Andreas Dilger wrote:
+> On Sep 27, 2007  15:15 +0100, Alastair McKinstry wrote:
+> > On 27 Sep 2007, at 15:10, Niklas Edmundsson wrote:
+> > >On Thu, 27 Sep 2007, Andreas Dilger wrote:
+> > >
+> > >>>On MDS we get this in the kernel log:
+> > >>>[692361.061558] LDISKFS-fs warning (device sdb2):  
+> > >>>ldiskfs_dx_add_entry: Directory index full!
+> > >>
+> > >>This is one of the reasons we are moving to ZFS for the back-end  
+> > >>storage.
+> >
+> > Is ZFS open-source ? What implications does this have for the open- 
+> > source nature of Lustre?
+> 
+> Yes, ZFS is open source (CDDL is an OSS-approved license), just not GPL.
+> There are no implications, Lustre will still be open source.
+> 
+> Cheers, Andreas
+> --
+> Andreas Dilger
+> Principal Software Engineer
+> Cluster File Systems, Inc.
+> 
+> _______________________________________________
+> Lustre-discuss mailing list
+> Lustre-discuss at clusterfs.com
+> https://mail.clusterfs.com/mailman/listinfo/lustre-discuss
+
+
+
+From frank.mietke at informatik.tu-chemnitz.de  Fri Sep 28 00:51:41 2007
+From: frank.mietke at informatik.tu-chemnitz.de (Frank Mietke)
+Date: Fri, 28 Sep 2007 09:51:41 +0200
+Subject: [Lustre-discuss] Problem with OST state
+In-Reply-To: <20070927174013.GI32520@schatzie.adilger.int>
+References: <20070927124735.GN8834@saul.informatik.tu-chemnitz.de>
+	<20070927174013.GI32520@schatzie.adilger.int>
+Message-ID: <20070928075140.GX8834@saul.informatik.tu-chemnitz.de>
+
+Hi,
+
+On Thu, Sep 27, 2007 at 11:40:13AM -0600, Andreas Dilger wrote:
+> On Sep 27, 2007  14:47 +0200, Frank Mietke wrote:
+> > we have a problem with lustre-1.6.0b7 installation where two OSTs are running
+> > on one server but only one of the OSTs is in state FULL and the other in
+> > DISCONN. Both are successfully mounted and the recovery_status is "Complete".
+> > 
+> > cat /proc/fs/lustre/osc/chicfs-OST0002-osc/ost_server_uuid
+> > chicfs-OST0002_UUID     DISCONN
+> > 
+> > cat /proc/fs/lustre/osc/chicfs-OST0000-osc/ost_server_uuid
+> > chicfs-OST0000_UUID     FULL
+> 
+> You should be able to do "lctl --device %chicfs-OST0002-osc recover"
+thanks for your answer. We found that the RAID controllers on the OSS had
+another RAID setup than before. This led to the behavior that some OSTs
+changed their physical OSS and thus wasn't reachable for the MDS.
+
+Best Regards
+Frank
+
+
+> 
+> Cheers, Andreas
+> --
+> Andreas Dilger
+> Principal Software Engineer
+> Cluster File Systems, Inc.
+> 
+> 
+
+-- 
+Dipl.-Inf. Frank Mietke     |     Fakult?tsrechen- und Informationszentrum
+Tel.: 0371 - 531 - 35538    |     Fak. f?r Informatik
+Fax:  0371 - 531 8 35538    |     TU-Chemnitz
+Key-ID: 60F59599            |     frank.mietke at informatik.tu-chemnitz.de
+
+
+
+From Niklas.Edmundsson at hpc2n.umu.se  Fri Sep 28 02:47:53 2007
+From: Niklas.Edmundsson at hpc2n.umu.se (Niklas Edmundsson)
+Date: Fri, 28 Sep 2007 11:47:53 +0200 (MEST)
+Subject: [Lustre-discuss] llog_origin_handle_cancel and other LustreErrors
+Message-ID: <Pine.GSO.4.64.0709281138090.18237@kleopatra.acc.umu.se>
+
+
+Hi again!
+
+Same setup as before (Lustre 1.6.2 + 2.6.18 kernel).
+
+This time things suddenly started to be very slow (as in periodically 
+stalling), and we found a bunch of llog_ LustreErrors on the MDS. Some 
+time later stuff had automagically recovered and is back to normal 
+speed.
+
+Any idea on the meaning/cause of these errors?
+
+What are the seriousness of "LustreError" errors in general? Does it 
+mean "this is bad, but normal", "this is bad, shouldn't happen" or 
+"you've found yet another bug"?
+
+-------------------8<---------------------------
+[20816.788257] LustreError: 6558:0:(llog_server.c:433:llog_origin_handle_cancel()) cancel 124 llog-records failed: -22
+[20818.183547] LustreError: 6111:0:(llog_server.c:433:llog_origin_handle_cancel()) cancel 124 llog-records failed: -22
+[20818.619593] LustreError: 6113:0:(llog_server.c:433:llog_origin_handle_cancel()) cancel 124 llog-records failed: -22
+[20883.882198] LustreError: 6109:0:(llog_lvfs.c:597:llog_lvfs_create()) error looking up logfile 0xa00008:0x7a7c6d4f: rc -2
+[20883.893487] LustreError: 6109:0:(llog_cat.c:158:llog_cat_id2handle()) error opening log id 0xa00008:7a7c6d4f: rc -2
+[20883.904307] LustreError: 6109:0:(llog_cat.c:309:llog_cat_cancel_records()) Cannot find log 0xa00008
+[20883.913791] LustreError: 6109:0:(llog_server.c:433:llog_origin_handle_cancel()) cancel 124 llog-records failed: -22
+[21077.251091] LustreError: 6556:0:(llog_server.c:433:llog_origin_handle_cancel()) cancel 124 llog-records failed: -22
+[21077.298404] LustreError: 6417:0:(llog_server.c:433:llog_origin_handle_cancel()) cancel 124 llog-records failed: -22
+[21077.309636] LustreError: 6417:0:(llog_server.c:433:llog_origin_handle_cancel()) Skipped 3 previous similar messages
+[21077.372758] LustreError: 6418:0:(llog_server.c:433:llog_origin_handle_cancel()) cancel 124 llog-records failed: -22
+[21077.383486] LustreError: 6418:0:(llog_server.c:433:llog_origin_handle_cancel()) Skipped 17 previous similar messages
+[21423.962709] LustreError: 6558:0:(llog_server.c:433:llog_origin_handle_cancel()) cancel 124 llog-records failed: -22
+[21423.973539] LustreError: 6558:0:(llog_server.c:433:llog_origin_handle_cancel()) Skipped 1 previous similar message
+[21874.084438] LustreError: 6109:0:(llog_server.c:433:llog_origin_handle_cancel()) cancel 124 llog-records failed: -22
+[21882.561323] LustreError: 6417:0:(llog_server.c:433:llog_origin_handle_cancel()) cancel 124 llog-records failed: -22
+-------------------8<---------------------------
+
+
+
+/Nikke
+-- 
+-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
+  Niklas Edmundsson, Admin @ {acc,hpc2n}.umu.se     |    nikke at hpc2n.umu.se
+---------------------------------------------------------------------------
+  "Contact Admiral Riker, Starbase 247." - Picard
+=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+
+
+
+From Kevin.Fox at pnl.gov  Fri Sep 28 09:47:38 2007
+From: Kevin.Fox at pnl.gov (Kevin Fox)
+Date: Fri, 28 Sep 2007 09:47:38 -0700
+Subject: [Lustre-discuss] Lustre 1.6.2 + 2.6.18 - Directory index full!
+In-Reply-To: <20070927200902.GL32520@schatzie.adilger.int>
+References: <Pine.GSO.4.64.0709271046100.2659@kleopatra.acc.umu.se>
+	<20070927090528.GA32520@schatzie.adilger.int>
+	<Pine.GSO.4.64.0709271549350.25577@kleopatra.acc.umu.se>
+	<20070927200902.GL32520@schatzie.adilger.int>
+Message-ID: <1190998058.4519.60.camel@zathras.emsl.pnl.gov>
+
+Is there a reason clustered metadata must be ZFS only?
+
+Kevin
+
+On Thu, 2007-09-27 at 14:09 -0600, Andreas Dilger wrote:
+> On Sep 27, 2007  16:10 +0200, Niklas Edmundsson wrote:
+> > On Thu, 27 Sep 2007, Andreas Dilger wrote:
+> > >On Sep 27, 2007  10:53 +0200, Niklas Edmundsson wrote:
+> > >>We have 13701222 files in one directory, and creating more files there
+> > >>fails even though we have lots of free inodes in the filesystem.
+> > >
+> > >We generally only test up to 10M files in a single directory.  If you had
+> > >a perfect hash distribution you might be able to get to 25M files in the
+> > >directory.
+> > 
+> > I suspected something like that. The error message needs some help 
+> > though, I'd prefer having the directory in question in there if 
+> > possible, or at least some hint on where to look.
+> > 
+> > >>On MDS we get this in the kernel log:
+> > >>[692361.061558] LDISKFS-fs warning (device sdb2): ldiskfs_dx_add_entry: 
+> > >>Directory index full!
+> > >
+> > >This is one of the reasons we are moving to ZFS for the back-end storage.
+> > 
+> > Any idea on the timeframe?
+> 
+> The 1.8 release (planned Q1 2008) will allow new filesystems to be created
+> with ZFS OSTs and MDTs.  We will require ZFS for clustered MDTs in 2.0
+> (and possibly all backing stores, though it should of course be possible
+> to still use 1.8 OSTs if required).
+> 
+> Cheers, Andreas
+> --
+> Andreas Dilger
+> Principal Software Engineer
+> Cluster File Systems, Inc.
+> 
+> _______________________________________________
+> Lustre-discuss mailing list
+> Lustre-discuss at clusterfs.com
+> https://mail.clusterfs.com/mailman/listinfo/lustre-discuss
+
+
+
+From adilger at clusterfs.com  Fri Sep 28 10:29:02 2007
+From: adilger at clusterfs.com (Andreas Dilger)
+Date: Fri, 28 Sep 2007 11:29:02 -0600
+Subject: [Lustre-discuss] Lustre 1.6.2 + 2.6.18 - Directory index full!
+In-Reply-To: <1190998058.4519.60.camel@zathras.emsl.pnl.gov>
+References: <Pine.GSO.4.64.0709271046100.2659@kleopatra.acc.umu.se>
+	<20070927090528.GA32520@schatzie.adilger.int>
+	<Pine.GSO.4.64.0709271549350.25577@kleopatra.acc.umu.se>
+	<20070927200902.GL32520@schatzie.adilger.int>
+	<1190998058.4519.60.camel@zathras.emsl.pnl.gov>
+Message-ID: <20070928172902.GW32520@schatzie.adilger.int>
+
+On Sep 28, 2007  09:47 -0700, Kevin Fox wrote:
+> Is there a reason clustered metadata must be ZFS only?
+
+Because it requires changes to the on-disk directory format of ext3 in
+a way that isn't likely to ever make it into upstream ext4 and we don't
+want to support that indefinitely (adds a pointer to a remote MDS for an
+inode and stores 128-bit file identifiers).  Also, we need mechanism to
+do name->value lookups in the filesystem (also doesn't exist in ext3).
+Both of these are possible with ZFS.
+
+> On Thu, 2007-09-27 at 14:09 -0600, Andreas Dilger wrote:
+> > On Sep 27, 2007  16:10 +0200, Niklas Edmundsson wrote:
+> > > On Thu, 27 Sep 2007, Andreas Dilger wrote:
+> > > >On Sep 27, 2007  10:53 +0200, Niklas Edmundsson wrote:
+> > > >>We have 13701222 files in one directory, and creating more files there
+> > > >>fails even though we have lots of free inodes in the filesystem.
+> > > >
+> > > >We generally only test up to 10M files in a single directory.  If you had
+> > > >a perfect hash distribution you might be able to get to 25M files in the
+> > > >directory.
+> > > 
+> > > I suspected something like that. The error message needs some help 
+> > > though, I'd prefer having the directory in question in there if 
+> > > possible, or at least some hint on where to look.
+> > > 
+> > > >>On MDS we get this in the kernel log:
+> > > >>[692361.061558] LDISKFS-fs warning (device sdb2): ldiskfs_dx_add_entry: 
+> > > >>Directory index full!
+> > > >
+> > > >This is one of the reasons we are moving to ZFS for the back-end storage.
+> > > 
+> > > Any idea on the timeframe?
+> > 
+> > The 1.8 release (planned Q1 2008) will allow new filesystems to be created
+> > with ZFS OSTs and MDTs.  We will require ZFS for clustered MDTs in 2.0
+> > (and possibly all backing stores, though it should of course be possible
+> > to still use 1.8 OSTs if required).
+
+Cheers, Andreas
+--
+Andreas Dilger
+Principal Software Engineer
+Cluster File Systems, Inc.
+
+
+

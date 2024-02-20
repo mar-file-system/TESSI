@@ -1,0 +1,1103 @@
+From jhammond at tacc.utexas.edu  Mon Aug  1 09:10:15 2011
+From: jhammond at tacc.utexas.edu (John Hammond)
+Date: Mon, 1 Aug 2011 11:10:15 -0500
+Subject: [Lustre-devel] open(), getattr(), and negative dentries
+In-Reply-To: <6A3C39D7-A059-4E1A-B73E-92F84AA2DE7D@whamcloud.com>
+References: <4E2888D2.7090201@tacc.utexas.edu>
+	<6A3C39D7-A059-4E1A-B73E-92F84AA2DE7D@whamcloud.com>
+Message-ID: <4E36CFE7.3020902@tacc.utexas.edu>
+
+On 07/27/2011 12:02 AM, Oleg Drokin wrote:
+> Hello!
+> 
+> On Jul 21, 2011, at 4:15 PM, John Hammond wrote:
+> 
+>> It appears that stating a non-existent file on Lustre causes a negative
+>> dentry to be created, while opening it does not.  If I understand
+>> correctly, this also means that every open of a non-existent file that
+>> misses the dentry cache causes an RPC to the MDS.  Is there a reason for
+>> the difference?
+> 
+> Open does not return a parent dir lock back to the client and this is what guards
+> negative dentries.
+> So if you do ls -l on the dir, and then do your open (without O_CREATE!)
+> the negative dentry will be cached because of the pre-existing lock.
+> In fact is the dir was last modified sufficiently long ago (like several seconds have passed),
+> even lookup of the dir itself (even done as part of the path lookup to the filename)
+> would return you the needed lock and negative dentry will be cached.
+
+Thanks, that's helpful.  I assume that "sufficiently long ago" means
+after ns_ctime_age_limit (10 by default) seconds have passed.  I
+adjusted my test case to account for this but there still seems to be an
+issue here, so I created LU-560.
+
+Best,
+
+John
+
+-- 
+John L. Hammond, Ph.D.
+TACC, The University of Texas at Austin
+jhammond at tacc.utexas.edu
+(512) 471-9304
+
+
+From Mark.Hills at framestore.com  Thu Aug  4 10:24:28 2011
+From: Mark.Hills at framestore.com (Mark Hills)
+Date: Thu, 4 Aug 2011 18:24:28 +0100 (BST)
+Subject: [Lustre-devel] Bad page state after unlink (was Re: Hangs with
+ cgroup memory controller)
+In-Reply-To: <alpine.LFD.2.01.1107291504480.15112@sys880.ldn.framestore.com>
+References: <alpine.LFD.2.01.1107271556070.7176@sys880.ldn.framestore.com>
+	<BE324D9D-3D7B-4D9E-8F3D-316F259871FC@whamcloud.com>
+	<alpine.LFD.2.01.1107271922560.7176@sys880.ldn.framestore.com>
+	<5DBD4462-2AAA-4657-9EBB-9633336DD972@whamcloud.com>
+	<alpine.LFD.2.01.1107281415530.6411@sys880.ldn.framestore.com>
+	<E33CBAC5-08FA-49CA-970C-605A4DBE7B3B@whamcloud.com>
+	<alpine.LFD.2.01.1107291504480.15112@sys880.ldn.framestore.com>
+Message-ID: <alpine.LFD.2.01.1108041707220.8709@sys880.ldn.framestore.com>
+
+On Fri, 29 Jul 2011, Mark Hills wrote:
+
+[...]
+> Hosts with Lustre mounted via an NFS gateway perform flawlessly for months 
+> (and they still have Lustre modules loaded.) Whereas a host with Lustre 
+> mounted directly (and no other changes) fails -- it can be made to block a 
+> cgroup in 10 minutes or so.
+
+Following this up, I seem to have a reproducable test case of a page bug, 
+on a kernel with more debugging features.
+
+At first it appeared with Bonnie. I looked more closely and the bug occurs 
+on unlink() of the file shortly after it was written to. Presumably with 
+pages still in the local cache (pending writes?) It seems unlink is 
+affected, but not truncate.
+
+  $ dd if=/dev/zero of=/net/lustre/file bs=4096 count=1
+  $ rm /net/lustre/file
+  BUG: Bad page state in process rm  pfn:21fe6a
+  page:ffffea00076fa730 flags:800000000000000c count:0 mapcount:0 mapping:(null) index:1
+
+If there is a delay of a few seconds before the rm, all is okay. Truncate 
+works, but a subsequent unlink rm can fail if it is quick enough.
+
+The task does not need to be running in a cgroup for the "Bad page" to be 
+reported, although the kernel is build with cgroup.
+
+I can't be certain this is the same bug seen on the production system 
+(which uses packaged kernel etc.) but it seems like a good start :-) It 
+also correlates with it. It seems the production kernel glosses over this 
+bug, but when a cgroup is used the symptoms start to show.
+
+  $ uname -a
+  Linux joker 2.6.32.28-mh #27 SMP PREEMPT Thu Aug 4 17:15:46 BST 2011 x86_64 x86_64 x86_64 GNU/Linux
+
+  Lustre source: Git 9302433 (beyond v1_8_6_80)
+  Reproduced with 1.8.6 server (Whamcloud release), and also 1.8.3.
+
+Thanks
+
+-- 
+Mark
+
+
+BUG: Bad page state in process rm  pfn:21fe6a
+page:ffffea00076fa730 flags:800000000000000c count:0 mapcount:0 mapping:(null) index:1
+Pid: 24724, comm: rm Tainted: G    B      2.6.32.28-mh #27
+Call Trace:
+ [<ffffffff81097ebc>] ? bad_page+0xcc/0x130
+ [<ffffffffa059f119>] ? ll_page_removal_cb+0x1e9/0x4d0 [lustre]
+ [<ffffffffa03b17a3>] ? __ldlm_handle2lock+0x93/0x3b0 [ptlrpc]
+ [<ffffffffa04c6522>] ? cache_remove_lock+0x182/0x268 [osc]
+ [<ffffffffa04ad95d>] ? osc_extent_blocking_cb+0x29d/0x2d0 [osc]
+ [<ffffffff81383920>] ? _spin_unlock+0x10/0x30
+ [<ffffffffa03b23a5>] ? ldlm_cancel_callback+0x55/0xe0 [ptlrpc]
+ [<ffffffffa03cb3c7>] ? ldlm_cli_cancel_local+0x67/0x340 [ptlrpc]
+ [<ffffffff81383920>] ? _spin_unlock+0x10/0x30
+ [<ffffffffa03cd65a>] ? ldlm_cancel_list+0xea/0x230 [ptlrpc]
+ [<ffffffffa02e1312>] ? lnet_md_unlink+0x42/0x2d0 [lnet]
+ [<ffffffff81383920>] ? _spin_unlock+0x10/0x30
+ [<ffffffffa03cd939>] ? ldlm_cancel_resource_local+0x199/0x2b0 [ptlrpc]
+ [<ffffffffa029a629>] ? cfs_alloc+0x89/0xf0 [libcfs]
+ [<ffffffffa04b0c22>] ? osc_destroy+0x112/0x720 [osc]
+ [<ffffffffa05608ab>] ? lov_prep_destroy_set+0x27b/0x960 [lov]
+ [<ffffffff8138374e>] ? _spin_lock_irqsave+0x1e/0x50
+ [<ffffffffa054adc4>] ? lov_destroy+0x584/0xf40 [lov]
+ [<ffffffffa05575ed>] ? lov_unpackmd+0x4bd/0x8e0 [lov]
+ [<ffffffffa05d9e98>] ? ll_objects_destroy+0x4c8/0x1820 [lustre]
+ [<ffffffffa03f7cbe>] ? lustre_swab_buf+0xfe/0x180 [ptlrpc]
+ [<ffffffff8138374e>] ? _spin_lock_irqsave+0x1e/0x50
+ [<ffffffffa05db940>] ? ll_unlink_generic+0x2e0/0x3a0 [lustre]
+ [<ffffffff810d7309>] ? vfs_unlink+0x89/0xd0
+ [<ffffffff810e634c>] ? mnt_want_write+0x5c/0xb0
+ [<ffffffff810dac89>] ? do_unlinkat+0x199/0x1d0
+ [<ffffffff810cc8d5>] ? sys_faccessat+0x1a5/0x1f0
+ [<ffffffff8100b5ab>] ? system_call_fastpath+0x16/0x1b
+
+
+From adilger at whamcloud.com  Tue Aug  9 08:27:52 2011
+From: adilger at whamcloud.com (Andreas Dilger)
+Date: Tue, 9 Aug 2011 09:27:52 -0600
+Subject: [Lustre-devel] Parallel Data Storage Workshop 2011 CFP
+References: <CAGfFL-xcEjZQS_9ALQMroj242jBTSUSqYAdH+A80SyK4G3Nm2w@mail.gmail.com>
+Message-ID: <7464F82C-89F3-4DB7-B121-9A071A664754@dilger.ca>
+
+
+6th Parallel Data Storage Workshop
+Sunday, November 13, 2011, 9:00am - 5:30pm
+http://www.pdsi-scidac.org/events/PDSW11/
+Held in conjunction with SC11 in Seattle, WA 
+
+************************
+PDSW11 CALL FOR PAPERS
+************************
+Workshop Abstract: Computational scientists are no longer satisfied with
+petascale infrastructures.  Their demands for finer and finer spatial and
+temporal resolutions are driving parallel storage systems to larger and larger
+scales of parallelism and concurrency.  This scale creates new problems and
+exacerbates old ones in areas such as storage capacity, performance,
+concurrency, data retrieval, reliability, availability, and manageability.
+Additionally, new technologies such as cloud storage are encouraging scientists
+to preserve more old data and to expand their analyses to include data 
+from a wider range of previous computations.  Paying special attention to
+issues in which community collaboration can be crucial such as problem
+identification, workload capture, solution interoperability, standards with
+community buy-in, and shared tools, this one-day workshop seeks contributions
+in the form of papers and posters on relevant topics, including but not limited
+to: 
+
+* performance and benchmarking results and tools, 
+* failure tolerance, 
+* APIs and protocols for high performance features, 
+* parallel file systems, 
+* high bandwidth storage architectures, 
+* wide area file systems, 
+* metadata intensive workloads, 
+* information extraction,
+* autonomics for HPC storage, 
+* checkpoint/restart,  
+* virtualization for storage systems,
+* archival storage advances, and 
+* resource management innovations.
+
+************************
+Paper Submissions:
+************************
+Due: Friday, September 16, 2011, 11:59 PM PDT
+Notification: Tuesday, October 11, 2011
+Camera-ready due: Sunday, November 6, 2011
+Slides due: Friday, Nov. 11, 2011 
+
+The parallel data storage workshop holds a peer reviewed competitive process
+for selecting extended abstracts and short papers.  Submit a not previously
+published extended abstract of up to 5 pages, not less than 10 point font, in a
+PDF file as instructed on the workshop web site.  Submitted papers will be
+reviewed under the supervision of the workshop program committee. Submissions
+should indicate authors and affiliations.  Final papers must not be longer than
+5 pages.  Selected papers and associated talk slides will be made available on
+the workshop web site; the papers will also be published in the digital library
+of the IEEE or ACM. 
+
+************************
+Poster Submissions:
+************************
+Due: Monday, November 7, 2011, 11:59 PM PDT
+Notification: Wednesday, November 19, 2011
+
+The PDSW program committee highly encourages authors of accepted papers to
+present posters of their work. Additional submissions for technical poster
+presentation will be considered if they are marked as such and include title
+and author list and a short abstract. Further specifications for poster
+production will be available on the workshop web site.
+
+************************
+Program Committee:
+************************
+John Bent, Los Alamos National Laboratory (PC Chair)
+Randal Burns, Johns Hopkins University 
+Andreas Dilger, Whamcloud, Inc. 
+Yong Chen, Texas Tech University 
+Haryadi Gunawi, University of California, Berkeley 
+Adam Manzanares, Los Alamos National Laboratory 
+Dutch Meyer, University of British Columbia 
+Ethan Miller, University of California, Santa Cruz 
+Ron Oldfield, Sandia National Laboratory 
+Vijayan Prabhakaran, Microsoft Research 
+Karsten Schwan, Georgia Tech 
+Brad Settlemyer, Oak Ridge National Laboratory 
+Raju Rangaswami, Florida International University 
+Doug Thain, University of Notre Dame 
+Rob Ross, Argonne National Laboratory 
+
+************************
+Steering Committee:
+************************
+Scott Brandt, University of California, Santa Cruz
+Evan J. Felix, Pacific Northwest National Laboratory
+Garth A. Gibson, Carnegie Mellon University and Panasas Inc.
+Gary Grider, Los Alamos National Laboratory
+Peter Honeyman, University of Michigan, Ann Arbor, Center for Information Technology Integration
+Bill Kramer, National Center for Supercomputing Applications/University of Illinois Urbana-Champaign
+Darrell Long, University of California, Santa Cruz
+Carlos Maltzahn, University of California, Santa Cruz
+Philip C. Roth, Oak Ridge National Laboratory
+John Shalf, National Energy Research Scientific Computing Center, Lawrence Berkeley National Laboratory
+Lee Ward, Sandia National Laboratories
+
+
+
+
+
+From nirant.puntambekar at oracle.com  Tue Aug  9 11:00:38 2011
+From: nirant.puntambekar at oracle.com (nirant.puntambekar at oracle.com)
+Date: Tue, 9 Aug 2011 11:00:38 -0700 (PDT)
+Subject: [Lustre-devel] Auto Reply: Lustre-devel Digest, Vol 65, Issue 3
+Message-ID: <e82e9cab-c734-4ecd-8c06-eedf0db39125@default>
+
+This is an auto-replied message. I am currently out of the office and will be back on Aug 15th. For anything urgent in my absence, do contact my manager Scott.Meadows at oracle.com.
+
+
+
+
+From johann at whamcloud.com  Wed Aug 10 07:23:41 2011
+From: johann at whamcloud.com (Johann Lombardi)
+Date: Wed, 10 Aug 2011 16:23:41 +0200
+Subject: [Lustre-devel] client i/o and PG_writeback
+Message-ID: <20110810142341.GA15190@granier.hd.free.fr>
+
+Hi there,
+
+I am working on a new client-side RPC engine using the per-stripe radix tree to select pages and trying to minimize RPC fragmentation. This should allow us to consume grant space more intelligently and to support blocksize > pagesize (e.g. for ext4 bigalloc).
+
+For historical reasons (lustre was initially developed for 2.4 kernels), the 1.8 client holds the page lock over bulk write RPCs. Some basic support for PG_writeback was added back in 2007 (see bugzilla ticket 11710), but the page lock is still held until RPC completion.
+Like the 1.8 client, the new client i/o stack introduced in 2.0 also keeps pages locked over transfer. I'm estimating the effort involved in implementing full PG_writeback support in CLIO. Does anybody have any technical concerns about this change?
+
+Thanks in advance.
+
+Cheers,
+Johann
+-- 
+Johann Lombardi
+Whamcloud, Inc.
+www.whamcloud.com
+
+
+From Nikita_Danilov at xyratex.com  Wed Aug 10 07:46:04 2011
+From: Nikita_Danilov at xyratex.com (Nikita Danilov)
+Date: Wed, 10 Aug 2011 18:46:04 +0400
+Subject: [Lustre-devel] client i/o and PG_writeback
+In-Reply-To: <20110810142341.GA15190@granier.hd.free.fr>
+References: <20110810142341.GA15190@granier.hd.free.fr>
+Message-ID: <6CDBCC5305CC4312AF061B9F30D3DCF3@xyratex.com>
+
+On Wednesday, August 10, 2011 at 18:23 , Johann Lombardi wrote:
+> Hi there,
+
+Hi Johann, [sorry, I hit a send button accidentally a few minutes ago] 
+> 
+> I am working on a new client-side RPC engine using the per-stripe radix tree to select pages and trying to minimize RPC fragmentation. This should allow us to consume grant space more intelligently and to support blocksize > pagesize (e.g. for ext4 bigalloc).
+> 
+> For historical reasons (lustre was initially developed for 2.4 kernels), the 1.8 client holds the page lock over bulk write RPCs. Some basic support for PG_writeback was added back in 2007 (see bugzilla ticket 11710), but the page lock is still held until RPC completion.
+> Like the 1.8 client, the new client i/o stack introduced in 2.0 also keeps pages locked over transfer. I'm estimating the effort involved in implementing full PG_writeback support in CLIO. Does anybody have any technical concerns about this change?
+
+the reasons to use the same lock for page-in and page-out in CLIO were
+
+ * portability: Solaris, Windows and pretty much every kernel around use the same lock and
+
+ * simplicity.
+
+I don't think there are any serious problems with splitting the lock, one has to be careful with checking all places where page is assumed to be "owned" by IO and making certain the lock is taken, if necessary.
+
+> 
+> Thanks in advance.
+> 
+> Cheers,
+> Johann
+
+Nikita.
+
+> -- 
+> Johann Lombardi
+> Whamcloud, Inc.
+> www.whamcloud.com (http://www.whamcloud.com)
+
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20110810/267c3583/attachment.htm>
+
+From jinshan.xiong at whamcloud.com  Thu Aug 11 11:21:04 2011
+From: jinshan.xiong at whamcloud.com (Jinshan Xiong)
+Date: Thu, 11 Aug 2011 11:21:04 -0700
+Subject: [Lustre-devel] client i/o and PG_writeback
+In-Reply-To: <6CDBCC5305CC4312AF061B9F30D3DCF3@xyratex.com>
+References: <20110810142341.GA15190@granier.hd.free.fr>
+	<6CDBCC5305CC4312AF061B9F30D3DCF3@xyratex.com>
+Message-ID: <1313086864.2307.8.camel@titan>
+
+
+Another problem I can think of is page checksum, if a page changes again
+during transfer, wrong checksum will be detected on the server side.
+
+On Wed, 2011-08-10 at 18:46 +0400, Nikita Danilov wrote:
+> On Wednesday, August 10, 2011 at 18:23 , Johann Lombardi wrote:
+> > Hi there,
+> > 
+> 
+> 
+> Hi Johann, [sorry, I hit a send button accidentally a few minutes
+> ago] 
+> > 
+> > I am working on a new client-side RPC engine using the per-stripe
+> > radix tree to select pages and trying to minimize RPC fragmentation.
+> > This should allow us to consume grant space more intelligently and
+> > to support blocksize > pagesize (e.g. for ext4 bigalloc).
+> > 
+> > For historical reasons (lustre was initially developed for 2.4
+> > kernels), the 1.8 client holds the page lock over bulk write RPCs.
+> > Some basic support for PG_writeback was added back in 2007 (see
+> > bugzilla ticket 11710), but the page lock is still held until RPC
+> > completion.
+> > Like the 1.8 client, the new client i/o stack introduced in 2.0 also
+> > keeps pages locked over transfer. I'm estimating the effort involved
+> > in implementing full PG_writeback support in CLIO. Does anybody have
+> > any technical concerns about this change?
+> > 
+> 
+> 
+> the reasons to use the same lock for page-in and page-out in CLIO were
+> 
+> 
+>     * portability: Solaris, Windows and pretty much every kernel
+> around use the same lock and
+> 
+> 
+>     * simplicity.
+> 
+> 
+> I don't think there are any serious problems with splitting the lock,
+> one has to be careful with checking all places where page is assumed
+> to be "owned" by IO and making certain the lock is taken, if
+> necessary.
+>  
+> > 
+> > Thanks in advance.
+> > 
+> > Cheers,
+> > Johann
+> > 
+> 
+> 
+> Nikita.
+>  
+> > -- 
+> > Johann Lombardi
+> > Whamcloud, Inc.
+> > www.whamcloud.com
+> > 
+> 
+> 
+> _______________________________________________
+> Lustre-devel mailing list
+> Lustre-devel at lists.lustre.org
+> http://lists.lustre.org/mailman/listinfo/lustre-devel
+
+-- 
+
+
+
+
+From adilger at whamcloud.com  Thu Aug 11 12:38:33 2011
+From: adilger at whamcloud.com (Andreas Dilger)
+Date: Thu, 11 Aug 2011 13:38:33 -0600
+Subject: [Lustre-devel] client i/o and PG_writeback
+In-Reply-To: <1313086864.2307.8.camel@titan>
+References: <20110810142341.GA15190@granier.hd.free.fr>
+	<6CDBCC5305CC4312AF061B9F30D3DCF3@xyratex.com>
+	<1313086864.2307.8.camel@titan>
+Message-ID: <2E3B1EF6-1075-47A7-8D83-0FFACDCBC7E2@whamcloud.com>
+
+On 2011-08-11, at 12:21 PM, Jinshan Xiong wrote:
+> Another problem I can think of is page checksum, if a page changes again
+> during transfer, wrong checksum will be detected on the server side.
+
+Actually, the kernel now uses PG_writeback to protect the page from being
+modified while it is being written to disk (or in our case sent to the
+network).  This was recently fixed for ext4 and other filesystems so that
+they can run properly on devices that support T10-DIF checksums.  Otherwise
+the disk keeps reporting checksum errors for files that were modified during
+IO.
+
+Lustre has a workaround for the case where the page is mmapped and is
+modified during RPC sending (the only case today where the page can be
+modified during IO), but it would be better not to have this workaround
+at all.  In this case the OSS detects the checksum error and the client
+resends like any other data corruption, but there is a flag in the RPC
+that silences the error messages that would otherwise be printed.
+
+> On Wed, 2011-08-10 at 18:46 +0400, Nikita Danilov wrote:
+>> On Wednesday, August 10, 2011 at 18:23 , Johann Lombardi wrote:
+>>> Hi there,
+>>> 
+>> 
+>> 
+>> Hi Johann, [sorry, I hit a send button accidentally a few minutes
+>> ago] 
+>>> 
+>>> I am working on a new client-side RPC engine using the per-stripe
+>>> radix tree to select pages and trying to minimize RPC fragmentation.
+>>> This should allow us to consume grant space more intelligently and
+>>> to support blocksize > pagesize (e.g. for ext4 bigalloc).
+>>> 
+>>> For historical reasons (lustre was initially developed for 2.4
+>>> kernels), the 1.8 client holds the page lock over bulk write RPCs.
+>>> Some basic support for PG_writeback was added back in 2007 (see
+>>> bugzilla ticket 11710), but the page lock is still held until RPC
+>>> completion.
+>>> Like the 1.8 client, the new client i/o stack introduced in 2.0 also
+>>> keeps pages locked over transfer. I'm estimating the effort involved
+>>> in implementing full PG_writeback support in CLIO. Does anybody have
+>>> any technical concerns about this change?
+>>> 
+>> 
+>> 
+>> the reasons to use the same lock for page-in and page-out in CLIO were
+>> 
+>> 
+>>    * portability: Solaris, Windows and pretty much every kernel
+>> around use the same lock and
+>> 
+>> 
+>>    * simplicity.
+>> 
+>> 
+>> I don't think there are any serious problems with splitting the lock,
+>> one has to be careful with checking all places where page is assumed
+>> to be "owned" by IO and making certain the lock is taken, if
+>> necessary.
+>> 
+>>> 
+>>> Thanks in advance.
+>>> 
+>>> Cheers,
+>>> Johann
+>>> 
+>> 
+>> 
+>> Nikita.
+>> 
+>>> -- 
+>>> Johann Lombardi
+>>> Whamcloud, Inc.
+>>> www.whamcloud.com
+>>> 
+>> 
+>> 
+>> _______________________________________________
+>> Lustre-devel mailing list
+>> Lustre-devel at lists.lustre.org
+>> http://lists.lustre.org/mailman/listinfo/lustre-devel
+> 
+> -- 
+> 
+> 
+> _______________________________________________
+> Lustre-devel mailing list
+> Lustre-devel at lists.lustre.org
+> http://lists.lustre.org/mailman/listinfo/lustre-devel
+
+
+Cheers, Andreas
+--
+Andreas Dilger 
+Principal Engineer
+Whamcloud, Inc.
+
+
+
+
+
+From jinshan.xiong at whamcloud.com  Thu Aug 11 14:40:23 2011
+From: jinshan.xiong at whamcloud.com (Jinshan Xiong)
+Date: Thu, 11 Aug 2011 14:40:23 -0700
+Subject: [Lustre-devel] client i/o and PG_writeback
+In-Reply-To: <2E3B1EF6-1075-47A7-8D83-0FFACDCBC7E2@whamcloud.com>
+References: <20110810142341.GA15190@granier.hd.free.fr>
+	<6CDBCC5305CC4312AF061B9F30D3DCF3@xyratex.com>
+	<1313086864.2307.8.camel@titan>
+	<2E3B1EF6-1075-47A7-8D83-0FFACDCBC7E2@whamcloud.com>
+Message-ID: <1313098823.2248.2.camel@titan>
+
+On Thu, 2011-08-11 at 13:38 -0600, Andreas Dilger wrote:
+> On 2011-08-11, at 12:21 PM, Jinshan Xiong wrote:
+> > Another problem I can think of is page checksum, if a page changes again
+> > during transfer, wrong checksum will be detected on the server side.
+> 
+> Actually, the kernel now uses PG_writeback to protect the page from being
+> modified while it is being written to disk (or in our case sent to the
+> network).  This was recently fixed for ext4 and other filesystems so that
+> they can run properly on devices that support T10-DIF checksums.  Otherwise
+> the disk keeps reporting checksum errors for files that were modified during
+> IO.
+
+This really means PG_writeback is useless. The most important benefit of
+PG_writeback is to allow to write a being flushed page.
+
+> 
+> Lustre has a workaround for the case where the page is mmapped and is
+> modified during RPC sending (the only case today where the page can be
+> modified during IO), but it would be better not to have this workaround
+> at all.  In this case the OSS detects the checksum error and the client
+> resends like any other data corruption, but there is a flag in the RPC
+> that silences the error messages that would otherwise be printed.
+> 
+> > On Wed, 2011-08-10 at 18:46 +0400, Nikita Danilov wrote:
+> >> On Wednesday, August 10, 2011 at 18:23 , Johann Lombardi wrote:
+> >>> Hi there,
+> >>> 
+> >> 
+> >> 
+> >> Hi Johann, [sorry, I hit a send button accidentally a few minutes
+> >> ago] 
+> >>> 
+> >>> I am working on a new client-side RPC engine using the per-stripe
+> >>> radix tree to select pages and trying to minimize RPC fragmentation.
+> >>> This should allow us to consume grant space more intelligently and
+> >>> to support blocksize > pagesize (e.g. for ext4 bigalloc).
+> >>> 
+> >>> For historical reasons (lustre was initially developed for 2.4
+> >>> kernels), the 1.8 client holds the page lock over bulk write RPCs.
+> >>> Some basic support for PG_writeback was added back in 2007 (see
+> >>> bugzilla ticket 11710), but the page lock is still held until RPC
+> >>> completion.
+> >>> Like the 1.8 client, the new client i/o stack introduced in 2.0 also
+> >>> keeps pages locked over transfer. I'm estimating the effort involved
+> >>> in implementing full PG_writeback support in CLIO. Does anybody have
+> >>> any technical concerns about this change?
+> >>> 
+> >> 
+> >> 
+> >> the reasons to use the same lock for page-in and page-out in CLIO were
+> >> 
+> >> 
+> >>    * portability: Solaris, Windows and pretty much every kernel
+> >> around use the same lock and
+> >> 
+> >> 
+> >>    * simplicity.
+> >> 
+> >> 
+> >> I don't think there are any serious problems with splitting the lock,
+> >> one has to be careful with checking all places where page is assumed
+> >> to be "owned" by IO and making certain the lock is taken, if
+> >> necessary.
+> >> 
+> >>> 
+> >>> Thanks in advance.
+> >>> 
+> >>> Cheers,
+> >>> Johann
+> >>> 
+> >> 
+> >> 
+> >> Nikita.
+> >> 
+> >>> -- 
+> >>> Johann Lombardi
+> >>> Whamcloud, Inc.
+> >>> www.whamcloud.com
+> >>> 
+> >> 
+> >> 
+> >> _______________________________________________
+> >> Lustre-devel mailing list
+> >> Lustre-devel at lists.lustre.org
+> >> http://lists.lustre.org/mailman/listinfo/lustre-devel
+> > 
+> > -- 
+> > 
+> > 
+> > _______________________________________________
+> > Lustre-devel mailing list
+> > Lustre-devel at lists.lustre.org
+> > http://lists.lustre.org/mailman/listinfo/lustre-devel
+> 
+> 
+> Cheers, Andreas
+> --
+> Andreas Dilger 
+> Principal Engineer
+> Whamcloud, Inc.
+> 
+> 
+> 
+
+-- 
+
+
+
+
+From johann at whamcloud.com  Fri Aug 12 04:51:19 2011
+From: johann at whamcloud.com (Johann Lombardi)
+Date: Fri, 12 Aug 2011 13:51:19 +0200
+Subject: [Lustre-devel] client i/o and PG_writeback
+In-Reply-To: <1313098823.2248.2.camel@titan>
+References: <20110810142341.GA15190@granier.hd.free.fr>
+	<6CDBCC5305CC4312AF061B9F30D3DCF3@xyratex.com>
+	<1313086864.2307.8.camel@titan>
+	<2E3B1EF6-1075-47A7-8D83-0FFACDCBC7E2@whamcloud.com>
+	<1313098823.2248.2.camel@titan>
+Message-ID: <20110812115119.GA12578@granier.hd.free.fr>
+
+On Thu, Aug 11, 2011 at 02:40:23PM -0700, Jinshan Xiong wrote:
+> This really means PG_writeback is useless. The most important benefit of
+> PG_writeback is to allow to write a being flushed page.
+
+The benefit of PG_writeback is that one can check whether or not a page is under writeback and decide to wait for writeback to complete (via wait_on_page_writeback()) or to skip this page. A good example is the linux kernel writeback code which waits for writeback to complete for WB_SYNC_ALL (data integrity flush), but not for WB_SYNC_NONE (just regular memory cleaning writeback).
+
+Cheers,
+Johann
+-- 
+Johann Lombardi
+Whamcloud, Inc.
+www.whamcloud.com
+
+
+From kenh at cmf.nrl.navy.mil  Tue Aug 16 19:01:19 2011
+From: kenh at cmf.nrl.navy.mil (Ken Hornstein)
+Date: Tue, 16 Aug 2011 22:01:19 -0400
+Subject: [Lustre-devel] client i/o and PG_writeback
+In-Reply-To: <20110810142341.GA15190@granier.hd.free.fr>
+Message-ID: <201108170201.p7H21JXn003518@hedwig.cmf.nrl.navy.mil>
+
+>For historical reasons (lustre was initially developed for 2.4
+>kernels), the 1.8 client holds the page lock over bulk write RPCs.
+>Some basic support for PG_writeback was added back in 2007 (see
+>bugzilla ticket 11710), but the page lock is still held until
+>RPC completion.
+
+Alright, let me ask some potentially dumb questions, no doubt due to my
+lack of understanding of the Linux VM system:
+
+- I'm missing the connection between using PG_writeback and selecting pages
+  to minimize RPC fragmentation (I mean, I understand why you want to
+  minimize RPC fragmentation, I just don't quite understand how PG_writeback
+  helps that).  I looked at bugzilla ticket 11710, but that seems to be
+  about how using PG_writeback is important for fsync() support.
+
+- As I understand it, you drop PG_locked and set PG_writeback during the
+  actual write operation.  Correct?
+
+- How are you planning on implementing this?  Via a new state in the
+  cl_page state machine, and setting PG_writeback in the new state?
+  A new page lock at the cl_page level?
+
+As far as technical concerns ... as long as code that directly uses
+PG_writeback and/or PageWriteback() stays in the llite directory,
+then I don't _think_ it will affect portability that much.  I believe
+I can simply fake it under MacOS X.
+
+--Ken
+
+
+From adilger at whamcloud.com  Fri Aug 19 16:17:58 2011
+From: adilger at whamcloud.com (Andreas Dilger)
+Date: Fri, 19 Aug 2011 17:17:58 -0600
+Subject: [Lustre-devel] Fwd: Parallel Data Storage Workshop 2011 CFP
+References: <7464F82C-89F3-4DB7-B121-9A071A664754@dilger.ca>
+Message-ID: <BB0789DA-6566-4C9A-B01C-58CF44137CAC@whamcloud.com>
+
+6th Parallel Data Storage Workshop
+Sunday, November 13, 2011, 9:00am - 5:30pm
+http://www.pdsi-scidac.org/events/PDSW11/
+Held in conjunction with SC11 in Seattle, WA 
+
+************************
+PDSW11 CALL FOR PAPERS
+************************
+Workshop Abstract: Computational scientists are no longer satisfied with
+petascale infrastructures.  Their demands for finer and finer spatial and
+temporal resolutions are driving parallel storage systems to larger and larger
+scales of parallelism and concurrency.  This scale creates new problems and
+exacerbates old ones in areas such as storage capacity, performance,
+concurrency, data retrieval, reliability, availability, and manageability.
+Additionally, new technologies such as cloud storage are encouraging scientists
+to preserve more old data and to expand their analyses to include data 
+from a wider range of previous computations.  Paying special attention to
+issues in which community collaboration can be crucial such as problem
+identification, workload capture, solution interoperability, standards with
+community buy-in, and shared tools, this one-day workshop seeks contributions
+in the form of papers and posters on relevant topics, including but not limited
+to: 
+
+* performance and benchmarking results and tools, 
+* failure tolerance, 
+* APIs and protocols for high performance features, 
+* parallel file systems, 
+* high bandwidth storage architectures, 
+* wide area file systems, 
+* metadata intensive workloads, 
+* information extraction,
+* autonomics for HPC storage, 
+* checkpoint/restart,  
+* virtualization for storage systems,
+* archival storage advances, and 
+* resource management innovations.
+
+************************
+Paper Submissions:
+************************
+Due: Friday, September 16, 2011, 11:59 PM PDT
+Notification: Tuesday, October 11, 2011
+Camera-ready due: Sunday, November 6, 2011
+Slides due: Friday, Nov. 11, 2011 
+
+The parallel data storage workshop holds a peer reviewed competitive process
+for selecting extended abstracts and short papers.  Submit a not previously
+published extended abstract of up to 5 pages, not less than 10 point font, in a
+PDF file as instructed on the workshop web site.  Submitted papers will be
+reviewed under the supervision of the workshop program committee. Submissions
+should indicate authors and affiliations.  Final papers must not be longer than
+5 pages.  Selected papers and associated talk slides will be made available on
+the workshop web site; the papers will also be published in the digital library
+of the IEEE or ACM. 
+
+************************
+Poster Submissions:
+************************
+Due: Monday, November 7, 2011, 11:59 PM PDT
+Notification: Wednesday, November 19, 2011
+
+The PDSW program committee highly encourages authors of accepted papers to
+present posters of their work. Additional submissions for technical poster
+presentation will be considered if they are marked as such and include title
+and author list and a short abstract. Further specifications for poster
+production will be available on the workshop web site.
+
+************************
+Program Committee:
+************************
+John Bent, Los Alamos National Laboratory (PC Chair)
+Randal Burns, Johns Hopkins University 
+Andreas Dilger, Whamcloud, Inc. 
+Yong Chen, Texas Tech University 
+Haryadi Gunawi, University of California, Berkeley 
+Adam Manzanares, Los Alamos National Laboratory 
+Dutch Meyer, University of British Columbia 
+Ethan Miller, University of California, Santa Cruz 
+Ron Oldfield, Sandia National Laboratory 
+Vijayan Prabhakaran, Microsoft Research 
+Karsten Schwan, Georgia Tech 
+Brad Settlemyer, Oak Ridge National Laboratory 
+Raju Rangaswami, Florida International University 
+Doug Thain, University of Notre Dame 
+Rob Ross, Argonne National Laboratory 
+
+************************
+Steering Committee:
+************************
+Scott Brandt, University of California, Santa Cruz
+Evan J. Felix, Pacific Northwest National Laboratory
+Garth A. Gibson, Carnegie Mellon University and Panasas Inc.
+Gary Grider, Los Alamos National Laboratory
+Peter Honeyman, University of Michigan, Ann Arbor, Center for Information Technology Integration
+Bill Kramer, National Center for Supercomputing Applications/University of Illinois Urbana-Champaign
+Darrell Long, University of California, Santa Cruz
+Carlos Maltzahn, University of California, Santa Cruz
+Philip C. Roth, Oak Ridge National Laboratory
+John Shalf, National Energy Research Scientific Computing Center, Lawrence Berkeley National Laboratory
+Lee Ward, Sandia National Laboratories
+
+Cheers, Andreas
+--
+Andreas Dilger 
+Principal Engineer
+Whamcloud, Inc.
+
+
+
+
+
+From Nathan_Rutman at xyratex.com  Wed Aug 24 12:12:46 2011
+From: Nathan_Rutman at xyratex.com (Nathan Rutman)
+Date: Wed, 24 Aug 2011 12:12:46 -0700
+Subject: [Lustre-devel] MRP-203 obdfilter not able to serve more then 32
+	requests in parallel
+In-Reply-To: <73AED5C780AE05478241DB067651A9210237875E@XYUS-EX22.xyus.xyratex.com>
+References: <73AED5C780AE05478241DB067651A9210237875E@XYUS-EX22.xyus.xyratex.com>
+Message-ID: <73AED5C780AE05478241DB067651A92102378760@XYUS-EX22.xyus.xyratex.com>
+
+Thanks Oleg.
+cc'ing lustre-devel
+
+
+On Aug 24, 2011, at 11:22 AM, Oleg Drokin wrote:
+
+
+	Increasing number of dirs is fine by me, but it has implications for upgrading and downgrading.
+	For example I think number of dirs is really hardcoded everywhere instead of using value in server data.
+	Also if you want to change the value on existing OST, we need a rehash functionality,
+	and then using older releases on such filesystems would lead to corruptions which also needs to be avoided somehow.
+
+
+
+On Aug 24, 2011, at 11:06 AM, Nathan Rutman wrote:
+
+
+		currently we have to use 32 directories for object in OST. but for large scale OST it isn't enough. 
+		so we need to able to extend that number to ~1024 or more.
+
+		
+		
+
+	This was brought up at LUG (presentation attached below) and my recollection is that Oleg had some strong opinions on this -- maybe not increasing the number of dirs but certainly on any locking changes.  Oleg -- did you have any objection to increasing the number of object directories?
+	
+	
+	130-200_Ben_Evans_LUG ... - OLCF.ORNL.GOV <http://www.olcf.ornl.gov/wp-content/events/lug2011/4-13-2011/130-200_Ben_Evans_LUG-2011_Ben_Evans_V3.pptx> 
+	
+	
+	
+
+
+
+
+______________________________________________________________________
+This email may contain privileged or confidential information, which should only be used for the purpose for which it was sent by Xyratex. No further rights or licenses are granted to use such information. If you are not the intended recipient of this message, please notify the sender by return and delete it. You may not use, copy, disclose or rely on the information contained in it.
+ 
+Internet email is susceptible to data corruption, interception and unauthorised amendment for which Xyratex does not accept liability. While we have taken reasonable precautions to ensure that this email is free of viruses, Xyratex does not accept liability for the presence of any computer viruses in this email, nor for any losses caused as a result of viruses.
+ 
+Xyratex Technology Limited (03134912), Registered in England & Wales, Registered Office, Langstone Road, Havant, Hampshire, PO9 1SA.
+ 
+The Xyratex group of companies also includes, Xyratex Ltd, registered in Bermuda, Xyratex International Inc, registered in California, Xyratex (Malaysia) Sdn Bhd registered in Malaysia, Xyratex Technology (Wuxi) Co Ltd registered in The People's Republic of China and Xyratex Japan Limited registered in Japan.
+______________________________________________________________________
+ 
+
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20110824/8a126482/attachment.htm>
+
+From adilger at whamcloud.com  Wed Aug 24 14:59:32 2011
+From: adilger at whamcloud.com (Andreas Dilger)
+Date: Wed, 24 Aug 2011 15:59:32 -0600
+Subject: [Lustre-devel] MRP-203 obdfilter not able to serve more then 32
+	requests in parallel
+In-Reply-To: <73AED5C780AE05478241DB067651A92102378760@XYUS-EX22.xyus.xyratex.com>
+References: <73AED5C780AE05478241DB067651A9210237875E@XYUS-EX22.xyus.xyratex.com>
+	<73AED5C780AE05478241DB067651A92102378760@XYUS-EX22.xyus.xyratex.com>
+Message-ID: <7A4E2471-331E-4DE4-8208-A4D5B9F945BA@whamcloud.com>
+
+On 2011-08-24, at 1:12 PM, Nathan Rutman wrote:
+> On Aug 24, 2011, at 11:22 AM, Oleg Drokin wrote:
+>> Increasing number of dirs is fine by me, but it has implications for upgrading and downgrading.
+>> For example I think number of dirs is really hardcoded everywhere instead of using value in server data.
+>> Also if you want to change the value on existing OST, we need a rehash functionality,
+>> and then using older releases on such filesystems would lead to corruptions which also needs to be avoided somehow.
+
+Yes, compatibility definitely has to be taken into account.  Note that in 1.x
+the code has always used fo_subdir_count for this value, so it should be
+relatively straight forward to change this code in a compatible way.
+
+The fo_subdir_count is initialized to FILTER_SUBDIR_COUNT when last_rcvd is
+first created, but if last_rcvd needs to be recreated after the filesystem is
+in use then it needs to scan O/0/d* to see what the actual subdirectory count
+is (easily done just by calling readdir() on O/0 and finding the largest value).
+Also lustre/utils/ll_recover_lost_found_objs.c would need to be fixed similarly.
+
+If in-place upgrading is needed, then either rehash would be possible but
+initially slow, and possibly broken if it is interrupted in the middle.  It
+would be possible to do this on the fly by creating d[0..FILTER_SUBDIR_COUNT-1]
+and searching d{objid % fo_subdir_count} first, but for missing objects it
+should also check d{objid % FILTER_SUBDIR_COUNT_OLD} (if fo_subdir_count isn't
+FILTER_SUBDIR_COUNT_OLD) and move the object over if found.
+
+That way the OST puts progressively more objects in the new directory structure,
+and only unused objects are left in d[0-31].  This kind of scheme would also
+allow the hash size to be changed while the OST is in use (with also new subdir
+array allocations and such), if there is ever a need to do so.
+
+On a related note, while this is a very easy fix and I encourage you to finish
+it, there are some other efforts that may make this less critical:
+- parallel directory operations (originally for MDT) would also avoid lock
+  contention on the OST parent directories, but not until 2.2
+- server DLM locks should hold an inode reference (discussed in the past,
+  but nobody working on it) which would avoid parent directory lookups
+  entirely, since client already sends lock handle for O(1) lock lookups,
+  and that would give inode reference for free and also avoid pushing the
+  in-use inodes out of memory on the server due to memory pressure
+
+
+> On Aug 24, 2011, at 11:06 AM, Nathan Rutman wrote:
+> 
+>> currently we have to use 32 directories for object in OST. but for large scale OST it isn't enough. 
+>> so we need to able to extend that number to ~1024 or more.
+>> 
+>> This was brought up at LUG (presentation attached below) and my recollection is that Oleg had some strong opinions on this -- maybe not increasing the number of dirs but certainly on any locking changes.  Oleg -- did you have any objection to increasing the number of object directories?
+>> 
+>> 130-200_Ben_Evans_LUG ... - OLCF.ORNL.GOV
+>> 
+>> 
+> 
+> ______________________________________________________________________
+> This email may contain privileged or confidential information, which should only be used for the purpose for which it was sent by Xyratex. No further rights or licenses are granted to use such information. If you are not the intended recipient of this message, please notify the sender by return and delete it. You may not use, copy, disclose or rely on the information contained in it.
+>  
+> Internet email is susceptible to data corruption, interception and unauthorised amendment for which Xyratex does not accept liability. While we have taken reasonable precautions to ensure that this email is free of viruses, Xyratex does not accept liability for the presence of any computer viruses in this email, nor for any losses caused as a result of viruses.
+>  
+> Xyratex Technology Limited (03134912), Registered in England & Wales, Registered Office, Langstone Road, Havant, Hampshire, PO9 1SA.
+>  
+> The Xyratex group of companies also includes, Xyratex Ltd, registered in Bermuda, Xyratex International Inc, registered in California, Xyratex (Malaysia) Sdn Bhd registered in Malaysia, Xyratex Technology (Wuxi) Co Ltd registered in The People's Republic of China and Xyratex Japan Limited registered in Japan.
+> ______________________________________________________________________
+>  
+> 
+> _______________________________________________
+> 
+> Lustre-devel mailing list
+> Lustre-devel at lists.lustre.org
+> http://lists.lustre.org/mailman/listinfo/lustre-devel
+
+
+Cheers, Andreas
+--
+Andreas Dilger 
+Principal Engineer
+Whamcloud, Inc.
+
+
+
+
+
+From kilian.cavalotti.work at gmail.com  Thu Aug 25 02:56:02 2011
+From: kilian.cavalotti.work at gmail.com (Kilian CAVALOTTI)
+Date: Thu, 25 Aug 2011 11:56:02 +0200
+Subject: [Lustre-devel] Changelogs and xattrs
+Message-ID: <CAJz=VjFQPXFuQ=BBK3wF5UJXe_2RLv9CR=Bpi5h_8tYAH4i5xg@mail.gmail.com>
+
+Hi all,
+
+Using version 2.0, I noticed that changelogs emitted on extended
+attributes modification depend on the namespace the xattr belongs to.
+
+For instance, when setting an attribute in user.*, an XATTR changelog
+is recorded:
+
+root:~ # setfattr -n user.foo -v bar /mnt/lustre/file
+root:~ # getfattr -d -m user.* /mnt/lustre/file
+getfattr: Removing leading '/' from absolute path names
+# file: mnt/lustre/file
+user.foo="bar"
+root:~ # lfs changelog lustre-MDT0000
+19810 00MARK ?09:17:11.709504920 2011.08.25 0x0 t=[0x40001:0x0:0x0]
+p=[0:0x0:0x0] mdd_obd-lustre-MDT0000-0
+19811 15XATTR 09:17:17.932504772 2011.08.25 0x0 t=[0x200000401:0x1634:0x0]
+
+But when I try to set an attribute in trusted.*, system.* or
+security.* the recorded changelog is of the CTIME type:
+
+root:~ # lfs changelog_clear lustre-MDT0000 cl1 0
+root:~ # lfs changelog lustre-MDT0000
+19825 00MARK ?09:30:00.495488159 2011.08.25 0x0 t=[0x40001:0x0:0x0]
+p=[0:0x0:0x0] mdd_obd-lustre-MDT0000-0
+root:~ # setfattr -n trusted.foo -v bar /mnt/lustre/testfile
+root:~ # lfs changelog lustre-MDT0000
+19825 00MARK ?09:30:00.495488159 2011.08.25 0x0 t=[0x40001:0x0:0x0]
+p=[0:0x0:0x0] mdd_obd-lustre-MDT0000-0
+19826 18CTIME 09:30:27.887487611 2011.08.25 0x4 t=[0x200000401:0x1634:0x0]
+
+Note: the CTIME changelog is only recorded after the changelogs have
+been cleared after setting an attributed in user.*. When it's not, no
+changelog is recorded at all for subsequent changes in
+{trusted,security,system}.*
+
+When the first attribute is set in user.*, an XATTR event is recorded
+in the changelog. After that, any attribute modification in
+{trusted,security,system}.* does not generate any changelog. But a
+modification in user.* still does.
+
+root:~ # lfs changelog_clear lustre-MDT0000 cl1 0
+root:~ # setfattr -n user.foo -v bar /mnt/lustre/testfile
+root:~ # lfs changelog lustre-MDT0000
+19827 00MARK ?09:34:31.733482876 2011.08.25 0x0 t=[0x40001:0x0:0x0]
+p=[0:0x0:0x0] mdd_obd-lustre-MDT0000-0
+19828 15XATTR 09:34:37.653482765 2011.08.25 0x0 t=[0x200000401:0x1634:0x0]
+root:~ # setfattr -n trusted.foo -v bar /mnt/lustre/testfile
+root:~ # lfs changelog lustre-MDT0000
+19827 00MARK ?09:34:31.733482876 2011.08.25 0x0 t=[0x40001:0x0:0x0]
+p=[0:0x0:0x0] mdd_obd-lustre-MDT0000-0
+19828 15XATTR 09:34:37.653482765 2011.08.25 0x0 t=[0x200000401:0x1634:0x0]
+root:~ # setfattr -n security.foo -v bar /mnt/lustre/testfile
+root:~ # lfs changelog lustre-MDT0000
+19827 00MARK ?09:34:31.733482876 2011.08.25 0x0 t=[0x40001:0x0:0x0]
+p=[0:0x0:0x0] mdd_obd-lustre-MDT0000-0
+19828 15XATTR 09:34:37.653482765 2011.08.25 0x0 t=[0x200000401:0x1634:0x0]
+root:~ # setfattr -n user.foo -v bar /mnt/lustre/testfile
+root:~ # lfs changelog lustre-MDT0000
+19827 00MARK ?09:34:31.733482876 2011.08.25 0x0 t=[0x40001:0x0:0x0]
+p=[0:0x0:0x0] mdd_obd-lustre-MDT0000-0
+19828 15XATTR 09:34:37.653482765 2011.08.25 0x0 t=[0x200000401:0x1634:0x0]
+19829 15XATTR 09:35:16.723482030 2011.08.25 0x0 t=[0x200000401:0x1634:0x0]
+
+
+Quickly looking at the code, it seems indeed that only user xattr
+changes are recorded. In lustre/mdd/mdd_object.c:
+
+static int mdd_xattr_set(const struct lu_env *env, struct md_object *obj,
+                         const struct lu_buf *buf, const char *name,
+                         int fl)
+{
+...
+        /* Only record user xattr changes */
+        if ((rc == 0) && (strncmp("user.", name, 5) == 0))
+                rc = mdd_changelog_data_store(env, mdd, CL_XATTR, 0, mdd_obj,
+...
+}
+
+
+So my questions are:
+1. why are xattr changes ignored in namespaces other than user.*?
+2. why xattr changes in {trusted,security,system}.* generate a CTIME
+event after the changelogs have been cleared? And not otherwise?
+
+
+Thanks a lot for any insight.
+Cheers,
+--
+Kilian
+
+
+From Nathan_Rutman at xyratex.com  Mon Aug 29 11:22:54 2011
+From: Nathan_Rutman at xyratex.com (Nathan Rutman)
+Date: Mon, 29 Aug 2011 13:22:54 -0500
+Subject: [Lustre-devel] Changelogs and xattrs
+In-Reply-To: <CAJz=VjFQPXFuQ=BBK3wF5UJXe_2RLv9CR=Bpi5h_8tYAH4i5xg@mail.gmail.com>
+References: <CAJz=VjFQPXFuQ=BBK3wF5UJXe_2RLv9CR=Bpi5h_8tYAH4i5xg@mail.gmail.com>
+Message-ID: <97EAD37B-9FD1-417A-9F37-B7538F193B7F@us.xyratex.com>
+
+
+
+On Aug 29, 2011, at 10:22 AM, "Kilian CAVALOTTI" <kilian.cavalotti.work at gmail.com> wrote:
+
+> Hi all,
+> 
+> Using version 2.0, I noticed that changelogs emitted on extended
+> attributes modification depend on the namespace the xattr belongs to.
+...
+> 
+> So my questions are:
+> 1. why are xattr changes ignored in namespaces other than user.*?
+> 2. why xattr changes in {trusted,security,system}.* generate a CTIME
+> event after the changelogs have been cleared? And not otherwise?
+> 
+The second question is actually easier - inode metadata changes (including xattr) generate CTIME events, but these are rate-limited to once per "clear" to avoid filling the logs on heavily used files. One TIME event per file in a log is sufficient to know that the file has been touched for eg backup or HSM purposes (but of course, not all purposes).  
+Why only user xattrs are recorded was initially an attempt to avoid recording the "lustre." xattr changes that would potentially have been confusing to users, but perhaps we went too far here. I can't really think of any reason to avoid the other namespaces now. 
+
+BTW, Xyratex has some improvements for changelog mtime handling that we'll push upstream. ______________________________________________________________________
+This email may contain privileged or confidential information, which should only be used for the purpose for which it was sent by Xyratex. No further rights or licenses are granted to use such information. If you are not the intended recipient of this message, please notify the sender by return and delete it. You may not use, copy, disclose or rely on the information contained in it.
+ 
+Internet email is susceptible to data corruption, interception and unauthorised amendment for which Xyratex does not accept liability. While we have taken reasonable precautions to ensure that this email is free of viruses, Xyratex does not accept liability for the presence of any computer viruses in this email, nor for any losses caused as a result of viruses.
+ 
+Xyratex Technology Limited (03134912), Registered in England & Wales, Registered Office, Langstone Road, Havant, Hampshire, PO9 1SA.
+ 
+The Xyratex group of companies also includes, Xyratex Ltd, registered in Bermuda, Xyratex International Inc, registered in California, Xyratex (Malaysia) Sdn Bhd registered in Malaysia, Xyratex Technology (Wuxi) Co Ltd registered in The People's Republic of China and Xyratex Japan Limited registered in Japan.
+______________________________________________________________________
+ 
+
+
+

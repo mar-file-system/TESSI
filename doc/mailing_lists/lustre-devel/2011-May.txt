@@ -1,0 +1,3319 @@
+From johann at whamcloud.com  Mon May  2 08:43:28 2011
+From: johann at whamcloud.com (Johann Lombardi)
+Date: Mon, 2 May 2011 17:43:28 +0200
+Subject: [Lustre-devel] F/S stats visualisation
+In-Reply-To: <84D90924-025F-4ABA-89BD-58C43C8FCDD9@ddn.com>
+References: <008a01cc05f8$a6b26840$f41738c0$@com>
+	<84D90924-025F-4ABA-89BD-58C43C8FCDD9@ddn.com>
+Message-ID: <20110502154328.GG14743@granier.hd.free.fr>
+
+Hi Ashley,
+
+On Fri, Apr 29, 2011 at 12:06:06AM -0700, Ashley Pittman wrote:
+> What do you think of the blue lines showing total number of inodes?  It appears to me as though df -i and lfs df -i are reporting different numbers for this value which I'm not able to easily explain.
+
+The total number of inodes can indeed be different between df (statfs(2)) and lfs df (lustre's ioctl). File creation can also fail with ENOSPC if you run out of objects on the OSTs, although the MDT might still have free inodes. Therefore the number of free inodes as well as the total number of inodes returned through statfs(2) are adjusted if the MDT has more free inodes than the OSTs.
+You can check ll_statfs_internal() to see how this is computed.
+
+HTH
+
+Johann
+
+-- 
+Johann Lombardi
+Whamcloud, Inc.
+www.whamcloud.com
+
+
+From rf at q-leap.de  Mon May  2 08:51:36 2011
+From: rf at q-leap.de (rf at q-leap.de)
+Date: Mon, 2 May 2011 17:51:36 +0200
+Subject: [Lustre-devel] F/S stats visualisation
+In-Reply-To: <20110502154328.GG14743@granier.hd.free.fr>
+References: <008a01cc05f8$a6b26840$f41738c0$@com>
+	<84D90924-025F-4ABA-89BD-58C43C8FCDD9@ddn.com>
+	<20110502154328.GG14743@granier.hd.free.fr>
+Message-ID: <19902.54024.358967.444979@gargle.gargle.HOWL>
+
+>>>>> "Johann" == Johann Lombardi <johann at whamcloud.com> writes:
+
+Hi Johann, Ashley, 
+
+    Johann> Hi Ashley, On Fri, Apr 29, 2011 at 12:06:06AM -0700, Ashley
+    Johann> Pittman wrote:
+
+    >> What do you think of the blue lines showing total number of
+    >> inodes?  It appears to me as though df -i and lfs df -i are
+    >> reporting different numbers for this value which I'm not able to
+    >> easily explain.
+
+    Johann> The total number of inodes can indeed be different between
+    Johann> df (statfs(2)) and lfs df (lustre's ioctl). File creation
+    Johann> can also fail with ENOSPC if you run out of objects on the
+    Johann> OSTs, although the MDT might still have free
+    Johann> inodes. Therefore the number of free inodes as well as the
+    Johann> total number of inodes returned through statfs(2) are
+    Johann> adjusted if the MDT has more free inodes than the OSTs.  You
+    Johann> can check ll_statfs_internal() to see how this is computed.
+
+It seems lfs df -i is indeed buggy showing totally bogus numbers
+(see https://bugzilla.lustre.org/show_bug.cgi?id=24489)
+
+Roland
+
+
+From johann at whamcloud.com  Mon May  2 09:32:59 2011
+From: johann at whamcloud.com (Johann Lombardi)
+Date: Mon, 2 May 2011 18:32:59 +0200
+Subject: [Lustre-devel] F/S stats visualisation
+In-Reply-To: <19902.54024.358967.444979@gargle.gargle.HOWL>
+References: <008a01cc05f8$a6b26840$f41738c0$@com>
+	<84D90924-025F-4ABA-89BD-58C43C8FCDD9@ddn.com>
+	<20110502154328.GG14743@granier.hd.free.fr>
+	<19902.54024.358967.444979@gargle.gargle.HOWL>
+Message-ID: <20110502163259.GI14743@granier.hd.free.fr>
+
+On Mon, May 02, 2011 at 05:51:36PM +0200, rf at q-leap.de wrote:
+> It seems lfs df -i is indeed buggy showing totally bogus numbers
+> (see https://bugzilla.lustre.org/show_bug.cgi?id=24489)
+
+In this case, you run df on the server directly, so you are comparing statfs information as returned by ext4/ldiskfs with what you get through lustre (i.e. lfs df or df on a lustre client).
+Lustre takes for granted that 1 EA block is needed for each inode (conservative approach) and adjusts the total number of inodes accordingly (see fsfilt_ext3_statfs()).
+That being said, with large inode support and mkfs.lustre adapting the inode size based on the default stripe count, i am not sure this "adjustment" makes sense any more. We could instead print a warning at mkfs time when the default stripe count cannot fit in the inode core and #inodes > #blocks.
+
+Johann
+
+-- 
+Johann Lombardi
+Whamcloud, Inc.
+www.whamcloud.com
+
+
+From adilger at whamcloud.com  Mon May  2 13:00:51 2011
+From: adilger at whamcloud.com (Andreas Dilger)
+Date: Mon, 2 May 2011 14:00:51 -0600
+Subject: [Lustre-devel] F/S stats visualisation
+In-Reply-To: <20110502163259.GI14743@granier.hd.free.fr>
+References: <008a01cc05f8$a6b26840$f41738c0$@com>
+	<84D90924-025F-4ABA-89BD-58C43C8FCDD9@ddn.com>
+	<20110502154328.GG14743@granier.hd.free.fr>
+	<19902.54024.358967.444979@gargle.gargle.HOWL>
+	<20110502163259.GI14743@granier.hd.free.fr>
+Message-ID: <1AB60204-0389-42FA-AC70-9CC58BDF8FE0@whamcloud.com>
+
+In fact in the patch I recently posted to LU-255 mkfs.lustre is a bit smarter about how many inodes are allocated on the MDT, based on the default striping count given by --stripe-count-hint. It is more aggressive about allocating inodes on the MDS, because we waste a lot of space otherwise. 
+
+That is not in itself harmful with HDDs because there is too much space anyway and you need more drives to have enough IOPS, but space on SSDs is much more precious. 
+
+Cheers, Andreas
+
+On 2011-05-02, at 10:32 AM, Johann Lombardi <johann at whamcloud.com> wrote:
+
+> On Mon, May 02, 2011 at 05:51:36PM +0200, rf at q-leap.de wrote:
+>> It seems lfs df -i is indeed buggy showing totally bogus numbers
+>> (see https://bugzilla.lustre.org/show_bug.cgi?id=24489)
+> 
+> In this case, you run df on the server directly, so you are comparing statfs information as returned by ext4/ldiskfs with what you get through lustre (i.e. lfs df or df on a lustre client).
+> Lustre takes for granted that 1 EA block is needed for each inode (conservative approach) and adjusts the total number of inodes accordingly (see fsfilt_ext3_statfs()).
+> That being said, with large inode support and mkfs.lustre adapting the inode size based on the default stripe count, i am not sure this "adjustment" makes sense any more. We could instead print a warning at mkfs time when the default stripe count cannot fit in the inode core and #inodes > #blocks.
+> 
+> Johann
+> 
+> -- 
+> Johann Lombardi
+> Whamcloud, Inc.
+> www.whamcloud.com
+> _______________________________________________
+> Lustre-devel mailing list
+> Lustre-devel at lists.lustre.org
+> http://lists.lustre.org/mailman/listinfo/lustre-devel
+
+
+From efocht at gmail.com  Tue May  3 05:46:37 2011
+From: efocht at gmail.com (Erich Focht)
+Date: Tue, 03 May 2011 14:46:37 +0200
+Subject: [Lustre-devel] accessing object version from user space?
+Message-ID: <4DBFF92D.6070304@gmail.com>
+
+Hi,
+
+is there a way to access the file objects version information (epoch, transno, whatever is used
+for version based recovery) from user space? If yes, is that possible for lustre 1.8.x, too?
+Looking for a way to check (quickly) whether a file has changed while copying it away...
+
+Erich
+
+
+From adilger at whamcloud.com  Tue May  3 12:35:12 2011
+From: adilger at whamcloud.com (Andreas Dilger)
+Date: Tue, 3 May 2011 13:35:12 -0600
+Subject: [Lustre-devel] accessing object version from user space?
+In-Reply-To: <4DBFF92D.6070304@gmail.com>
+References: <4DBFF92D.6070304@gmail.com>
+Message-ID: <AD1E6969-051D-41AA-BE5D-E89F114C0317@whamcloud.com>
+
+On May 3, 2011, at 06:46, Erich Focht wrote:
+> is there a way to access the file objects version information (epoch, transno, whatever is used
+> for version based recovery) from user space? If yes, is that possible for lustre 1.8.x, too?
+> Looking for a way to check (quickly) whether a file has changed while copying it away...
+
+Comparing the ctime at the start/end of the copy should be enough for that.
+
+Cheers, Andreas
+--
+Andreas Dilger 
+Principal Engineer
+Whamcloud, Inc.
+
+
+
+
+
+From efocht at gmail.com  Wed May  4 09:36:36 2011
+From: efocht at gmail.com (Erich Focht)
+Date: Wed, 04 May 2011 18:36:36 +0200
+Subject: [Lustre-devel] accessing object version from user space?
+In-Reply-To: <AD1E6969-051D-41AA-BE5D-E89F114C0317@whamcloud.com>
+References: <4DBFF92D.6070304@gmail.com>
+	<AD1E6969-051D-41AA-BE5D-E89F114C0317@whamcloud.com>
+Message-ID: <4DC18094.6050007@gmail.com>
+
+On 05/03/2011 09:35 PM, Andreas Dilger wrote:
+> On May 3, 2011, at 06:46, Erich Focht wrote:
+>> is there a way to access the file objects version information (epoch, transno, whatever is used
+>> for version based recovery) from user space? If yes, is that possible for lustre 1.8.x, too?
+>> Looking for a way to check (quickly) whether a file has changed while copying it away...
+> 
+> Comparing the ctime at the start/end of the copy should be enough for that.
+
+You mean ctime of Lustre file, or ctime of file objects on OSTs? Is there a nice way to access those?
+Maybe I'm a bit paranoid, but what if a client loses connection to MDS while continuing to write to
+OSTs? Just a thought...
+
+Thanks & best regards,
+Erich
+
+
+From meshram.vilobh at gmail.com  Wed May  4 23:57:19 2011
+From: meshram.vilobh at gmail.com (vilobh meshram)
+Date: Thu, 5 May 2011 02:57:19 -0400
+Subject: [Lustre-devel] Fwd: Question on path name resolution in Lustre
+In-Reply-To: <BANLkTimoh3K1NCv_RC1HMdpko4zk=BGTcA@mail.gmail.com>
+References: <BANLkTimoh3K1NCv_RC1HMdpko4zk=BGTcA@mail.gmail.com>
+Message-ID: <BANLkTik18X7bWw21F8E-wK2wzyG3spLdDA@mail.gmail.com>
+
+---------- Forwarded message ----------
+From: vilobh meshram <meshram.vilobh at gmail.com>
+Date: Thu, May 5, 2011 at 2:37 AM
+Subject: Question on path name resolution in Lustre
+To: lustre-discuss <lustre-discuss at lists.lustre.org>,
+lusre-devel at lists.lustre.org
+
+
+Hi,
+
+I have noticed that for file or directory kind of operation in Lustre, the
+Lock Manager grabs an EX (Exclusive lock) on the parent directory and then
+creates a directory or file inside it.Is there a specific reason behind this
+logic or implementation.
+
+e.g. : If we want to create foo.txt in /d1/d2/d3/d4/d5/foo.txt
+
+We grab the lock on /d1
+then we grab the lock on /d1/d2
+then we grab the lock on /d1/d2/d3
+then we grab the lock on /d1/d2/d3/d4
+then we grab the lock on /d1/d2/d3/d4/d5
+then we create the file.
+This is what I have seen in logs.
+
+Is this the correct method followed during first time file access or file
+creation ?
+
+If yes then how is the performance when the directory depth is very high ?
+
+If no can you explain me how it happens.
+
+Thanks,
+Vilobh
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20110505/65724222/attachment.htm>
+
+From adilger at whamcloud.com  Thu May  5 09:48:45 2011
+From: adilger at whamcloud.com (Andreas Dilger)
+Date: Thu, 5 May 2011 10:48:45 -0600
+Subject: [Lustre-devel] accessing object version from user space?
+In-Reply-To: <4DC18094.6050007@gmail.com>
+References: <4DBFF92D.6070304@gmail.com>
+	<AD1E6969-051D-41AA-BE5D-E89F114C0317@whamcloud.com>
+	<4DC18094.6050007@gmail.com>
+Message-ID: <5468F3C7-6632-435F-B437-C2BA2AAD3968@whamcloud.com>
+
+On May 4, 2011, at 10:36, Erich Focht wrote:
+> On 05/03/2011 09:35 PM, Andreas Dilger wrote:
+>> On May 3, 2011, at 06:46, Erich Focht wrote:
+>>> is there a way to access the file objects version information (epoch, transno, whatever is used
+>>> for version based recovery) from user space? If yes, is that possible for lustre 1.8.x, too?
+>>> Looking for a way to check (quickly) whether a file has changed while copying it away...
+>> 
+>> Comparing the ctime at the start/end of the copy should be enough for that.
+> 
+> You mean ctime of Lustre file, or ctime of file objects on OSTs? Is there a
+> nice way to access those?
+> Maybe I'm a bit paranoid, but what if a client loses connection to MDS while
+> continuing to write to OSTs? Just a thought...
+
+The ctime is derived from the latest ctime of the MDS inode and OST objects (ctime is not allowed to go backward), so even if the client is disconnected from the MDS it will get the latest ctime from the OSTs if the files are being modified there.
+
+Cheers, Andreas
+--
+Andreas Dilger 
+Principal Engineer
+Whamcloud, Inc.
+
+
+
+
+
+From t.roth at gsi.de  Thu May  5 10:54:55 2011
+From: t.roth at gsi.de (Thomas Roth)
+Date: Thu, 05 May 2011 19:54:55 +0200
+Subject: [Lustre-devel] [Lustre-discuss] Research on filesystem metadata
+	operation	distribution
+In-Reply-To: <C09F427D-51DA-420F-83B6-D10F30347750@whamcloud.com>
+References: <C09F427D-51DA-420F-83B6-D10F30347750@whamcloud.com>
+Message-ID: <4DC2E46F.5020509@gsi.de>
+
+At GSI, we have
+
+lctl get_param mds.*.stats | egrep "open|close|rename|link|attr|sync"
+open                      10302752480 samples [reqs]
+close                     528292519 samples [reqs]
+unlink                    22292174 samples [reqs]
+rename                    542512 samples [reqs]
+getxattr                  408511496 samples [reqs]
+setxattr                  838368 samples [reqs]
+setattr                   27097846 samples [reqs]
+getattr                   738233548 samples [reqs]
+
+Output of 'lfs df' is attached.
+
+The filesystem is used for storing HEP data from theory calculations, 
+simulations and HEP experimental data for use in analysis. People also 
+use it as a software repository, to compile their programs (ouch) and as 
+a general purpose distributed file system (a certain sysadmin is known 
+to store his music files there).
+
+Regards,
+Thomas
+
+On 04/21/2011 08:40 PM, Andreas Dilger wrote:
+> I'm trying to get some data about the relative distribution of MDS operations in the wild, and I'd be grateful if some people with production filesystems that have been running for at least a week could collect some simple stats and email them to me.  They can be collected by any regular user on the MDS node:
+>
+>      lctl get_param mds.*.stats | egrep "open|close|rename|link|attr|sync"
+>
+> It would be useful to also include "lfs df" and "lfs df -i" information, as well as a brief description of what the filesystem is used for (scratch, home, project, archive, etc).
+>
+>
+>
+> As a reminder, I'm also interested if some Lustre admins could run the "fsstats" tool from http://www.pdsi-scidac.org/fsstats/ and send me the output.  Sending the output to PDSI via their submission form may also produce some positive results.
+>
+>      http://www.pdsi-scidac.org/fsstats/files/fsstats-1.4.5.tar.gz
+>
+>
+> Thanks in advance for any data.  I've set replies to go only to lustre-devel, to avoid clogging the larger readership of lustre-discuss, but it may be useful for others to have this in a list archive and/or searchable via Google in the future so I don't necessarily want to keep it all to myself.
+>
+> Cheers, Andreas
+> --
+> Andreas Dilger
+> Principal Engineer
+> Whamcloud, Inc.
+>
+>
+>
+> _______________________________________________
+> Lustre-discuss mailing list
+> Lustre-discuss at lists.lustre.org
+> http://lists.lustre.org/mailman/listinfo/lustre-discuss
+
+
+-- 
+--------------------------------------------------------------------
+Thomas Roth
+Department: Informationstechnologie
+
+GSI Helmholtzzentrum f?r Schwerionenforschung GmbH
+Planckstra?e 1
+64291 Darmstadt
+www.gsi.de
+
+Gesellschaft mit beschr?nkter Haftung
+Sitz der Gesellschaft: Darmstadt
+Handelsregister: Amtsgericht Darmstadt, HRB 1528
+
+Gesch?ftsf?hrung: Professor Dr. Dr. h.c. Horst St?cker,
+Dr. Hartmut Eickhoff
+
+Vorsitzende des Aufsichtsrates: Dr. Beatrix Vierkorn-Rudolph
+Stellvertreter: Ministerialdirigent Dr. Rolf Bernhardt
+
+-------------- next part --------------
+An embedded and charset-unspecified text was scrubbed...
+Name: lfs_df
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20110505/c14cc51a/attachment.asc>
+-------------- next part --------------
+An embedded and charset-unspecified text was scrubbed...
+Name: lfs_df_i
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20110505/c14cc51a/attachment.txt>
+
+From adilger at whamcloud.com  Thu May  5 11:05:42 2011
+From: adilger at whamcloud.com (Andreas Dilger)
+Date: Thu, 5 May 2011 12:05:42 -0600
+Subject: [Lustre-devel] Research on filesystem metadata
+	operation	distribution
+In-Reply-To: <4DC2E46F.5020509@gsi.de>
+References: <C09F427D-51DA-420F-83B6-D10F30347750@whamcloud.com>
+	<4DC2E46F.5020509@gsi.de>
+Message-ID: <37E4262C-6108-4F84-B883-6FF4E7B497A6@whamcloud.com>
+
+On May 5, 2011, at 11:54, Thomas Roth wrote:
+> At GSI, we have
+> 
+> lctl get_param mds.*.stats | egrep "open|close|rename|link|attr|sync"
+> open                      10302752480 samples [reqs]
+> close                     528292519 samples [reqs]
+> unlink                    22292174 samples [reqs]
+> rename                    542512 samples [reqs]
+> getxattr                  408511496 samples [reqs]
+> setxattr                  838368 samples [reqs]
+> setattr                   27097846 samples [reqs]
+> getattr                   738233548 samples [reqs]
+> 
+> Output of 'lfs df' is attached.
+
+While it wasn't my original goal in asking for this data, a question I've been asking all of the sites that have filesystems with OSTs of different sizes is whether they use (and/or continue to use) an external process for balancing the space used on the OSTs (e.g. migrating of files, or marking OSTs inactive on the MDS once they have reached some threshold of space usage), or if the existing space balancing mechanism in the MDS was able to get this relatively uniform space utilization?
+
+> The filesystem is used for storing HEP data from theory calculations, simulations and HEP experimental data for use in analysis. People also use it as a software repository, to compile their programs (ouch) and as a general purpose distributed file system (a certain sysadmin is known to store his music files there).
+> 
+> Regards,
+> Thomas
+> 
+> On 04/21/2011 08:40 PM, Andreas Dilger wrote:
+>> I'm trying to get some data about the relative distribution of MDS operations in the wild, and I'd be grateful if some people with production filesystems that have been running for at least a week could collect some simple stats and email them to me.  They can be collected by any regular user on the MDS node:
+>> 
+>>     lctl get_param mds.*.stats | egrep "open|close|rename|link|attr|sync"
+>> 
+>> It would be useful to also include "lfs df" and "lfs df -i" information, as well as a brief description of what the filesystem is used for (scratch, home, project, archive, etc).
+>> 
+>> 
+>> 
+>> As a reminder, I'm also interested if some Lustre admins could run the "fsstats" tool from http://www.pdsi-scidac.org/fsstats/ and send me the output.  Sending the output to PDSI via their submission form may also produce some positive results.
+>> 
+>>     http://www.pdsi-scidac.org/fsstats/files/fsstats-1.4.5.tar.gz
+>> 
+>> 
+>> Thanks in advance for any data.  I've set replies to go only to lustre-devel, to avoid clogging the larger readership of lustre-discuss, but it may be useful for others to have this in a list archive and/or searchable via Google in the future so I don't necessarily want to keep it all to myself.
+>> 
+>> Cheers, Andreas
+>> --
+>> Andreas Dilger
+>> Principal Engineer
+>> Whamcloud, Inc.
+>> 
+>> 
+>> 
+>> _______________________________________________
+>> Lustre-discuss mailing list
+>> Lustre-discuss at lists.lustre.org
+>> http://lists.lustre.org/mailman/listinfo/lustre-discuss
+> 
+> 
+> -- 
+> --------------------------------------------------------------------
+> Thomas Roth
+> Department: Informationstechnologie
+> 
+> GSI Helmholtzzentrum f?r Schwerionenforschung GmbH
+> Planckstra?e 1
+> 64291 Darmstadt
+> www.gsi.de
+> 
+> Gesellschaft mit beschr?nkter Haftung
+> Sitz der Gesellschaft: Darmstadt
+> Handelsregister: Amtsgericht Darmstadt, HRB 1528
+> 
+> Gesch?ftsf?hrung: Professor Dr. Dr. h.c. Horst St?cker,
+> Dr. Hartmut Eickhoff
+> 
+> Vorsitzende des Aufsichtsrates: Dr. Beatrix Vierkorn-Rudolph
+> Stellvertreter: Ministerialdirigent Dr. Rolf Bernhardt
+> 
+> <lfs_df.txt><lfs_df_i.txt>_______________________________________________
+> Lustre-devel mailing list
+> Lustre-devel at lists.lustre.org
+> http://lists.lustre.org/mailman/listinfo/lustre-devel
+
+
+Cheers, Andreas
+--
+Andreas Dilger 
+Principal Engineer
+Whamcloud, Inc.
+
+
+
+
+
+From morrone2 at llnl.gov  Fri May  6 14:53:31 2011
+From: morrone2 at llnl.gov (Christopher J. Morrone)
+Date: Fri, 06 May 2011 14:53:31 -0700
+Subject: [Lustre-devel] Technical debt in the lustre build system
+Message-ID: <4DC46DDB.4000906@llnl.gov>
+
+Eric Barton has been raising awareness about the need to address 
+technical debt in the lustre code base.  I think we should also start 
+talking about the technical debt in the lustre build system.
+
+Overtime, we've cobbled together a very complex, and very fragile build 
+system for lustre.  Every time I work on the build system, my 
+frustration level builds and I am tempted to pull the whole thing apart 
+and start from scratch.  But when I am thinking more rationally, I admit 
+that a more evolutionary approach to improving the build system would be 
+more likely to succeed.
+
+So I'd like to start a discussion about where we need to go with the 
+build system.  Here are some of the things off the top of my head that 
+are problems that need to be addressed, or improvements that I think we 
+should make.
+
+1) The recursive configure system should be removed.
+
+Each system that requires its own build system should be a standalone 
+package.  Each standalone package should have proper Requires:, 
+BuildRequires:, Provides:, etc. in the .spec file for rpm.  Appropriate 
+equivalents should be used in other packaging systems (deb).
+
+ldiskfs is a good candidate for this.  With the changes to support 
+multiple backend filesystems, making the backends separate packages 
+makes even more sense than it did in the past.  In fact, LLNL has 
+already packaged ldiskfs separately for 2.1.  It would be great if the 
+rest of the community adopted this approach in a future release.
+
+I am guessing that the snmp directory could easily be its own package as 
+well.
+
+Lets identify more things like that.
+
+2) Installed files need serious cleanup and reorganization.  Case in 
+point, the main lustre package installs this file:
+
+   /usr/bin/config.sh
+
+This pretty much wins the lifetime award for Poorly Named Command In A 
+Standard Path Location.  There are many others such as obdfilter-survey, 
+ost-survey, parse-ior, plot-obdfilter, etc. that are clearly useful 
+testing tools, but inappropriate for the main lustre rpm package.
+
+3) Remove old build system tools dealing with CVS or Subversion 
+repositories.  We've moved to git, and it is clearly superior.  We are 
+not going back.  It is time to remove the cruft.
+
+4) make_META.pl -> version_tag.pl.  Why is make_META.pl part of the 
+build system and just a symlink to version_tag.pl?  I don't understand 
+the rationale on this one.  Mighty confusing when you need to fix a bug 
+in make_META.pl, but no file named make_META.pl exists in your source tree.
+
+5) Need to keep in mind that third parties will be building this, and 
+will need the flexibility to have their own tags and versioning schemes. 
+  We can partly do this now, but it needs improvement.
+
+Some of the code to check git version numbers and tags and such seems 
+like it was well intentioned, but just adds too much complexity to an 
+already complex problem.  Lets look into ways to simplify this.
+
+6) The lustre.spec file.
+
+Lets face it, rpm's spec language is just awful.  But it is what we are 
+stuck with for most of our platforms, so we need to figure out how to 
+live with it.  Lustre's spec file is a bit of a mess now, and pretty 
+difficult for those of us downstream to use unmodified.  Some of the 
+previous suggestions will naturally improve the state of the spec file, 
+but additional improvements are needed.  I think we should take another 
+look at the decision to parse --with-linux and --with-linux-objs out of 
+%configure_args.  It just makes the interactions between various rpm 
+variables and configure arguments too complex, in my opinion.
+
+I think that we can take some inspiration here from Brian Behlendorf's 
+zfs-modules.spec.in file in his ZFS repo:
+
+   https://github.com/behlendorf/zfs
+
+Brian has gone to great lengths to make ZFS buildable under just about 
+every Linux distro under the sun, and I still am able to understand his 
+spec file.  I can't say the same for Lustre's spec file, and lustre 
+doesn't build nearly as cleanly.
+
+Grantly, lustre is a bit more complex in ways...but by splitting the 
+code into multiple projects I think we can reduce the spec file complexity.
+
+7) build/lbuild-*
+
+What is this stuff?  Does anyone outside of the core CFS/Sun/Oracle/etc. 
+team use this?  Seriously, if you do, please speak up.
+
+I know that LLNL has never used it.  Frankly, I think it should be 
+removed from the main Lustre tree.  My impression, from a brief skimming 
+of the files, is that they are the automated build system that upstream 
+has used to generate kernel packages, lustre packages, and maybe IB 
+packages.
+
+LLNL uses an automated build environment based on buildbot that builds 
+lustre and all of our other packages under a chroot environment 
+individually created for each package by "mock".  It contains only the 
+rpms needed by the package, which enforces that we have to have our spec 
+file dependencies correct (another reason why the lustre.spec often 
+doesn't work for us).
+
+That is a bit of a digression, but my point is this: we probably all 
+have our own build systems to contend with.  Those scripts shouldn't be 
+part of the main lustre tree.  They should be a separate package, or 
+just Whamcloud's internal scripts if no one else is using them.
+
+8) Lustre .src.rpm should be rebuildable.  It is now, more-or-less, but 
+could use improvement.
+
+So where do we go from here?  I think we should set up a wiki page to 
+plan the overhaul, and start opening bugs to track individual changes 
+that need to be made.
+
+Make a large overhaul for 2.1 is out of the question, but perhaps we can 
+make many of the changes in the next release.
+
+Chris
+
+
+
+From kenh at cmf.nrl.navy.mil  Mon May  9 19:53:23 2011
+From: kenh at cmf.nrl.navy.mil (Ken Hornstein)
+Date: Mon, 09 May 2011 22:53:23 -0400
+Subject: [Lustre-devel] Technical debt in the lustre build system
+In-Reply-To: <4DC46DDB.4000906@llnl.gov>
+Message-ID: <201105100253.p4A2rNeE013093@hedwig.cmf.nrl.navy.mil>
+
+>So I'd like to start a discussion about where we need to go with the 
+>build system.  Here are some of the things off the top of my head that 
+>are problems that need to be addressed, or improvements that I think we 
+>should make.
+>[...]
+
+I agree with everything you've said, but I'd like to add one thing:
+
+9) Portability
+
+   This drives me nuts on the Mac port; the build system has a fair amount
+   of cruft left over (see autoMakefile versus Makefile.am, for starters).
+   If we're thinking about long-term plans on the build system, thinking
+   about portability is important.
+
+   (On the Mac, and AFAIK all other operating systems other than
+   Linux, building a kernel module is relatively straightforward;
+   just compile everything with a few extra options).
+
+--Ken
+
+
+From morrone2 at llnl.gov  Tue May 10 16:24:53 2011
+From: morrone2 at llnl.gov (Christopher J. Morrone)
+Date: Tue, 10 May 2011 16:24:53 -0700
+Subject: [Lustre-devel] Technical debt in the lustre build system
+In-Reply-To: <201105100253.p4A2rNeE013093@hedwig.cmf.nrl.navy.mil>
+References: <201105100253.p4A2rNeE013093@hedwig.cmf.nrl.navy.mil>
+Message-ID: <4DC9C945.7050705@llnl.gov>
+
+On 05/09/2011 07:53 PM, Ken Hornstein wrote:
+>> So I'd like to start a discussion about where we need to go with the
+>> build system.  Here are some of the things off the top of my head that
+>> are problems that need to be addressed, or improvements that I think we
+>> should make.
+>> [...]
+>
+> I agree with everything you've said, but I'd like to add one thing:
+>
+> 9) Portability
+>
+>     This drives me nuts on the Mac port; the build system has a fair amount
+>     of cruft left over (see autoMakefile versus Makefile.am, for starters).
+>     If we're thinking about long-term plans on the build system, thinking
+>     about portability is important.
+>
+>     (On the Mac, and AFAIK all other operating systems other than
+>     Linux, building a kernel module is relatively straightforward;
+>     just compile everything with a few extra options).
+
+Yeah, that would be nice.
+
+It does seem odd at first glance that most directories have both 
+autoMakefile.am files and Makefile.in files.
+
+I think that what is going on there is are essentially two independent 
+build system: normal user-space build stuff (liblustre) uses the 
+autoMakefile, and the kernel build system uses Makefile.  But in the 
+end, Makefile does an "include autoMakefile", making one wonder why they 
+need to be separate in the first place.
+
+It is certainly worth investigating to see if that can be improved to be 
+both more understandable and more portable.
+
+Chris
+
+
+From adilger at whamcloud.com  Tue May 10 14:53:00 2011
+From: adilger at whamcloud.com (Andreas Dilger)
+Date: Tue, 10 May 2011 15:53:00 -0600
+Subject: [Lustre-devel] Technical debt in the lustre build system
+In-Reply-To: <4DC46DDB.4000906@llnl.gov>
+References: <4DC46DDB.4000906@llnl.gov>
+Message-ID: <EBE08B3E-7905-4A4D-9FDB-B27220455FAF@whamcloud.com>
+
+On 2011-05-06, at 3:53 PM, "Christopher J. Morrone" <morrone2 at llnl.gov> wrote:
+> Eric Barton has been raising awareness about the need to address 
+> technical debt in the lustre code base.  I think we should also start 
+> talking about the technical debt in the lustre build system.
+> 
+> Overtime, we've cobbled together a very complex, and very fragile build 
+> system for lustre.  Every time I work on the build system, my 
+> frustration level builds and I am tempted to pull the whole thing apart 
+> and start from scratch.  But when I am thinking more rationally, I admit 
+> that a more evolutionary approach to improving the build system would be 
+> more likely to succeed.
+> 
+> So I'd like to start a discussion about where we need to go with the 
+> build system.  Here are some of the things off the top of my head that 
+> are problems that need to be addressed, or improvements that I think we 
+> should make.
+
+Chris, I tend to agree with most of your statements. Having a simpler build system is desirable for everyone. It also makes sense to have "make rpms" use this build system instead of having a separate system to handle the "production" build vs "homebrew" builds, which isn't the case today. 
+
+I think it would be great to see small incremental patches that fix the problems that you have detailed here. Some of them appear to be very minor changes (i.e. extra files included in the RPM packages, or poorly-named files). 
+
+Other changes are more extensive, and lumping them all together would mean that accepting the simple changes is blocked behind testified and landing the large changes, which is going to be slower. 
+
+Ken also mentioned the Makefile vs. autoMakefile.am issue, and this is a historic artifact of when Lustre built on both 2.4 and 2.6 kernels, and is no longer needed. It might still make sense to have a simple "list of source files" that can be included by the various Makefiles for each platform, so that there isn't a need to modify 3 or 4 makefiles whenever a new source file is added. 
+
+> 1) The recursive configure system should be removed.
+> 
+> Each system that requires its own build system should be a standalone 
+> package.  Each standalone package should have proper Requires:, 
+> BuildRequires:, Provides:, etc. in the .spec file for rpm.  Appropriate 
+> equivalents should be used in other packaging systems (deb).
+> 
+> ldiskfs is a good candidate for this.  With the changes to support 
+> multiple backend filesystems, making the backends separate packages 
+> makes even more sense than it did in the past.  In fact, LLNL has 
+> already packaged ldiskfs separately for 2.1.  It would be great if the 
+> rest of the community adopted this approach in a future release.
+
+One issue with separating ldiskfs into it's own package is that fsfilt (or obd-ldiskfs on newer versions of Lustre) are linked closely to the ldiskfs code, and cannot completely be configured using the header file today. That said, it may be practical to store the results of the configure check in the ldiskfs header itself (e.g. #define HAVE_SOME_FEATURE) but this would also need a bit of work.
+
+I'd be interested to see how this is handled by the LLNL build system today.
+
+> I am guessing that the snmp directory could easily be its own package as 
+> well.
+> 
+> Lets identify more things like that.
+> 
+> 2) Installed files need serious cleanup and reorganization.  Case in 
+> point, the main lustre package installs this file:
+> 
+>   /usr/bin/config.sh
+> 
+> This pretty much wins the lifetime award for Poorly Named Command In A 
+> Standard Path Location.  There are many others such as obdfilter-survey, 
+> ost-survey, parse-ior, plot-obdfilter, etc. that are clearly useful 
+> testing tools, but inappropriate for the main lustre rpm package.
+> 
+> 3) Remove old build system tools dealing with CVS or Subversion 
+> repositories.  We've moved to git, and it is clearly superior.  We are 
+> not going back.  It is time to remove the cruft.
+
+Sure, I don't think anyone disagrees. There were also old config scripts and tests that could be removed, I'm not sure if they have been or not. 
+
+> 4) make_META.pl -> version_tag.pl.  Why is make_META.pl part of the 
+> build system and just a symlink to version_tag.pl?  I don't understand 
+> the rationale on this one.  Mighty confusing when you need to fix a bug 
+> in make_META.pl, but no file named make_META.pl exists in your source tree.
+> 
+> 5) Need to keep in mind that third parties will be building this, and 
+> will need the flexibility to have their own tags and versioning schemes. 
+>  We can partly do this now, but it needs improvement.
+> 
+> Some of the code to check git version numbers and tags and such seems 
+> like it was well intentioned, but just adds too much complexity to an 
+> already complex problem.  Lets look into ways to simplify this.
+> 
+> 6) The lustre.spec file.
+> 
+> Lets face it, rpm's spec language is just awful.  But it is what we are 
+> stuck with for most of our platforms, so we need to figure out how to 
+> live with it.  Lustre's spec file is a bit of a mess now, and pretty 
+> difficult for those of us downstream to use unmodified.  Some of the 
+> previous suggestions will naturally improve the state of the spec file, 
+> but additional improvements are needed.  I think we should take another 
+> look at the decision to parse --with-linux and --with-linux-objs out of 
+> %configure_args.  It just makes the interactions between various rpm 
+> variables and configure arguments too complex, in my opinion.
+> 
+> I think that we can take some inspiration here from Brian Behlendorf's 
+> zfs-modules.spec.in file in his ZFS repo:
+> 
+>   https://github.com/behlendorf/zfs
+> 
+> Brian has gone to great lengths to make ZFS buildable under just about 
+> every Linux distro under the sun, and I still am able to understand his 
+> spec file.  I can't say the same for Lustre's spec file, and lustre 
+> doesn't build nearly as cleanly.
+> 
+> Grantly, lustre is a bit more complex in ways...but by splitting the 
+> code into multiple projects I think we can reduce the spec file complexity.
+
+I agree. However, you also need to recognize that Lustre was started when RHEL3 was the main distro, so the ability of the RPM .spec file has increased significantly since that time.  I don't mean to indicate that it _shouldn't_ be cleaned up, but it hasn't taken a priority to date, if it continues to work. 
+ 
+> 7) build/lbuild-*
+> 
+> What is this stuff?  Does anyone outside of the core CFS/Sun/Oracle/etc. 
+> team use this?  Seriously, if you do, please speak up.
+> 
+> I know that LLNL has never used it.  Frankly, I think it should be 
+> removed from the main Lustre tree.  My impression, from a brief skimming 
+> of the files, is that they are the automated build system that upstream 
+> has used to generate kernel packages, lustre packages, and maybe IB 
+> packages.
+> 
+> LLNL uses an automated build environment based on buildbot that builds 
+> lustre and all of our other packages under a chroot environment 
+> individually created for each package by "mock".  It contains only the 
+> rpms needed by the package, which enforces that we have to have our spec 
+> file dependencies correct (another reason why the lustre.spec often 
+> doesn't work for us).
+> 
+> That is a bit of a digression, but my point is this: we probably all 
+> have our own build systems to contend with.  Those scripts shouldn't be 
+> part of the main lustre tree.  They should be a separate package, or 
+> just Whamcloud's internal scripts if no one else is using them.
+> 
+> 8) Lustre .src.rpm should be rebuildable.  It is now, more-or-less, but 
+> could use improvement.
+> 
+> So where do we go from here?  I think we should set up a wiki page to 
+> plan the overhaul, and start opening bugs to track individual changes 
+> that need to be made.
+> 
+> Make a large overhaul for 2.1 is out of the question, but perhaps we can 
+> make many of the changes in the next release.
+> 
+> Chris
+
+
+From morrone2 at llnl.gov  Wed May 11 11:05:13 2011
+From: morrone2 at llnl.gov (Christopher J. Morrone)
+Date: Wed, 11 May 2011 11:05:13 -0700
+Subject: [Lustre-devel] Technical debt in the lustre build system
+In-Reply-To: <EBE08B3E-7905-4A4D-9FDB-B27220455FAF@whamcloud.com>
+References: <4DC46DDB.4000906@llnl.gov>
+	<EBE08B3E-7905-4A4D-9FDB-B27220455FAF@whamcloud.com>
+Message-ID: <4DCACFD9.8080902@llnl.gov>
+
+On 05/10/2011 02:53 PM, Andreas Dilger wrote:
+
+> Chris, I tend to agree with most of your statements. Having a simpler build system is desirable for everyone. It also makes sense to have "make rpms" use this build system instead of having a separate system to handle the "production" build vs "homebrew" builds, which isn't the case today.
+
+Agreed!
+
+> I think it would be great to see small incremental patches that fix the problems that you have detailed here. Some of them appear to be very minor changes (i.e. extra files included in the RPM packages, or poorly-named files).
+
+I totally agree; I definitely think this needs an incremental approach. 
+  But also a concerted effort to drive those incremental changes.
+
+LLNL has tried to push up patches to clean up some of those minor 
+changes in the past and failed to gain traction.  Maybe we just didn't 
+push hard enough.  So this time I want to keep pushing.  And get more 
+people involved so hopefully they'll understand where the incremental 
+changes are leading.
+
+> Ken also mentioned the Makefile vs. autoMakefile.am issue, and this is a historic artifact of when Lustre built on both 2.4 and 2.6 kernels, and is no longer needed. It might still make sense to have a simple "list of source files" that can be included by the various Makefiles for each platform, so that there isn't a need to modify 3 or 4 makefiles whenever a new source file is added.
+
+Great.
+
+> One issue with separating ldiskfs into it's own package is that fsfilt (or obd-ldiskfs on newer versions of Lustre) are linked closely to the ldiskfs code, and cannot completely be configured using the header file today. That said, it may be practical to store the results of the configure check in the ldiskfs header itself (e.g. #define HAVE_SOME_FEATURE) but this would also need a bit of work.
+>
+> I'd be interested to see how this is handled by the LLNL build system today.
+
+Sure, I'll get Ned to comment on this.
+
+>> Grantly, lustre is a bit more complex in ways...but by splitting the
+>> code into multiple projects I think we can reduce the spec file complexity.
+>
+> I agree. However, you also need to recognize that Lustre was started when RHEL3 was the main distro, so the ability of the RPM .spec file has increased significantly since that time.  I don't mean to indicate that it _shouldn't_ be cleaned up, but it hasn't taken a priority to date, if it continues to work.
+
+Sure, I understand that.  Though you may be giving newer versions of RPM 
+too much credit. :)
+
+Chris
+
+
+From morrone2 at llnl.gov  Wed May 11 11:22:59 2011
+From: morrone2 at llnl.gov (Christopher J. Morrone)
+Date: Wed, 11 May 2011 11:22:59 -0700
+Subject: [Lustre-devel] Technical debt in the lustre build system
+In-Reply-To: <4DCACFD9.8080902@llnl.gov>
+References: <4DC46DDB.4000906@llnl.gov>
+	<EBE08B3E-7905-4A4D-9FDB-B27220455FAF@whamcloud.com>
+	<4DCACFD9.8080902@llnl.gov>
+Message-ID: <4DCAD403.2040802@llnl.gov>
+
+On 05/11/2011 11:05 AM, Christopher J. Morrone wrote:
+> On 05/10/2011 02:53 PM, Andreas Dilger wrote:
+ >
+>> One issue with separating ldiskfs into it's own package is that fsfilt (or obd-ldiskfs on newer versions of Lustre) are linked closely to the ldiskfs code, and cannot completely be configured using the header file today. That said, it may be practical to store the results of the configure check in the ldiskfs header itself (e.g. #define HAVE_SOME_FEATURE) but this would also need a bit of work.
+>>
+>> I'd be interested to see how this is handled by the LLNL build system today.
+>
+> Sure, I'll get Ned to comment on this.
+
+Ned's email got stuck in moderation.  Here's a copy:
+
+"We create a package lustre-ldiskfs-devel that provides all of the 
+ldiskfs headers including ldiskfs_extents.h and ldiskfs_jbd2.h.  I 
+believe those two along with ldiskfs.h are sufficient to configure 
+fsfilt (though the Lustre build system would need to be updated to 
+include them instead of their ext4 equivalents).  That said, I like your 
+suggestion to have ldiskfs directly export its configuration via ldiskfs.h.
+
+Ned"
+
+
+From apittman at ddn.com  Thu May 12 01:58:24 2011
+From: apittman at ddn.com (Ashley Pittman)
+Date: Thu, 12 May 2011 01:58:24 -0700
+Subject: [Lustre-devel] Technical debt in the lustre build system
+In-Reply-To: <4DC46DDB.4000906@llnl.gov>
+References: <4DC46DDB.4000906@llnl.gov>
+Message-ID: <27CC7301-CA70-4AB6-8AB0-4302637B0367@ddn.com>
+
+
+On 6 May 2011, at 23:53, Christopher J. Morrone wrote:
+> 2) Installed files need serious cleanup and reorganization.  Case in 
+> point, the main lustre package installs this file:
+> 
+>   /usr/bin/config.sh
+> 
+> This pretty much wins the lifetime award for Poorly Named Command In A 
+> Standard Path Location.  There are many others such as obdfilter-survey, 
+> ost-survey, parse-ior, plot-obdfilter, etc. that are clearly useful 
+> testing tools, but inappropriate for the main lustre rpm package.
+
+You could argue that this is a separate issue from the build but I can see it'd be easier to fix them both at the same time.
+
+> 5) Need to keep in mind that third parties will be building this, and 
+> will need the flexibility to have their own tags and versioning schemes. 
+>  We can partly do this now, but it needs improvement.
+
+We rebuild Lustre and add our own tag to the build, if it's not possible to add a tag to the build on the command line we'll need to patch it ourselves.
+
+> 7) build/lbuild-*
+> 
+> What is this stuff?  Does anyone outside of the core CFS/Sun/Oracle/etc. 
+> team use this?  Seriously, if you do, please speak up.
+
+> I know that LLNL has never used it.  Frankly, I think it should be 
+> removed from the main Lustre tree.  My impression, from a brief skimming 
+> of the files, is that they are the automated build system that upstream 
+> has used to generate kernel packages, lustre packages, and maybe IB 
+> packages.
+
+We use this right now.  We are not tied to it however we need some of the functionality it provides so if we move away from it we'll have to find another way.
+
+> That is a bit of a digression, but my point is this: we probably all 
+> have our own build systems to contend with.  Those scripts shouldn't be 
+> part of the main lustre tree.  They should be a separate package, or 
+> just Whamcloud's internal scripts if no one else is using them.
+
+We'd be happy to maintain our own if it meant the central tree could be cleaner and easier to use for people using the stock release.
+
+> So where do we go from here?
+
+10)
+
+One of the things that bugs me is that currently we build and distribute a new kernel for each and every update when in theory we could re-use the kernel and only update the modules 90% of the time.  As a background to this we maintain our list of patches to Lustre with quilt and for any given commit there is no way that I know of to tell if the change impacts the kernel patches or just the module/userspace.  As a result the only safe thing to do is to build a whole new kernel each and every time.  Actually the cost of this is pretty low as Lustre runs on dedicated machines so rebooting during updates is not an issue.
+
+One thing I changed at Quadrics where we had a similar problem was to separate the kernel patches from the kernel modules into different "packages" and maintain, distribute, and update them as separate bits of software.  This had the added benefit of making it obvious when people were patching the kernel further which reduced the incidence of this and meant we put more thought into changes.  I suspect this wouldn't work for Lustre as it's more intrusive into the kernel source but I'd welcome ideas for solving the do-I-update-the-kernel-or-not problem.
+
+Ashley.
+
+From nic at cray.com  Thu May 12 07:57:41 2011
+From: nic at cray.com (Nic Henke)
+Date: Thu, 12 May 2011 09:57:41 -0500
+Subject: [Lustre-devel] replacing Lustre pings with LNet Peer Health
+Message-ID: <4DCBF565.3060602@cray.com>
+
+Just floating an idea... I'd much appreciate any feedback
+
+Given bug 12471 where the ptlrpc pinger traffic on a large system can 
+approach the ridiculous (2.6M pings every 75s for 160 OSTs and 16K 
+clients), I'd like to consider getting rid of the pings entirely.
+
+The idea would be to extend the idea in the attached patch where we add 
+an upper layer callback for lnet_notify() signaling a peer going down or 
+up. The ptlrpc pinger code would be then changed to record the 'down' 
+event for an import/export which would then start an eviction timer that 
+started when the LNet peer was last_alive. If the nodes comes 'up' 
+before the timer expires, no eviction. The eviction code would then only 
+operate on nodes with 'down' events and trusting that the rest are all 
+ok and functional.
+
+Eric - I know this doesn't get us that far down the road toward your new 
+health network, but does solve a near term issue with pinger rates on 
+large systems.
+
+Issues...
+
+- lacks "proof" that peer nodes ptlrpc queues are moving forward, but 
+not really sure that is all that important in terms of pinger evictions.
+
+- LNet peer health is a bit "weird" in that it requires an upper layer 
+sending a packet to trigger a node moving back to 'up'. We would need to 
+address this for proper LNet peer health as it is.
+
+- Might need some beefing up of the standard LNDs to ensure we have good 
+peer health data.
+
+Thoughts ?
+
+Nic
+-------------- next part --------------
+A non-text attachment was scrubbed...
+Name: register_notify.diff
+Type: text/x-patch
+Size: 6030 bytes
+Desc: not available
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20110512/286e205d/attachment.bin>
+
+From adilger at whamcloud.com  Thu May 12 10:27:00 2011
+From: adilger at whamcloud.com (Andreas Dilger)
+Date: Thu, 12 May 2011 11:27:00 -0600
+Subject: [Lustre-devel] replacing Lustre pings with LNet Peer Health
+In-Reply-To: <4DCBF565.3060602@cray.com>
+References: <4DCBF565.3060602@cray.com>
+Message-ID: <9BC94E70-4EB6-49D9-8AA1-B07E1455E51D@whamcloud.com>
+
+On May 12, 2011, at 08:57, Nic Henke wrote:
+> Just floating an idea... I'd much appreciate any feedback
+> 
+> Given bug 12471 where the ptlrpc pinger traffic on a large system can approach the ridiculous (2.6M pings every 75s for 160 OSTs and 16K clients), I'd like to consider getting rid of the pings entirely.
+> 
+> The idea would be to extend the idea in the attached patch where we add an upper layer callback for lnet_notify() signaling a peer going down or up. The ptlrpc pinger code would be then changed to record the 'down' event for an import/export which would then start an eviction timer that started when the LNet peer was last_alive. If the nodes comes 'up' before the timer expires, no eviction. The eviction code would then only operate on nodes with 'down' events and trusting that the rest are all ok and functional.
+
+One issue is that the Lustre OBD_PING RPC is not just detecting peer death.  It is also reporting the last_committed value to the RPC stack, so that clients can discard RPCs that were committed on the server.  It is also signalling to the server that this client is still alive, so that it doesn't get evicted.  If there are LNET routers in a system, the LNET peer health will only report the health of the routers, and not of the clients or servers behind the routers, so this isn't going to result in a working Lustre filesystem...
+
+> Eric - I know this doesn't get us that far down the road toward your new health network, but does solve a near term issue with pinger rates on large systems.
+
+There would need to be at least some of the health network implemented in order to "pass through" the peer health on the routers, and also to broadcast some of the data, like last_rcvd.
+
+> Issues...
+> 
+> - lacks "proof" that peer nodes ptlrpc queues are moving forward, but not really sure that is all that important in terms of pinger evictions.
+> 
+> - LNet peer health is a bit "weird" in that it requires an upper layer sending a packet to trigger a node moving back to 'up'. We would need to address this for proper LNet peer health as it is.
+> 
+> - Might need some beefing up of the standard LNDs to ensure we have good peer health data.
+> 
+> Thoughts ?
+> 
+> Nic
+> <register_notify.diff>_______________________________________________
+> Lustre-devel mailing list
+> Lustre-devel at lists.lustre.org
+> http://lists.lustre.org/mailman/listinfo/lustre-devel
+
+
+Cheers, Andreas
+--
+Andreas Dilger 
+Principal Engineer
+Whamcloud, Inc.
+
+
+
+
+
+From morrone2 at llnl.gov  Thu May 12 10:28:42 2011
+From: morrone2 at llnl.gov (Christopher J. Morrone)
+Date: Thu, 12 May 2011 10:28:42 -0700
+Subject: [Lustre-devel] Technical debt in the lustre build system
+In-Reply-To: <27CC7301-CA70-4AB6-8AB0-4302637B0367@ddn.com>
+References: <4DC46DDB.4000906@llnl.gov>
+	<27CC7301-CA70-4AB6-8AB0-4302637B0367@ddn.com>
+Message-ID: <4DCC18CA.6070205@llnl.gov>
+
+On 05/12/2011 01:58 AM, Ashley Pittman wrote:
+
+> 10)
+>
+> One of the things that bugs me is that currently we build and distribute a new kernel for each and every update when in theory we could re-use the kernel and only update the modules 90% of the time.  As a background to this we maintain our list of patches to Lustre with quilt and for any given commit there is no way that I know of to tell if the change impacts the kernel patches or just the module/userspace.  As a result the only safe thing to do is to build a whole new kernel each and every time.  Actually the cost of this is pretty low as Lustre runs on dedicated machines so rebooting during updates is not an issue.
+
+I feel for you.  We used to maintain our patches to lustre in quilt, but 
+we've moved to just keeping a branch in git.  I for one am MUCH happier 
+now that we've eliminated that quilt part.
+
+> One thing I changed at Quadrics where we had a similar problem was to separate the kernel patches from the kernel modules into different "packages" and maintain, distribute, and update them as separate bits of software.  This had the added benefit of making it obvious when people were patching the kernel further which reduced the incidence of this and meant we put more thought into changes.  I suspect this wouldn't work for Lustre as it's more intrusive into the kernel source but I'd welcome ideas for solving the do-I-update-the-kernel-or-not problem.
+
+Yes, I agree, that is an issue.  We maintain our own kernel release, and 
+currently we need to keep the same watch on the kernel_patches 
+directories that you do so that we can regularly pull the patches into 
+our kernel repo.
+
+I think we can greatly improve that situation.  I see two things that 
+would make a big difference:
+
+1) Make lustre "patchless".  If you ignore the ldiskfs patches, the 
+kernel patch set for lustre is getting quite small.  There is even the 
+belief that with some effort lustre can go completely patchless 
+(ignoring ldiskfs) for the server as well as the client.  This effort is 
+under way, and there are bugs open to track it.  But it is one of those 
+items that tends to have slow progress because the developers are busy 
+with other tasks.
+
+2) Package ldiskfs separately.  Make direct commits to ldiskfs's git 
+repo rather than maintaining a quilt patch stack.
+
+Chris
+
+
+From morrone2 at llnl.gov  Thu May 12 10:37:51 2011
+From: morrone2 at llnl.gov (Christopher J. Morrone)
+Date: Thu, 12 May 2011 10:37:51 -0700
+Subject: [Lustre-devel] replacing Lustre pings with LNet Peer Health
+In-Reply-To: <4DCBF565.3060602@cray.com>
+References: <4DCBF565.3060602@cray.com>
+Message-ID: <4DCC1AEF.8020705@llnl.gov>
+
+I think Eric's approach is the only sane way I've heard to reduce pings.
+
+Here are some issues that I see with this:
+
+1)  For your solution to work, you require that the lnet layer take on 
+pinging duties.  Usually the network, be it IB, TCP, whatever, will not 
+provide any active notification of a peer failure.  To notice that a 
+peer has died, the lnet LND must, you guessed it, ping.
+
+Usually the LNDs try to be smart.  They only generate their own pings if 
+no traffic has been sent to the peer in a certain period of time.  So 
+once you eliminate the higher-level pings, they will partly be replaced 
+by lower-level pings.
+
+2)  Doesn't work in a routed environment.  Would need a health network 
+for clients behind routers to learn that a server has died, and vice versa.
+
+On 05/12/2011 07:57 AM, Nic Henke wrote:
+> Just floating an idea... I'd much appreciate any feedback
+>
+> Given bug 12471 where the ptlrpc pinger traffic on a large system can
+> approach the ridiculous (2.6M pings every 75s for 160 OSTs and 16K
+> clients), I'd like to consider getting rid of the pings entirely.
+>
+> The idea would be to extend the idea in the attached patch where we add
+> an upper layer callback for lnet_notify() signaling a peer going down or
+> up. The ptlrpc pinger code would be then changed to record the 'down'
+> event for an import/export which would then start an eviction timer that
+> started when the LNet peer was last_alive. If the nodes comes 'up'
+> before the timer expires, no eviction. The eviction code would then only
+> operate on nodes with 'down' events and trusting that the rest are all
+> ok and functional.
+>
+> Eric - I know this doesn't get us that far down the road toward your new
+> health network, but does solve a near term issue with pinger rates on
+> large systems.
+>
+> Issues...
+>
+> - lacks "proof" that peer nodes ptlrpc queues are moving forward, but
+> not really sure that is all that important in terms of pinger evictions.
+>
+> - LNet peer health is a bit "weird" in that it requires an upper layer
+> sending a packet to trigger a node moving back to 'up'. We would need to
+> address this for proper LNet peer health as it is.
+>
+> - Might need some beefing up of the standard LNDs to ensure we have good
+> peer health data.
+>
+> Thoughts ?
+>
+> Nic
+
+
+
+From chris at whamcloud.com  Thu May 12 11:10:53 2011
+From: chris at whamcloud.com (Chris)
+Date: Thu, 12 May 2011 19:10:53 +0100
+Subject: [Lustre-devel] Technical debt in the lustre build system
+In-Reply-To: <mailman.5319.1305221323.23683.lustre-devel@lists.lustre.org>
+References: <mailman.5319.1305221323.23683.lustre-devel@lists.lustre.org>
+Message-ID: <4DCC22AD.3050602@whamcloud.com>
+
+
+>> I think it would be great to see small incremental patches that fix the problems that you have detailed here. Some of them appear to be very minor changes (i.e. extra files included in the RPM packages, or poorly-named files).
+> I totally agree; I definitely think this needs an incremental approach.
+>    But also a concerted effort to drive those incremental changes.
+>
+> LLNL has tried to push up patches to clean up some of those minor
+> changes in the past and failed to gain traction.  Maybe we just didn't
+> push hard enough.  So this time I want to keep pushing.  And get more
+> people involved so hopefully they'll understand where the incremental
+> changes are leading.
+>
+Perhaps the right approach is to create a specification or document that 
+fully outlines what the objective is and get sign-up from the broader 
+community before work is started. The incremental changes can then refer 
+to the 'master document' to illustrate the reason for the change.
+
+Little steps are a good way of making sure that we don't trip over, but 
+without an agreed long term target they don't allow people to be sure 
+where the changes are taking them.
+
+Chris
+---
+Chris Gearing
+Snr Engineer
+Whamcloud. Inc.
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20110512/6b4bdb30/attachment.htm>
+
+From alexey_lyashkov at xyratex.com  Sun May 15 00:44:28 2011
+From: alexey_lyashkov at xyratex.com (Alexey Lyashkov)
+Date: Sun, 15 May 2011 11:44:28 +0400
+Subject: [Lustre-devel] replacing Lustre pings with LNet Peer Health
+In-Reply-To: <4DCC1AEF.8020705@llnl.gov>
+References: <4DCBF565.3060602@cray.com> <4DCC1AEF.8020705@llnl.gov>
+Message-ID: <020AA780-CB93-4FCD-98C4-4ECC5DE749A7@xyratex.com>
+
+One problem.
+
+LNet layer can report - node is live, but one or more ptlrpc services on that node is dead (due a LBUG hit by example).
+But yes, generate a LNet event about node is dead is usefull to reduce time of detecting timeout of requests.
+
+
+On May 12, 2011, at 21:37, Christopher J. Morrone wrote:
+
+> I think Eric's approach is the only sane way I've heard to reduce pings.
+> 
+> Here are some issues that I see with this:
+> 
+> 1)  For your solution to work, you require that the lnet layer take on 
+> pinging duties.  Usually the network, be it IB, TCP, whatever, will not 
+> provide any active notification of a peer failure.  To notice that a 
+> peer has died, the lnet LND must, you guessed it, ping.
+> 
+> Usually the LNDs try to be smart.  They only generate their own pings if 
+> no traffic has been sent to the peer in a certain period of time.  So 
+> once you eliminate the higher-level pings, they will partly be replaced 
+> by lower-level pings.
+> 
+> 2)  Doesn't work in a routed environment.  Would need a health network 
+> for clients behind routers to learn that a server has died, and vice versa.
+> 
+> On 05/12/2011 07:57 AM, Nic Henke wrote:
+>> Just floating an idea... I'd much appreciate any feedback
+>> 
+>> Given bug 12471 where the ptlrpc pinger traffic on a large system can
+>> approach the ridiculous (2.6M pings every 75s for 160 OSTs and 16K
+>> clients), I'd like to consider getting rid of the pings entirely.
+>> 
+>> The idea would be to extend the idea in the attached patch where we add
+>> an upper layer callback for lnet_notify() signaling a peer going down or
+>> up. The ptlrpc pinger code would be then changed to record the 'down'
+>> event for an import/export which would then start an eviction timer that
+>> started when the LNet peer was last_alive. If the nodes comes 'up'
+>> before the timer expires, no eviction. The eviction code would then only
+>> operate on nodes with 'down' events and trusting that the rest are all
+>> ok and functional.
+>> 
+>> Eric - I know this doesn't get us that far down the road toward your new
+>> health network, but does solve a near term issue with pinger rates on
+>> large systems.
+>> 
+>> Issues...
+>> 
+>> - lacks "proof" that peer nodes ptlrpc queues are moving forward, but
+>> not really sure that is all that important in terms of pinger evictions.
+>> 
+>> - LNet peer health is a bit "weird" in that it requires an upper layer
+>> sending a packet to trigger a node moving back to 'up'. We would need to
+>> address this for proper LNet peer health as it is.
+>> 
+>> - Might need some beefing up of the standard LNDs to ensure we have good
+>> peer health data.
+>> 
+>> Thoughts ?
+>> 
+>> Nic
+> 
+> _______________________________________________
+> Lustre-devel mailing list
+> Lustre-devel at lists.lustre.org
+> http://lists.lustre.org/mailman/listinfo/lustre-devel
+
+--------------------------------------------
+Alexey Lyashkov
+alexey_lyashkov at xyratex.com
+
+
+
+
+______________________________________________________________________
+This email may contain privileged or confidential information, which should only be used for the purpose for which it was sent by Xyratex. No further rights or licenses are granted to use such information. If you are not the intended recipient of this message, please notify the sender by return and delete it. You may not use, copy, disclose or rely on the information contained in it.
+ 
+Internet email is susceptible to data corruption, interception and unauthorised amendment for which Xyratex does not accept liability. While we have taken reasonable precautions to ensure that this email is free of viruses, Xyratex does not accept liability for the presence of any computer viruses in this email, nor for any losses caused as a result of viruses.
+ 
+Xyratex Technology Limited (03134912), Registered in England & Wales, Registered Office, Langstone Road, Havant, Hampshire, PO9 1SA.
+ 
+The Xyratex group of companies also includes, Xyratex Ltd, registered in Bermuda, Xyratex International Inc, registered in California, Xyratex (Malaysia) Sdn Bhd registered in Malaysia, Xyratex Technology (Wuxi) Co Ltd registered in The People's Republic of China and Xyratex Japan Limited registered in Japan.
+______________________________________________________________________
+ 
+
+
+
+From rf at q-leap.de  Tue May 17 04:05:01 2011
+From: rf at q-leap.de (rf at q-leap.de)
+Date: Tue, 17 May 2011 13:05:01 +0200
+Subject: [Lustre-devel] F/S stats visualisation
+In-Reply-To: <20110502163259.GI14743@granier.hd.free.fr>
+References: <008a01cc05f8$a6b26840$f41738c0$@com>
+	<84D90924-025F-4ABA-89BD-58C43C8FCDD9@ddn.com>
+	<20110502154328.GG14743@granier.hd.free.fr>
+	<19902.54024.358967.444979@gargle.gargle.HOWL>
+	<20110502163259.GI14743@granier.hd.free.fr>
+Message-ID: <19922.22109.288864.530108@gargle.gargle.HOWL>
+
+>>>>> "Johann" == Johann Lombardi <johann at whamcloud.com> writes:
+
+    Johann> On Mon, May 02, 2011 at 05:51:36PM +0200, rf at q-leap.de
+    Johann> wrote:
+    >> It seems lfs df -i is indeed buggy showing totally bogus numbers
+    >> (see https://bugzilla.lustre.org/show_bug.cgi?id=24489)
+
+    Johann> In this case, you run df on the server directly, so you are
+    Johann> comparing statfs information as returned by ext4/ldiskfs
+    Johann> with what you get through lustre (i.e. lfs df or df on a
+    Johann> lustre client).  Lustre takes for granted that 1 EA block is
+    Johann> needed for each inode (conservative approach) and adjusts
+    Johann> the total number of inodes accordingly (see
+    Johann> fsfilt_ext3_statfs()).  That being said, with large inode
+    Johann> support and mkfs.lustre adapting the inode size based on the
+    Johann> default stripe count, i am not sure this "adjustment" makes
+    Johann> sense any more. We could instead print a warning at mkfs
+    Johann> time when the default stripe count cannot fit in the inode
+    Johann> core and #inodes > #blocks.
+
+Sorry, but I'm not sure, what I'm supposed to understand from this. It's
+a fact that 'lfs df -i ' numbers are bogus. I can fill up the whole
+filesystem with as many inodes as df on the server shows (tested this
+with the installation mentioned in bug 24489), so the latter inode
+number is correct. In my opinion this is a clear bug, and deserves
+fixing.
+
+Roland
+
+
+From johann at whamcloud.com  Tue May 17 05:03:05 2011
+From: johann at whamcloud.com (Johann Lombardi)
+Date: Tue, 17 May 2011 14:03:05 +0200
+Subject: [Lustre-devel] F/S stats visualisation
+In-Reply-To: <19922.22109.288864.530108@gargle.gargle.HOWL>
+References: <008a01cc05f8$a6b26840$f41738c0$@com>
+	<84D90924-025F-4ABA-89BD-58C43C8FCDD9@ddn.com>
+	<20110502154328.GG14743@granier.hd.free.fr>
+	<19902.54024.358967.444979@gargle.gargle.HOWL>
+	<20110502163259.GI14743@granier.hd.free.fr>
+	<19922.22109.288864.530108@gargle.gargle.HOWL>
+Message-ID: <20110517120305.GD2142@granier.hd.free.fr>
+
+On Tue, May 17, 2011 at 01:05:01PM +0200, rf at q-leap.de wrote:
+> Sorry, but I'm not sure, what I'm supposed to understand from this.
+
+Lustre intentionally reduces the number of inodes returned via lfs df -i when #blocks > #inodes.
+
+> It's a fact that 'lfs df -i ' numbers are bogus.
+> I can fill up the whole filesystem with as many inodes as df on the server shows (tested this
+> with the installation mentioned in bug 24489), so the latter inode
+> number is correct.
+
+That's because your default striping does not require an additional EA block.
+
+Johann
+
+
+From johann at whamcloud.com  Tue May 17 05:06:55 2011
+From: johann at whamcloud.com (Johann Lombardi)
+Date: Tue, 17 May 2011 14:06:55 +0200
+Subject: [Lustre-devel] F/S stats visualisation
+In-Reply-To: <20110517120305.GD2142@granier.hd.free.fr>
+References: <008a01cc05f8$a6b26840$f41738c0$@com>
+	<84D90924-025F-4ABA-89BD-58C43C8FCDD9@ddn.com>
+	<20110502154328.GG14743@granier.hd.free.fr>
+	<19902.54024.358967.444979@gargle.gargle.HOWL>
+	<20110502163259.GI14743@granier.hd.free.fr>
+	<19922.22109.288864.530108@gargle.gargle.HOWL>
+	<20110517120305.GD2142@granier.hd.free.fr>
+Message-ID: <20110517120655.GE2142@granier.hd.free.fr>
+
+On Tue, May 17, 2011 at 02:03:05PM +0200, Johann Lombardi wrote:
+> Lustre intentionally reduces the number of inodes returned via lfs df -i when #blocks > #inodes.
+
+Sorry, i meant when #inodes > #blocks.
+
+
+From rf at q-leap.de  Tue May 17 05:13:37 2011
+From: rf at q-leap.de (rf at q-leap.de)
+Date: Tue, 17 May 2011 14:13:37 +0200
+Subject: [Lustre-devel] F/S stats visualisation
+In-Reply-To: <20110517120305.GD2142@granier.hd.free.fr>
+References: <008a01cc05f8$a6b26840$f41738c0$@com>
+	<84D90924-025F-4ABA-89BD-58C43C8FCDD9@ddn.com>
+	<20110502154328.GG14743@granier.hd.free.fr>
+	<19902.54024.358967.444979@gargle.gargle.HOWL>
+	<20110502163259.GI14743@granier.hd.free.fr>
+	<19922.22109.288864.530108@gargle.gargle.HOWL>
+	<20110517120305.GD2142@granier.hd.free.fr>
+Message-ID: <19922.26225.948666.896428@gargle.gargle.HOWL>
+
+>>>>> "Johann" == Johann Lombardi <johann at whamcloud.com> writes:
+
+    Johann> On Tue, May 17, 2011 at 01:05:01PM +0200, rf at q-leap.de
+    Johann> wrote:
+
+    >> Sorry, but I'm not sure, what I'm supposed to understand from
+    >> this.
+
+    Johann> Lustre intentionally reduces the number of inodes returned
+    Johann> via lfs df -i when #blocks > #inodes.
+
+Which #blocks? The one of the MDT or the one of the whole FS?
+
+    >> It's a fact that 'lfs df -i ' numbers are bogus.  I can fill up
+    >> the whole filesystem with as many inodes as df on the server
+    >> shows (tested this with the installation mentioned in bug 24489),
+    >> so the latter inode number is correct.
+
+    Johann> That's because your default striping does not require an
+    Johann> additional EA block.
+
+Does that imply I'm doing something wrong? What is an EA block anyway?
+We haven't activated any striping.
+
+Roland
+
+
+From johann at whamcloud.com  Tue May 17 05:47:57 2011
+From: johann at whamcloud.com (Johann Lombardi)
+Date: Tue, 17 May 2011 14:47:57 +0200
+Subject: [Lustre-devel] F/S stats visualisation
+In-Reply-To: <19922.26225.948666.896428@gargle.gargle.HOWL>
+References: <008a01cc05f8$a6b26840$f41738c0$@com>
+	<84D90924-025F-4ABA-89BD-58C43C8FCDD9@ddn.com>
+	<20110502154328.GG14743@granier.hd.free.fr>
+	<19902.54024.358967.444979@gargle.gargle.HOWL>
+	<20110502163259.GI14743@granier.hd.free.fr>
+	<19922.22109.288864.530108@gargle.gargle.HOWL>
+	<20110517120305.GD2142@granier.hd.free.fr>
+	<19922.26225.948666.896428@gargle.gargle.HOWL>
+Message-ID: <20110517124757.GG2142@granier.hd.free.fr>
+
+On Tue, May 17, 2011 at 02:13:37PM +0200, rf at q-leap.de wrote:
+> Which #blocks? The one of the MDT or the one of the whole FS?
+
+The #blocks on the MDT.
+
+> Does that imply I'm doing something wrong?
+
+Lustre is just *very* conservative. If you format your MDT with a #blocks/#inodes ratio of 1, you won't get this problem.
+
+> What is an EA block anyway?
+
+The file striping configuration is stored in an extended attribute. Depending on the number of file stripes (can be changed dynamically with lfs setstripe), this extended attribute is stored either in the inode core or in an additional data block. In the latter, you need to alloate one data block for each file creation.
+
+> We haven't activated any striping.
+
+Then you use the default stripe count which is 1 and the extended attribute fits in the inode.
+As i said in my first email, we could probably do better and handle this at mkfs time. Andreas' patch (http://review.whamcloud.com/#change,480) introducing --stripe-count-hint should help in this regard.
+
+Johann
+
+
+From rf at q-leap.de  Tue May 17 06:43:14 2011
+From: rf at q-leap.de (rf at q-leap.de)
+Date: Tue, 17 May 2011 15:43:14 +0200
+Subject: [Lustre-devel] F/S stats visualisation
+In-Reply-To: <20110517124757.GG2142@granier.hd.free.fr>
+References: <008a01cc05f8$a6b26840$f41738c0$@com>
+	<84D90924-025F-4ABA-89BD-58C43C8FCDD9@ddn.com>
+	<20110502154328.GG14743@granier.hd.free.fr>
+	<19902.54024.358967.444979@gargle.gargle.HOWL>
+	<20110502163259.GI14743@granier.hd.free.fr>
+	<19922.22109.288864.530108@gargle.gargle.HOWL>
+	<20110517120305.GD2142@granier.hd.free.fr>
+	<19922.26225.948666.896428@gargle.gargle.HOWL>
+	<20110517124757.GG2142@granier.hd.free.fr>
+Message-ID: <19922.31602.740562.879134@gargle.gargle.HOWL>
+
+>>>>> "Johann" == Johann Lombardi <johann at whamcloud.com> writes:
+
+    Johann> On Tue, May 17, 2011 at 02:13:37PM +0200, rf at q-leap.de
+    Johann> wrote:
+    >> Which #blocks? The one of the MDT or the one of the whole FS?
+
+    Johann> The #blocks on the MDT.
+
+Ah, OK, that's definitely the case here.
+
+    >> Does that imply I'm doing something wrong?
+
+    Johann> Lustre is just *very* conservative. If you format your MDT
+    Johann> with a #blocks/#inodes ratio of 1, you won't get this
+    Johann> problem.
+
+I see. Unfortunately, we need that many inodes ...
+
+    >> What is an EA block anyway?
+
+    Johann> The file striping configuration is stored in an extended
+    Johann> attribute. Depending on the number of file stripes (can be
+    Johann> changed dynamically with lfs setstripe), this extended
+    Johann> attribute is stored either in the inode core or in an
+    Johann> additional data block. In the latter, you need to alloate
+    Johann> one data block for each file creation.
+
+Got it.
+
+    >> We haven't activated any striping.
+
+    Johann> Then you use the default stripe count which is 1 and the
+    Johann> extended attribute fits in the inode.  As i said in my first
+    Johann> email, we could probably do better and handle this at mkfs
+    Johann> time. Andreas' patch
+    Johann> (http://review.whamcloud.com/#change,480) introducing
+    Johann> --stripe-count-hint should help in this regard.
+
+Great. Thanks a lot for this hint. Do you know whether this will eneter
+the 1.8 branch as well?
+
+Roland
+
+
+From johann at whamcloud.com  Tue May 17 06:56:54 2011
+From: johann at whamcloud.com (Johann Lombardi)
+Date: Tue, 17 May 2011 15:56:54 +0200
+Subject: [Lustre-devel] F/S stats visualisation
+In-Reply-To: <19922.31602.740562.879134@gargle.gargle.HOWL>
+References: <008a01cc05f8$a6b26840$f41738c0$@com>
+	<84D90924-025F-4ABA-89BD-58C43C8FCDD9@ddn.com>
+	<20110502154328.GG14743@granier.hd.free.fr>
+	<19902.54024.358967.444979@gargle.gargle.HOWL>
+	<20110502163259.GI14743@granier.hd.free.fr>
+	<19922.22109.288864.530108@gargle.gargle.HOWL>
+	<20110517120305.GD2142@granier.hd.free.fr>
+	<19922.26225.948666.896428@gargle.gargle.HOWL>
+	<20110517124757.GG2142@granier.hd.free.fr>
+	<19922.31602.740562.879134@gargle.gargle.HOWL>
+Message-ID: <20110517135653.GC14133@granier.hd.free.fr>
+
+On Tue, May 17, 2011 at 03:43:14PM +0200, rf at q-leap.de wrote:
+> I see. Unfortunately, we need that many inodes ...
+
+Well, in your case, you could just remove the culprit code from fsfilt_ext3_statfs(), as done here:
+http://review.whamcloud.com/#patch,sidebyside,480,8,lustre/lvfs/fsfilt_ext3.c
+
+> Great. Thanks a lot for this hint. Do you know whether this will eneter
+> the 1.8 branch as well?
+
+I would ask this question in the bugzilla ticket to have an answer from someone from Oracle.
+
+Johann
+
+-- 
+Johann Lombardi
+Whamcloud, Inc.
+www.whamcloud.com
+
+
+From nic at cray.com  Tue May 17 07:27:43 2011
+From: nic at cray.com (Nic Henke)
+Date: Tue, 17 May 2011 09:27:43 -0500
+Subject: [Lustre-devel] replacing Lustre pings with LNet Peer Health
+In-Reply-To: <9BC94E70-4EB6-49D9-8AA1-B07E1455E51D@whamcloud.com>
+References: <4DCBF565.3060602@cray.com>
+	<9BC94E70-4EB6-49D9-8AA1-B07E1455E51D@whamcloud.com>
+Message-ID: <4DD285DF.2000700@cray.com>
+
+On 05/12/2011 12:27 PM, Andreas Dilger wrote:
+> On May 12, 2011, at 08:57, Nic Henke wrote:
+>> Just floating an idea... I'd much appreciate any feedback
+>>
+
+> One issue is that the Lustre OBD_PING RPC is not just detecting peer
+> death.  It is also reporting the last_committed value to the RPC
+> stack, so that clients can discard RPCs that were committed on the
+> server.  It is also signalling to the server that this client is
+> still alive, so that it doesn't get evicted.  If there are LNET
+> routers in a system, the LNET peer health will only report the health
+> of the routers, and not of the clients or servers behind the routers,
+> so this isn't going to result in a working Lustre filesystem...
+>
+
+Good point, I had missed this. Pesky "working" filesystems...
+
+>> Eric - I know this doesn't get us that far down the road toward
+>> your new health network, but does solve a near term issue with
+>> pinger rates on large systems.
+>
+> There would need to be at least some of the health network
+> implemented in order to "pass through" the peer health on the
+> routers, and also to broadcast some of the data, like last_rcvd.
+
+Yeah, not sure how I thinko'd the LNet Router case. We'd need to add 
+.lnd_notify into the LNDs and have them broadcast the failures at the 
+router level. Not exactly ideal, and I think the use of lnd_notify has 
+been dropped in favor of the newer LNet Peer Health.
+
+Cheers,
+Nic
+
+
+From nic at cray.com  Tue May 17 07:30:08 2011
+From: nic at cray.com (Nic Henke)
+Date: Tue, 17 May 2011 09:30:08 -0500
+Subject: [Lustre-devel] replacing Lustre pings with LNet Peer Health
+In-Reply-To: <4DCC1AEF.8020705@llnl.gov>
+References: <4DCBF565.3060602@cray.com> <4DCC1AEF.8020705@llnl.gov>
+Message-ID: <4DD28670.1090609@cray.com>
+
+On 05/12/2011 12:37 PM, Christopher J. Morrone wrote:
+> I think Eric's approach is the only sane way I've heard to reduce pings.
+>
+> Here are some issues that I see with this:
+>
+> 1)  For your solution to work, you require that the lnet layer take on
+> pinging duties.  Usually the network, be it IB, TCP, whatever, will not
+> provide any active notification of a peer failure.  To notice that a
+> peer has died, the lnet LND must, you guessed it, ping.
+>
+
+Correct. I had assumed the LNDs would or could be doing the pinging. At 
+worst it'd be done on a per-peer basis and not per-import, reducing the 
+traffic somewhat. It'd also reduce the number of layers that need to be 
+involved in the message RX, providing some CPU usage benefit.
+
+> Usually the LNDs try to be smart.  They only generate their own pings if
+> no traffic has been sent to the peer in a certain period of time.  So
+> once you eliminate the higher-level pings, they will partly be replaced
+> by lower-level pings.
+
+Correct, and I thought that sufficient to provide reasonable notification.
+
+Given the LNet router case, I think this idea is a bit DOA... unless I 
+find some sort of non-gross magic :-)
+
+Cheers,
+Nic
+
+
+From rf at q-leap.de  Tue May 17 07:58:16 2011
+From: rf at q-leap.de (rf at q-leap.de)
+Date: Tue, 17 May 2011 16:58:16 +0200
+Subject: [Lustre-devel] F/S stats visualisation
+In-Reply-To: <20110517135653.GC14133@granier.hd.free.fr>
+References: <008a01cc05f8$a6b26840$f41738c0$@com>
+	<84D90924-025F-4ABA-89BD-58C43C8FCDD9@ddn.com>
+	<20110502154328.GG14743@granier.hd.free.fr>
+	<19902.54024.358967.444979@gargle.gargle.HOWL>
+	<20110502163259.GI14743@granier.hd.free.fr>
+	<19922.22109.288864.530108@gargle.gargle.HOWL>
+	<20110517120305.GD2142@granier.hd.free.fr>
+	<19922.26225.948666.896428@gargle.gargle.HOWL>
+	<20110517124757.GG2142@granier.hd.free.fr>
+	<19922.31602.740562.879134@gargle.gargle.HOWL>
+	<20110517135653.GC14133@granier.hd.free.fr>
+Message-ID: <19922.36104.370380.764472@gargle.gargle.HOWL>
+
+>>>>> "Johann" == Johann Lombardi <johann at whamcloud.com> writes:
+
+    Johann> On Tue, May 17, 2011 at 03:43:14PM +0200, rf at q-leap.de
+    Johann> wrote:
+    >> I see. Unfortunately, we need that many inodes ...
+
+    Johann> Well, in your case, you could just remove the culprit code
+    Johann> from fsfilt_ext3_statfs(), as done here:
+    Johann> http://review.whamcloud.com/#patch,sidebyside,480,8,lustre/lvfs/fsfilt_ext3.c
+
+Ok, that's easy. Thanks a lot for the pointer.
+
+    >> Great. Thanks a lot for this hint. Do you know whether this will
+    >> eneter the 1.8 branch as well?
+
+    Johann> I would ask this question in the bugzilla ticket to have an
+    Johann> answer from someone from Oracle.
+
+I will.
+
+Roland
+
+
+From isaac_huang at xyratex.com  Tue May 17 15:53:24 2011
+From: isaac_huang at xyratex.com (Isaac Huang)
+Date: Tue, 17 May 2011 16:53:24 -0600
+Subject: [Lustre-devel] replacing Lustre pings with LNet Peer Health
+In-Reply-To: <4DCBF565.3060602@cray.com>
+References: <4DCBF565.3060602@cray.com>
+Message-ID: <20110517225324.GA2007@xyratex.com>
+
+On Thu, May 12, 2011 at 09:57:41AM -0500, Nic Henke wrote:
+> ......
+> Issues...
+> 
+> - lacks "proof" that peer nodes ptlrpc queues are moving forward,
+> but not really sure that is all that important in terms of pinger
+> evictions.
+> 
+> - LNet peer health is a bit "weird" in that it requires an upper
+> layer sending a packet to trigger a node moving back to 'up'. We
+> would need to address this for proper LNet peer health as it is.
+
+The idea was that if upper layer has no interest sending him a message
+LNet is not bothered whether he's become "up" again. But care must be
+taken such that a message from upper layer must not be dropped if it's
+destined to a peer that appears "dead" but LNet isn't so sure of it,
+i.e. that death news was too old and we haven't tried to get some
+update yet. All is so that unnecessary pings could be cut off.
+
+This is also why router pinger can't be replaced by Peer Health -
+there'd be no more message to a dead router without router pinger
+being active.
+
+As others have pointed out, Peer Health is not end-to-end.
+
+Thanks,
+Isaac
+______________________________________________________________________
+This email may contain privileged or confidential information, which should only be used for the purpose for which it was sent by Xyratex. No further rights or licenses are granted to use such information. If you are not the intended recipient of this message, please notify the sender by return and delete it. You may not use, copy, disclose or rely on the information contained in it.
+ 
+Internet email is susceptible to data corruption, interception and unauthorised amendment for which Xyratex does not accept liability. While we have taken reasonable precautions to ensure that this email is free of viruses, Xyratex does not accept liability for the presence of any computer viruses in this email, nor for any losses caused as a result of viruses.
+ 
+Xyratex Technology Limited (03134912), Registered in England & Wales, Registered Office, Langstone Road, Havant, Hampshire, PO9 1SA.
+ 
+The Xyratex group of companies also includes, Xyratex Ltd, registered in Bermuda, Xyratex International Inc, registered in California, Xyratex (Malaysia) Sdn Bhd registered in Malaysia, Xyratex Technology (Wuxi) Co Ltd registered in The People's Republic of China and Xyratex Japan Limited registered in Japan.
+______________________________________________________________________
+ 
+
+
+
+From james.vanns at framestore.com  Wed May 18 02:29:09 2011
+From: james.vanns at framestore.com (Jim Vanns)
+Date: Wed, 18 May 2011 10:29:09 +0100
+Subject: [Lustre-devel] Understanding of LDLM SLV, CLV correct?
+Message-ID: <1305710949.8503.95.camel@sys367.ldn.framestore.com>
+
+Hi, this is my first post to the list and sadly I've had to resort to
+the developer list because I can't find much detailed info about the
+LDLM intrinsics other than the comments in the source code (which I've
+read).
+
+OS: Linux 2.6
+Client-side version: 1.8.x
+Server-side version: 1.6.x
+Configuration: 4 nodes (each w/ 4G RAM, 4 CPUs) make up 12 OSSs, 1 MDS
+
+This is an old and perhaps odd configuration that I've been trying to
+get my head around!
+
+I'm helping our sysadmins get to the bottom of poor client-side
+performance where the client is evicting pages from it's cache before a
+process has finished with them essentially causing a reread from disk,
+network and back into the cache! Repeat ad infinitum.
+
+As I understand it this boils down to the server lock volume remaining
+almost constantly as 1 and certainly never greater than the client lock
+volume causing a quicker than normal expiry of the lock(s) the client
+had been granted and when these locks are released so are the pages
+flushed from the cache.
+
+We're using, on the client-side, the dynamic calculation of the LDLM LRU
+size which is based on the numbers I mentioned above - the SLV and CLV.
+Sure enough if I overwrite every OSC lru_size on a single client node to
+NR_CPU*100 (using lctl set_param or /proc) then the LRU size dynamic
+calculation is disabled and we can see our pages remain in RAM (in the
+page cache).
+
+Conversely if I get clients that have had several large files open for
+some time to kill-off the processes that had them open, the lock grant
+does not go down and neither does the page cache. This is a little
+ironic because this is what we want other clients to do! Is there some
+sort of (resource/lock) contention here?
+
+It seems that there is a correlation between the SLV and the number of
+current granted locks? As I said the SLV on every OSS is more-or-less 1
+all the time. The #locks granted is quite high - in the order of 10s to
+100s of thousands per OSS. The number of client nodes is approximately
+1000 with God knows how many millions of files!
+
+Am I correct in my assumption that on any individual client node that
+the following files:
+
+cat /proc/fs/lustre/ldlm/namespaces/<OSCs>/lock_count
+
+contain the number of locks granted from each OSS to that client only?
+Is there a cancel/evict/expiry timeout attributed to each of these
+locks? As I hinted in the previous paragraph on machines that have
+closed files their lock_count does not decrease and therefore(?) neither
+does their page cache (until pressure to remove them comes from
+elsewhere in the OS).
+
+The problem is, is that I think this is preventing other nodes in the
+cluster from being able to retain any pages in their cache for a decent
+amount of time (i.e. when they are still processing data from open
+files).
+
+I guess what I am asking is for confirmation on all of the above. I'm
+pretty new to Lustre diagnosis! If this was ever a bug (the calculation
+of the SLV never changing for instance or simply not being granular
+enough) then it is probably fixed by now - 2.0 is the current release
+right?
+
+Are there any configuration parameters that may help in this instance,
+however? Could setting the following:
+
+options ost oss_num_threads=384
+
+per *server* be a little over zealous considering each server acts as 4
+OSSs and it only has 4G of RAM? This is how it is set at the moment.
+
+Any further direction would be appreciated!
+
+Regards,
+
+Jim Vanns
+
+-- 
+Jim Vanns
+Systems Programmer
+Framestore
+
+
+
+From eeb at whamcloud.com  Thu May 26 06:01:08 2011
+From: eeb at whamcloud.com (Eric Barton)
+Date: Thu, 26 May 2011 14:01:08 +0100
+Subject: [Lustre-devel] New test results for "ls -Ul"
+In-Reply-To: <4DCBA5D4.5010902@whamcloud.com>
+References: <4DCBA5D4.5010902@whamcloud.com>
+Message-ID: <012401cc1ba4$fc090da0$f41b28e0$@com>
+
+Nasf,
+
+ 
+
+Interesting results.  Thank you - especially for graphing the results so thoroughly.
+
+I'm attaching them here and cc-ing lustre-devel since these are of general interest.
+
+ 
+
+I don't think your conclusion number (1), to say CLIO locking is slowing us down
+
+is as obvious from these results as you imply.  If you just compare the 1.8 and
+
+patched 2.x per-file times and how they scale with #stripes you get this.
+
+ 
+
+
+
+ 
+
+The gradients of these lines should correspond to the additional time per stripe required
+
+to stat each file and I've graphed these times below (ignoring the 0-stripe data for this
+
+calculation because I'm just interested in the incremental per-stripe overhead).
+
+ 
+
+
+
+They show per-stripe overhead for 1.8 well above patched 2.x for the lower stripe
+
+counts, but whereas 1.8 gets better with more stripes, patched 2.x gets worse.  I'm
+
+guessing that at high stripe counts, 1.8 puts many concurrent glimpses on the wire
+
+and does it quite efficiently.  I'd like to understand better how you control the #
+
+of glimpse-aheads you keep on the wire - is it a single fixed number, or a fixed
+
+number per OST or some other scheme?  In any case, it will be interesting to see
+
+measurements at higher stripe counts.
+
+Cheers, 
+                   Eric 
+
+From: Fan Yong [mailto:yong.fan at whamcloud.com] 
+Sent: 12 May 2011 10:18 AM
+To: Eric Barton
+Cc: Bryon Neitzel; Ian Colle; Liang Zhen
+Subject: New test results for "ls -Ul"
+
+ 
+
+I have improved statahead load balance mechanism to distribute statahead load to more CPU units on client. And adjusted AGL
+according to CLIO lock state machine. After those improvement, 'ls -Ul' can run more fast than old patches, especially on large SMP
+node.
+
+On the other hand, as the increasing the degree of parallelism, the lower network scheduler is becoming performance bottleneck. So I
+combine my patches together with Liang's SMP patches in the test.
+
+	
+client (fat-intel-4, 24 cores)
+
+server (client-xxx, 4 OSSes, 8 OSTs on each OSS)
+
+
+b2x_patched
+
+my patches + SMP patches
+
+my patches
+
+
+b18
+
+original b1_8
+
+share the same server with "b2x_patched"
+
+
+b2x_original
+
+original b2_x
+
+original b2_x
+
+
+Some notes:
+
+1) Stripe count affects traversing performance much, and the impact is more than linear. Even if with all the patches applied on
+b2_x, the degree of stripe count impact is still larger than b1_8. It is related with the complex CLIO lock state machine and
+tedious iteration/repeat operations. It is not easy to make it run as efficiently as b1_8.
+
+2) Patched b2_x is much faster than original b2_x, for traversing 400K * 32-striped directory, it is 100 times or more improved.
+
+3) Patched b2_x is also faster than b1_8, within our test, patched b2_x is at least 4X faster than b1_8, which matches the
+requirement in ORNL contract.
+
+4) Original b2_x is faster than b1_8 only for small striped cases, not more than 4-striped. For large striped cases, slower than
+b1_8, which is consistent with ORNL test result.
+
+5) The largest stripe count is 32 in our test. We have not enough resource to test more large striped cases. And I also wonder
+whether it is worth to test more large striped directory or not. Because how many customers want to use large and full striped
+directory? means contains 1M * 160-striped items in signal directory. If it is rare case, then wasting lots of time on that is
+worthless.
+
+We need to confirm with ORNL what is the last acceptance test cases and environment, includes:
+a) stripe count
+b) item count
+c) network latency, w/o lnet router, suggest without router.
+d) OST count on each OSS
+
+
+Cheers,
+--
+Nasf
+
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20110526/8ddd386d/attachment.htm>
+-------------- next part --------------
+A non-text attachment was scrubbed...
+Name: not available
+Type: image/png
+Size: 64417 bytes
+Desc: not available
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20110526/8ddd386d/attachment.png>
+-------------- next part --------------
+A non-text attachment was scrubbed...
+Name: not available
+Type: image/png
+Size: 57471 bytes
+Desc: not available
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20110526/8ddd386d/attachment-0001.png>
+-------------- next part --------------
+A non-text attachment was scrubbed...
+Name: result_20110512.xls
+Type: application/vnd.ms-excel
+Size: 61952 bytes
+Desc: not available
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20110526/8ddd386d/attachment.xls>
+
+From yong.fan at whamcloud.com  Thu May 26 07:36:23 2011
+From: yong.fan at whamcloud.com (Fan Yong)
+Date: Thu, 26 May 2011 22:36:23 +0800
+Subject: [Lustre-devel] New test results for "ls -Ul"
+In-Reply-To: <012401cc1ba4$fc090da0$f41b28e0$@com>
+References: <4DCBA5D4.5010902@whamcloud.com>
+	<012401cc1ba4$fc090da0$f41b28e0$@com>
+Message-ID: <4DDE6567.4010708@whamcloud.com>
+
+Hi Eric,
+
+Thanks very much for your comparison of the results. I want to give more 
+explanation for the results:
+
+1) I suspect the complex CLIO lock state machine and tedious 
+iteration/repeat operations affect the performance of traversing 
+large-striped directory, means the overhead introduced by those factors 
+are higher than original b1_8 I/O stack. To measure per-stripe overhead, 
+it is unfair that you compare the results between patched lustre-2.x and 
+luster-1.8, because my AGL related patches are async pipeline 
+operations, they hide much of such overhead. But b1_8 is sync glimpse 
+and non-per-fetched. If compare between original lustre-2.x and 
+lustre-1.8, you will find the overhead difference. In fact, such 
+overhead difference can be seen in your second graph also. Just as you 
+said: "1.8 gets better with more stripes, patched 2.x gets worse".
+
+2) Currently, the limitation for AGL #/RPC is statahead window. 
+Originally, such window is only used for controlling MDS-side statahead. 
+So means, as long as item's MDS-side attributes is ready (per-fetched), 
+then related OSS-side AGL RPC can be triggered. The default statahead 
+window size is 32. In my test, I just use the default value. I also 
+tested with larger window size on Toro, but it did not give much help. I 
+am not sure whether it can be better if testing against more powerful 
+nodes/network.
+
+3) For large-striped directory, the test results maybe not represent the 
+real cases, because in my test, there are 8 OSTs on each OSS, but OSS 
+CPU is 4-cores, which is much slower than client node (24-cores CPU). I 
+found OSS's load was quite high for 32-striped cases. In theory, there 
+are at most 32 * 8 concurrent AGL RPCs for each OSS. If we can test on 
+more powerful OSS nodes for large-stripe directory, the improvement may 
+be better than current results.
+
+4) If OSS is the performance bottle neck, it also can explain why "1.8 
+gets better with more stripes, patched 2.x gets worse" on some degree. 
+Because for b1_8, the glimpse RPCs between two items are sync, so there 
+are at most 8 concurrent glimpse RPCs for each OSS, means less 
+contention, so less overhead caused by those contention. I just guess 
+from the experience of studying SMP scaling.
+
+
+Cheers,
+--
+Nasf
+
+On 5/26/11 9:01 PM, Eric Barton wrote:
+>
+> Nasf,
+>
+> Interesting results.  Thank you - especially for graphing the results 
+> so thoroughly.
+>
+> I'm attaching them here and cc-ing lustre-devel since these are of 
+> general interest.
+>
+> I don't think your conclusion number (1), to say CLIO locking is 
+> slowing us down
+>
+> is as obvious from these results as you imply.  If you just compare 
+> the 1.8 and
+>
+> patched 2.x per-file times and how they scale with #stripes you get 
+> this...
+>
+> The gradients of these lines should correspond to the additional time 
+> per stripe required
+>
+> to stat each file and I've graphed these times below (ignoring the 
+> 0-stripe data for this
+>
+> calculation because I'm just interested in the incremental per-stripe 
+> overhead).
+>
+> They show per-stripe overhead for 1.8 well above patched 2.x for the 
+> lower stripe
+>
+> counts, but whereas 1.8 gets better with more stripes, patched 2.x 
+> gets worse.  I'm
+>
+> guessing that at high stripe counts, 1.8 puts many concurrent glimpses 
+> on the wire
+>
+> and does it quite efficiently.  I'd like to understand better how you 
+> control the #
+>
+> of glimpse-aheads you keep on the wire -- is it a single fixed number, 
+> or a fixed
+>
+> number per OST or some other scheme?  In any case, it will be 
+> interesting to see
+>
+> measurements at higher stripe counts.
+>
+>     Cheers,
+>                        Eric
+>
+> *From:*Fan Yong [mailto:yong.fan at whamcloud.com]
+> *Sent:* 12 May 2011 10:18 AM
+> *To:* Eric Barton
+> *Cc:* Bryon Neitzel; Ian Colle; Liang Zhen
+> *Subject:* New test results for "ls -Ul"
+>
+> I have improved statahead load balance mechanism to distribute 
+> statahead load to more CPU units on client. And adjusted AGL according 
+> to CLIO lock state machine. After those improvement, 'ls -Ul' can run 
+> more fast than old patches, especially on large SMP node.
+>
+> On the other hand, as the increasing the degree of parallelism, the 
+> lower network scheduler is becoming performance bottleneck. So I 
+> combine my patches together with Liang's SMP patches in the test.
+>
+>
+> 	
+>
+> client (fat-intel-4, 24 cores)
+>
+> 	
+>
+> server (client-xxx, 4 OSSes, 8 OSTs on each OSS)
+>
+> b2x_patched
+>
+> 	
+>
+> my patches + SMP patches
+>
+> 	
+>
+> my patches
+>
+> b18
+>
+> 	
+>
+> original b1_8
+>
+> 	
+>
+> share the same server with "b2x_patched"
+>
+> b2x_original
+>
+> 	
+>
+> original b2_x
+>
+> 	
+>
+> original b2_x
+>
+>
+> Some notes:
+>
+> 1) Stripe count affects traversing performance much, and the impact is 
+> more than linear. Even if with all the patches applied on b2_x, the 
+> degree of stripe count impact is still larger than b1_8. It is related 
+> with the complex CLIO lock state machine and tedious iteration/repeat 
+> operations. It is not easy to make it run as efficiently as b1_8.
+>
+> 2) Patched b2_x is much faster than original b2_x, for traversing 400K 
+> * 32-striped directory, it is 100 times or more improved.
+>
+> 3) Patched b2_x is also faster than b1_8, within our test, patched 
+> b2_x is at least 4X faster than b1_8, which matches the requirement in 
+> ORNL contract.
+>
+> 4) Original b2_x is faster than b1_8 only for small striped cases, not 
+> more than 4-striped. For large striped cases, slower than b1_8, which 
+> is consistent with ORNL test result.
+>
+> 5) The largest stripe count is 32 in our test. We have not enough 
+> resource to test more large striped cases. And I also wonder whether 
+> it is worth to test more large striped directory or not. Because how 
+> many customers want to use large and full striped directory? means 
+> contains 1M * 160-striped items in signal directory. If it is rare 
+> case, then wasting lots of time on that is worthless.
+>
+> We need to confirm with ORNL what is the last acceptance test cases 
+> and environment, includes:
+> a) stripe count
+> b) item count
+> c) network latency, w/o lnet router, suggest without router.
+> d) OST count on each OSS
+>
+>
+> Cheers,
+> --
+> Nasf
+>
+
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20110526/ebf54878/attachment.htm>
+-------------- next part --------------
+A non-text attachment was scrubbed...
+Name: not available
+Type: image/png
+Size: 64417 bytes
+Desc: not available
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20110526/ebf54878/attachment.png>
+-------------- next part --------------
+A non-text attachment was scrubbed...
+Name: not available
+Type: image/png
+Size: 57471 bytes
+Desc: not available
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20110526/ebf54878/attachment-0001.png>
+
+From nrutman at gmail.com  Thu May 26 08:18:12 2011
+From: nrutman at gmail.com (Nathan Rutman)
+Date: Thu, 26 May 2011 08:18:12 -0700
+Subject: [Lustre-devel] LNET and IPv6?
+Message-ID: <6EDF69A2-F4B6-49C0-A161-DE06A2529E92@gmail.com>
+
+Does anyone have any ideas / plans for IPv6 support for Lustre / LNET?  Or does it remain an uninvestigated wishlist item?
+
+This was part of the OpenSFS requirements gathering phase:
+Support for IPv6 requires a change in the NID format to accommodate a 128bit IPv6 address in the address-within-network field. This affects all protocol levels: LNDs, LNET and Lustre.
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20110526/12c13276/attachment.htm>
+
+From adilger at whamcloud.com  Thu May 26 10:19:24 2011
+From: adilger at whamcloud.com (Andreas Dilger)
+Date: Thu, 26 May 2011 11:19:24 -0600
+Subject: [Lustre-devel] Understanding of LDLM SLV, CLV correct?
+In-Reply-To: <1305710949.8503.95.camel@sys367.ldn.framestore.com>
+References: <1305710949.8503.95.camel@sys367.ldn.framestore.com>
+Message-ID: <74A4CB65-C9AF-4A3E-8932-5AD0434BD945@whamcloud.com>
+
+On 2011-05-18, at 3:29 AM, Jim Vanns <james.vanns at framestore.com> wrote:
+
+> Hi, this is my first post to the list and sadly I've had to resort to
+> the developer list because I can't find much detailed info about the
+> LDLM intrinsics other than the comments in the source code (which I've
+> read).
+
+Hi Jim,
+This is the right place for your question. I was hoping someone else would chime in on this topic, but it's been sitting unanswered for too long. 
+
+There should be a design doc for this work in bugzilla that may be of help. 
+
+> OS: Linux 2.6
+> Client-side version: 1.8.x
+> Server-side version: 1.6.x
+> Configuration: 4 nodes (each w/ 4G RAM, 4 CPUs) make up 12 OSSs, 1 MDS
+> 
+> This is an old and perhaps odd configuration that I've been trying to
+> get my head around!
+> 
+> I'm helping our sysadmins get to the bottom of poor client-side
+> performance where the client is evicting pages from it's cache before a
+> process has finished with them essentially causing a reread from disk,
+> network and back into the cache! Repeat ad infinitum.
+> 
+> As I understand it this boils down to the server lock volume remaining
+> almost constantly as 1 and certainly never greater than the client lock
+> volume causing a quicker than normal expiry of the lock(s) the client
+> had been granted and when these locks are released so are the pages
+> flushed from the cache.
+
+As I recall, there were a number of problems with the DLM automated LRU sizing that were fixed later on. it may be that this problem is resolved in a later version of Lustre, so it would be good to try and find a reproducer with 1.8.5 to verify it still exists, as well as to let others help debug the problem. It would make sense to go through the Lustre/ChangeLog to see when the last fixes were made to this code. 
+
+That said, I'm still not convinced that the behavior of this code and/or its interaction with the VM is what it is supposed to be, so I welcome your investigation into this behavior.
+
+This is one of those situations where it works "well enough" for most users so it hasn't gotten any investigation. Occasionally, however, I notice on my home Lustre system that locks do not remain in the client cache as long as I would expect them to, but have chalked this up to running too many services (MDT + 5 OSTs) on a node with too little RAM (only 2GB). 
+
+> We're using, on the client-side, the dynamic calculation of the LDLM LRU
+> size which is based on the numbers I mentioned above - the SLV and CLV.
+> Sure enough if I overwrite every OSC lru_size on a single client node to
+> NR_CPU*100 (using lctl set_param or /proc) then the LRU size dynamic
+> calculation is disabled and we can see our pages remain in RAM (in the
+> page cache).
+> 
+> Conversely if I get clients that have had several large files open for
+> some time to kill-off the processes that had them open, the lock grant
+> does not go down and neither does the page cache. This is a little
+> ironic because this is what we want other clients to do! Is there some
+> sort of (resource/lock) contention here?
+
+Closing files or killing the processes that previously read or wrote pages has nothing to do with whether the pages remain on cache or not. Lustre at least partly uses the Linux VM To manage pages in cache, and it tries to keep pages in cache unless there is something else to take it's place.
+
+Processes only hold references on locks while inside a syscall, but if they are frequently accessing files those locks are moved to the head of the DLM LRU list. 
+
+> It seems that there is a correlation between the SLV and the number of
+> current granted locks? As I said the SLV on every OSS is more-or-less 1
+> all the time.
+
+The "lock volume" is intended to represent (number of locks * lock age) on the server and client. Since the server can't determine which locks on the client are the oldest, it only sends "pressure" to the client to reduce its lock volume instead of canceling specific locks, and the client decides which locks to cancel itself. 
+
+> The #locks granted is quite high - in the order of 10s to
+> 100s of thousands per OSS. The number of client nodes is approximately
+> 1000 with God knows how many millions of files!
+
+It would be interesting to determine why the OSS is trying to shrink the lock volume. Is it because of memory pressure or normal cache shrinking via the shrinker callbacks? Internal lock volume reduction?
+
+> Am I correct in my assumption that on any individual client node that
+> the following files:
+> 
+> cat /proc/fs/lustre/ldlm/namespaces/<OSCs>/lock_count
+> 
+> contain the number of locks granted from each OSS to that client only?
+
+Correct. 
+
+> Is there a cancel/evict/expiry timeout attributed to each of these
+> locks?
+
+It is possible to dump the internal lock state to the Lustre internal debug log, and then dump the debug log to a file. I'm not sure this will contain all if the data you are looking for, but it is a start. 
+
+Now I just need to recall how that is done...
+
+> As I hinted in the previous paragraph on machines that have
+> closed files their lock_count does not decrease and therefore(?) neither
+> does their page cache (until pressure to remove them comes from
+> elsewhere in the OS).
+
+Unused locks should age and drop off the LRU, but I wonder if there is a problem that these clients are granted a lot of locks and it takes too long to age the locks?
+
+> The problem is, is that I think this is preventing other nodes in the
+> cluster from being able to retain any pages in their cache for a decent
+> amount of time (i.e. when they are still processing data from open
+> files).
+
+There isn't a limit to the number of pages that can be cached under a single lock, so this would only be a problem if these clients are trying to access a large number of different files. 
+
+> I guess what I am asking is for confirmation on all of the above. I'm
+> pretty new to Lustre diagnosis! If this was ever a bug (the calculation
+> of the SLV never changing for instance or simply not being granular
+> enough) then it is probably fixed by now - 2.0 is the current release
+> right?
+
+Well, very few sites are using 2.0.  Most are on 1.8, and many are waiting for 2.1 to be released before upgrading. 
+
+> Are there any configuration parameters that may help in this instance,
+> however? Could setting the following:
+> 
+> options ost oss_num_threads=384
+> 
+> per *server* be a little over zealous considering each server acts as 4
+> OSSs and it only has 4G of RAM? This is how it is set at the moment.
+
+No, this is pretty typical, and shouldn't affect the locking too much. I was going to ask about disabling the read cache in the OSS, but that doesn't exist in 1.6 servers yet. 
+
+Cheers, Andreas
+
+From eeb at whamcloud.com  Thu May 26 10:40:45 2011
+From: eeb at whamcloud.com (Eric Barton)
+Date: Thu, 26 May 2011 18:40:45 +0100
+Subject: [Lustre-devel] New test results for "ls -Ul"
+In-Reply-To: <4DDE6567.4010708@whamcloud.com>
+References: <4DCBA5D4.5010902@whamcloud.com>
+	<012401cc1ba4$fc090da0$f41b28e0$@com>
+	<4DDE6567.4010708@whamcloud.com>
+Message-ID: <002201cc1bcc$0c6b2ad0$25418070$@com>
+
+Nasf,
+
+ 
+
+I agree that we have to be careful comparing 1.8 and patched 2.x since 1.8 is doing
+
+no RPC pipelining to the MDS or OSSs - however I still think (unless you can show
+
+me the hole in my reasoning) that comparing the slopes of the time v. # stripes graphs
+
+is fair.  These slopes correspond to the additional time it takes to stat a file with more
+
+stripes.  Although total per-file stat times in 1.8 are dominated by RPC round-trips
+
+to the MDS and OSSes - the OSS RPCs are all sent concurrently, so the incremental
+
+time per stripe should be the time it takes to traverse the stack for each stripe and
+
+issue the RPC.  Similarly for 2.x, the incremental time per stripe should also be the
+
+time it takes to traverse the stack for each strip and queue the async glimpse.
+
+ 
+
+In any case, I think measurements of higher stripe counts on a larger server cluster
+
+will be revealing.
+
+ 
+
+Cheers,
+                   Eric 
+
+ 
+
+From: Fan Yong [mailto:yong.fan at whamcloud.com] 
+Sent: 26 May 2011 3:36 PM
+To: Eric Barton
+Cc: 'Bryon Neitzel'; 'Ian Colle'; 'Liang Zhen'; lustre-devel at lists.lustre.org
+Subject: Re: New test results for "ls -Ul"
+
+ 
+
+Hi Eric,
+
+Thanks very much for your comparison of the results. I want to give more explanation for the results:
+
+1) I suspect the complex CLIO lock state machine and tedious iteration/repeat operations affect the performance of traversing
+large-striped directory, means the overhead introduced by those factors are higher than original b1_8 I/O stack. To measure
+per-stripe overhead, it is unfair that you compare the results between patched lustre-2.x and luster-1.8, because my AGL related
+patches are async pipeline operations, they hide much of such overhead. But b1_8 is sync glimpse and non-per-fetched. If compare
+between original lustre-2.x and lustre-1.8, you will find the overhead difference. In fact, such overhead difference can be seen in
+your second graph also. Just as you said: "1.8 gets better with more stripes, patched 2.x gets worse".
+
+2) Currently, the limitation for AGL #/RPC is statahead window. Originally, such window is only used for controlling MDS-side
+statahead. So means, as long as item's MDS-side attributes is ready (per-fetched), then related OSS-side AGL RPC can be triggered.
+The default statahead window size is 32. In my test, I just use the default value. I also tested with larger window size on Toro,
+but it did not give much help. I am not sure whether it can be better if testing against more powerful nodes/network.
+
+3) For large-striped directory, the test results maybe not represent the real cases, because in my test, there are 8 OSTs on each
+OSS, but OSS CPU is 4-cores, which is much slower than client node (24-cores CPU). I found OSS's load was quite high for 32-striped
+cases. In theory, there are at most 32 * 8 concurrent AGL RPCs for each OSS. If we can test on more powerful OSS nodes for
+large-stripe directory, the improvement may be better than current results.
+
+4) If OSS is the performance bottle neck, it also can explain why "1.8 gets better with more stripes, patched 2.x gets worse" on
+some degree. Because for b1_8, the glimpse RPCs between two items are sync, so there are at most 8 concurrent glimpse RPCs for each
+OSS, means less contention, so less overhead caused by those contention. I just guess from the experience of studying SMP scaling.
+
+
+Cheers,
+--
+Nasf
+
+On 5/26/11 9:01 PM, Eric Barton wrote: 
+
+Nasf,
+
+ 
+
+Interesting results.  Thank you - especially for graphing the results so thoroughly.
+
+I'm attaching them here and cc-ing lustre-devel since these are of general interest.
+
+ 
+
+I don't think your conclusion number (1), to say CLIO locking is slowing us down
+
+is as obvious from these results as you imply.  If you just compare the 1.8 and
+
+patched 2.x per-file times and how they scale with #stripes you get this.
+
+ 
+
+
+
+ 
+
+The gradients of these lines should correspond to the additional time per stripe required
+
+to stat each file and I've graphed these times below (ignoring the 0-stripe data for this
+
+calculation because I'm just interested in the incremental per-stripe overhead).
+
+ 
+
+
+
+They show per-stripe overhead for 1.8 well above patched 2.x for the lower stripe
+
+counts, but whereas 1.8 gets better with more stripes, patched 2.x gets worse.  I'm
+
+guessing that at high stripe counts, 1.8 puts many concurrent glimpses on the wire
+
+and does it quite efficiently.  I'd like to understand better how you control the #
+
+of glimpse-aheads you keep on the wire - is it a single fixed number, or a fixed
+
+number per OST or some other scheme?  In any case, it will be interesting to see
+
+measurements at higher stripe counts.
+
+Cheers, 
+                   Eric 
+
+From: Fan Yong [mailto:yong.fan at whamcloud.com] 
+Sent: 12 May 2011 10:18 AM
+To: Eric Barton
+Cc: Bryon Neitzel; Ian Colle; Liang Zhen
+Subject: New test results for "ls -Ul"
+
+ 
+
+I have improved statahead load balance mechanism to distribute statahead load to more CPU units on client. And adjusted AGL
+according to CLIO lock state machine. After those improvement, 'ls -Ul' can run more fast than old patches, especially on large SMP
+node.
+
+On the other hand, as the increasing the degree of parallelism, the lower network scheduler is becoming performance bottleneck. So I
+combine my patches together with Liang's SMP patches in the test.
+
+	
+client (fat-intel-4, 24 cores)
+
+server (client-xxx, 4 OSSes, 8 OSTs on each OSS)
+
+
+b2x_patched
+
+my patches + SMP patches
+
+my patches
+
+
+b18
+
+original b1_8
+
+share the same server with "b2x_patched"
+
+
+b2x_original
+
+original b2_x
+
+original b2_x
+
+
+Some notes:
+
+1) Stripe count affects traversing performance much, and the impact is more than linear. Even if with all the patches applied on
+b2_x, the degree of stripe count impact is still larger than b1_8. It is related with the complex CLIO lock state machine and
+tedious iteration/repeat operations. It is not easy to make it run as efficiently as b1_8.
+
+2) Patched b2_x is much faster than original b2_x, for traversing 400K * 32-striped directory, it is 100 times or more improved.
+
+3) Patched b2_x is also faster than b1_8, within our test, patched b2_x is at least 4X faster than b1_8, which matches the
+requirement in ORNL contract.
+
+4) Original b2_x is faster than b1_8 only for small striped cases, not more than 4-striped. For large striped cases, slower than
+b1_8, which is consistent with ORNL test result.
+
+5) The largest stripe count is 32 in our test. We have not enough resource to test more large striped cases. And I also wonder
+whether it is worth to test more large striped directory or not. Because how many customers want to use large and full striped
+directory? means contains 1M * 160-striped items in signal directory. If it is rare case, then wasting lots of time on that is
+worthless.
+
+We need to confirm with ORNL what is the last acceptance test cases and environment, includes:
+a) stripe count
+b) item count
+c) network latency, w/o lnet router, suggest without router.
+d) OST count on each OSS
+
+
+Cheers,
+--
+Nasf
+
+ 
+
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20110526/3ee2ea5e/attachment.htm>
+-------------- next part --------------
+A non-text attachment was scrubbed...
+Name: not available
+Type: image/png
+Size: 64417 bytes
+Desc: not available
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20110526/3ee2ea5e/attachment.png>
+-------------- next part --------------
+A non-text attachment was scrubbed...
+Name: not available
+Type: image/png
+Size: 57471 bytes
+Desc: not available
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20110526/3ee2ea5e/attachment-0001.png>
+
+From adilger at whamcloud.com  Thu May 26 12:36:40 2011
+From: adilger at whamcloud.com (Andreas Dilger)
+Date: Thu, 26 May 2011 13:36:40 -0600
+Subject: [Lustre-devel] New test results for "ls -Ul"
+In-Reply-To: <002201cc1bcc$0c6b2ad0$25418070$@com>
+References: <4DCBA5D4.5010902@whamcloud.com>
+	<012401cc1ba4$fc090da0$f41b28e0$@com>
+	<4DDE6567.4010708@whamcloud.com>
+	<002201cc1bcc$0c6b2ad0$25418070$@com>
+Message-ID: <3258294A-E2A4-45F1-B896-4C57BD7D48BD@whamcloud.com>
+
+On May 26, 2011, at 11:40, Eric Barton wrote:
+> I agree that we have to be careful comparing 1.8 and patched 2.x since 1.8
+> is doing no RPC pipelining to the MDS or OSSs ? however I still think
+> (unless you can show me the hole in my reasoning) that comparing the slopes
+> of the time v. # stripes graphs is fair.  These slopes correspond to the
+> additional time it takes to stat a file with more stripes.
+> 
+> Although total per-file stat times in 1.8 are dominated by RPC round-trips
+> to the MDS and OSSes ? the OSS RPCs are all sent concurrently, so the
+> incremental time per stripe should be the time it takes to traverse the
+> stack for each stripe and issue the RPC.  Similarly for 2.x, the incremental
+> time per stripe should also be the time it takes to traverse the stack for
+> each strip and queue the async glimpse.
+
+I'm not sure this is correct.  In the 1.8 case, the parallel OST glimpse RPCs are amortizing (per stripe) the higher (more visible) round-trip MDT RPC time.  That means the 1.8 MDT RPC time per OST stripe is shrinking, which makes it appear that 1.8 is more efficient with higher stripe counts, while in 2.x the increase in stripes can only increase the total time, because there is less opportunity the N-stripe glimpse RPC latency can be hidden by async RPCs.
+
+I think the good news is that regardless of whether the 2.x client stack is less efficient, the overall improvements made to 2.x are stunning, and it is reasonable to have higher CPU overhead on the client for this substantial performance improvement visible to users/applications.
+
+> In any case, I think measurements of higher stripe counts on a larger server
+> cluster will be revealing.
+>  
+> Cheers,
+>                    Eric
+>  
+> From: Fan Yong [mailto:yong.fan at whamcloud.com] 
+> Sent: 26 May 2011 3:36 PM
+> To: Eric Barton
+> Cc: 'Bryon Neitzel'; 'Ian Colle'; 'Liang Zhen'; lustre-devel at lists.lustre.org
+> Subject: Re: New test results for "ls -Ul"
+>  
+> Hi Eric,
+> 
+> Thanks very much for your comparison of the results. I want to give more explanation for the results:
+> 
+> 1) I suspect the complex CLIO lock state machine and tedious iteration/repeat operations affect the performance of traversing large-striped directory, means the overhead introduced by those factors are higher than original b1_8 I/O stack. To measure per-stripe overhead, it is unfair that you compare the results between patched lustre-2.x and luster-1.8, because my AGL related patches are async pipeline operations, they hide much of such overhead. But b1_8 is sync glimpse and non-per-fetched. If compare between original lustre-2.x and lustre-1.8, you will find the overhead difference. In fact, such overhead difference can be seen in your second graph also. Just as you said: "1.8 gets better with more stripes, patched 2.x gets worse".
+> 
+> 2) Currently, the limitation for AGL #/RPC is statahead window. Originally, such window is only used for controlling MDS-side statahead. So means, as long as item's MDS-side attributes is ready (per-fetched), then related OSS-side AGL RPC can be triggered. The default statahead window size is 32. In my test, I just use the default value. I also tested with larger window size on Toro, but it did not give much help. I am not sure whether it can be better if testing against more powerful nodes/network.
+> 
+> 3) For large-striped directory, the test results maybe not represent the real cases, because in my test, there are 8 OSTs on each OSS, but OSS CPU is 4-cores, which is much slower than client node (24-cores CPU). I found OSS's load was quite high for 32-striped cases. In theory, there are at most 32 * 8 concurrent AGL RPCs for each OSS. If we can test on more powerful OSS nodes for large-stripe directory, the improvement may be better than current results.
+> 
+> 4) If OSS is the performance bottle neck, it also can explain why "1.8 gets better with more stripes, patched 2.x gets worse" on some degree. Because for b1_8, the glimpse RPCs between two items are sync, so there are at most 8 concurrent glimpse RPCs for each OSS, means less contention, so less overhead caused by those contention. I just guess from the experience of studying SMP scaling.
+> 
+> 
+> Cheers,
+> --
+> Nasf
+> 
+> On 5/26/11 9:01 PM, Eric Barton wrote:
+> Nasf,
+>  
+> Interesting results.  Thank you - especially for graphing the results so thoroughly.
+> I?m attaching them here and cc-ing lustre-devel since these are of general interest.
+>  
+> I don?t think your conclusion number (1), to say CLIO locking is slowing us down
+> is as obvious from these results as you imply.  If you just compare the 1.8 and
+> patched 2.x per-file times and how they scale with #stripes you get this?
+>  
+> <image001.png>
+>  
+> The gradients of these lines should correspond to the additional time per stripe required
+> to stat each file and I?ve graphed these times below (ignoring the 0-stripe data for this
+> calculation because I?m just interested in the incremental per-stripe overhead).
+>  
+> <image002.png>
+> They show per-stripe overhead for 1.8 well above patched 2.x for the lower stripe
+> counts, but whereas 1.8 gets better with more stripes, patched 2.x gets worse.  I?m
+> guessing that at high stripe counts, 1.8 puts many concurrent glimpses on the wire
+> and does it quite efficiently.  I?d like to understand better how you control the #
+> of glimpse-aheads you keep on the wire ? is it a single fixed number, or a fixed
+> number per OST or some other scheme?  In any case, it will be interesting to see
+> measurements at higher stripe counts.
+> Cheers, 
+>                    Eric
+> From: Fan Yong [mailto:yong.fan at whamcloud.com] 
+> Sent: 12 May 2011 10:18 AM
+> To: Eric Barton
+> Cc: Bryon Neitzel; Ian Colle; Liang Zhen
+> Subject: New test results for "ls -Ul"
+>  
+> I have improved statahead load balance mechanism to distribute statahead load to more CPU units on client. And adjusted AGL according to CLIO lock state machine. After those improvement, 'ls -Ul' can run more fast than old patches, especially on large SMP node.
+> 
+> On the other hand, as the increasing the degree of parallelism, the lower network scheduler is becoming performance bottleneck. So I combine my patches together with Liang's SMP patches in the test.
+> 
+> client (fat-intel-4, 24 cores)
+> server (client-xxx, 4 OSSes, 8 OSTs on each OSS)
+> b2x_patched
+> my patches + SMP patches
+> my patches
+> b18
+> original b1_8
+> share the same server with "b2x_patched"
+> b2x_original
+> original b2_x
+> original b2_x
+> 
+> Some notes:
+> 
+> 1) Stripe count affects traversing performance much, and the impact is more than linear. Even if with all the patches applied on b2_x, the degree of stripe count impact is still larger than b1_8. It is related with the complex CLIO lock state machine and tedious iteration/repeat operations. It is not easy to make it run as efficiently as b1_8.
+> 
+> 2) Patched b2_x is much faster than original b2_x, for traversing 400K * 32-striped directory, it is 100 times or more improved.
+> 
+> 3) Patched b2_x is also faster than b1_8, within our test, patched b2_x is at least 4X faster than b1_8, which matches the requirement in ORNL contract.
+> 
+> 4) Original b2_x is faster than b1_8 only for small striped cases, not more than 4-striped. For large striped cases, slower than b1_8, which is consistent with ORNL test result.
+> 
+> 5) The largest stripe count is 32 in our test. We have not enough resource to test more large striped cases. And I also wonder whether it is worth to test more large striped directory or not. Because how many customers want to use large and full striped directory? means contains 1M * 160-striped items in signal directory. If it is rare case, then wasting lots of time on that is worthless.
+> 
+> We need to confirm with ORNL what is the last acceptance test cases and environment, includes:
+> a) stripe count
+> b) item count
+> c) network latency, w/o lnet router, suggest without router.
+> d) OST count on each OSS
+> 
+> 
+> Cheers,
+> --
+> Nasf
+>  
+> _______________________________________________
+> Lustre-devel mailing list
+> Lustre-devel at lists.lustre.org
+> http://lists.lustre.org/mailman/listinfo/lustre-devel
+
+
+Cheers, Andreas
+--
+Andreas Dilger 
+Principal Engineer
+Whamcloud, Inc.
+
+
+
+
+
+From adilger at whamcloud.com  Thu May 26 13:56:35 2011
+From: adilger at whamcloud.com (Andreas Dilger)
+Date: Thu, 26 May 2011 14:56:35 -0600
+Subject: [Lustre-devel] LNET and IPv6?
+In-Reply-To: <6EDF69A2-F4B6-49C0-A161-DE06A2529E92@gmail.com>
+References: <6EDF69A2-F4B6-49C0-A161-DE06A2529E92@gmail.com>
+Message-ID: <6CA65419-7663-4E11-8D66-6FAD42AF3D38@whamcloud.com>
+
+On May 26, 2011, at 09:18, Nathan Rutman wrote:
+> Does anyone have any ideas / plans for IPv6 support for Lustre / LNET?  Or does it remain an uninvestigated wishlist item?
+> 
+> This was part of the OpenSFS requirements gathering phase:
+> Support for IPv6 requires a change in the NID format to accommodate a 128bit IPv6 address in the address-within-network field. This affects all protocol levels: LNDs, LNET and Lustre.
+
+While I think there are a number of semi-interested parties, I don't think
+anyone is actually working on this today.
+
+There is a two-fold problem:
+1) the less complex one is to change Lustre/LNET to handle the larger IPv6
+   NIDs at compile time and get that working, but this breaks compatibility
+2) the more complex one is to make an IPv6-capable Lustre work in some
+   manner with older clients that don't understand it (e.g. IPv4-IPv6 LNET
+   routers, different socklnds for each, or similar)
+
+Of course, until #1 is done there is no way to know how hard #2 will be to
+implement.  The earlier #1 is finished, it would be possible for many users
+to upgrade to RPMs built with IPv6 support, but most of the sites that have
+money to fund such work are interested in compatibility (#2) because they
+cannot upgrade their entire infrastructure at one time.
+
+
+Cheers, Andreas
+--
+Andreas Dilger 
+Principal Engineer
+Whamcloud, Inc.
+
+
+
+
+
+From yong.fan at whamcloud.com  Fri May 27 00:58:41 2011
+From: yong.fan at whamcloud.com (Fan Yong)
+Date: Fri, 27 May 2011 15:58:41 +0800
+Subject: [Lustre-devel] New test results for "ls -Ul"
+In-Reply-To: <3258294A-E2A4-45F1-B896-4C57BD7D48BD@whamcloud.com>
+References: <4DCBA5D4.5010902@whamcloud.com>
+	<012401cc1ba4$fc090da0$f41b28e0$@com>
+	<4DDE6567.4010708@whamcloud.com>
+	<002201cc1bcc$0c6b2ad0$25418070$@com>
+	<3258294A-E2A4-45F1-B896-4C57BD7D48BD@whamcloud.com>
+Message-ID: <4DDF59B1.7020404@whamcloud.com>
+
+On 5/27/11 3:36 AM, Andreas Dilger wrote:
+> On May 26, 2011, at 11:40, Eric Barton wrote:
+>> I agree that we have to be careful comparing 1.8 and patched 2.x since 1.8
+>> is doing no RPC pipelining to the MDS or OSSs ? however I still think
+>> (unless you can show me the hole in my reasoning) that comparing the slopes
+>> of the time v. # stripes graphs is fair.  These slopes correspond to the
+>> additional time it takes to stat a file with more stripes.
+>>
+>> Although total per-file stat times in 1.8 are dominated by RPC round-trips
+>> to the MDS and OSSes ? the OSS RPCs are all sent concurrently, so the
+>> incremental time per stripe should be the time it takes to traverse the
+>> stack for each stripe and issue the RPC.  Similarly for 2.x, the incremental
+>> time per stripe should also be the time it takes to traverse the stack for
+>> each strip and queue the async glimpse.
+> I'm not sure this is correct.  In the 1.8 case, the parallel OST glimpse RPCs are amortizing (per stripe) the higher (more visible) round-trip MDT RPC time.  That means the 1.8 MDT RPC time per OST stripe is shrinking, which makes it appear that 1.8 is more efficient with higher stripe counts, while in 2.x the increase in stripes can only increase the total time, because there is less opportunity the N-stripe glimpse RPC latency can be hidden by async RPCs.
+>
+> I think the good news is that regardless of whether the 2.x client stack is less efficient, the overall improvements made to 2.x are stunning, and it is reasonable to have higher CPU overhead on the client for this substantial performance improvement visible to users/applications.
+
+Yes, it has greatly improved the traversing performance for not more 
+than 32-striped cases, especially for large directory. As for more large 
+striped directory, we have no direct test results yet. What I worry 
+about is whether the per-stripe overhead will grow rapidly or not. I 
+think that is also why Eric suggest to measure more large striped cases.
+
+
+Cheers,
+--
+Nasf
+
+>> In any case, I think measurements of higher stripe counts on a larger server
+>> cluster will be revealing.
+>>
+>> Cheers,
+>>                     Eric
+>>
+>> From: Fan Yong [mailto:yong.fan at whamcloud.com]
+>> Sent: 26 May 2011 3:36 PM
+>> To: Eric Barton
+>> Cc: 'Bryon Neitzel'; 'Ian Colle'; 'Liang Zhen'; lustre-devel at lists.lustre.org
+>> Subject: Re: New test results for "ls -Ul"
+>>
+>> Hi Eric,
+>>
+>> Thanks very much for your comparison of the results. I want to give more explanation for the results:
+>>
+>> 1) I suspect the complex CLIO lock state machine and tedious iteration/repeat operations affect the performance of traversing large-striped directory, means the overhead introduced by those factors are higher than original b1_8 I/O stack. To measure per-stripe overhead, it is unfair that you compare the results between patched lustre-2.x and luster-1.8, because my AGL related patches are async pipeline operations, they hide much of such overhead. But b1_8 is sync glimpse and non-per-fetched. If compare between original lustre-2.x and lustre-1.8, you will find the overhead difference. In fact, such overhead difference can be seen in your second graph also. Just as you said: "1.8 gets better with more stripes, patched 2.x gets worse".
+>>
+>> 2) Currently, the limitation for AGL #/RPC is statahead window. Originally, such window is only used for controlling MDS-side statahead. So means, as long as item's MDS-side attributes is ready (per-fetched), then related OSS-side AGL RPC can be triggered. The default statahead window size is 32. In my test, I just use the default value. I also tested with larger window size on Toro, but it did not give much help. I am not sure whether it can be better if testing against more powerful nodes/network.
+>>
+>> 3) For large-striped directory, the test results maybe not represent the real cases, because in my test, there are 8 OSTs on each OSS, but OSS CPU is 4-cores, which is much slower than client node (24-cores CPU). I found OSS's load was quite high for 32-striped cases. In theory, there are at most 32 * 8 concurrent AGL RPCs for each OSS. If we can test on more powerful OSS nodes for large-stripe directory, the improvement may be better than current results.
+>>
+>> 4) If OSS is the performance bottle neck, it also can explain why "1.8 gets better with more stripes, patched 2.x gets worse" on some degree. Because for b1_8, the glimpse RPCs between two items are sync, so there are at most 8 concurrent glimpse RPCs for each OSS, means less contention, so less overhead caused by those contention. I just guess from the experience of studying SMP scaling.
+>>
+>>
+>> Cheers,
+>> --
+>> Nasf
+>>
+>> On 5/26/11 9:01 PM, Eric Barton wrote:
+>> Nasf,
+>>
+>> Interesting results.  Thank you - especially for graphing the results so thoroughly.
+>> I?m attaching them here and cc-ing lustre-devel since these are of general interest.
+>>
+>> I don?t think your conclusion number (1), to say CLIO locking is slowing us down
+>> is as obvious from these results as you imply.  If you just compare the 1.8 and
+>> patched 2.x per-file times and how they scale with #stripes you get this?
+>>
+>> <image001.png>
+>>
+>> The gradients of these lines should correspond to the additional time per stripe required
+>> to stat each file and I?ve graphed these times below (ignoring the 0-stripe data for this
+>> calculation because I?m just interested in the incremental per-stripe overhead).
+>>
+>> <image002.png>
+>> They show per-stripe overhead for 1.8 well above patched 2.x for the lower stripe
+>> counts, but whereas 1.8 gets better with more stripes, patched 2.x gets worse.  I?m
+>> guessing that at high stripe counts, 1.8 puts many concurrent glimpses on the wire
+>> and does it quite efficiently.  I?d like to understand better how you control the #
+>> of glimpse-aheads you keep on the wire ? is it a single fixed number, or a fixed
+>> number per OST or some other scheme?  In any case, it will be interesting to see
+>> measurements at higher stripe counts.
+>> Cheers,
+>>                     Eric
+>> From: Fan Yong [mailto:yong.fan at whamcloud.com]
+>> Sent: 12 May 2011 10:18 AM
+>> To: Eric Barton
+>> Cc: Bryon Neitzel; Ian Colle; Liang Zhen
+>> Subject: New test results for "ls -Ul"
+>>
+>> I have improved statahead load balance mechanism to distribute statahead load to more CPU units on client. And adjusted AGL according to CLIO lock state machine. After those improvement, 'ls -Ul' can run more fast than old patches, especially on large SMP node.
+>>
+>> On the other hand, as the increasing the degree of parallelism, the lower network scheduler is becoming performance bottleneck. So I combine my patches together with Liang's SMP patches in the test.
+>>
+>> client (fat-intel-4, 24 cores)
+>> server (client-xxx, 4 OSSes, 8 OSTs on each OSS)
+>> b2x_patched
+>> my patches + SMP patches
+>> my patches
+>> b18
+>> original b1_8
+>> share the same server with "b2x_patched"
+>> b2x_original
+>> original b2_x
+>> original b2_x
+>>
+>> Some notes:
+>>
+>> 1) Stripe count affects traversing performance much, and the impact is more than linear. Even if with all the patches applied on b2_x, the degree of stripe count impact is still larger than b1_8. It is related with the complex CLIO lock state machine and tedious iteration/repeat operations. It is not easy to make it run as efficiently as b1_8.
+>>
+>> 2) Patched b2_x is much faster than original b2_x, for traversing 400K * 32-striped directory, it is 100 times or more improved.
+>>
+>> 3) Patched b2_x is also faster than b1_8, within our test, patched b2_x is at least 4X faster than b1_8, which matches the requirement in ORNL contract.
+>>
+>> 4) Original b2_x is faster than b1_8 only for small striped cases, not more than 4-striped. For large striped cases, slower than b1_8, which is consistent with ORNL test result.
+>>
+>> 5) The largest stripe count is 32 in our test. We have not enough resource to test more large striped cases. And I also wonder whether it is worth to test more large striped directory or not. Because how many customers want to use large and full striped directory? means contains 1M * 160-striped items in signal directory. If it is rare case, then wasting lots of time on that is worthless.
+>>
+>> We need to confirm with ORNL what is the last acceptance test cases and environment, includes:
+>> a) stripe count
+>> b) item count
+>> c) network latency, w/o lnet router, suggest without router.
+>> d) OST count on each OSS
+>>
+>>
+>> Cheers,
+>> --
+>> Nasf
+>>
+>> _______________________________________________
+>> Lustre-devel mailing list
+>> Lustre-devel at lists.lustre.org
+>> http://lists.lustre.org/mailman/listinfo/lustre-devel
+>
+> Cheers, Andreas
+> --
+> Andreas Dilger
+> Principal Engineer
+> Whamcloud, Inc.
+>
+>
+>
+
+
+
+From yong.fan at whamcloud.com  Mon May 30 01:11:59 2011
+From: yong.fan at whamcloud.com (Fan Yong)
+Date: Mon, 30 May 2011 16:11:59 +0800
+Subject: [Lustre-devel] New test results for "ls -Ul"
+In-Reply-To: <BA5D598A-2A89-48DF-A67A-4ACDD8B1F409@whamcloud.com>
+References: <4DCBA5D4.5010902@whamcloud.com>
+	<012401cc1ba4$fc090da0$f41b28e0$@com>
+	<BA5D598A-2A89-48DF-A67A-4ACDD8B1F409@whamcloud.com>
+Message-ID: <4DE3514F.2050903@whamcloud.com>
+
+Inline comments as following:
+
+On 5/30/11 1:51 PM, Jinshan Xiong wrote:
+>
+> On May 26, 2011, at 6:01 AM, Eric Barton wrote:
+>
+>> Nasf,
+>> Interesting results.  Thank you - especially for graphing the results 
+>> so thoroughly.
+>> I?m attaching them here and cc-ing lustre-devel since these are of 
+>> general interest.
+>> I don?t think your conclusion number (1), to say CLIO locking is 
+>> slowing us down
+>> is as obvious from these results as you imply.  If you just compare 
+>> the 1.8 and
+>> patched 2.x per-file times and how they scale with #stripes you get this?
+>> <image001.png>
+>> The gradients of these lines should correspond to the additional time 
+>> per stripe required
+>> to stat each file and I?ve graphed these times below (ignoring the 
+>> 0-stripe data for this
+>> calculation because I?m just interested in the incremental per-stripe 
+>> overhead).
+>> <image004.png>
+>> They show per-stripe overhead for 1.8 well above patched 2.x for the 
+>> lower stripe
+>> counts, but whereas 1.8 gets better with more stripes, patched 2.x 
+>> gets worse.  I?m
+>> guessing that at high stripe counts, 1.8 puts many concurrent 
+>> glimpses on the wire
+>> and does it quite efficiently.  I?d like to understand better how you 
+>> control the #
+>> of glimpse-aheads you keep on the wire ? is it a single fixed number, 
+>> or a fixed
+>> number per OST or some other scheme?  In any case, it will be 
+>> interesting to see
+>> measurements at higher stripe counts.
+>>
+>>     Cheers,
+>>                        Eric
+>>
+>> *From:*Fan Yong [mailto:yong.fan at whamcloud.com]
+>> *Sent:*12 May 2011 10:18 AM
+>> *To:*Eric Barton
+>> *Cc:*Bryon Neitzel; Ian Colle; Liang Zhen
+>> *Subject:*New test results for "ls -Ul"
+>>
+>> I have improved statahead load balance mechanism to distribute 
+>> statahead load to more CPU units on client. And adjusted AGL 
+>> according to CLIO lock state machine. After those improvement, 'ls 
+>> -Ul' can run more fast than old patches, especially on large SMP node.
+>>
+>> On the other hand, as the increasing the degree of parallelism, the 
+>> lower network scheduler is becoming performance bottleneck. So I 
+>> combine my patches together with Liang's SMP patches in the test.
+>>
+>>
+>> 	
+>> client (fat-intel-4, 24 cores)
+>> 	
+>> server (client-xxx, 4 OSSes, 8 OSTs on each OSS)
+>> b2x_patched
+>> 	
+>> my patches + SMP patches
+>> 	
+>> my patches
+>> b18
+>> 	
+>> original b1_8
+>> 	
+>> share the same server with "b2x_patched"
+>> b2x_original
+>> 	
+>> original b2_x
+>> 	
+>> original b2_x
+>>
+>>
+>> Some notes:
+>>
+>> 1) Stripe count affects traversing performance much, and the impact 
+>> is more than linear. Even if with all the patches applied on b2_x, 
+>> the degree of stripe count impact is still larger than b1_8. It is 
+>> related with the complex CLIO lock state machine and tedious 
+>> iteration/repeat operations. It is not easy to make it run as 
+>> efficiently as b1_8.
+>
+>
+> Hi there,
+>
+> I did some tests to investigate the overhead of clio lock state 
+> machine and glimpse lock, and I found something new.
+>
+> Basically I did the same thing as what Nasf had done, but I only cared 
+> about the overhead of glimpse locks. For this purpose, I ran 'ls -lU' 
+> twice for each test, and the 1st run is only used to create IBITS 
+> UPDATE lock cache for files; then, I dropped cl_locks and ldlm_locks 
+> from client side cache by setting zero to lru_size of ldlm namespaces, 
+> then do 'ls -lU' once again. In the second run of 'ls -lU', the 
+> statahead thread will always find cached IBITS lock(we can check mdc 
+> lock_count for sure), so the elapsed time of ls will be glimpse related.
+>
+> This is what I got from the test:
+>
+>
+>
+>
+>
+> Description and test environment:
+> - `ls -Ul time' means the time to finish the second run;
+> - 100K means 100K files under the same directory; 400K means 400K 
+> files under the same directory;
+> - there are two OSSes in my test, and each OSS has 8 OSTs; OSTs are 
+> crossed over on two OSSes, i.e., OST0, 2, 4,.. are on OSS0; 1, 3, 5, 
+> .. are on OSS1;
+> - each node has 12G memory, 4 CPU cores;
+> - latest lustre-master build, b140
+>
+> and, prorated per stripe overhead:
+>
+>
+>
+>
+>
+> From the above test, it's very hard to make the conclusion that 
+> cl_lock causes the increase of ls time by the stripe count.
+>
+> Here is the test script I used to do the test, and test output is 
+> attached as well. Please let me know if I missed something.
+
+
+In theory, processing glimpse RPC for each stripe of the same file 
+should be in parallel. So means more stripe count, then less average 
+overhead per-stripe, at least it is the expectation. Flat line cannot 
+indicate the overhead is small enough. I suggest to compare with b1_8 
+for the same tests.
+
+
+>
+>
+>
+>
+>
+>
+> ===================
+> Let's take a step back to reconsider what's real cause in Nasf's test. 
+> I tend to think the load on OSSes might cause that symptom. It's 
+> obvious that Async Glimpse Lock produces more stress on OSS, 
+> especially in his test env where multiple OSTs are actually on the 
+> same OSS. This will make the ls time increased by the stripe count as 
+> well - since OSS has to handle more RPCs when the stripe count 
+> increases in a specific time. This problem may be mitigated by 
+> distributing OSTs to more OSSes.
+
+
+Basically, I agree with you that the heavy load on OSS may be the 
+performance bottleneck, just as I said in former email, we found the CPU 
+loads on OSS were quite high when "ls -Ul" for large-striped cases. It 
+is easy to be verified as long as we have enough powerful OSSes, 
+unfortunately we have not now.
+
+Cheers,
+--
+Nasf
+
+
+>
+> Thanks,
+> Jinshan
+>
+>>
+>> 2) Patched b2_x is much faster than original b2_x, for traversing 
+>> 400K * 32-striped directory, it is 100 times or more improved.
+>>
+>> 3) Patched b2_x is also faster than b1_8, within our test, patched 
+>> b2_x is at least 4X faster than b1_8, which matches the requirement 
+>> in ORNL contract.
+>>
+>> 4) Original b2_x is faster than b1_8 only for small striped cases, 
+>> not more than 4-striped. For large striped cases, slower than b1_8, 
+>> which is consistent with ORNL test result.
+>>
+>> 5) The largest stripe count is 32 in our test. We have not enough 
+>> resource to test more large striped cases. And I also wonder whether 
+>> it is worth to test more large striped directory or not. Because how 
+>> many customers want to use large and full striped directory? means 
+>> contains 1M * 160-striped items in signal directory. If it is rare 
+>> case, then wasting lots of time on that is worthless.
+>>
+>> We need to confirm with ORNL what is the last acceptance test cases 
+>> and environment, includes:
+>> a) stripe count
+>> b) item count
+>> c) network latency, w/o lnet router, suggest without router.
+>> d) OST count on each OSS
+>>
+>>
+>> Cheers,
+>> --
+>> Nasf
+>> <result_20110512.xls>_______________________________________________
+>> Lustre-devel mailing list
+>> Lustre-devel at lists.lustre.org <mailto:Lustre-devel at lists.lustre.org>
+>> http://lists.lustre.org/mailman/listinfo/lustre-devel
+>
+
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20110530/29c7a5d7/attachment.htm>
+
+From meshram.vilobh at gmail.com  Tue May 31 02:56:30 2011
+From: meshram.vilobh at gmail.com (vilobh meshram)
+Date: Tue, 31 May 2011 05:56:30 -0400
+Subject: [Lustre-devel] Lustre and Multicore
+Message-ID: <BANLkTimHiGZtmzNEPNs-DRdNQk5Bg8wduQ@mail.gmail.com>
+
+Hi ,
+
+Wanted to understand will the design of Lustre(Client/MDS/OSS) change if we
+have Multicores.
+
+Thanks,
+Vilobh
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20110531/29f004ad/attachment.htm>
+
+From jinshan.xiong at whamcloud.com  Sun May 29 22:51:50 2011
+From: jinshan.xiong at whamcloud.com (Jinshan Xiong)
+Date: Sun, 29 May 2011 22:51:50 -0700
+Subject: [Lustre-devel] New test results for "ls -Ul"
+In-Reply-To: <012401cc1ba4$fc090da0$f41b28e0$@com>
+References: <4DCBA5D4.5010902@whamcloud.com>
+	<012401cc1ba4$fc090da0$f41b28e0$@com>
+Message-ID: <BA5D598A-2A89-48DF-A67A-4ACDD8B1F409@whamcloud.com>
+
+
+On May 26, 2011, at 6:01 AM, Eric Barton wrote:
+
+> Nasf,
+>  
+> Interesting results.  Thank you - especially for graphing the results so thoroughly.
+> I?m attaching them here and cc-ing lustre-devel since these are of general interest.
+>  
+> I don?t think your conclusion number (1), to say CLIO locking is slowing us down
+> is as obvious from these results as you imply.  If you just compare the 1.8 and
+> patched 2.x per-file times and how they scale with #stripes you get this?
+>  
+> <image001.png>
+>  
+> The gradients of these lines should correspond to the additional time per stripe required
+> to stat each file and I?ve graphed these times below (ignoring the 0-stripe data for this
+> calculation because I?m just interested in the incremental per-stripe overhead).
+>  
+> <image004.png>
+> They show per-stripe overhead for 1.8 well above patched 2.x for the lower stripe
+> counts, but whereas 1.8 gets better with more stripes, patched 2.x gets worse.  I?m
+> guessing that at high stripe counts, 1.8 puts many concurrent glimpses on the wire
+> and does it quite efficiently.  I?d like to understand better how you control the #
+> of glimpse-aheads you keep on the wire ? is it a single fixed number, or a fixed
+> number per OST or some other scheme?  In any case, it will be interesting to see
+> measurements at higher stripe counts.
+> Cheers, 
+>                    Eric
+> From: Fan Yong [mailto:yong.fan at whamcloud.com] 
+> Sent: 12 May 2011 10:18 AM
+> To: Eric Barton
+> Cc: Bryon Neitzel; Ian Colle; Liang Zhen
+> Subject: New test results for "ls -Ul"
+>  
+> I have improved statahead load balance mechanism to distribute statahead load to more CPU units on client. And adjusted AGL according to CLIO lock state machine. After those improvement, 'ls -Ul' can run more fast than old patches, especially on large SMP node.
+> 
+> On the other hand, as the increasing the degree of parallelism, the lower network scheduler is becoming performance bottleneck. So I combine my patches together with Liang's SMP patches in the test.
+> 
+> client (fat-intel-4, 24 cores)
+> server (client-xxx, 4 OSSes, 8 OSTs on each OSS)
+> b2x_patched
+> my patches + SMP patches
+> my patches
+> b18
+> original b1_8
+> share the same server with "b2x_patched"
+> b2x_original
+> original b2_x
+> original b2_x
+> 
+> Some notes:
+> 
+> 1) Stripe count affects traversing performance much, and the impact is more than linear. Even if with all the patches applied on b2_x, the degree of stripe count impact is still larger than b1_8. It is related with the complex CLIO lock state machine and tedious iteration/repeat operations. It is not easy to make it run as efficiently as b1_8.
+
+
+Hi there,
+
+I did some tests to investigate the overhead of clio lock state machine and glimpse lock, and I found something new.
+
+Basically I did the same thing as what Nasf had done, but I only cared about the overhead of glimpse locks. For this purpose, I ran 'ls -lU' twice for each test, and the 1st run is only used to create IBITS UPDATE lock cache for files; then, I dropped cl_locks and ldlm_locks from client side cache by setting zero to lru_size of ldlm namespaces, then do 'ls -lU' once again. In the second run of 'ls -lU', the statahead thread will always find cached IBITS lock(we can check mdc lock_count for sure), so the elapsed time of ls will be glimpse related.
+
+This is what I got from the test:
+
+
+
+
+Description and test environment:
+- `ls -Ul time' means the time to finish the second run; 
+- 100K means 100K files under the same directory; 400K means 400K files under the same directory;
+- there are two OSSes in my test, and each OSS has 8 OSTs; OSTs are crossed over on two OSSes, i.e., OST0, 2, 4,.. are on OSS0; 1, 3, 5, .. are on OSS1;
+- each node has 12G memory, 4 CPU cores;
+- latest lustre-master build, b140
+
+and, prorated per stripe overhead:
+
+
+
+
+From the above test, it's very hard to make the conclusion that cl_lock causes the increase of ls time by the stripe count.
+
+Here is the test script I used to do the test, and test output is attached as well. Please let me know if I missed something.
+
+
+
+
+
+===================
+Let's take a step back to reconsider what's real cause in Nasf's test. I tend to think the load on OSSes might cause that symptom. It's obvious that Async Glimpse Lock produces more stress on OSS, especially in his test env where multiple OSTs are actually on the same OSS. This will make the ls time increased by the stripe count as well - since OSS has to handle more RPCs when the stripe count increases in a specific time. This problem may be mitigated by distributing OSTs to more OSSes.
+
+Thanks,
+Jinshan
+
+> 
+> 2) Patched b2_x is much faster than original b2_x, for traversing 400K * 32-striped directory, it is 100 times or more improved.
+> 
+> 3) Patched b2_x is also faster than b1_8, within our test, patched b2_x is at least 4X faster than b1_8, which matches the requirement in ORNL contract.
+> 
+> 4) Original b2_x is faster than b1_8 only for small striped cases, not more than 4-striped. For large striped cases, slower than b1_8, which is consistent with ORNL test result.
+> 
+> 5) The largest stripe count is 32 in our test. We have not enough resource to test more large striped cases. And I also wonder whether it is worth to test more large striped directory or not. Because how many customers want to use large and full striped directory? means contains 1M * 160-striped items in signal directory. If it is rare case, then wasting lots of time on that is worthless.
+> 
+> We need to confirm with ORNL what is the last acceptance test cases and environment, includes:
+> a) stripe count
+> b) item count
+> c) network latency, w/o lnet router, suggest without router.
+> d) OST count on each OSS
+> 
+> 
+> Cheers,
+> --
+> Nasf
+> <result_20110512.xls>_______________________________________________
+> Lustre-devel mailing list
+> Lustre-devel at lists.lustre.org
+> http://lists.lustre.org/mailman/listinfo/lustre-devel
+
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20110529/9ad0cc05/attachment.htm>
+-------------- next part --------------
+A non-text attachment was scrubbed...
+Name: 1.png
+Type: image/png
+Size: 58740 bytes
+Desc: not available
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20110529/9ad0cc05/attachment.png>
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20110529/9ad0cc05/attachment-0001.htm>
+-------------- next part --------------
+A non-text attachment was scrubbed...
+Name: 2.png
+Type: image/png
+Size: 65244 bytes
+Desc: not available
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20110529/9ad0cc05/attachment-0001.png>
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20110529/9ad0cc05/attachment-0002.htm>
+-------------- next part --------------
+A non-text attachment was scrubbed...
+Name: test.tgz
+Type: application/octet-stream
+Size: 1516 bytes
+Desc: not available
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20110529/9ad0cc05/attachment.obj>
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20110529/9ad0cc05/attachment-0003.htm>
+
+From liang at whamcloud.com  Tue May 31 08:56:11 2011
+From: liang at whamcloud.com (Liang Zhen)
+Date: Tue, 31 May 2011 23:56:11 +0800
+Subject: [Lustre-devel] Lustre and Multicore
+In-Reply-To: <BANLkTimHiGZtmzNEPNs-DRdNQk5Bg8wduQ@mail.gmail.com>
+References: <BANLkTimHiGZtmzNEPNs-DRdNQk5Bg8wduQ@mail.gmail.com>
+Message-ID: <85FA5B23-7B16-4FC1-8D9B-7E6D1B98AFB5@whamcloud.com>
+
+Vilobh,
+
+We do have work-in-progress for performance on multicores (http://jira.whamcloud.com/browse/LU-56), but these changes will be almost transparent to users, and they have nothing to do with lustre protocol.
+
+Regards
+Liang
+
+On May 31, 2011, at 5:56 PM, vilobh meshram wrote:
+
+> Hi ,
+> 
+> Wanted to understand will the design of Lustre(Client/MDS/OSS) change if we have Multicores.
+> 
+> Thanks,
+> Vilobh
+> _______________________________________________
+> Lustre-devel mailing list
+> Lustre-devel at lists.lustre.org
+> http://lists.lustre.org/mailman/listinfo/lustre-devel
+
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20110531/b5f4d422/attachment.htm>
+

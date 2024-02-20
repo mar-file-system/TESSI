@@ -1,0 +1,894 @@
+From jsimmons at infradead.org  Wed May 11 12:38:38 2022
+From: jsimmons at infradead.org (James Simmons)
+Date: Wed, 11 May 2022 15:38:38 -0400
+Subject: [lustre-devel] [PATCH 0/5] lustre: sync to 2.15 LTS release
+Message-ID: <1652297923-16141-1-git-send-email-jsimmons@infradead.org>
+
+Last patches needed to bring native client in sync with
+Lustre 2.15 LTS release.
+
+Alex Zhuravlev (1):
+  lustre: obdclass: llog to handle gaps
+
+Arshad Hussain (1):
+  lustre: uapi: fallocate interop for 2.14 clients
+
+John L. Hammond (1):
+  lustre: llite: disable fast_read and workaround
+
+Oleg Drokin (1):
+  lustre: update version to 2.15.0
+
+Sebastien Buisson (1):
+  lustre: sec: correctly handle page lock in ll_io_zero_page
+
+ fs/lustre/llite/llite_lib.c            | 22 +++++++++++-----------
+ fs/lustre/llite/rw.c                   | 11 +++++++++--
+ fs/lustre/llite/vvp_page.c             |  6 ------
+ fs/lustre/obdclass/llog.c              | 25 +++++++++----------------
+ include/uapi/linux/lustre/lustre_idl.h |  3 +++
+ include/uapi/linux/lustre/lustre_ver.h |  6 +++---
+ 6 files changed, 35 insertions(+), 38 deletions(-)
+
+-- 
+1.8.3.1
+
+
+From jsimmons at infradead.org  Wed May 11 12:38:39 2022
+From: jsimmons at infradead.org (James Simmons)
+Date: Wed, 11 May 2022 15:38:39 -0400
+Subject: [lustre-devel] [PATCH 1/5] lustre: uapi: fallocate interop for 2.14
+ clients
+In-Reply-To: <1652297923-16141-1-git-send-email-jsimmons@infradead.org>
+References: <1652297923-16141-1-git-send-email-jsimmons@infradead.org>
+Message-ID: <1652297923-16141-2-git-send-email-jsimmons@infradead.org>
+
+From: Arshad Hussain <arshad.hussain at aeoncomputing.com>
+
+fallocate() start and end are passed in o_size and o_blocks
+on the wire.  Clients 2.15.0 and newer should always set
+the OBD_MD_FLSIZE and OBD_MD_FLBLOCKS valid flags, but some
+older client versions did not.  We permit older clients to
+not set these flags, checking their version by proxy using
+the missing OBD_CONNECT_TRUNCLOCK to imply 2.14.0 or older.
+
+WC-bug-id: https://jira.whamcloud.com/browse/LU-15748
+Lustre-commit: 79053592966792a21 ("LU-15748 osc: fallocate interop for 2.14 clients")
+Signed-off-by: Arshad Hussain <arshad.hussain at aeoncomputing.com>
+Reviewed-on: https://review.whamcloud.com/47098
+Reviewed-by: Andreas Dilger <adilger at whamcloud.com>
+Reviewed-by: Patrick Farrell <pfarrell at whamcloud.com>
+Signed-off-by: James Simmons <jsimmons at infradead.org>
+---
+ include/uapi/linux/lustre/lustre_idl.h | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/include/uapi/linux/lustre/lustre_idl.h b/include/uapi/linux/lustre/lustre_idl.h
+index 753df16..37db3ee 100644
+--- a/include/uapi/linux/lustre/lustre_idl.h
++++ b/include/uapi/linux/lustre/lustre_idl.h
+@@ -691,6 +691,9 @@ struct ptlrpc_body_v2 {
+ #define OBD_CONNECT_ACL			 0x80ULL /*access control lists */
+ #define OBD_CONNECT_XATTR		0x100ULL /*client use extended attr */
+ #define OBD_CONNECT_LARGE_ACL		0x200ULL /* more than 32 ACL entries */
++/* was OBD_CONNECT_TRUNCLOCK		0x400ULL *locks on server for punch */
++/* temporary reuse until 2.21.53 to indicate pre-2.15 client, see LU-15478 */
++#define OBD_CONNECT_OLD_FALLOC		0x400ULL /* missing o_valid flags */
+ #define OBD_CONNECT_TRANSNO		0x800ULL /*replay sends init transno */
+ #define OBD_CONNECT_IBITS	       0x1000ULL /* not checked in 2.11+ */
+ #define OBD_CONNECT_BARRIER	       0x2000ULL /* write barrier. Resevered to
+-- 
+1.8.3.1
+
+
+From jsimmons at infradead.org  Wed May 11 12:38:41 2022
+From: jsimmons at infradead.org (James Simmons)
+Date: Wed, 11 May 2022 15:38:41 -0400
+Subject: [lustre-devel] [PATCH 3/5] lustre: sec: correctly handle page lock
+ in ll_io_zero_page
+In-Reply-To: <1652297923-16141-1-git-send-email-jsimmons@infradead.org>
+References: <1652297923-16141-1-git-send-email-jsimmons@infradead.org>
+Message-ID: <1652297923-16141-4-git-send-email-jsimmons@infradead.org>
+
+From: Sebastien Buisson <sbuisson at ddn.com>
+
+In ll_io_zero_page(), we need to make sure we have locked the page,
+and it is up-to-date, before zeroing. So modify ll_io_read_page()
+behavior to not disown the clpage for our use case. It avoids being
+exposed to concurrent modifications.
+
+WC-bug-id: https://jira.whamcloud.com/browse/LU-15803
+Lustre-commit: edcd05e5ac035dd1d ("LU-15803 sec: correctly handle page lock in ll_io_zero_page")
+Signed-off-by: Sebastien Buisson <sbuisson at ddn.com>
+Reviewed-on: https://review.whamcloud.com/47170
+Reviewed-by: Andreas Dilger <adilger at whamcloud.com>
+Reviewed-by: Patrick Farrell <pfarrell at whamcloud.com>
+Reviewed-by: Oleg Drokin <green at whamcloud.com>
+Signed-off-by: James Simmons <jsimmons at infradead.org>
+---
+ fs/lustre/llite/llite_lib.c | 20 ++++++++++----------
+ fs/lustre/llite/rw.c        | 11 +++++++++--
+ 2 files changed, 19 insertions(+), 12 deletions(-)
+
+diff --git a/fs/lustre/llite/llite_lib.c b/fs/lustre/llite/llite_lib.c
+index 8c0a3e0..ad77ef0 100644
+--- a/fs/lustre/llite/llite_lib.c
++++ b/fs/lustre/llite/llite_lib.c
+@@ -1831,7 +1831,6 @@ int ll_io_zero_page(struct inode *inode, pgoff_t index, pgoff_t offset,
+ 	struct cl_2queue *queue = NULL;
+ 	struct cl_sync_io *anchor = NULL;
+ 	bool holdinglock = false;
+-	bool lockedbymyself = true;
+ 	int rc;
+ 
+ 	env = cl_env_get(&refcheck);
+@@ -1888,8 +1887,10 @@ int ll_io_zero_page(struct inode *inode, pgoff_t index, pgoff_t offset,
+ 	if (!PageUptodate(vmpage) && !PageDirty(vmpage) &&
+ 	    !PageWriteback(vmpage)) {
+ 		/* read page */
+-		/* set PagePrivate2 to detect special case of empty page
+-		 * in osc_brw_fini_request()
++		/* Set PagePrivate2 to detect special case of empty page
++		 * in osc_brw_fini_request().
++		 * It is also used to tell ll_io_read_page() that we do not
++		 * want the vmpage to be unlocked.
+ 		 */
+ 		SetPagePrivate2(vmpage);
+ 		rc = ll_io_read_page(env, io, clpage, NULL);
+@@ -1900,17 +1901,18 @@ int ll_io_zero_page(struct inode *inode, pgoff_t index, pgoff_t offset,
+ 			 * file, we must not zero and write as below. Subsequent
+ 			 * server-side truncate will handle things correctly.
+ 			 */
++			cl_page_unassume(env, io, clpage);
+ 			rc = 0;
+ 			goto clpfini;
+ 		}
+ 		ClearPagePrivate2(vmpage);
+ 		if (rc)
+ 			goto clpfini;
+-		lockedbymyself = trylock_page(vmpage);
+-		cl_page_assume(env, io, clpage);
+ 	}
+ 
+-	/* zero range in page */
++	/* Thanks to PagePrivate2 flag, ll_io_read_page() did not unlock
++	 * the vmpage, so we are good to proceed and zero range in page.
++	 */
+ 	zero_user(vmpage, offset, len);
+ 
+ 	if (holdinglock && clpage) {
+@@ -1940,10 +1942,8 @@ int ll_io_zero_page(struct inode *inode, pgoff_t index, pgoff_t offset,
+ 	if (clpage)
+ 		cl_page_put(env, clpage);
+ pagefini:
+-	if (lockedbymyself) {
+-		unlock_page(vmpage);
+-		put_page(vmpage);
+-	}
++	unlock_page(vmpage);
++	put_page(vmpage);
+ rellock:
+ 	if (holdinglock)
+ 		cl_lock_release(env, lock);
+diff --git a/fs/lustre/llite/rw.c b/fs/lustre/llite/rw.c
+index 0ddd920..bd02a28 100644
+--- a/fs/lustre/llite/rw.c
++++ b/fs/lustre/llite/rw.c
+@@ -1630,18 +1630,24 @@ int ll_io_read_page(const struct lu_env *env, struct cl_io *io,
+ 	struct vvp_io *vio = vvp_env_io(env);
+ 	bool mmap = !vio->vui_ra_valid;
+ 	struct cl_sync_io *anchor = NULL;
++	bool unlockpage = true, uptodate;
+ 	pgoff_t ra_start_index = 0;
+ 	pgoff_t io_start_index;
+ 	pgoff_t io_end_index;
+ 	int rc = 0, rc2 = 0;
+ 	struct vvp_page *vpg;
+-	bool uptodate;
+ 
+ 	if (file) {
+ 		fd = file->private_data;
+ 		ras = &fd->fd_ras;
+ 	}
+ 
++	/* PagePrivate2 is set in ll_io_zero_page() to tell us the vmpage
++	 * must not be unlocked after processing.
++	 */
++	if (page->cp_vmpage && PagePrivate2(page->cp_vmpage))
++		unlockpage = false;
++
+ 	vpg = cl2vvp_page(cl_object_page_slice(page->cp_obj, page));
+ 	uptodate = vpg->vpg_defer_uptodate;
+ 
+@@ -1721,7 +1727,8 @@ int ll_io_read_page(const struct lu_env *env, struct cl_io *io,
+ 			 */
+ 			cl_page_discard(env, io, page);
+ 		}
+-		cl_page_disown(env, io, page);
++		if (unlockpage)
++			cl_page_disown(env, io, page);
+ 	}
+ 
+ 	/* TODO: discard all pages until page reinit route is implemented */
+-- 
+1.8.3.1
+
+
+From jsimmons at infradead.org  Wed May 11 12:38:42 2022
+From: jsimmons at infradead.org (James Simmons)
+Date: Wed, 11 May 2022 15:38:42 -0400
+Subject: [lustre-devel] [PATCH 4/5] lustre: llite: disable fast_read and
+ workaround
+In-Reply-To: <1652297923-16141-1-git-send-email-jsimmons@infradead.org>
+References: <1652297923-16141-1-git-send-email-jsimmons@infradead.org>
+Message-ID: <1652297923-16141-5-git-send-email-jsimmons@infradead.org>
+
+From: "John L. Hammond" <jhammond at whamcloud.com>
+
+Revert the fast_read stale data workaround from LU-14541 and disable
+fast_read by default. The workaround causes applications to receive
+spurious SIGBUGs when reclaim is concurrent with mmap page fault
+handlers. We disable fast read to avoid the stale data issue entirely.
+
+This reverts commit 15caffd4dc36c45f53458c2d6493f07b95acf507 and
+re-exposes us to the consistency issues described in LU-14541.
+
+WC-bug-id: https://jira.whamcloud.com/browse/LU-15815
+Lustre-commit: 201ade9442828fbb3 ("LU-15815 llite: disable fast_read and workaround")
+Signed-off-by: John L. Hammond <jhammond at whamcloud.com>
+Reviewed-on: https://review.whamcloud.com/47204
+Reviewed-by: Patrick Farrell <pfarrell at whamcloud.com>
+Reviewed-by: Andreas Dilger <adilger at whamcloud.com>
+Reviewed-by: Oleg Drokin <green at whamcloud.com>
+Signed-off-by: James Simmons <jsimmons at infradead.org>
+---
+ fs/lustre/llite/llite_lib.c | 2 +-
+ fs/lustre/llite/vvp_page.c  | 6 ------
+ 2 files changed, 1 insertion(+), 7 deletions(-)
+
+diff --git a/fs/lustre/llite/llite_lib.c b/fs/lustre/llite/llite_lib.c
+index ad77ef0..4578a9e 100644
+--- a/fs/lustre/llite/llite_lib.c
++++ b/fs/lustre/llite/llite_lib.c
+@@ -169,7 +169,7 @@ static struct ll_sb_info *ll_init_sbi(void)
+ 	atomic_set(&sbi->ll_sa_running, 0);
+ 	atomic_set(&sbi->ll_agl_total, 0);
+ 	set_bit(LL_SBI_AGL_ENABLED, sbi->ll_flags);
+-	set_bit(LL_SBI_FAST_READ, sbi->ll_flags);
++	/* Disable LL_SBI_FAST_READ by default, see LU-15815. */
+ 	set_bit(LL_SBI_TINY_WRITE, sbi->ll_flags);
+ 	set_bit(LL_SBI_PARALLEL_DIO, sbi->ll_flags);
+ 	ll_sbi_set_encrypt(sbi, true);
+diff --git a/fs/lustre/llite/vvp_page.c b/fs/lustre/llite/vvp_page.c
+index 1e95ede..7744e9b 100644
+--- a/fs/lustre/llite/vvp_page.c
++++ b/fs/lustre/llite/vvp_page.c
+@@ -164,12 +164,6 @@ static void vvp_page_delete(const struct lu_env *env,
+ 
+ 	ClearPagePrivate(vmpage);
+ 	vmpage->private = 0;
+-
+-	/**
+-	 * Vmpage might not be released due page refcount != 2,
+-	 * clear Page uptodate here to avoid stale data.
+-	 */
+-	ClearPageUptodate(vmpage);
+ 	/*
+ 	 * Reference from vmpage to cl_page is removed, but the reference back
+ 	 * is still here. It is removed later in vvp_page_fini().
+-- 
+1.8.3.1
+
+
+From jsimmons at infradead.org  Wed May 11 12:38:43 2022
+From: jsimmons at infradead.org (James Simmons)
+Date: Wed, 11 May 2022 15:38:43 -0400
+Subject: [lustre-devel] [PATCH 5/5] lustre: update version to 2.15.0
+In-Reply-To: <1652297923-16141-1-git-send-email-jsimmons@infradead.org>
+References: <1652297923-16141-1-git-send-email-jsimmons@infradead.org>
+Message-ID: <1652297923-16141-6-git-send-email-jsimmons@infradead.org>
+
+From: Oleg Drokin <green at whamcloud.com>
+
+New tag 2.15.0
+
+Signed-off-by: Oleg Drokin <green at whamcloud.com>
+Signed-off-by: James Simmons <jsimmons at infradead.org>
+---
+ include/uapi/linux/lustre/lustre_ver.h | 6 +++---
+ 1 file changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/include/uapi/linux/lustre/lustre_ver.h b/include/uapi/linux/lustre/lustre_ver.h
+index 5cba95e..a17edd6 100644
+--- a/include/uapi/linux/lustre/lustre_ver.h
++++ b/include/uapi/linux/lustre/lustre_ver.h
+@@ -2,10 +2,10 @@
+ #define _LUSTRE_VER_H_
+ 
+ #define LUSTRE_MAJOR 2
+-#define LUSTRE_MINOR 14
+-#define LUSTRE_PATCH 57
++#define LUSTRE_MINOR 15
++#define LUSTRE_PATCH 0
+ #define LUSTRE_FIX 0
+-#define LUSTRE_VERSION_STRING "2.14.57"
++#define LUSTRE_VERSION_STRING "2.15.0"
+ 
+ #define OBD_OCD_VERSION(major, minor, patch, fix)			\
+ 	(((major) << 24) + ((minor) << 16) + ((patch) << 8) + (fix))
+-- 
+1.8.3.1
+
+
+From jsimmons at infradead.org  Wed May 11 12:38:40 2022
+From: jsimmons at infradead.org (James Simmons)
+Date: Wed, 11 May 2022 15:38:40 -0400
+Subject: [lustre-devel] [PATCH 2/5] lustre: obdclass: llog to handle gaps
+In-Reply-To: <1652297923-16141-1-git-send-email-jsimmons@infradead.org>
+References: <1652297923-16141-1-git-send-email-jsimmons@infradead.org>
+Message-ID: <1652297923-16141-3-git-send-email-jsimmons@infradead.org>
+
+From: Alex Zhuravlev <bzzz at whamcloud.com>
+
+due to old errors an update llog can contain gaps in index.
+this shouldn't block llog processing and recovery. actual
+gaps in transaction sequence should be catched by VBR.
+
+WC-bug-id: https://jira.whamcloud.com/browse/LU-15645
+Signed-off-by: Alex Zhuravlev <bzzz at whamcloud.com>
+Reviewed-on: https://review.whamcloud.com/46837
+Reviewed-by: Andreas Dilger <adilger at whamcloud.com>
+Reviewed-by: Alexander Boyko <alexander.boyko at hpe.com>
+Reviewed-by: Oleg Drokin <green at whamcloud.com>
+Signed-off-by: James Simmons <jsimmons at infradead.org>
+---
+ fs/lustre/obdclass/llog.c | 25 +++++++++----------------
+ 1 file changed, 9 insertions(+), 16 deletions(-)
+
+diff --git a/fs/lustre/obdclass/llog.c b/fs/lustre/obdclass/llog.c
+index 768bc47..acede87 100644
+--- a/fs/lustre/obdclass/llog.c
++++ b/fs/lustre/obdclass/llog.c
+@@ -430,23 +430,16 @@ static int llog_process_thread(void *arg)
+ 				continue;
+ 			}
+ 
+-			if (rec->lrh_index != index) {
+-				/*
+-				 * the last time we couldn't parse the block due
+-				 * to corruption, thus has no idea about the
+-				 * next index, take it from the block, once.
++			if (rec->lrh_index > index) {
++				/* the record itself looks good, but we met a
++				 * gap which can be result of old bugs, just
++				 * keep going
+ 				 */
+-				if (refresh_idx) {
+-					refresh_idx = false;
+-					index = rec->lrh_index;
+-				} else {
+-					CERROR("%s: "DFID" Invalid record: index %u but expected %u\n",
+-					       loghandle2name(loghandle),
+-					       PFID(&loghandle->lgh_id.lgl_oi.oi_fid),
+-					       rec->lrh_index, index);
+-					rc = -ERANGE;
+-					goto out;
+-				}
++				CERROR("%s: "DFID" index %u, expected %u\n",
++				       loghandle2name(loghandle),
++				       PFID(&loghandle->lgh_id.lgl_oi.oi_fid),
++				       rec->lrh_index, index);
++				index = rec->lrh_index;
+ 			}
+ 
+ 			CDEBUG(D_OTHER,
+-- 
+1.8.3.1
+
+
+From jsimmons at infradead.org  Sat May 14 12:03:37 2022
+From: jsimmons at infradead.org (James Simmons)
+Date: Sat, 14 May 2022 15:03:37 -0400
+Subject: [lustre-devel] [PATCH v2] fscrypt: allow alternative bounce buffers
+Message-ID: <1652555017-16601-1-git-send-email-jsimmons@infradead.org>
+
+Currently fscrypt offers two options. One option is to use the
+internal bounce buffer allocated or perform inline encrpytion.
+Add the option to use an external bounce buffer. This change can
+be used useful for example for a network file systems which can
+pass in a page from the page cache and place the encrypted data
+into a page for a network packet to be sent. Another potential
+use is the use of GPU pages with RDMA being the final destination
+for the encrypted data. Lastly in performance measurements the
+allocation of the bounce page incures a heavy cost. Using a page
+from a predefined memory pool can lower the case. We can replace
+the one off case of inplace encryption with the new general
+functions.
+
+Signed-Off-By: James Simmons <jsimmons at infradead.org>
+---
+ fs/crypto/crypto.c      | 34 +++++++++++++++++++---------------
+ fs/ubifs/crypto.c       | 12 +++++++-----
+ include/linux/fscrypt.h | 31 ++++++++++++++++---------------
+ 3 files changed, 42 insertions(+), 35 deletions(-)
+
+diff --git a/fs/crypto/crypto.c b/fs/crypto/crypto.c
+index e78be66bbf01..f241c697b1f9 100644
+--- a/fs/crypto/crypto.c
++++ b/fs/crypto/crypto.c
+@@ -210,9 +210,10 @@ struct page *fscrypt_encrypt_pagecache_blocks(struct page *page,
+ EXPORT_SYMBOL(fscrypt_encrypt_pagecache_blocks);
+ 
+ /**
+- * fscrypt_encrypt_block_inplace() - Encrypt a filesystem block in-place
++ * fscrypt_encrypt_page() - Cache an encrypt filesystem block in a page
+  * @inode:     The inode to which this block belongs
+- * @page:      The page containing the block to encrypt
++ * @src:       The page containing the block to encrypt
++ * @dst:       The page which will contain the encrypted data
+  * @len:       Size of block to encrypt.  This must be a multiple of
+  *		FSCRYPT_CONTENTS_ALIGNMENT.
+  * @offs:      Byte offset within @page at which the block to encrypt begins
+@@ -223,17 +224,18 @@ EXPORT_SYMBOL(fscrypt_encrypt_pagecache_blocks);
+  * Encrypt a possibly-compressed filesystem block that is located in an
+  * arbitrary page, not necessarily in the original pagecache page.  The @inode
+  * and @lblk_num must be specified, as they can't be determined from @page.
++ * The decrypted data will be stored in @dst.
+  *
+  * Return: 0 on success; -errno on failure
+  */
+-int fscrypt_encrypt_block_inplace(const struct inode *inode, struct page *page,
+-				  unsigned int len, unsigned int offs,
+-				  u64 lblk_num, gfp_t gfp_flags)
++int fscrypt_encrypt_page(const struct inode *inode, struct page *src,
++			 struct page *dst, unsigned int len, unsigned int offs,
++			 u64 lblk_num, gfp_t gfp_flags)
+ {
+-	return fscrypt_crypt_block(inode, FS_ENCRYPT, lblk_num, page, page,
++	return fscrypt_crypt_block(inode, FS_ENCRYPT, lblk_num, src, dst,
+ 				   len, offs, gfp_flags);
+ }
+-EXPORT_SYMBOL(fscrypt_encrypt_block_inplace);
++EXPORT_SYMBOL(fscrypt_encrypt_page);
+ 
+ /**
+  * fscrypt_decrypt_pagecache_blocks() - Decrypt filesystem blocks in a
+@@ -280,9 +282,10 @@ int fscrypt_decrypt_pagecache_blocks(struct page *page, unsigned int len,
+ EXPORT_SYMBOL(fscrypt_decrypt_pagecache_blocks);
+ 
+ /**
+- * fscrypt_decrypt_block_inplace() - Decrypt a filesystem block in-place
++ * fscrypt_decrypt_page() - Cache a decrypt a filesystem block in a page
+  * @inode:     The inode to which this block belongs
+- * @page:      The page containing the block to decrypt
++ * @src:       The page containing the block to decrypt
++ * @dst:       The page which will contain the plain data
+  * @len:       Size of block to decrypt.  This must be a multiple of
+  *		FSCRYPT_CONTENTS_ALIGNMENT.
+  * @offs:      Byte offset within @page at which the block to decrypt begins
+@@ -292,17 +295,18 @@ EXPORT_SYMBOL(fscrypt_decrypt_pagecache_blocks);
+  * Decrypt a possibly-compressed filesystem block that is located in an
+  * arbitrary page, not necessarily in the original pagecache page.  The @inode
+  * and @lblk_num must be specified, as they can't be determined from @page.
++ * The encrypted data will be stored in @dst.
+  *
+  * Return: 0 on success; -errno on failure
+  */
+-int fscrypt_decrypt_block_inplace(const struct inode *inode, struct page *page,
+-				  unsigned int len, unsigned int offs,
+-				  u64 lblk_num)
++int fscrypt_decrypt_page(const struct inode *inode, struct page *src,
++			 struct page *dst, unsigned int len, unsigned int offs,
++			 u64 lblk_num, gfp_t gfp_flags)
+ {
+-	return fscrypt_crypt_block(inode, FS_DECRYPT, lblk_num, page, page,
+-				   len, offs, GFP_NOFS);
++	return fscrypt_crypt_block(inode, FS_DECRYPT, lblk_num, src, dst,
++				   len, offs, gfp_flags);
+ }
+-EXPORT_SYMBOL(fscrypt_decrypt_block_inplace);
++EXPORT_SYMBOL(fscrypt_decrypt_page);
+ 
+ /**
+  * fscrypt_initialize() - allocate major buffers for fs encryption.
+diff --git a/fs/ubifs/crypto.c b/fs/ubifs/crypto.c
+index c57b46a352d8..8233dc2e4969 100644
+--- a/fs/ubifs/crypto.c
++++ b/fs/ubifs/crypto.c
+@@ -39,8 +39,9 @@ int ubifs_encrypt(const struct inode *inode, struct ubifs_data_node *dn,
+ 	if (pad_len != in_len)
+ 		memset(p + in_len, 0, pad_len - in_len);
+ 
+-	err = fscrypt_encrypt_block_inplace(inode, virt_to_page(p), pad_len,
+-					    offset_in_page(p), block, GFP_NOFS);
++	/* Encrypt inplace */
++	err = fscrypt_encrypt_page(inode, virt_to_page(p), virt_to_page(p),
++				   pad_len, offset_in_page(p), block, GFP_NOFS);
+ 	if (err) {
+ 		ubifs_err(c, "fscrypt_encrypt_block_inplace() failed: %d", err);
+ 		return err;
+@@ -64,9 +65,10 @@ int ubifs_decrypt(const struct inode *inode, struct ubifs_data_node *dn,
+ 	}
+ 
+ 	ubifs_assert(c, dlen <= UBIFS_BLOCK_SIZE);
+-	err = fscrypt_decrypt_block_inplace(inode, virt_to_page(&dn->data),
+-					    dlen, offset_in_page(&dn->data),
+-					    block);
++	/* Decrypt inplace */
++	err = fscrypt_decrypt_page(inode, virt_to_page(&dn->data),
++				   virt_to_page(&dn->data), dlen,
++				   offset_in_page(&dn->data), block, GFP_NOFS);
+ 	if (err) {
+ 		ubifs_err(c, "fscrypt_decrypt_block_inplace() failed: %d", err);
+ 		return err;
+diff --git a/include/linux/fscrypt.h b/include/linux/fscrypt.h
+index e60d57c99cb6..87efd61a764a 100644
+--- a/include/linux/fscrypt.h
++++ b/include/linux/fscrypt.h
+@@ -256,15 +256,16 @@ struct page *fscrypt_encrypt_pagecache_blocks(struct page *page,
+ 					      unsigned int len,
+ 					      unsigned int offs,
+ 					      gfp_t gfp_flags);
+-int fscrypt_encrypt_block_inplace(const struct inode *inode, struct page *page,
+-				  unsigned int len, unsigned int offs,
+-				  u64 lblk_num, gfp_t gfp_flags);
++int fscrypt_encrypt_page(const struct inode *inode, struct page *src,
++			 struct page *dst, unsigned int len,
++			 unsigned int offs, u64 lblk_num, gfp_t gfp_flags);
+ 
+ int fscrypt_decrypt_pagecache_blocks(struct page *page, unsigned int len,
+ 				     unsigned int offs);
+-int fscrypt_decrypt_block_inplace(const struct inode *inode, struct page *page,
+-				  unsigned int len, unsigned int offs,
+-				  u64 lblk_num);
++
++int fscrypt_decrypt_page(const struct inode *inode, struct page *src,
++			 struct page *dst, unsigned int len,
++			 unsigned int offs, u64 lblk_num, gfp_t gfp_flags);
+ 
+ static inline bool fscrypt_is_bounce_page(struct page *page)
+ {
+@@ -413,11 +414,11 @@ static inline struct page *fscrypt_encrypt_pagecache_blocks(struct page *page,
+ 	return ERR_PTR(-EOPNOTSUPP);
+ }
+ 
+-static inline int fscrypt_encrypt_block_inplace(const struct inode *inode,
+-						struct page *page,
+-						unsigned int len,
+-						unsigned int offs, u64 lblk_num,
+-						gfp_t gfp_flags)
++static inline int fscrypt_encrypt_page(const struct inode *inode,
++				       struct page *src, struct page *dst,
++				       unsigned int len,
++				       unsigned int offs, u64 lblk_num,
++				       gfp_t gfp_flags)
+ {
+ 	return -EOPNOTSUPP;
+ }
+@@ -429,10 +430,10 @@ static inline int fscrypt_decrypt_pagecache_blocks(struct page *page,
+ 	return -EOPNOTSUPP;
+ }
+ 
+-static inline int fscrypt_decrypt_block_inplace(const struct inode *inode,
+-						struct page *page,
+-						unsigned int len,
+-						unsigned int offs, u64 lblk_num)
++static inline int fscrypt_decrypt_page(const struct inode *inode,
++				       struct page *src, struct page *dst,
++				       unsigned int len,
++				       unsigned int offs, u64 lblk_num)
+ {
+ 	return -EOPNOTSUPP;
+ }
+-- 
+2.34.1
+
+
+From sbuisson at ddn.com  Mon May 16 08:18:07 2022
+From: sbuisson at ddn.com (Sebastien Buisson)
+Date: Mon, 16 May 2022 15:18:07 +0000
+Subject: [lustre-devel] [PATCH v2] fscrypt: allow alternative bounce
+ buffers
+In-Reply-To: <1652555017-16601-1-git-send-email-jsimmons@infradead.org>
+References: <1652555017-16601-1-git-send-email-jsimmons@infradead.org>
+Message-ID: <3CF7A24D-7E4F-4C35-88A6-DA660F31705D@ddn.com>
+
+
+> Le 14 mai 2022 ? 21:03, James Simmons <jsimmons at infradead.org> a ?crit :
+> 
+> Currently fscrypt offers two options. One option is to use the
+> internal bounce buffer allocated or perform inline encrpytion.
+> Add the option to use an external bounce buffer. This change can
+> be used useful for example for a network file systems which can
+> pass in a page from the page cache and place the encrypted data
+> into a page for a network packet to be sent. Another potential
+> use is the use of GPU pages with RDMA being the final destination
+> for the encrypted data. Lastly in performance measurements the
+> allocation of the bounce page incures a heavy cost. Using a page
+> from a predefined memory pool can lower the case. We can replace
+> the one off case of inplace encryption with the new general
+> functions.
+> 
+> Signed-Off-By: James Simmons <jsimmons at infradead.org>
+> ---
+> fs/crypto/crypto.c      | 34 +++++++++++++++++++---------------
+> fs/ubifs/crypto.c       | 12 +++++++-----
+> include/linux/fscrypt.h | 31 ++++++++++++++++---------------
+> 3 files changed, 42 insertions(+), 35 deletions(-)
+> 
+> diff --git a/fs/ubifs/crypto.c b/fs/ubifs/crypto.c
+> index c57b46a352d8..8233dc2e4969 100644
+> --- a/fs/ubifs/crypto.c
+> +++ b/fs/ubifs/crypto.c
+> @@ -39,8 +39,9 @@ int ubifs_encrypt(const struct inode *inode, struct ubifs_data_node *dn,
+> 	if (pad_len != in_len)
+> 		memset(p + in_len, 0, pad_len - in_len);
+> 
+> -	err = fscrypt_encrypt_block_inplace(inode, virt_to_page(p), pad_len,
+> -					    offset_in_page(p), block, GFP_NOFS);
+> +	/* Encrypt inplace */
+> +	err = fscrypt_encrypt_page(inode, virt_to_page(p), virt_to_page(p),
+> +				   pad_len, offset_in_page(p), block, GFP_NOFS);
+> 	if (err) {
+> 		ubifs_err(c, "fscrypt_encrypt_block_inplace() failed: %d", err);
+
+The error message should be changed as well.
+
+> 		return err;
+> @@ -64,9 +65,10 @@ int ubifs_decrypt(const struct inode *inode, struct ubifs_data_node *dn,
+> 	}
+> 
+> 	ubifs_assert(c, dlen <= UBIFS_BLOCK_SIZE);
+> -	err = fscrypt_decrypt_block_inplace(inode, virt_to_page(&dn->data),
+> -					    dlen, offset_in_page(&dn->data),
+> -					    block);
+> +	/* Decrypt inplace */
+> +	err = fscrypt_decrypt_page(inode, virt_to_page(&dn->data),
+> +				   virt_to_page(&dn->data), dlen,
+> +				   offset_in_page(&dn->data), block, GFP_NOFS);
+> 	if (err) {
+> 		ubifs_err(c, "fscrypt_decrypt_block_inplace() failed: %d", err);
+
+The error message should be changed as well.
+
+> 		return err;
+
+
+From jsimmons at infradead.org  Mon May 16 10:32:22 2022
+From: jsimmons at infradead.org (James Simmons)
+Date: Mon, 16 May 2022 13:32:22 -0400
+Subject: [lustre-devel] [PATCH v3] fscrypt: allow alternative bounce buffers
+Message-ID: <1652722342-27606-1-git-send-email-jsimmons@infradead.org>
+
+Currently fscrypt offers two options. One option is to use the
+internal bounce buffer allocated or perform inline encrpytion.
+Add the option to use an external bounce buffer. This change can
+be used useful for example for a network file systems which can
+pass in a page from the page cache and place the encrypted data
+into a page for a network packet to be sent. Another potential
+use is the use of GPU pages with RDMA being the final destination
+for the encrypted data. Lastly in performance measurements the
+allocation of the bounce page incures a heavy cost. Using a page
+from a predefined memory pool can lower the case. We can replace
+the one off case of inplace encryption with the new general
+functions.
+
+Signed-Off-By: James Simmons <jsimmons at infradead.org>
+---
+ fs/crypto/crypto.c      | 34 +++++++++++++++++++---------------
+ fs/ubifs/crypto.c       | 16 +++++++++-------
+ include/linux/fscrypt.h | 31 ++++++++++++++++---------------
+ 3 files changed, 44 insertions(+), 37 deletions(-)
+
+diff --git a/fs/crypto/crypto.c b/fs/crypto/crypto.c
+index e78be66bbf01..f241c697b1f9 100644
+--- a/fs/crypto/crypto.c
++++ b/fs/crypto/crypto.c
+@@ -210,9 +210,10 @@ struct page *fscrypt_encrypt_pagecache_blocks(struct page *page,
+ EXPORT_SYMBOL(fscrypt_encrypt_pagecache_blocks);
+ 
+ /**
+- * fscrypt_encrypt_block_inplace() - Encrypt a filesystem block in-place
++ * fscrypt_encrypt_page() - Cache an encrypt filesystem block in a page
+  * @inode:     The inode to which this block belongs
+- * @page:      The page containing the block to encrypt
++ * @src:       The page containing the block to encrypt
++ * @dst:       The page which will contain the encrypted data
+  * @len:       Size of block to encrypt.  This must be a multiple of
+  *		FSCRYPT_CONTENTS_ALIGNMENT.
+  * @offs:      Byte offset within @page at which the block to encrypt begins
+@@ -223,17 +224,18 @@ EXPORT_SYMBOL(fscrypt_encrypt_pagecache_blocks);
+  * Encrypt a possibly-compressed filesystem block that is located in an
+  * arbitrary page, not necessarily in the original pagecache page.  The @inode
+  * and @lblk_num must be specified, as they can't be determined from @page.
++ * The decrypted data will be stored in @dst.
+  *
+  * Return: 0 on success; -errno on failure
+  */
+-int fscrypt_encrypt_block_inplace(const struct inode *inode, struct page *page,
+-				  unsigned int len, unsigned int offs,
+-				  u64 lblk_num, gfp_t gfp_flags)
++int fscrypt_encrypt_page(const struct inode *inode, struct page *src,
++			 struct page *dst, unsigned int len, unsigned int offs,
++			 u64 lblk_num, gfp_t gfp_flags)
+ {
+-	return fscrypt_crypt_block(inode, FS_ENCRYPT, lblk_num, page, page,
++	return fscrypt_crypt_block(inode, FS_ENCRYPT, lblk_num, src, dst,
+ 				   len, offs, gfp_flags);
+ }
+-EXPORT_SYMBOL(fscrypt_encrypt_block_inplace);
++EXPORT_SYMBOL(fscrypt_encrypt_page);
+ 
+ /**
+  * fscrypt_decrypt_pagecache_blocks() - Decrypt filesystem blocks in a
+@@ -280,9 +282,10 @@ int fscrypt_decrypt_pagecache_blocks(struct page *page, unsigned int len,
+ EXPORT_SYMBOL(fscrypt_decrypt_pagecache_blocks);
+ 
+ /**
+- * fscrypt_decrypt_block_inplace() - Decrypt a filesystem block in-place
++ * fscrypt_decrypt_page() - Cache a decrypt a filesystem block in a page
+  * @inode:     The inode to which this block belongs
+- * @page:      The page containing the block to decrypt
++ * @src:       The page containing the block to decrypt
++ * @dst:       The page which will contain the plain data
+  * @len:       Size of block to decrypt.  This must be a multiple of
+  *		FSCRYPT_CONTENTS_ALIGNMENT.
+  * @offs:      Byte offset within @page at which the block to decrypt begins
+@@ -292,17 +295,18 @@ EXPORT_SYMBOL(fscrypt_decrypt_pagecache_blocks);
+  * Decrypt a possibly-compressed filesystem block that is located in an
+  * arbitrary page, not necessarily in the original pagecache page.  The @inode
+  * and @lblk_num must be specified, as they can't be determined from @page.
++ * The encrypted data will be stored in @dst.
+  *
+  * Return: 0 on success; -errno on failure
+  */
+-int fscrypt_decrypt_block_inplace(const struct inode *inode, struct page *page,
+-				  unsigned int len, unsigned int offs,
+-				  u64 lblk_num)
++int fscrypt_decrypt_page(const struct inode *inode, struct page *src,
++			 struct page *dst, unsigned int len, unsigned int offs,
++			 u64 lblk_num, gfp_t gfp_flags)
+ {
+-	return fscrypt_crypt_block(inode, FS_DECRYPT, lblk_num, page, page,
+-				   len, offs, GFP_NOFS);
++	return fscrypt_crypt_block(inode, FS_DECRYPT, lblk_num, src, dst,
++				   len, offs, gfp_flags);
+ }
+-EXPORT_SYMBOL(fscrypt_decrypt_block_inplace);
++EXPORT_SYMBOL(fscrypt_decrypt_page);
+ 
+ /**
+  * fscrypt_initialize() - allocate major buffers for fs encryption.
+diff --git a/fs/ubifs/crypto.c b/fs/ubifs/crypto.c
+index c57b46a352d8..c4cb1a8207e0 100644
+--- a/fs/ubifs/crypto.c
++++ b/fs/ubifs/crypto.c
+@@ -39,10 +39,11 @@ int ubifs_encrypt(const struct inode *inode, struct ubifs_data_node *dn,
+ 	if (pad_len != in_len)
+ 		memset(p + in_len, 0, pad_len - in_len);
+ 
+-	err = fscrypt_encrypt_block_inplace(inode, virt_to_page(p), pad_len,
+-					    offset_in_page(p), block, GFP_NOFS);
++	/* Encrypt inplace */
++	err = fscrypt_encrypt_page(inode, virt_to_page(p), virt_to_page(p),
++				   pad_len, offset_in_page(p), block, GFP_NOFS);
+ 	if (err) {
+-		ubifs_err(c, "fscrypt_encrypt_block_inplace() failed: %d", err);
++		ubifs_err(c, "fscrypt_encrypt_page() failed: %d", err);
+ 		return err;
+ 	}
+ 	*out_len = pad_len;
+@@ -64,11 +65,12 @@ int ubifs_decrypt(const struct inode *inode, struct ubifs_data_node *dn,
+ 	}
+ 
+ 	ubifs_assert(c, dlen <= UBIFS_BLOCK_SIZE);
+-	err = fscrypt_decrypt_block_inplace(inode, virt_to_page(&dn->data),
+-					    dlen, offset_in_page(&dn->data),
+-					    block);
++	/* Decrypt inplace */
++	err = fscrypt_decrypt_page(inode, virt_to_page(&dn->data),
++				   virt_to_page(&dn->data), dlen,
++				   offset_in_page(&dn->data), block, GFP_NOFS);
+ 	if (err) {
+-		ubifs_err(c, "fscrypt_decrypt_block_inplace() failed: %d", err);
++		ubifs_err(c, "fscrypt_decrypt_page() failed: %d", err);
+ 		return err;
+ 	}
+ 	*out_len = clen;
+diff --git a/include/linux/fscrypt.h b/include/linux/fscrypt.h
+index e60d57c99cb6..87efd61a764a 100644
+--- a/include/linux/fscrypt.h
++++ b/include/linux/fscrypt.h
+@@ -256,15 +256,16 @@ struct page *fscrypt_encrypt_pagecache_blocks(struct page *page,
+ 					      unsigned int len,
+ 					      unsigned int offs,
+ 					      gfp_t gfp_flags);
+-int fscrypt_encrypt_block_inplace(const struct inode *inode, struct page *page,
+-				  unsigned int len, unsigned int offs,
+-				  u64 lblk_num, gfp_t gfp_flags);
++int fscrypt_encrypt_page(const struct inode *inode, struct page *src,
++			 struct page *dst, unsigned int len,
++			 unsigned int offs, u64 lblk_num, gfp_t gfp_flags);
+ 
+ int fscrypt_decrypt_pagecache_blocks(struct page *page, unsigned int len,
+ 				     unsigned int offs);
+-int fscrypt_decrypt_block_inplace(const struct inode *inode, struct page *page,
+-				  unsigned int len, unsigned int offs,
+-				  u64 lblk_num);
++
++int fscrypt_decrypt_page(const struct inode *inode, struct page *src,
++			 struct page *dst, unsigned int len,
++			 unsigned int offs, u64 lblk_num, gfp_t gfp_flags);
+ 
+ static inline bool fscrypt_is_bounce_page(struct page *page)
+ {
+@@ -413,11 +414,11 @@ static inline struct page *fscrypt_encrypt_pagecache_blocks(struct page *page,
+ 	return ERR_PTR(-EOPNOTSUPP);
+ }
+ 
+-static inline int fscrypt_encrypt_block_inplace(const struct inode *inode,
+-						struct page *page,
+-						unsigned int len,
+-						unsigned int offs, u64 lblk_num,
+-						gfp_t gfp_flags)
++static inline int fscrypt_encrypt_page(const struct inode *inode,
++				       struct page *src, struct page *dst,
++				       unsigned int len,
++				       unsigned int offs, u64 lblk_num,
++				       gfp_t gfp_flags)
+ {
+ 	return -EOPNOTSUPP;
+ }
+@@ -429,10 +430,10 @@ static inline int fscrypt_decrypt_pagecache_blocks(struct page *page,
+ 	return -EOPNOTSUPP;
+ }
+ 
+-static inline int fscrypt_decrypt_block_inplace(const struct inode *inode,
+-						struct page *page,
+-						unsigned int len,
+-						unsigned int offs, u64 lblk_num)
++static inline int fscrypt_decrypt_page(const struct inode *inode,
++				       struct page *src, struct page *dst,
++				       unsigned int len,
++				       unsigned int offs, u64 lblk_num)
+ {
+ 	return -EOPNOTSUPP;
+ }
+-- 
+2.34.1
+
+
+From anna.fuchs at informatik.uni-hamburg.de  Tue May 24 12:34:34 2022
+From: anna.fuchs at informatik.uni-hamburg.de (Anna Fuchs)
+Date: Tue, 24 May 2022 21:34:34 +0200
+Subject: [lustre-devel] I/O in HPC applications and systems SURVEY
+Message-ID: <d7a983ae-4aa8-1e25-4755-e4417e7a93c1@informatik.uni-hamburg.de>
+
+Dear all,
+
+I have prepared a survey 'I/O in HPC applications and systems' for my 
+studies about compression in Lustre.
+I would be excited if you would fill in the survey and forward the link 
+to any user or admin of an HPC system.
+https://www.limesurvey.uni-hamburg.de/index.php/237926?lang=en
+
+The most questions are of type multiple choice and it will take you 
+about 5-10 minutes.
+I would share the results later, if desired.
+
+Thank you for the support!
+
+Best regards
+Anna
+
+-- 
+Anna Fuchs
+Universit?t Hamburg
+https://wr.informatik.uni-hamburg.de
+
+anna.fuchs at informatik.uni-hamburg.de
+https://wr.informatik.uni-hamburg.de/people/anna_fuchs
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20220524/5e3cb087/attachment.html>
+

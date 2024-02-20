@@ -1,0 +1,2938 @@
+From hecht at hlrs.de  Mon Nov  2 09:30:58 2015
+From: hecht at hlrs.de (Martin Hecht)
+Date: Mon, 2 Nov 2015 18:30:58 +0100
+Subject: [lustre-discuss] recovery MDT ".." directory entries (LU-5626)
+In-Reply-To: <DB0C8A206669AC40B1C4E52A8584A6F614D198BA@CFWEX01.americas.cray.com>
+References: <562F96BA.6040409@yale.edu>
+	<DB0C8A206669AC40B1C4E52A8584A6F614D198BA@CFWEX01.americas.cray.com>
+Message-ID: <56379DD2.1040502@hlrs.de>
+
+Hi Chris and Patrick,
+
+I was sick last week so I have found this conversation not before today,
+sorry
+
+On 10/27/2015 05:06 PM, Patrick Farrell wrote:
+> If you read LU-5626 carefully, there's an explanation of the exact nature of the damage, and having that should let you make partial recoveries by hand.  I'm not familiar with the ll_recover_lost_found_objs tool, but I doubt it would prove helpful in this instance.
+there is no tool like ll_recover_lost_found_objs for the MDT. On OSTs
+this would be the right choice.
+
+> Note that there's two forms to this corruption.  One is if you move a directory which was created before dirdata was enabled, then the '..' entry ends up in the wrong place.  This does not trouble Lustre, but fsck reports it as an error and will 'correct' it, which has the effect of (usually) overwriting one dentry in the directory when it creates a new '..' dentry in the correct location.
+>
+> I don't *think* that one causes the MDT to go read only, but I could be wrong.  I *think* what causes the MDT to go read only is the other problem:
+>
+> When you have a non-htree directory (not too many items in it, all directory entries in a single inode) that is in the bad state described above (with the '..' dentry in the wrong place after being moved) and that directory has enough files added to it that it becomes an htree directory, the resulting directory is corrupted more severely.  We never sorted out the precise details of this - I believe we chose to simply delete any directories in this state.  (I think lfsck did it for us, but can't recall for sure.)
+If I recall correctly, moving (or renaming) the corrupted directory to
+another place caused the MDT to go readonly, probably adding more files
+as Patrick wrote before is another trigger.
+
+In our case we captured the full ouptut of e2fsck which contained the
+original names and the inodes. fsck moved some of the files and
+subdiretories of the corrupted directories to lost+found. With the
+information contained in the e2fsck output we could move them back from
+lost+found to their original place on the ldiskfs level (I have parsed
+the e2fsck output for a pattern matching the inode numbers and created a
+script out of it). We had to repeat this a couple of times, because
+either some of the subdirectories moved to lost+found were in a bad
+shape themselves or were further damaged later when the owners added
+files to them later on or moved them around.
+
+So, if you have captured all your e2fsck output and you haven't yet
+cleaned up lost+found, you still can recover the data. lfsck would
+probably throw away the objects on the OSTs because it thinks they are
+orphane objects left over after deleting the files. 
+
+best regards,
+Martin
+
+
+-------------- next part --------------
+A non-text attachment was scrubbed...
+Name: smime.p7s
+Type: application/pkcs7-signature
+Size: 2252 bytes
+Desc: S/MIME Cryptographic Signature
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20151102/c4a6044e/attachment.bin>
+
+From rmohr at utk.edu  Tue Nov  3 09:17:45 2015
+From: rmohr at utk.edu (Mohr Jr, Richard Frank (Rick Mohr))
+Date: Tue, 3 Nov 2015 17:17:45 +0000
+Subject: [lustre-discuss] recovery MDT ".." directory entries (LU-5626)
+In-Reply-To: <562FB86B.9090401@cray.com>
+References: <562F96BA.6040409@yale.edu>
+	<BE518F3B-D80F-4DF8-A33A-083C4EF9B32A@utk.edu>
+	<562FB86B.9090401@cray.com>
+Message-ID: <D6DC6C2B-E2CC-47CB-95F4-AD4E4B31B0C4@utk.edu>
+
+
+> On Oct 27, 2015, at 1:46 PM, Patrick Farrell <paf at cray.com> wrote:
+> 
+> That's something of a time bomb - If one of those directories fsck wishes it could correct is small and grows in number of files, you'll get the MDT going read only (and a few odd LBUGs if you try to put it back).
+
+I was looking back over the incident where I thought I had hit this bug, but based on the lack of side effects that you mentioned, I am now starting to think that I was mistaken.  Nevertheless, I am trying to understand the bug a little better in case I am still susceptible to it.  I tried to summarize my understanding below, and maybe you can tell me if I am correct.
+
+For HTree directories, the problem is described in LU-2638.  But since I am running Lustre >2.4, I should not be affected by this bug.
+
+For non-Tree directories, the problem is described in LU-5626.  In order to trigger the bug, the following steps must happen:
+
+1) A non-HTree directory created under Lustre 1.8 (which does not have a FID for its ?..? entry) gets moved to a different parent directory.
+
+2) Lustre tries to update the ?..? entry in the directory, and if there is not enough space in the existing entry, it creates a new ?..? entry and adds the FID.
+
+3) Something happens to the MDT, and fsck needs to be run.  When it runs, it notices that ?..? is no longer the second entry in the directory.
+
+4) fsck tries to ?fix? the problem by moving the ?..? entry back to its original position.  With the FID in place, there is not enough space in the original position, but fsck moves it anyway which causes the ?..? entry to overwrite part of the third entry in the directory.
+
+If that is correct, then steps #1 and #2 can happen without causing any problems.  It is only at steps #3 and #4 that the corruption occurs, and as long as dirdata is disabled before fsck is run, then there should not be any problems.
+
+Is that explanation accurate?
+
+--
+Rick Mohr
+Senior HPC System Administrator
+National Institute for Computational Sciences
+http://www.nics.tennessee.edu
+
+
+From paf at cray.com  Tue Nov  3 09:30:09 2015
+From: paf at cray.com (Patrick Farrell)
+Date: Tue, 3 Nov 2015 11:30:09 -0600
+Subject: [lustre-discuss] recovery MDT ".." directory entries (LU-5626)
+In-Reply-To: <D6DC6C2B-E2CC-47CB-95F4-AD4E4B31B0C4@utk.edu>
+References: <562F96BA.6040409@yale.edu>
+	<BE518F3B-D80F-4DF8-A33A-083C4EF9B32A@utk.edu>
+	<562FB86B.9090401@cray.com>
+	<D6DC6C2B-E2CC-47CB-95F4-AD4E4B31B0C4@utk.edu>
+Message-ID: <5638EF21.2040000@cray.com>
+
+Hm.  That's almost, but not quite, right.  Disabling dirdata during the 
+fsck run has no positive effect - fsck will still get upset about the 
+incorrectly placed entry.  (And whether or not dirdata is enabled, fsck 
+will do the same thing.  It doesn't know or care about the dirdata 
+setting as such.)
+
+Steps #1 and #2 will not cause any problems until you run fsck, but 
+there's no way around the issue once you do run fsck.  The .. dentry 
+must go back to the correct location to make fsck happy.  If I remember 
+right, fsck creates the .. dentry and doesn't include the fid 
+(regardless of dirdata setting).  This can overwrite another dentry if 
+one has been placed in the location normally reserved for the .. dentry 
+(which can happen if the dentry which was after the .. dentry is 
+deleted, thereby making a space large enough for a dentry+FID).
+
+Furthermore, if you have a non-Htree directory where the .. dentry is 
+incorrectly placed (your steps 1 & 2), then you add files until it 
+shifts to become an HTree directory, THAT directory becomes corrupted in 
+a more severe manner that will cause your MDT to remount read only 
+and/or LBUG.  (LU-2638 only fixes the .. dentry bug for HTree 
+directories themselves.  It does not help with a corrupted directory 
+that then becomes an HTree directory.)
+
+- Patrick
+
+On 11/03/2015 11:17 AM, Mohr Jr, Richard Frank (Rick Mohr) wrote:
+>> On Oct 27, 2015, at 1:46 PM, Patrick Farrell <paf at cray.com> wrote:
+>>
+>> That's something of a time bomb - If one of those directories fsck wishes it could correct is small and grows in number of files, you'll get the MDT going read only (and a few odd LBUGs if you try to put it back).
+> I was looking back over the incident where I thought I had hit this bug, but based on the lack of side effects that you mentioned, I am now starting to think that I was mistaken.  Nevertheless, I am trying to understand the bug a little better in case I am still susceptible to it.  I tried to summarize my understanding below, and maybe you can tell me if I am correct.
+>
+> For HTree directories, the problem is described in LU-2638.  But since I am running Lustre >2.4, I should not be affected by this bug.
+>
+> For non-Tree directories, the problem is described in LU-5626.  In order to trigger the bug, the following steps must happen:
+>
+> 1) A non-HTree directory created under Lustre 1.8 (which does not have a FID for its ?..? entry) gets moved to a different parent directory.
+>
+> 2) Lustre tries to update the ?..? entry in the directory, and if there is not enough space in the existing entry, it creates a new ?..? entry and adds the FID.
+>
+> 3) Something happens to the MDT, and fsck needs to be run.  When it runs, it notices that ?..? is no longer the second entry in the directory.
+>
+> 4) fsck tries to ?fix? the problem by moving the ?..? entry back to its original position.  With the FID in place, there is not enough space in the original position, but fsck moves it anyway which causes the ?..? entry to overwrite part of the third entry in the directory.
+>
+> If that is correct, then steps #1 and #2 can happen without causing any problems.  It is only at steps #3 and #4 that the corruption occurs, and as long as dirdata is disabled before fsck is run, then there should not be any problems.
+>
+> Is that explanation accurate?
+>
+> --
+> Rick Mohr
+> Senior HPC System Administrator
+> National Institute for Computational Sciences
+> http://www.nics.tennessee.edu
+>
+
+
+From rmohr at utk.edu  Tue Nov  3 11:12:13 2015
+From: rmohr at utk.edu (Mohr Jr, Richard Frank (Rick Mohr))
+Date: Tue, 3 Nov 2015 19:12:13 +0000
+Subject: [lustre-discuss] recovery MDT ".." directory entries (LU-5626)
+In-Reply-To: <5638EF21.2040000@cray.com>
+References: <562F96BA.6040409@yale.edu>
+	<BE518F3B-D80F-4DF8-A33A-083C4EF9B32A@utk.edu>
+	<562FB86B.9090401@cray.com>
+	<D6DC6C2B-E2CC-47CB-95F4-AD4E4B31B0C4@utk.edu>
+	<5638EF21.2040000@cray.com>
+Message-ID: <2C56D3CF-F01D-4BBC-8C70-1738CEB012E6@utk.edu>
+
+Patrick,
+
+Thanks for the clarification. I think I understand now.  Disabling dirdata would not help any directories which have already had their ?..? entry relocated.  The next time fsck runs, those directories will potentially get corrupted.  The bigger reason to disable dirdata is to prevent more serious corruption if a non-HTree directory with an incorrectly placed ?..? gets converted to a HTree directory.
+
+How large does a directory need to be before the conversion to HTree happens?  I don?t suppose there is an easy way to scan the file system to look for directories that might be subject to corruption?
+
+?Rick
+
+
+> On Nov 3, 2015, at 12:30 PM, Patrick Farrell <paf at cray.com> wrote:
+> 
+> Hm.  That's almost, but not quite, right.  Disabling dirdata during the fsck run has no positive effect - fsck will still get upset about the incorrectly placed entry.  (And whether or not dirdata is enabled, fsck will do the same thing.  It doesn't know or care about the dirdata setting as such.)
+> 
+> Steps #1 and #2 will not cause any problems until you run fsck, but there's no way around the issue once you do run fsck.  The .. dentry must go back to the correct location to make fsck happy.  If I remember right, fsck creates the .. dentry and doesn't include the fid (regardless of dirdata setting).  This can overwrite another dentry if one has been placed in the location normally reserved for the .. dentry (which can happen if the dentry which was after the .. dentry is deleted, thereby making a space large enough for a dentry+FID).
+> 
+> Furthermore, if you have a non-Htree directory where the .. dentry is incorrectly placed (your steps 1 & 2), then you add files until it shifts to become an HTree directory, THAT directory becomes corrupted in a more severe manner that will cause your MDT to remount read only and/or LBUG.  (LU-2638 only fixes the .. dentry bug for HTree directories themselves.  It does not help with a corrupted directory that then becomes an HTree directory.)
+> 
+> - Patrick
+> 
+> On 11/03/2015 11:17 AM, Mohr Jr, Richard Frank (Rick Mohr) wrote:
+>>> On Oct 27, 2015, at 1:46 PM, Patrick Farrell <paf at cray.com> wrote:
+>>> 
+>>> That's something of a time bomb - If one of those directories fsck wishes it could correct is small and grows in number of files, you'll get the MDT going read only (and a few odd LBUGs if you try to put it back).
+>> I was looking back over the incident where I thought I had hit this bug, but based on the lack of side effects that you mentioned, I am now starting to think that I was mistaken.  Nevertheless, I am trying to understand the bug a little better in case I am still susceptible to it.  I tried to summarize my understanding below, and maybe you can tell me if I am correct.
+>> 
+>> For HTree directories, the problem is described in LU-2638.  But since I am running Lustre >2.4, I should not be affected by this bug.
+>> 
+>> For non-Tree directories, the problem is described in LU-5626.  In order to trigger the bug, the following steps must happen:
+>> 
+>> 1) A non-HTree directory created under Lustre 1.8 (which does not have a FID for its ?..? entry) gets moved to a different parent directory.
+>> 
+>> 2) Lustre tries to update the ?..? entry in the directory, and if there is not enough space in the existing entry, it creates a new ?..? entry and adds the FID.
+>> 
+>> 3) Something happens to the MDT, and fsck needs to be run.  When it runs, it notices that ?..? is no longer the second entry in the directory.
+>> 
+>> 4) fsck tries to ?fix? the problem by moving the ?..? entry back to its original position.  With the FID in place, there is not enough space in the original position, but fsck moves it anyway which causes the ?..? entry to overwrite part of the third entry in the directory.
+>> 
+>> If that is correct, then steps #1 and #2 can happen without causing any problems.  It is only at steps #3 and #4 that the corruption occurs, and as long as dirdata is disabled before fsck is run, then there should not be any problems.
+>> 
+>> Is that explanation accurate?
+>> 
+>> --
+>> Rick Mohr
+>> Senior HPC System Administrator
+>> National Institute for Computational Sciences
+>> http://www.nics.tennessee.edu
+>> 
+> 
+
+
+From paf at cray.com  Tue Nov  3 11:20:44 2015
+From: paf at cray.com (Patrick Farrell)
+Date: Tue, 3 Nov 2015 13:20:44 -0600
+Subject: [lustre-discuss] recovery MDT ".." directory entries (LU-5626)
+In-Reply-To: <2C56D3CF-F01D-4BBC-8C70-1738CEB012E6@utk.edu>
+References: <562F96BA.6040409@yale.edu>
+	<BE518F3B-D80F-4DF8-A33A-083C4EF9B32A@utk.edu>
+	<562FB86B.9090401@cray.com>
+	<D6DC6C2B-E2CC-47CB-95F4-AD4E4B31B0C4@utk.edu>
+	<5638EF21.2040000@cray.com>
+	<2C56D3CF-F01D-4BBC-8C70-1738CEB012E6@utk.edu>
+Message-ID: <5639090C.5030003@cray.com>
+
+Mmm, unfortunately, still not quite right - Disabling dirdata will not 
+save you in the conversion to HTree case either.  It will just prevent 
+*more* directories from getting a misplaced ".." dentry to begin with.
+
+As to size...  I figured it out once - But it depends on file name 
+length in the directory, since the dentry includes the file name. Once 
+the total size of dentries in a directory exceeds 4096 bytes (one 
+inode), then it will be converted to an HTree, I believe.
+
+So, at something like 32 bytes a dentry, which is like a 10-16 or so 
+character file name (exact dentry length here requires more checking 
+than I've got time for, but it's close), then you've got 32=2^5, 4096 = 
+2^12, so 2^12/2^5 = 2^7 or 128 dentries.
+
+But of course, longer file names --> bigger dentries --> fewer dentries 
+before conversion to HTree.
+
+As far as "easy way to scan", well, fsck set to not make changes will 
+find all the directories with misplaced ".." dentries, and also any 
+already damaged-by-conversion-to-HTree directories.
+
+- Patrick
+On 11/03/2015 01:12 PM, Mohr Jr, Richard Frank (Rick Mohr) wrote:
+> Patrick,
+>
+> Thanks for the clarification. I think I understand now.  Disabling dirdata would not help any directories which have already had their ?..? entry relocated.  The next time fsck runs, those directories will potentially get corrupted.  The bigger reason to disable dirdata is to prevent more serious corruption if a non-HTree directory with an incorrectly placed ?..? gets converted to a HTree directory.
+>
+> How large does a directory need to be before the conversion to HTree happens?  I don?t suppose there is an easy way to scan the file system to look for directories that might be subject to corruption?
+>
+> ?Rick
+>
+>
+>> On Nov 3, 2015, at 12:30 PM, Patrick Farrell <paf at cray.com> wrote:
+>>
+>> Hm.  That's almost, but not quite, right.  Disabling dirdata during the fsck run has no positive effect - fsck will still get upset about the incorrectly placed entry.  (And whether or not dirdata is enabled, fsck will do the same thing.  It doesn't know or care about the dirdata setting as such.)
+>>
+>> Steps #1 and #2 will not cause any problems until you run fsck, but there's no way around the issue once you do run fsck.  The .. dentry must go back to the correct location to make fsck happy.  If I remember right, fsck creates the .. dentry and doesn't include the fid (regardless of dirdata setting).  This can overwrite another dentry if one has been placed in the location normally reserved for the .. dentry (which can happen if the dentry which was after the .. dentry is deleted, thereby making a space large enough for a dentry+FID).
+>>
+>> Furthermore, if you have a non-Htree directory where the .. dentry is incorrectly placed (your steps 1 & 2), then you add files until it shifts to become an HTree directory, THAT directory becomes corrupted in a more severe manner that will cause your MDT to remount read only and/or LBUG.  (LU-2638 only fixes the .. dentry bug for HTree directories themselves.  It does not help with a corrupted directory that then becomes an HTree directory.)
+>>
+>> - Patrick
+>>
+>> On 11/03/2015 11:17 AM, Mohr Jr, Richard Frank (Rick Mohr) wrote:
+>>>> On Oct 27, 2015, at 1:46 PM, Patrick Farrell <paf at cray.com> wrote:
+>>>>
+>>>> That's something of a time bomb - If one of those directories fsck wishes it could correct is small and grows in number of files, you'll get the MDT going read only (and a few odd LBUGs if you try to put it back).
+>>> I was looking back over the incident where I thought I had hit this bug, but based on the lack of side effects that you mentioned, I am now starting to think that I was mistaken.  Nevertheless, I am trying to understand the bug a little better in case I am still susceptible to it.  I tried to summarize my understanding below, and maybe you can tell me if I am correct.
+>>>
+>>> For HTree directories, the problem is described in LU-2638.  But since I am running Lustre >2.4, I should not be affected by this bug.
+>>>
+>>> For non-Tree directories, the problem is described in LU-5626.  In order to trigger the bug, the following steps must happen:
+>>>
+>>> 1) A non-HTree directory created under Lustre 1.8 (which does not have a FID for its ?..? entry) gets moved to a different parent directory.
+>>>
+>>> 2) Lustre tries to update the ?..? entry in the directory, and if there is not enough space in the existing entry, it creates a new ?..? entry and adds the FID.
+>>>
+>>> 3) Something happens to the MDT, and fsck needs to be run.  When it runs, it notices that ?..? is no longer the second entry in the directory.
+>>>
+>>> 4) fsck tries to ?fix? the problem by moving the ?..? entry back to its original position.  With the FID in place, there is not enough space in the original position, but fsck moves it anyway which causes the ?..? entry to overwrite part of the third entry in the directory.
+>>>
+>>> If that is correct, then steps #1 and #2 can happen without causing any problems.  It is only at steps #3 and #4 that the corruption occurs, and as long as dirdata is disabled before fsck is run, then there should not be any problems.
+>>>
+>>> Is that explanation accurate?
+>>>
+>>> --
+>>> Rick Mohr
+>>> Senior HPC System Administrator
+>>> National Institute for Computational Sciences
+>>> http://www.nics.tennessee.edu
+>>>
+
+
+From rmohr at utk.edu  Tue Nov  3 14:47:20 2015
+From: rmohr at utk.edu (Mohr Jr, Richard Frank (Rick Mohr))
+Date: Tue, 3 Nov 2015 22:47:20 +0000
+Subject: [lustre-discuss] recovery MDT ".." directory entries (LU-5626)
+In-Reply-To: <5639090C.5030003@cray.com>
+References: <562F96BA.6040409@yale.edu>
+	<BE518F3B-D80F-4DF8-A33A-083C4EF9B32A@utk.edu>
+	<562FB86B.9090401@cray.com>
+	<D6DC6C2B-E2CC-47CB-95F4-AD4E4B31B0C4@utk.edu>
+	<5638EF21.2040000@cray.com>
+	<2C56D3CF-F01D-4BBC-8C70-1738CEB012E6@utk.edu>
+	<5639090C.5030003@cray.com>
+Message-ID: <04AA2918-8A7D-4653-9182-205DD8124AA0@utk.edu>
+
+
+> On Nov 3, 2015, at 2:20 PM, Patrick Farrell <paf at cray.com> wrote:
+> 
+> Mmm, unfortunately, still not quite right - Disabling dirdata will not save you in the conversion to HTree case either.  It will just prevent *more* directories from getting a misplaced ".." dentry to begin with.
+
+Sorry.  Yes, that is what I meant to say.  (My sentence was supposed to read ??correctly placed??.  I was thinking of a non-corrupted non-HTree directory that was moved and then converted. Poor wording on my part.)
+
+> As to size...  I figured it out once - But it depends on file name length in the directory, since the dentry includes the file name. Once the total size of dentries in a directory exceeds 4096 bytes (one inode), then it will be converted to an HTree, I believe.
+> 
+> So, at something like 32 bytes a dentry, which is like a 10-16 or so character file name (exact dentry length here requires more checking than I've got time for, but it's close), then you've got 32=2^5, 4096 = 2^12, so 2^12/2^5 = 2^7 or 128 dentries.
+> 
+> But of course, longer file names --> bigger dentries --> fewer dentries before conversion to HTree.
+
+So it doesn?t seem like it takes many entries at all.  Interesting.  We have many directories much larger than that and no sign of any corruption.  I?ll have to spend some more time looking into this.
+
+--
+Rick Mohr
+Senior HPC System Administrator
+National Institute for Computational Sciences
+http://www.nics.tennessee.edu
+
+
+From paf at cray.com  Tue Nov  3 18:23:45 2015
+From: paf at cray.com (Patrick Farrell)
+Date: Wed, 4 Nov 2015 02:23:45 +0000
+Subject: [lustre-discuss] recovery MDT ".." directory entries (LU-5626)
+In-Reply-To: <04AA2918-8A7D-4653-9182-205DD8124AA0@utk.edu>
+References: <562F96BA.6040409@yale.edu>
+	<BE518F3B-D80F-4DF8-A33A-083C4EF9B32A@utk.edu>
+	<562FB86B.9090401@cray.com>
+	<D6DC6C2B-E2CC-47CB-95F4-AD4E4B31B0C4@utk.edu>
+	<5638EF21.2040000@cray.com>
+	<2C56D3CF-F01D-4BBC-8C70-1738CEB012E6@utk.edu>
+	<5639090C.5030003@cray.com>,
+	<04AA2918-8A7D-4653-9182-205DD8124AA0@utk.edu>
+Message-ID: <DB0C8A206669AC40B1C4E52A8584A6F614D1ABA9@CFWEX01.americas.cray.com>
+
+Comment inline...
+________________________________________
+From: Mohr Jr, Richard Frank (Rick Mohr) [rmohr at utk.edu]
+Sent: Tuesday, November 03, 2015 4:47 PM
+To: Patrick Farrell
+Cc: lustre-discuss at lists.lustre.org
+Subject: Re: [lustre-discuss] recovery MDT ".." directory entries (LU-5626)
+
+> On Nov 3, 2015, at 2:20 PM, Patrick Farrell <paf at cray.com> wrote:
+>
+> Mmm, unfortunately, still not quite right - Disabling dirdata will not save you in the conversion to HTree case either.  It will just prevent *more* directories from getting a misplaced ".." dentry to begin with.
+
+Sorry.  Yes, that is what I meant to say.  (My sentence was supposed to read ??correctly placed??.  I was thinking of a non-corrupted non-HTree directory that was moved and then converted. Poor wording on my part.)
+
+> As to size...  I figured it out once - But it depends on file name length in the directory, since the dentry includes the file name. Once the total size of dentries in a directory exceeds 4096 bytes (one inode), then it will be converted to an HTree, I believe.
+>
+> So, at something like 32 bytes a dentry, which is like a 10-16 or so character file name (exact dentry length here requires more checking than I've got time for, but it's close), then you've got 32=2^5, 4096 = 2^12, so 2^12/2^5 = 2^7 or 128 dentries.
+>
+> But of course, longer file names --> bigger dentries --> fewer dentries before conversion to HTree.
+
+So it doesn?t seem like it takes many entries at all.  Interesting.  We have many directories much larger than that and no sign of any corruption.  I?ll have to spend some more time looking into this.
+
+PAF: Remember, the specific conditions are pretty tight.  Created under 1.8, not empty (if it's empty, the .. dentry is not misplaced when moved) but also non-htree, then moved with dirdata enabled, and then grown to this larger size.  How many existing (small) directories do you move and then add a bunch of files to?  It's a pretty rare operation.  We only hit it at Martin's site because of an automated tool they have to re-arrange user/job directories.
+
+
+--
+Rick Mohr
+Senior HPC System Administrator
+National Institute for Computational Sciences
+http://www.nics.tennessee.edu
+
+
+From hecht at hlrs.de  Wed Nov  4 01:42:46 2015
+From: hecht at hlrs.de (Martin Hecht)
+Date: Wed, 4 Nov 2015 10:42:46 +0100
+Subject: [lustre-discuss] recovery MDT ".." directory entries (LU-5626)
+In-Reply-To: <DB0C8A206669AC40B1C4E52A8584A6F614D1ABA9@CFWEX01.americas.cray.com>
+References: <562F96BA.6040409@yale.edu>
+	<BE518F3B-D80F-4DF8-A33A-083C4EF9B32A@utk.edu>
+	<562FB86B.9090401@cray.com>
+	<D6DC6C2B-E2CC-47CB-95F4-AD4E4B31B0C4@utk.edu>
+	<5638EF21.2040000@cray.com>
+	<2C56D3CF-F01D-4BBC-8C70-1738CEB012E6@utk.edu>
+	<5639090C.5030003@cray.com>
+	<04AA2918-8A7D-4653-9182-205DD8124AA0@utk.edu>
+	<DB0C8A206669AC40B1C4E52A8584A6F614D1ABA9@CFWEX01.americas.cray.com>
+Message-ID: <5639D316.5000502@hlrs.de>
+
+On 11/04/2015 03:23 AM, Patrick Farrell wrote:
+> PAF: Remember, the specific conditions are pretty tight.  Created under 1.8, not empty (if it's empty, the .. dentry is not misplaced when moved) but also non-htree, then moved with dirdata enabled, and then grown to this larger size.  How many existing (small) directories do you move and then add a bunch of files to?  It's a pretty rare operation.  We only hit it at Martin's site because of an automated tool they have to re-arrange user/job directories.
+Well, not only because of the tool. Especially, because when the
+directories have been moved by the tool, no files are added anymore.
+However, our mechanism gives a reason to the users to move their data
+from time to time (that's not the intention of the mechanism, but that's
+how some users react).
+
+But I'm not quite sure anymore if moving the directories is really a
+precondition to run into LU-5626.
+We have run the background lfsck which adds the FID to the existing
+dentries. This might be an important detail, because in our case a
+second '..' entry containing the FID was presumably created by lfsck (in
+the wrong place), and not by moving the directory. To my current
+understanding the user then only has to add some files to trigger the LBUG.
+A subsequent e2fsck will not only find this particular directory but all
+other small directories with a '..' entry in the wrong place. When
+e2fsck tries to fix these directories, some entries are overwritten by
+the FID and these files are then moved to lost+found.
+If one of these first entries happens to be a small subdirectory, I
+believe there is a chance to run into the same issue again, when you
+move everything back to the original location after the e2fsck and
+someone starts adding files in these subdirectories.
+
+However, the preconditions are still quite narrow: small directories,
+not empty, created without fid, then converted by lfsck (or
+alternatively moved to a different place which would also create the
+second '..' entry). To trigger the LBUG files need to be added to one of
+these directories and for a second occurrence of the LBUG the same
+conditions must hold for another subdirectory which must have been at
+the very beginning of the directory.
+
+Martin
+
+
+-------------- next part --------------
+A non-text attachment was scrubbed...
+Name: smime.p7s
+Type: application/pkcs7-signature
+Size: 2252 bytes
+Desc: S/MIME Cryptographic Signature
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20151104/a1b5a4a3/attachment.bin>
+
+From paf at cray.com  Wed Nov  4 04:34:22 2015
+From: paf at cray.com (Patrick Farrell)
+Date: Wed, 4 Nov 2015 12:34:22 +0000
+Subject: [lustre-discuss] recovery MDT ".." directory entries (LU-5626)
+In-Reply-To: <5639D316.5000502@hlrs.de>
+References: <562F96BA.6040409@yale.edu>
+	<BE518F3B-D80F-4DF8-A33A-083C4EF9B32A@utk.edu>
+	<562FB86B.9090401@cray.com>
+	<D6DC6C2B-E2CC-47CB-95F4-AD4E4B31B0C4@utk.edu>
+	<5638EF21.2040000@cray.com>
+	<2C56D3CF-F01D-4BBC-8C70-1738CEB012E6@utk.edu>
+	<5639090C.5030003@cray.com>
+	<04AA2918-8A7D-4653-9182-205DD8124AA0@utk.edu>
+	<DB0C8A206669AC40B1C4E52A8584A6F614D1ABA9@CFWEX01.americas.cray.com>,
+	<5639D316.5000502@hlrs.de>
+Message-ID: <DB0C8A206669AC40B1C4E52A8584A6F614D1AC31@CFWEX01.americas.cray.com>
+
+Martin,
+
+Our observation at the time was that lfsck did not add the fid to the .. dentry unless there was already space in the appropriate location.  I don't remember digging in to the details, but that was our observation at the time.  (Since it meant lfsck namespace was behaving, in a sense, correctly, we were initially puzzled but decided it was all right.  I seem to remember reading a comment somewhere that the developers decided rearranging the dentries was too hard, so they'd only add fids were space was already present.)
+
+It's possible we didn't get that quite right, though it would have to be partial somehow - misplaced .. dentries with fids were definitely not universal after running the namespace lfsck. (Drawing on experience from other sites here as well.)
+
+In any case, directories with bad .. dentries can be identified with fsck anyway.
+
+- Patrick
+________________________________________
+From: Martin Hecht [hecht at hlrs.de]
+Sent: Wednesday, November 04, 2015 3:42 AM
+To: Patrick Farrell; Mohr Jr, Richard Frank (Rick Mohr)
+Cc: lustre-discuss at lists.lustre.org
+Subject: Re: [lustre-discuss] recovery MDT ".." directory entries (LU-5626)
+
+On 11/04/2015 03:23 AM, Patrick Farrell wrote:
+> PAF: Remember, the specific conditions are pretty tight.  Created under 1.8, not empty (if it's empty, the .. dentry is not misplaced when moved) but also non-htree, then moved with dirdata enabled, and then grown to this larger size.  How many existing (small) directories do you move and then add a bunch of files to?  It's a pretty rare operation.  We only hit it at Martin's site because of an automated tool they have to re-arrange user/job directories.
+Well, not only because of the tool. Especially, because when the
+directories have been moved by the tool, no files are added anymore.
+However, our mechanism gives a reason to the users to move their data
+from time to time (that's not the intention of the mechanism, but that's
+how some users react).
+
+But I'm not quite sure anymore if moving the directories is really a
+precondition to run into LU-5626.
+We have run the background lfsck which adds the FID to the existing
+dentries. This might be an important detail, because in our case a
+second '..' entry containing the FID was presumably created by lfsck (in
+the wrong place), and not by moving the directory. To my current
+understanding the user then only has to add some files to trigger the LBUG.
+A subsequent e2fsck will not only find this particular directory but all
+other small directories with a '..' entry in the wrong place. When
+e2fsck tries to fix these directories, some entries are overwritten by
+the FID and these files are then moved to lost+found.
+If one of these first entries happens to be a small subdirectory, I
+believe there is a chance to run into the same issue again, when you
+move everything back to the original location after the e2fsck and
+someone starts adding files in these subdirectories.
+
+However, the preconditions are still quite narrow: small directories,
+not empty, created without fid, then converted by lfsck (or
+alternatively moved to a different place which would also create the
+second '..' entry). To trigger the LBUG files need to be added to one of
+these directories and for a second occurrence of the LBUG the same
+conditions must hold for another subdirectory which must have been at
+the very beginning of the directory.
+
+Martin
+
+
+
+From chris.hunter at yale.edu  Wed Nov  4 07:24:07 2015
+From: chris.hunter at yale.edu (Chris Hunter)
+Date: Wed, 4 Nov 2015 10:24:07 -0500
+Subject: [lustre-discuss] recovery MDT ".." directory entries (LU-5626)
+In-Reply-To: <56379DD2.1040502@hlrs.de>
+References: <562F96BA.6040409@yale.edu>
+	<DB0C8A206669AC40B1C4E52A8584A6F614D198BA@CFWEX01.americas.cray.com>
+	<56379DD2.1040502@hlrs.de>
+Message-ID: <563A2317.6080109@yale.edu>
+
+
+
+On 11/02/2015 12:30 PM, Martin Hecht wrote:
+> Hi Chris and Patrick,
+>
+> I was sick last week so I have found this conversation not before today,
+> sorry
+>
+> On 10/27/2015 05:06 PM, Patrick Farrell wrote:
+>> If you read LU-5626 carefully, there's an explanation of the exact nature of the damage, and having that should let you make partial recoveries by hand.  I'm not familiar with the ll_recover_lost_found_objs tool, but I doubt it would prove helpful in this instance.
+> there is no tool like ll_recover_lost_found_objs for the MDT. On OSTs
+> this would be the right choice.
+>
+>> Note that there's two forms to this corruption.  One is if you move a directory which was created before dirdata was enabled, then the '..' entry ends up in the wrong place.  This does not trouble Lustre, but fsck reports it as an error and will 'correct' it, which has the effect of (usually) overwriting one dentry in the directory when it creates a new '..' dentry in the correct location.
+>>
+>> I don't *think* that one causes the MDT to go read only, but I could be wrong.  I *think* what causes the MDT to go read only is the other problem:
+>>
+>> When you have a non-htree directory (not too many items in it, all directory entries in a single inode) that is in the bad state described above (with the '..' dentry in the wrong place after being moved) and that directory has enough files added to it that it becomes an htree directory, the resulting directory is corrupted more severely.  We never sorted out the precise details of this - I believe we chose to simply delete any directories in this state.  (I think lfsck did it for us, but can't recall for sure.)
+> If I recall correctly, moving (or renaming) the corrupted directory to
+> another place caused the MDT to go readonly, probably adding more files
+> as Patrick wrote before is another trigger.
+>
+> In our case we captured the full ouptut of e2fsck which contained the
+> original names and the inodes. fsck moved some of the files and
+> subdiretories of the corrupted directories to lost+found. With the
+> information contained in the e2fsck output we could move them back from
+> lost+found to their original place on the ldiskfs level (I have parsed
+> the e2fsck output for a pattern matching the inode numbers and created a
+> script out of it). We had to repeat this a couple of times, because
+> either some of the subdirectories moved to lost+found were in a bad
+> shape themselves or were further damaged later when the owners added
+> files to them later on or moved them around.
+>
+> So, if you have captured all your e2fsck output and you haven't yet
+> cleaned up lost+found, you still can recover the data. lfsck would
+> probably throw away the objects on the OSTs because it thinks they are
+> orphane objects left over after deleting the files.
+>
+> best regards,
+> Martin
+
+Yes I believe you want to (manually) recover the directories from 
+lost+found back to ROOT on the MDT before lfsck/oi_scrub runs. I don't 
+think lfsck on the MDT will impact orphan objects on the OSTs.
+
+regards,
+chris hunter
+
+
+From andreas.dilger at intel.com  Wed Nov  4 16:29:02 2015
+From: andreas.dilger at intel.com (Dilger, Andreas)
+Date: Thu, 5 Nov 2015 00:29:02 +0000
+Subject: [lustre-discuss] recovery MDT ".." directory entries (LU-5626)
+In-Reply-To: <5639D316.5000502@hlrs.de>
+References: <562F96BA.6040409@yale.edu>
+	<BE518F3B-D80F-4DF8-A33A-083C4EF9B32A@utk.edu>
+	<562FB86B.9090401@cray.com>
+	<D6DC6C2B-E2CC-47CB-95F4-AD4E4B31B0C4@utk.edu>
+	<5638EF21.2040000@cray.com>
+	<2C56D3CF-F01D-4BBC-8C70-1738CEB012E6@utk.edu>
+	<5639090C.5030003@cray.com>
+	<04AA2918-8A7D-4653-9182-205DD8124AA0@utk.edu>
+	<DB0C8A206669AC40B1C4E52A8584A6F614D1ABA9@CFWEX01.americas.cray.com>
+	<5639D316.5000502@hlrs.de>
+Message-ID: <D25FEFBA.1186B6%andreas.dilger@intel.com>
+
+On 2015/11/04, 02:42, "lustre-discuss on behalf of Martin Hecht"
+<lustre-discuss-bounces at lists.lustre.org on behalf of hecht at hlrs.de> wrote:
+
+>On 11/04/2015 03:23 AM, Patrick Farrell wrote:
+>> PAF: Remember, the specific conditions are pretty tight.  Created under
+>>1.8, not empty (if it's empty, the .. dentry is not misplaced when
+>>moved) but also non-htree, then moved with dirdata enabled, and then
+>>grown to this larger size.  How many existing (small) directories do you
+>>move and then add a bunch of files to?  It's a pretty rare operation.
+>>We only hit it at Martin's site because of an automated tool they have
+>>to re-arrange user/job directories.
+>Well, not only because of the tool. Especially, because when the
+>directories have been moved by the tool, no files are added anymore.
+>However, our mechanism gives a reason to the users to move their data
+>from time to time (that's not the intention of the mechanism, but that's
+>how some users react).
+>
+>But I'm not quite sure anymore if moving the directories is really a
+>precondition to run into LU-5626.
+>We have run the background lfsck which adds the FID to the existing
+>dentries. This might be an important detail, because in our case a
+>second '..' entry containing the FID was presumably created by lfsck (in
+>the wrong place), and not by moving the directory. To my current
+>understanding the user then only has to add some files to trigger the
+>LBUG.
+>A subsequent e2fsck will not only find this particular directory but all
+>other small directories with a '..' entry in the wrong place. When
+>e2fsck tries to fix these directories, some entries are overwritten by
+>the FID and these files are then moved to lost+found.
+
+Note that newer versions of LFSCK namespace checking (2.6 or 2.7, don't
+recall offhand) will be able to return such entries from lost+found back
+into the proper parent directory in the namespace, assuming they were
+created under 2.x.  Lustre stores an extra "link" xattr on each inode with
+the filename and parent directory FID for each link to the file (up to the
+available xattr space for each inode), so in case of directory corruption
+it would be possible to rebuild the directory structure just from the
+"link" xattrs on each file.
+
+In the meantime, I attached a script to LU-5626 that could be used to
+re-link files from lost+found into the right directory and filename based
+on the output from e2fsck.  It is a bit rough (needs manual editing of
+pathnames), but may be useful if someone has hit this problem.
+
+Cheers, Andreas
+
+>If one of these first entries happens to be a small subdirectory, I
+>believe there is a chance to run into the same issue again, when you
+>move everything back to the original location after the e2fsck and
+>someone starts adding files in these subdirectories.
+>
+>However, the preconditions are still quite narrow: small directories,
+>not empty, created without fid, then converted by lfsck (or
+>alternatively moved to a different place which would also create the
+>second '..' entry). To trigger the LBUG files need to be added to one of
+>these directories and for a second occurrence of the LBUG the same
+>conditions must hold for another subdirectory which must have been at
+>the very beginning of the directory.
+>
+>Martin
+>
+>
+>
+
+
+Cheers, Andreas
+-- 
+Andreas Dilger
+
+Lustre Software Architect
+Intel High Performance Data Division
+
+
+
+From goetz.waschk at gmail.com  Thu Nov  5 02:09:19 2015
+From: goetz.waschk at gmail.com (=?UTF-8?B?R8O2dHogV2FzY2hr?=)
+Date: Thu, 5 Nov 2015 11:09:19 +0100
+Subject: [lustre-discuss] Can't get zfs OST to mount on a freshly built
+	server
+In-Reply-To: <55535CA7.4030705@umich.edu>
+References: <55535CA7.4030705@umich.edu>
+Message-ID: <CACd6u-pdtGKgCzR=XWoBh-GvHiD_7SwZ_LRKGkw4Sve7EdyVQA@mail.gmail.com>
+
+On Wed, May 13, 2015 at 4:16 PM, Bob Ball <ball at umich.edu> wrote:
+> OK, so, I am seeing EXACTLY the issue reported at the end of LU-6452 8
+> minutes after it was closed by Andreas Dilger.
+> https://jira.hpdd.intel.com/browse/LU-6452
+>
+> There is no response.  Is there a solution?
+
+Hi Bob,
+
+I guess my answer is rather for the archive. I had the same problem. I
+guess this information is for paying customers only and not found in
+the release notes or on Jira.
+
+> This is Lustre 2.7.0 with (now) zfs 0.6.4.1-1, which was current when the
+> server was built.  I see a number of recent Emails about updates to Lustre
+> sources against this zfs version, but is there a solution for the standard
+> set of 2.7.0 Lustre rpms?  Or any solution that will get me un-stuck?
+
+
+Your version of zfs is too new. The binary rpms of lustre 2.7.0 are
+compatible with spl/zfs 0.6.3-1.2 only:
+# modinfo zfs|grep version
+version:        0.6.3-1.2
+srcversion:     9888DC55B2F55794F6B5D44
+# modinfo osd_zfs|grep version
+srcversion:     D9F832C8E8804F08B693280
+vermagic:       2.6.32-504.8.1.el6_lustre.x86_64 SMP mod_unload modversions
+
+
+Regards, G?tz Waschk
+
+From hecht at hlrs.de  Thu Nov  5 06:18:32 2015
+From: hecht at hlrs.de (Martin Hecht)
+Date: Thu, 5 Nov 2015 15:18:32 +0100
+Subject: [lustre-discuss] recovery MDT ".." directory entries (LU-5626)
+In-Reply-To: <DB0C8A206669AC40B1C4E52A8584A6F614D1AC31@CFWEX01.americas.cray.com>
+References: <562F96BA.6040409@yale.edu>
+	<BE518F3B-D80F-4DF8-A33A-083C4EF9B32A@utk.edu>
+	<562FB86B.9090401@cray.com>
+	<D6DC6C2B-E2CC-47CB-95F4-AD4E4B31B0C4@utk.edu>
+	<5638EF21.2040000@cray.com>
+	<2C56D3CF-F01D-4BBC-8C70-1738CEB012E6@utk.edu>
+	<5639090C.5030003@cray.com>
+	<04AA2918-8A7D-4653-9182-205DD8124AA0@utk.edu>
+	<DB0C8A206669AC40B1C4E52A8584A6F614D1ABA9@CFWEX01.americas.cray.com>
+	<5639D316.5000502@hlrs.de>
+	<DB0C8A206669AC40B1C4E52A8584A6F614D1AC31@CFWEX01.americas.cray.com>
+Message-ID: <563B6538.8@hlrs.de>
+
+Hi,
+
+comments inline...
+
+On 11/04/2015 01:34 PM, Patrick Farrell wrote:
+> Our observation at the time was that lfsck did not add the fid to the .. dentry unless there was already space in the appropriate location.  
+Ok, I might have been wrong in this point and some manual mv by the
+users was involved.
+
+
+On 11/04/2015 04:24 PM, Chris Hunter wrote:
+> Yes I believe you want to (manually) recover the directories from
+> lost+found back to ROOT on the MDT before lfsck/oi_scrub runs. I don't
+> think lfsck on the MDT will impact orphan objects on the OSTs.
+With lfsck phase 2 introduced in lustre 2.6 the MDT-OST consistency is
+checked and repaired. Chris, you wrote that you have upgraded to "lustre
+2.x", so I don't know if you have lfsck II already.  And I'm not sure if
+MDT entries in lost+found are ignored by lfsck. I just wanted to point
+out that you might have to be careful here, but looking at the lustre
+manual it turns out that you are right. The consistency checks are run
+when lfsck type is set to "layout", which is a different thing than the
+"namespace" check used to update the FIDs.
+
+
+On 11/05/2015 01:29 AM, Dilger, Andreas wrote:
+> Note that newer versions of LFSCK namespace checking (2.6 or 2.7, don't
+> recall offhand) will be able to return such entries from lost+found back
+> into the proper parent directory in the namespace, assuming they were
+> created under 2.x.  Lustre stores an extra "link" xattr on each inode with
+> the filename and parent directory FID for each link to the file (up to the
+> available xattr space for each inode), so in case of directory corruption
+> it would be possible to rebuild the directory structure just from the
+> "link" xattrs on each file.
+that's good to know. However, the files in this case were created with
+1.8, so even if the current version after the upgrade has this "link"
+xattr, it doesn't help to recover from LU-5626. But your script is
+useful (it's pretty much the same as I did back then, but I didn't find
+my quick hack it anymore...)
+ 
+> In the meantime, I attached a script to LU-5626 that could be used to
+> re-link files from lost+found into the right directory and filename based
+> on the output from e2fsck.  It is a bit rough (needs manual editing of
+> pathnames), but may be useful if someone has hit this problem.
+
+best regards,
+Martin
+
+-------------- next part --------------
+A non-text attachment was scrubbed...
+Name: smime.p7s
+Type: application/pkcs7-signature
+Size: 2252 bytes
+Desc: S/MIME Cryptographic Signature
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20151105/ff7a6bcb/attachment.bin>
+
+From jerome.becot at inserm.fr  Fri Nov  6 01:55:18 2015
+From: jerome.becot at inserm.fr (=?UTF-8?B?SsOpcsO0bWUgQkVDT1Q=?=)
+Date: Fri, 6 Nov 2015 10:55:18 +0100
+Subject: [lustre-discuss] Lustre FS inodes getting full
+Message-ID: <563C7906.6080501@inserm.fr>
+
+Hi,
+
+We face a weird situation here. And i'd like to know if there is 
+anything wrong and what can I do to fix that.
+
+We have a 30TB system with lustre 2.6 (1 MDS / 2 OSS). The inode usage 
+is full though :
+
+root at SlurmMaster:~# df -i
+Filesystem                Inodes    IUsed      IFree IUse% Mounted on
+/dev/sda5                      0        0          0     - /
+udev                     8256017      390    8255627    1% /dev
+tmpfs                    8258094      347    8257747    1% /run
+tmpfs                    8258094        5    8258089    1% /run/lock
+tmpfs                    8258094        2    8258092    1% /run/shm
+/dev/sdb1                      0        0          0     - /home
+10.0.1.60 at tcp:/lustre   37743327 37492361     250966  100% /scratch
+cgroup                   8258094        8    8258086    1% /sys/fs/cgroup
+
+root at SlurmMaster:~# lfs df -i
+UUID                      Inodes       IUsed       IFree IUse% Mounted on
+lustre-MDT0000_UUID   1169686528    37413529  1132272999   3% 
+/scratch[MDT:0]
+lustre-OST0000_UUID     17160192    16996738      163454  99% 
+/scratch[OST:0]
+lustre-OST0001_UUID     17160192    16996308      163884  99% 
+/scratch[OST:1]
+
+filesystem summary:     37740867    37413529      327338  99% /scratch
+
+What is happening here ? I thought we would have a 4 billion files max, 
+not 16 million ?
+
+Thanks
+
+-- 
+J?rome BECOT
+
+Administrateur Syst?mes et R?seaux
+
+Mol?cules ? vis?e Th?rapeutique par des approches in Silico (MTi)
+Univ Paris Diderot, UMRS973 Inserm
+Case 013
+B?t. Lamarck A, porte 412
+35, rue H?l?ne Brion 75205 Paris Cedex 13
+France
+
+Tel : 01 57 27 83 82
+
+
+From rmohr at utk.edu  Fri Nov  6 06:00:58 2015
+From: rmohr at utk.edu (Mohr Jr, Richard Frank (Rick Mohr))
+Date: Fri, 6 Nov 2015 14:00:58 +0000
+Subject: [lustre-discuss] Lustre FS inodes getting full
+In-Reply-To: <563C7906.6080501@inserm.fr>
+References: <563C7906.6080501@inserm.fr>
+Message-ID: <6171D83B-C09A-4629-AB55-83F3F4059895@utk.edu>
+
+Every Lustre file will use an inode on the MDS and at least one inode on an OST (more than one OST is the file stripe count is >1).  If your OSTs don't have free inodes, Lustre cannot allocate an object for the file's contents.
+
+The upper limit on the number of files will be the lesser of:
+
+1) number of MDS inodes
+2) sum of inodes across all OSTs
+
+But depending upon file size and stripe count, you could end up with less.
+
+-- Rick
+
+> On Nov 6, 2015, at 4:55 AM, J?r?me BECOT <jerome.becot at inserm.fr> wrote:
+> 
+> Hi,
+> 
+> We face a weird situation here. And i'd like to know if there is anything wrong and what can I do to fix that.
+> 
+> We have a 30TB system with lustre 2.6 (1 MDS / 2 OSS). The inode usage is full though :
+> 
+> root at SlurmMaster:~# df -i
+> Filesystem                Inodes    IUsed      IFree IUse% Mounted on
+> /dev/sda5                      0        0          0     - /
+> udev                     8256017      390    8255627    1% /dev
+> tmpfs                    8258094      347    8257747    1% /run
+> tmpfs                    8258094        5    8258089    1% /run/lock
+> tmpfs                    8258094        2    8258092    1% /run/shm
+> /dev/sdb1                      0        0          0     - /home
+> 10.0.1.60 at tcp:/lustre   37743327 37492361     250966  100% /scratch
+> cgroup                   8258094        8    8258086    1% /sys/fs/cgroup
+> 
+> root at SlurmMaster:~# lfs df -i
+> UUID                      Inodes       IUsed       IFree IUse% Mounted on
+> lustre-MDT0000_UUID   1169686528    37413529  1132272999   3% /scratch[MDT:0]
+> lustre-OST0000_UUID     17160192    16996738      163454  99% /scratch[OST:0]
+> lustre-OST0001_UUID     17160192    16996308      163884  99% /scratch[OST:1]
+> 
+> filesystem summary:     37740867    37413529      327338  99% /scratch
+> 
+> What is happening here ? I thought we would have a 4 billion files max, not 16 million ?
+> 
+> Thanks
+> 
+> -- 
+> J?rome BECOT
+> 
+> Administrateur Syst?mes et R?seaux
+> 
+> Mol?cules ? vis?e Th?rapeutique par des approches in Silico (MTi)
+> Univ Paris Diderot, UMRS973 Inserm
+> Case 013
+> B?t. Lamarck A, porte 412
+> 35, rue H?l?ne Brion 75205 Paris Cedex 13
+> France
+> 
+> Tel : 01 57 27 83 82
+> 
+> _______________________________________________
+> lustre-discuss mailing list
+> lustre-discuss at lists.lustre.org
+> http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org
+
+From jerome.becot at inserm.fr  Fri Nov  6 06:10:23 2015
+From: jerome.becot at inserm.fr (=?UTF-8?B?SsOpcsO0bWUgQkVDT1Q=?=)
+Date: Fri, 6 Nov 2015 15:10:23 +0100
+Subject: [lustre-discuss] Lustre FS inodes getting full
+In-Reply-To: <6171D83B-C09A-4629-AB55-83F3F4059895@utk.edu>
+References: <563C7906.6080501@inserm.fr>
+	<6171D83B-C09A-4629-AB55-83F3F4059895@utk.edu>
+Message-ID: <563CB4CF.3040305@inserm.fr>
+
+Yes that's why I understood. We don't use stripes.
+
+What I don't know is what determines the inodes limit on the OST. I 
+guess that the underlaying filesystem (i.e. ldiskfs here) is the 
+culprit. But then on a 15TB OST with ldiskfs, I didn't expect to have a 
+17M inodes limitation.
+
+We use programs that generates tons of small files, and now we're 
+getting full by using only 30% of disk space.
+
+Is there any way to increase the max inode number available on the OSTs ?
+
+Here again I guess I will probably not have any other choice than 
+switching to a ZFS backend ?
+
+
+Le 06/11/2015 15:00, Mohr Jr, Richard Frank (Rick Mohr) a ?crit :
+> Every Lustre file will use an inode on the MDS and at least one inode on an OST (more than one OST is the file stripe count is >1).  If your OSTs don't have free inodes, Lustre cannot allocate an object for the file's contents.
+>
+> The upper limit on the number of files will be the lesser of:
+>
+> 1) number of MDS inodes
+> 2) sum of inodes across all OSTs
+>
+> But depending upon file size and stripe count, you could end up with less.
+>
+> -- Rick
+>
+>> On Nov 6, 2015, at 4:55 AM, J?r?me BECOT <jerome.becot at inserm.fr> wrote:
+>>
+>> Hi,
+>>
+>> We face a weird situation here. And i'd like to know if there is anything wrong and what can I do to fix that.
+>>
+>> We have a 30TB system with lustre 2.6 (1 MDS / 2 OSS). The inode usage is full though :
+>>
+>> root at SlurmMaster:~# df -i
+>> Filesystem                Inodes    IUsed      IFree IUse% Mounted on
+>> /dev/sda5                      0        0          0     - /
+>> udev                     8256017      390    8255627    1% /dev
+>> tmpfs                    8258094      347    8257747    1% /run
+>> tmpfs                    8258094        5    8258089    1% /run/lock
+>> tmpfs                    8258094        2    8258092    1% /run/shm
+>> /dev/sdb1                      0        0          0     - /home
+>> 10.0.1.60 at tcp:/lustre   37743327 37492361     250966  100% /scratch
+>> cgroup                   8258094        8    8258086    1% /sys/fs/cgroup
+>>
+>> root at SlurmMaster:~# lfs df -i
+>> UUID                      Inodes       IUsed       IFree IUse% Mounted on
+>> lustre-MDT0000_UUID   1169686528    37413529  1132272999   3% /scratch[MDT:0]
+>> lustre-OST0000_UUID     17160192    16996738      163454  99% /scratch[OST:0]
+>> lustre-OST0001_UUID     17160192    16996308      163884  99% /scratch[OST:1]
+>>
+>> filesystem summary:     37740867    37413529      327338  99% /scratch
+>>
+>> What is happening here ? I thought we would have a 4 billion files max, not 16 million ?
+>>
+>> Thanks
+>>
+>> -- 
+>> J?rome BECOT
+>>
+>> Administrateur Syst?mes et R?seaux
+>>
+>> Mol?cules ? vis?e Th?rapeutique par des approches in Silico (MTi)
+>> Univ Paris Diderot, UMRS973 Inserm
+>> Case 013
+>> B?t. Lamarck A, porte 412
+>> 35, rue H?l?ne Brion 75205 Paris Cedex 13
+>> France
+>>
+>> Tel : 01 57 27 83 82
+>>
+>> _______________________________________________
+>> lustre-discuss mailing list
+>> lustre-discuss at lists.lustre.org
+>> http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org
+
+-- 
+J?rome BECOT
+
+Administrateur Syst?mes et R?seaux
+
+Mol?cules ? vis?e Th?rapeutique par des approches in Silico (MTi)
+Univ Paris Diderot, UMRS973 Inserm
+Case 013
+B?t. Lamarck A, porte 412
+35, rue H?l?ne Brion 75205 Paris Cedex 13
+France
+
+Tel : 01 57 27 83 82
+
+
+From andreas.dilger at intel.com  Fri Nov  6 22:05:51 2015
+From: andreas.dilger at intel.com (Dilger, Andreas)
+Date: Sat, 7 Nov 2015 06:05:51 +0000
+Subject: [lustre-discuss] Lustre FS inodes getting full
+In-Reply-To: <563CB4CF.3040305@inserm.fr>
+References: <563C7906.6080501@inserm.fr>
+	<6171D83B-C09A-4629-AB55-83F3F4059895@utk.edu>
+	<563CB4CF.3040305@inserm.fr>
+Message-ID: <D262BE3B.1190CC%andreas.dilger@intel.com>
+
+On 2015/11/06, 07:10, "lustre-discuss on behalf of J?r?me BECOT"
+<lustre-discuss-bounces at lists.lustre.org on behalf of
+jerome.becot at inserm.fr> wrote:
+
+>Yes that's why I understood. We don't use stripes.
+>
+>What I don't know is what determines the inodes limit on the OST. I
+>guess that the underlaying filesystem (i.e. ldiskfs here) is the
+>culprit. But then on a 15TB OST with ldiskfs, I didn't expect to have a
+>17M inodes limitation.
+>
+>We use programs that generates tons of small files, and now we're
+>getting full by using only 30% of disk space.
+
+The default formatting a 15TB OST assumes an average file size of 1MB,
+which is normally a safe assumption for Lustre.
+
+>Is there any way to increase the max inode number available on the OSTs?
+
+This can be changed at format time by specifying the average file size
+(inode ratio) for the OSTs:
+
+    mkfs.lustre ... --mkfsoptions="-i <average_file_size>"
+
+But you may want to specify a slightly smaller average file size to give
+some safety margin.
+
+>Here again I guess I will probably not have any other choice than
+>switching to a ZFS backend ?
+
+The best way to handle this would be to add one or two more OSTs to the
+filesystem that are formatted with the smaller inode ratio, and Lustre
+will chose these instead of the full ones.  You could then migrate files
+from the older OSTs to the new ones until they are empty, reformat them
+with the smaller inode ratio, and add them back into the filesystem.
+
+Cheers, Andreas
+
+>Le 06/11/2015 15:00, Mohr Jr, Richard Frank (Rick Mohr) a ?crit :
+>> Every Lustre file will use an inode on the MDS and at least one inode
+>>on an OST (more than one OST is the file stripe count is >1).  If your
+>>OSTs don't have free inodes, Lustre cannot allocate an object for the
+>>file's contents.
+>>
+>> The upper limit on the number of files will be the lesser of:
+>>
+>> 1) number of MDS inodes
+>> 2) sum of inodes across all OSTs
+>>
+>> But depending upon file size and stripe count, you could end up with
+>>less.
+>>
+>> -- Rick
+>>
+>>> On Nov 6, 2015, at 4:55 AM, J?r?me BECOT <jerome.becot at inserm.fr>
+>>>wrote:
+>>>
+>>> Hi,
+>>>
+>>> We face a weird situation here. And i'd like to know if there is
+>>>anything wrong and what can I do to fix that.
+>>>
+>>> We have a 30TB system with lustre 2.6 (1 MDS / 2 OSS). The inode usage
+>>>is full though :
+>>>
+>>> root at SlurmMaster:~# df -i
+>>> Filesystem                Inodes    IUsed      IFree IUse% Mounted on
+>>> /dev/sda5                      0        0          0     - /
+>>> udev                     8256017      390    8255627    1% /dev
+>>> tmpfs                    8258094      347    8257747    1% /run
+>>> tmpfs                    8258094        5    8258089    1% /run/lock
+>>> tmpfs                    8258094        2    8258092    1% /run/shm
+>>> /dev/sdb1                      0        0          0     - /home
+>>> 10.0.1.60 at tcp:/lustre   37743327 37492361     250966  100% /scratch
+>>> cgroup                   8258094        8    8258086    1%
+>>>/sys/fs/cgroup
+>>>
+>>> root at SlurmMaster:~# lfs df -i
+>>> UUID                      Inodes       IUsed       IFree IUse% Mounted
+>>>on
+>>> lustre-MDT0000_UUID   1169686528    37413529  1132272999   3%
+>>>/scratch[MDT:0]
+>>> lustre-OST0000_UUID     17160192    16996738      163454  99%
+>>>/scratch[OST:0]
+>>> lustre-OST0001_UUID     17160192    16996308      163884  99%
+>>>/scratch[OST:1]
+>>>
+>>> filesystem summary:     37740867    37413529      327338  99% /scratch
+>>>
+>>> What is happening here ? I thought we would have a 4 billion files
+>>>max, not 16 million ?
+>>>
+>>> Thanks
+>>>
+>>> -- 
+>>> J?rome BECOT
+
+Cheers, Andreas
+-- 
+Andreas Dilger
+
+Lustre Software Architect
+Intel High Performance Data Division
+
+
+
+From massimo.sgaravatto at pd.infn.it  Tue Nov 10 03:52:19 2015
+From: massimo.sgaravatto at pd.infn.it (Massimo Sgaravatto)
+Date: Tue, 10 Nov 2015 12:52:19 +0100
+Subject: [lustre-discuss] Lustre doesn't use new OST
+In-Reply-To: <C370E14B-9A45-4AB0-A4A4-FF9A7FAEA196@utk.edu>
+References: <55B8F1CD.5080509@pd.infn.it>
+	<C370E14B-9A45-4AB0-A4A4-FF9A7FAEA196@utk.edu>
+Message-ID: <5641DA73.1050405@pd.infn.it>
+
+Hello
+
+Let me resurrect this old thread concerning the problem of OST not used 
+if there are deactivated OSTs (see below for details)
+
+I created a small testbed with a Lustre 2.5.3 server (MGS + MDT + OSS) 
+and a Lustre 2.5.3 client.
+I reproduced the problem creating a Lustre filesystem with:
+
+- OST-0 OST-1 and OST-5 active
+- OST-2, OST-3, OST-4 deactived
+
+and I see that files are not written in OST-5.
+
+I then tried to update the Lustre server machine to Lustre v. 2.7.0 
+(while the client keeps running Lustre v. 2.5.3): the problem is still 
+there.
+
+I then tried to also update the client to Lustre v. 2.7.0 and it looks 
+like this fixes the problem.
+
+Is this expected ? I thought the problem was in the server side ...
+
+Thanks, Massimo
+
+
+
+On 29/07/2015 17:47, Mohr Jr, Richard Frank (Rick Mohr) wrote:
+> Have you taken a look at LU-5778 (https://jira.hpdd.intel.com/browse/LU-5778)?  It sounds like the same thing.
+>
+> --
+> Rick Mohr
+> Senior HPC System Administrator
+> National Institute for Computational Sciences
+> http://www.nics.tennessee.edu
+>
+>
+>> On Jul 29, 2015, at 11:31 AM, Massimo Sgaravatto <massimo.sgaravatto at pd.infn.it> wrote:
+>>
+>> Hi
+>>
+>> We had a Lustre filesystem composed of 5 OSTs.
+>> Because of a problem with 3 OSTs (the problem is described in the thread "Problems moving an OSS from an old Lustre installation to a new one"), we disabled them.
+>>
+>> Now we want to reformat (mkfs.lustre --reformat ...) these 3 OSS and make them on-line.
+>>
+>> For the time being we performed this operation just for one OSS (using a new index number).
+>>
+>>
+>> The current scenario is the following (OST0005 is the reformatted OST):
+>>
+>>
+>>
+>> lfs df -h /lustre/cmswork/
+>> UUID                       bytes        Used   Available Use% Mounted on
+>> cmswork-MDT0000_UUID      374.9G        3.5G      346.4G   1% /lustre/cmswork[MDT:0]
+>> cmswork-OST0000_UUID       18.1T       14.5T        2.7T  84% /lustre/cmswork[OST:0]
+>> cmswork-OST0001_UUID       18.1T       14.2T        3.0T  83% /lustre/cmswork[OST:1]
+>> OST0002             : inactive device
+>> OST0003             : inactive device
+>> OST0004             : inactive device
+>> cmswork-OST0005_UUID       13.6T      415.1M       12.9T   0% /lustre/cmswork[OST:5]
+>>
+>> filesystem summary:        49.7T       28.7T       18.5T  61% /lustre/cmswork
+>>
+>>
+>> The problem is that  the "Lustre scheduler" is not selecting OST0005 at all for new files.
+>>
+>> Only if I use "lfs setstripe --index 5 " I see that the relevant files are written to this OST. Otherwise only OST0000 and OST0001 are used
+>>
+>> We didn't change the values for qos_threshold_rr and qos_prio_free, which are therefore using the default values (17%, 91 %).
+>>
+>>
+>> I can't find anything useful in the log files.
+>> Any idea ?
+>>
+>> Thanks, Massimo
+>>
+>> _______________________________________________
+>> lustre-discuss mailing list
+>> lustre-discuss at lists.lustre.org
+>> http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org
+>
+>
+
+
+-------------- next part --------------
+A non-text attachment was scrubbed...
+Name: smime.p7s
+Type: application/pkcs7-signature
+Size: 1897 bytes
+Desc: S/MIME Cryptographic Signature
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20151110/512f28cc/attachment.bin>
+
+From rmohr at utk.edu  Wed Nov 11 11:15:07 2015
+From: rmohr at utk.edu (Mohr Jr, Richard Frank (Rick Mohr))
+Date: Wed, 11 Nov 2015 19:15:07 +0000
+Subject: [lustre-discuss] Lustre doesn't use new OST
+In-Reply-To: <5641DA73.1050405@pd.infn.it>
+References: <55B8F1CD.5080509@pd.infn.it>
+	<C370E14B-9A45-4AB0-A4A4-FF9A7FAEA196@utk.edu>
+	<5641DA73.1050405@pd.infn.it>
+Message-ID: <6D681446-EFC6-43A3-8378-5ADBDEC5A76B@utk.edu>
+
+
+> On Nov 10, 2015, at 6:52 AM, Massimo Sgaravatto <massimo.sgaravatto at pd.infn.it> wrote:
+> 
+> Hello
+> 
+> Let me resurrect this old thread concerning the problem of OST not used if there are deactivated OSTs (see below for details)
+> 
+> I created a small testbed with a Lustre 2.5.3 server (MGS + MDT + OSS) and a Lustre 2.5.3 client.
+> I reproduced the problem creating a Lustre filesystem with:
+> 
+> - OST-0 OST-1 and OST-5 active
+> - OST-2, OST-3, OST-4 deactived
+> 
+> and I see that files are not written in OST-5.
+> 
+> I then tried to update the Lustre server machine to Lustre v. 2.7.0 (while the client keeps running Lustre v. 2.5.3): the problem is still there.
+> 
+> I then tried to also update the client to Lustre v. 2.7.0 and it looks like this fixes the problem.
+> 
+> Is this expected ? I thought the problem was in the server side ...
+
+If the problem was related to LU-5778, then I would expect it to be purely a server side issue.  So either I misread something in the bug report, or this is a different issue (although it is good to know that upgrading both the server and the client helped).
+
+--
+Rick Mohr
+Senior HPC System Administrator
+National Institute for Computational Sciences
+http://www.nics.tennessee.edu
+
+
+From magnus.lassus at wartsila.com  Wed Nov 18 10:17:13 2015
+From: magnus.lassus at wartsila.com (Lassus, Magnus)
+Date: Wed, 18 Nov 2015 18:17:13 +0000
+Subject: [lustre-discuss] o2ib (ib_qib) with 2.7.0 rpms on centos 6.6:
+ LNetError: kiblnd_init_rdma: Src buffer exhausted: 1 frags
+Message-ID: <HE1PR04MB1273C36E676E1824D8B2E3A4941C0@HE1PR04MB1273.eurprd04.prod.outlook.com>
+
+Hi,
+
+I fail to understand where I go wrong in getting o2ib working using 2.7.0 rpms on top of CentOS 6.6. Running selftest I see:
+
+Nov 17 18:22:40 ss08 kernel: LNet: Added LNI 10.165.32.18 at o2ib [8/256/0/180]
+Nov 17 18:24:40 ss08 kernel: LNetError: 12532:0:(o2iblnd_cb.c:1123:kiblnd_init_rdma()) Src buffer exhausted: 1 frags
+Nov 17 18:24:40 ss08 kernel: LustreError: 12553:0:(brw_test.c:212:brw_check_page()) Bad data in page ffffea0070c20800: 0xbeefbeefbeefbeef, 0xeeb0eeb1eeb2eeb3 expec
+Nov 17 18:24:40 ss08 kernel: LustreError: 12553:0:(brw_test.c:238:brw_check_bulk()) Bulk page ffffea0070c20800 (0/256) is corrupted!
+Nov 17 18:24:40 ss08 kernel: LustreError: 12553:0:(brw_test.c:343:brw_client_done_rpc()) Bulk data from 12345-10.165.32.18 at o2ib is corrupted!
+Nov 17 18:24:40 ss08 kernel: LNetError: 12532:0:(o2iblnd_cb.c:1690:kiblnd_reply()) Can't setup rdma for GET from 10.165.32.18 at o2ib: -71
+Nov 17 18:25:31 ss08 kernel: LNetError: 12529:0:(o2iblnd_cb.c:3036:kiblnd_check_txs_locked()) Timed out tx: active_txs, 0 seconds
+Nov 17 18:25:31 ss08 kernel: LNetError: 12529:0:(o2iblnd_cb.c:3099:kiblnd_check_conns()) Timed out RDMA with 10.165.32.18 at o2ib (0): c: 7, oc: 0, rc: 7
+Nov 17 18:25:31 ss08 kernel: LustreError: 12558:0:(brw_test.c:388:brw_bulk_ready()) BRW bulk WRITE failed for RPC from 12345-10.165.32.18 at o2ib: -103
+Nov 17 18:25:31 ss08 kernel: LustreError: 12558:0:(brw_test.c:362:brw_server_rpc_done()) Bulk transfer from 12345-10.165.32.18 at o2ib has failed: -5
+Nov 17 18:25:48 ss08 kernel: LNet: 12581:0:(rpc.c:1077:srpc_client_rpc_expired()) Client RPC expired: service 11, peer 12345-10.165.32.18 at o2ib, timeout 64.
+Nov 17 18:25:48 ss08 kernel: LustreError: 12555:0:(brw_test.c:318:brw_client_done_rpc()) BRW RPC to 12345-10.165.32.18 at o2ib failed with -110
+
+# rpm -qa | egrep 'lustre|kernel' | sort
+dracut-kernel-004-356.el6.noarch
+kernel-2.6.32-504.8.1.el6_lustre.x86_64
+kernel-devel-2.6.32-504.8.1.el6_lustre.x86_64
+kernel-firmware-2.6.32-504.8.1.el6_lustre.x86_64
+kernel-headers-2.6.32-504.8.1.el6_lustre.x86_64
+lustre-2.7.0-2.6.32_504.8.1.el6_lustre.x86_64.x86_64
+lustre-iokit-2.7.0-2.6.32_504.8.1.el6_lustre.x86_64.x86_64
+lustre-modules-2.7.0-2.6.32_504.8.1.el6_lustre.x86_64.x86_64
+lustre-osd-ldiskfs-2.7.0-2.6.32_504.8.1.el6_lustre.x86_64.x86_64
+lustre-osd-ldiskfs-mount-2.7.0-2.6.32_504.8.1.el6_lustre.x86_64.x86_64
+lustre-tests-2.7.0-2.6.32_504.8.1.el6_lustre.x86_64.x86_64
+perf-2.6.32-504.8.1.el6_lustre.x86_64
+python-perf-2.6.32-504.8.1.el6_lustre.x86_64
+
+Using latest 2.7.63 build on 6.7 works.
+
+Any pointers are warmly welcome as I'd prefer to use 2.7.0.
+
+Regards,
+Magnus
+
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20151118/bc19b61a/attachment.htm>
+
+From chris.hunter at yale.edu  Wed Nov 18 13:14:07 2015
+From: chris.hunter at yale.edu (Chris Hunter)
+Date: Wed, 18 Nov 2015 16:14:07 -0500
+Subject: [lustre-discuss] o2ib (ib_qib) with 2.7.0 rpms on centos 6.6
+In-Reply-To: <mailman.1.1447880630.16279.lustre-discuss-lustre.org@lists.lustre.org>
+References: <mailman.1.1447880630.16279.lustre-discuss-lustre.org@lists.lustre.org>
+Message-ID: <564CEA1F.9020302@yale.edu>
+
+Are you using truescale IB interfaces ?
+
+There is a known truescale bug in rhel/centos 6.6 kernels. You should 
+try kernel 2.6.32-504.23.4 or newer. Some details of the bug are in 
+LU-6698 and RHSA-2015-1081.
+
+regards,
+chris hunter
+yale hpc group
+
+> From: "Lassus, Magnus" <magnus.lassus at wartsila.com>
+> To: "lustre-discuss at lists.lustre.org"
+> 	<lustre-discuss at lists.lustre.org>
+> Subject: [lustre-discuss] o2ib (ib_qib) with 2.7.0 rpms on centos 6.6:
+> 	LNetError: kiblnd_init_rdma: Src buffer exhausted: 1 frags
+> Message-ID:
+> 	<HE1PR04MB1273C36E676E1824D8B2E3A4941C0 at HE1PR04MB1273.eurprd04.prod.outlook.com>
+> 	
+> Content-Type: text/plain; charset="us-ascii"
+>
+> Hi,
+>
+> I fail to understand where I go wrong in getting o2ib working using 2.7.0 rpms on top of CentOS 6.6. Running selftest I see:
+>
+> Nov 17 18:22:40 ss08 kernel: LNet: Added LNI 10.165.32.18 at o2ib [8/256/0/180]
+> Nov 17 18:24:40 ss08 kernel: LNetError: 12532:0:(o2iblnd_cb.c:1123:kiblnd_init_rdma()) Src buffer exhausted: 1 frags
+> Nov 17 18:24:40 ss08 kernel: LustreError: 12553:0:(brw_test.c:212:brw_check_page()) Bad data in page ffffea0070c20800: 0xbeefbeefbeefbeef, 0xeeb0eeb1eeb2eeb3 expec
+> Nov 17 18:24:40 ss08 kernel: LustreError: 12553:0:(brw_test.c:238:brw_check_bulk()) Bulk page ffffea0070c20800 (0/256) is corrupted!
+> Nov 17 18:24:40 ss08 kernel: LustreError: 12553:0:(brw_test.c:343:brw_client_done_rpc()) Bulk data from 12345-10.165.32.18 at o2ib is corrupted!
+> Nov 17 18:24:40 ss08 kernel: LNetError: 12532:0:(o2iblnd_cb.c:1690:kiblnd_reply()) Can't setup rdma for GET from 10.165.32.18 at o2ib: -71
+> Nov 17 18:25:31 ss08 kernel: LNetError: 12529:0:(o2iblnd_cb.c:3036:kiblnd_check_txs_locked()) Timed out tx: active_txs, 0 seconds
+> Nov 17 18:25:31 ss08 kernel: LNetError: 12529:0:(o2iblnd_cb.c:3099:kiblnd_check_conns()) Timed out RDMA with 10.165.32.18 at o2ib (0): c: 7, oc: 0, rc: 7
+> Nov 17 18:25:31 ss08 kernel: LustreError: 12558:0:(brw_test.c:388:brw_bulk_ready()) BRW bulk WRITE failed for RPC from 12345-10.165.32.18 at o2ib: -103
+> Nov 17 18:25:31 ss08 kernel: LustreError: 12558:0:(brw_test.c:362:brw_server_rpc_done()) Bulk transfer from 12345-10.165.32.18 at o2ib has failed: -5
+> Nov 17 18:25:48 ss08 kernel: LNet: 12581:0:(rpc.c:1077:srpc_client_rpc_expired()) Client RPC expired: service 11, peer 12345-10.165.32.18 at o2ib, timeout 64.
+> Nov 17 18:25:48 ss08 kernel: LustreError: 12555:0:(brw_test.c:318:brw_client_done_rpc()) BRW RPC to 12345-10.165.32.18 at o2ib failed with -110
+>
+> # rpm -qa | egrep 'lustre|kernel' | sort
+> dracut-kernel-004-356.el6.noarch
+> kernel-2.6.32-504.8.1.el6_lustre.x86_64
+> kernel-devel-2.6.32-504.8.1.el6_lustre.x86_64
+> kernel-firmware-2.6.32-504.8.1.el6_lustre.x86_64
+> kernel-headers-2.6.32-504.8.1.el6_lustre.x86_64
+> lustre-2.7.0-2.6.32_504.8.1.el6_lustre.x86_64.x86_64
+> lustre-iokit-2.7.0-2.6.32_504.8.1.el6_lustre.x86_64.x86_64
+> lustre-modules-2.7.0-2.6.32_504.8.1.el6_lustre.x86_64.x86_64
+> lustre-osd-ldiskfs-2.7.0-2.6.32_504.8.1.el6_lustre.x86_64.x86_64
+> lustre-osd-ldiskfs-mount-2.7.0-2.6.32_504.8.1.el6_lustre.x86_64.x86_64
+> lustre-tests-2.7.0-2.6.32_504.8.1.el6_lustre.x86_64.x86_64
+> perf-2.6.32-504.8.1.el6_lustre.x86_64
+> python-perf-2.6.32-504.8.1.el6_lustre.x86_64
+>
+> Using latest 2.7.63 build on 6.7 works.
+>
+> Any pointers are warmly welcome as I'd prefer to use 2.7.0.
+>
+> Regards,
+> Magnus
+>
+> -------------- next part --------------
+> An HTML attachment was scrubbed...
+> URL: <https://urldefense.proofpoint.com/v2/url?u=http-3A__lists.lustre.org_pipermail_lustre-2Ddiscuss-2Dlustre.org_attachments_20151118_bc19b61a_attachment.html&d=AwICAg&c=-dg2m7zWuuDZ0MUcV7Sdqw&r=d_G2h_sZYG4xtHMeKo8QgjDmOcMVdQvYgM-5Dri1AOY&m=yntd6s6FbhcK6yz7f--sTQB8uauio2sPpZXJO07_GMM&s=fmaW2S-MSdcgBPqEnTVELb9GaBrR0zwaQlFI9_QrbYw&e= >
+>
+> ------------------------------
+>
+> Subject: Digest Footer
+>
+> _______________________________________________
+> lustre-discuss mailing list
+> lustre-discuss at lists.lustre.org
+> https://urldefense.proofpoint.com/v2/url?u=http-3A__lists.lustre.org_listinfo.cgi_lustre-2Ddiscuss-2Dlustre.org&d=AwICAg&c=-dg2m7zWuuDZ0MUcV7Sdqw&r=d_G2h_sZYG4xtHMeKo8QgjDmOcMVdQvYgM-5Dri1AOY&m=yntd6s6FbhcK6yz7f--sTQB8uauio2sPpZXJO07_GMM&s=XPhf61e64WjkcxWw05wudsYWLfRBfsN0OiJF8O2DYE4&e=
+>
+>
+> ------------------------------
+>
+> End of lustre-discuss Digest, Vol 116, Issue 9
+> **********************************************
+>
+
+From magnus.lassus at wartsila.com  Thu Nov 19 07:33:12 2015
+From: magnus.lassus at wartsila.com (Lassus, Magnus)
+Date: Thu, 19 Nov 2015 15:33:12 +0000
+Subject: [lustre-discuss] o2ib (ib_qib) with 2.7.0 rpms on centos 6.6
+In-Reply-To: <564CEA1F.9020302@yale.edu>
+References: <mailman.1.1447880630.16279.lustre-discuss-lustre.org@lists.lustre.org>
+	<564CEA1F.9020302@yale.edu>
+Message-ID: <VI1PR04MB1279EC056F1B2DCE1F946BB5941B0@VI1PR04MB1279.eurprd04.prod.outlook.com>
+
+Thank you very much Chris. True scale it is and using 2.6.32-504.23.4 solved it.
+
+Regards,
+Magnus
+
+-----Original Message-----
+From: Chris Hunter [mailto:chris.hunter at yale.edu] 
+Sent: 18 November 2015 23:14
+To: Lassus, Magnus <magnus.lassus at wartsila.com>
+Cc: lustre-discuss at lists.lustre.org
+Subject: Re: [lustre-discuss] o2ib (ib_qib) with 2.7.0 rpms on centos 6.6
+
+Are you using truescale IB interfaces ?
+
+There is a known truescale bug in rhel/centos 6.6 kernels. You should 
+try kernel 2.6.32-504.23.4 or newer. Some details of the bug are in 
+LU-6698 and RHSA-2015-1081.
+
+regards,
+chris hunter
+yale hpc group
+
+> From: "Lassus, Magnus" <magnus.lassus at wartsila.com>
+> To: "lustre-discuss at lists.lustre.org"
+> 	<lustre-discuss at lists.lustre.org>
+> Subject: [lustre-discuss] o2ib (ib_qib) with 2.7.0 rpms on centos 6.6:
+> 	LNetError: kiblnd_init_rdma: Src buffer exhausted: 1 frags
+> Message-ID:
+> 	<HE1PR04MB1273C36E676E1824D8B2E3A4941C0 at HE1PR04MB1273.eurprd04.prod.outlook.com>
+> 	
+> Content-Type: text/plain; charset="us-ascii"
+>
+> Hi,
+>
+> I fail to understand where I go wrong in getting o2ib working using 2.7.0 rpms on top of CentOS 6.6. Running selftest I see:
+>
+> Nov 17 18:22:40 ss08 kernel: LNet: Added LNI 10.165.32.18 at o2ib [8/256/0/180]
+> Nov 17 18:24:40 ss08 kernel: LNetError: 12532:0:(o2iblnd_cb.c:1123:kiblnd_init_rdma()) Src buffer exhausted: 1 frags
+> Nov 17 18:24:40 ss08 kernel: LustreError: 12553:0:(brw_test.c:212:brw_check_page()) Bad data in page ffffea0070c20800: 0xbeefbeefbeefbeef, 0xeeb0eeb1eeb2eeb3 expec
+> Nov 17 18:24:40 ss08 kernel: LustreError: 12553:0:(brw_test.c:238:brw_check_bulk()) Bulk page ffffea0070c20800 (0/256) is corrupted!
+> Nov 17 18:24:40 ss08 kernel: LustreError: 12553:0:(brw_test.c:343:brw_client_done_rpc()) Bulk data from 12345-10.165.32.18 at o2ib is corrupted!
+> Nov 17 18:24:40 ss08 kernel: LNetError: 12532:0:(o2iblnd_cb.c:1690:kiblnd_reply()) Can't setup rdma for GET from 10.165.32.18 at o2ib: -71
+> Nov 17 18:25:31 ss08 kernel: LNetError: 12529:0:(o2iblnd_cb.c:3036:kiblnd_check_txs_locked()) Timed out tx: active_txs, 0 seconds
+> Nov 17 18:25:31 ss08 kernel: LNetError: 12529:0:(o2iblnd_cb.c:3099:kiblnd_check_conns()) Timed out RDMA with 10.165.32.18 at o2ib (0): c: 7, oc: 0, rc: 7
+> Nov 17 18:25:31 ss08 kernel: LustreError: 12558:0:(brw_test.c:388:brw_bulk_ready()) BRW bulk WRITE failed for RPC from 12345-10.165.32.18 at o2ib: -103
+> Nov 17 18:25:31 ss08 kernel: LustreError: 12558:0:(brw_test.c:362:brw_server_rpc_done()) Bulk transfer from 12345-10.165.32.18 at o2ib has failed: -5
+> Nov 17 18:25:48 ss08 kernel: LNet: 12581:0:(rpc.c:1077:srpc_client_rpc_expired()) Client RPC expired: service 11, peer 12345-10.165.32.18 at o2ib, timeout 64.
+> Nov 17 18:25:48 ss08 kernel: LustreError: 12555:0:(brw_test.c:318:brw_client_done_rpc()) BRW RPC to 12345-10.165.32.18 at o2ib failed with -110
+>
+> # rpm -qa | egrep 'lustre|kernel' | sort
+> dracut-kernel-004-356.el6.noarch
+> kernel-2.6.32-504.8.1.el6_lustre.x86_64
+> kernel-devel-2.6.32-504.8.1.el6_lustre.x86_64
+> kernel-firmware-2.6.32-504.8.1.el6_lustre.x86_64
+> kernel-headers-2.6.32-504.8.1.el6_lustre.x86_64
+> lustre-2.7.0-2.6.32_504.8.1.el6_lustre.x86_64.x86_64
+> lustre-iokit-2.7.0-2.6.32_504.8.1.el6_lustre.x86_64.x86_64
+> lustre-modules-2.7.0-2.6.32_504.8.1.el6_lustre.x86_64.x86_64
+> lustre-osd-ldiskfs-2.7.0-2.6.32_504.8.1.el6_lustre.x86_64.x86_64
+> lustre-osd-ldiskfs-mount-2.7.0-2.6.32_504.8.1.el6_lustre.x86_64.x86_64
+> lustre-tests-2.7.0-2.6.32_504.8.1.el6_lustre.x86_64.x86_64
+> perf-2.6.32-504.8.1.el6_lustre.x86_64
+> python-perf-2.6.32-504.8.1.el6_lustre.x86_64
+>
+> Using latest 2.7.63 build on 6.7 works.
+>
+> Any pointers are warmly welcome as I'd prefer to use 2.7.0.
+>
+> Regards,
+> Magnus
+>
+> -------------- next part --------------
+> An HTML attachment was scrubbed...
+> URL: <https://urldefense.proofpoint.com/v2/url?u=http-3A__lists.lustre.org_pipermail_lustre-2Ddiscuss-2Dlustre.org_attachments_20151118_bc19b61a_attachment.html&d=AwICAg&c=-dg2m7zWuuDZ0MUcV7Sdqw&r=d_G2h_sZYG4xtHMeKo8QgjDmOcMVdQvYgM-5Dri1AOY&m=yntd6s6FbhcK6yz7f--sTQB8uauio2sPpZXJO07_GMM&s=fmaW2S-MSdcgBPqEnTVELb9GaBrR0zwaQlFI9_QrbYw&e= >
+>
+> ------------------------------
+>
+> Subject: Digest Footer
+>
+> _______________________________________________
+> lustre-discuss mailing list
+> lustre-discuss at lists.lustre.org
+> https://urldefense.proofpoint.com/v2/url?u=http-3A__lists.lustre.org_listinfo.cgi_lustre-2Ddiscuss-2Dlustre.org&d=AwICAg&c=-dg2m7zWuuDZ0MUcV7Sdqw&r=d_G2h_sZYG4xtHMeKo8QgjDmOcMVdQvYgM-5Dri1AOY&m=yntd6s6FbhcK6yz7f--sTQB8uauio2sPpZXJO07_GMM&s=XPhf61e64WjkcxWw05wudsYWLfRBfsN0OiJF8O2DYE4&e=
+>
+>
+> ------------------------------
+>
+> End of lustre-discuss Digest, Vol 116, Issue 9
+> **********************************************
+>
+
+From chris.hunter at yale.edu  Thu Nov 19 08:55:36 2015
+From: chris.hunter at yale.edu (Chris Hunter)
+Date: Thu, 19 Nov 2015 11:55:36 -0500
+Subject: [lustre-discuss] o2ib (ib_qib) with 2.7.0 rpms on centos 6.6
+In-Reply-To: <564CEA1F.9020302@yale.edu>
+References: <mailman.1.1447880630.16279.lustre-discuss-lustre.org@lists.lustre.org>
+	<564CEA1F.9020302@yale.edu>
+Message-ID: <564DFF08.3020402@yale.edu>
+
+Thanks goes to sysadmins at Linkoping University (sweden) and llnl. It 
+took some effort for the involved parties to push out a fix.
+* http://lists.openfabrics.org/pipermail/users/2015-March/000453.html
+
+chris hunter
+chris.hunter at yale.edu
+
+On 11/18/2015 04:14 PM, Chris Hunter wrote:
+> Are you using truescale IB interfaces ?
+>
+> There is a known truescale bug in rhel/centos 6.6 kernels. You should
+> try kernel 2.6.32-504.23.4 or newer. Some details of the bug are in
+> LU-6698 and RHSA-2015-1081.
+>
+> regards,
+> chris hunter
+> yale hpc group
+>
+>> From: "Lassus, Magnus" <magnus.lassus at wartsila.com>
+>> To: "lustre-discuss at lists.lustre.org"
+>>     <lustre-discuss at lists.lustre.org>
+>> Subject: [lustre-discuss] o2ib (ib_qib) with 2.7.0 rpms on centos 6.6:
+>>     LNetError: kiblnd_init_rdma: Src buffer exhausted: 1 frags
+>> Message-ID:
+>>     <HE1PR04MB1273C36E676E1824D8B2E3A4941C0 at HE1PR04MB1273.eurprd04.prod.outlook.com>
+>>
+>>
+>> Content-Type: text/plain; charset="us-ascii"
+>>
+>> Hi,
+>>
+>> I fail to understand where I go wrong in getting o2ib working using
+>> 2.7.0 rpms on top of CentOS 6.6. Running selftest I see:
+>>
+>> Nov 17 18:22:40 ss08 kernel: LNet: Added LNI 10.165.32.18 at o2ib
+>> [8/256/0/180]
+>> Nov 17 18:24:40 ss08 kernel: LNetError:
+>> 12532:0:(o2iblnd_cb.c:1123:kiblnd_init_rdma()) Src buffer exhausted: 1
+>> frags
+>> Nov 17 18:24:40 ss08 kernel: LustreError:
+>> 12553:0:(brw_test.c:212:brw_check_page()) Bad data in page
+>> ffffea0070c20800: 0xbeefbeefbeefbeef, 0xeeb0eeb1eeb2eeb3 expec
+>> Nov 17 18:24:40 ss08 kernel: LustreError:
+>> 12553:0:(brw_test.c:238:brw_check_bulk()) Bulk page ffffea0070c20800
+>> (0/256) is corrupted!
+>> Nov 17 18:24:40 ss08 kernel: LustreError:
+>> 12553:0:(brw_test.c:343:brw_client_done_rpc()) Bulk data from
+>> 12345-10.165.32.18 at o2ib is corrupted!
+>> Nov 17 18:24:40 ss08 kernel: LNetError:
+>> 12532:0:(o2iblnd_cb.c:1690:kiblnd_reply()) Can't setup rdma for GET
+>> from 10.165.32.18 at o2ib: -71
+>> Nov 17 18:25:31 ss08 kernel: LNetError:
+>> 12529:0:(o2iblnd_cb.c:3036:kiblnd_check_txs_locked()) Timed out tx:
+>> active_txs, 0 seconds
+>> Nov 17 18:25:31 ss08 kernel: LNetError:
+>> 12529:0:(o2iblnd_cb.c:3099:kiblnd_check_conns()) Timed out RDMA with
+>> 10.165.32.18 at o2ib (0): c: 7, oc: 0, rc: 7
+>> Nov 17 18:25:31 ss08 kernel: LustreError:
+>> 12558:0:(brw_test.c:388:brw_bulk_ready()) BRW bulk WRITE failed for
+>> RPC from 12345-10.165.32.18 at o2ib: -103
+>> Nov 17 18:25:31 ss08 kernel: LustreError:
+>> 12558:0:(brw_test.c:362:brw_server_rpc_done()) Bulk transfer from
+>> 12345-10.165.32.18 at o2ib has failed: -5
+>> Nov 17 18:25:48 ss08 kernel: LNet:
+>> 12581:0:(rpc.c:1077:srpc_client_rpc_expired()) Client RPC expired:
+>> service 11, peer 12345-10.165.32.18 at o2ib, timeout 64.
+>> Nov 17 18:25:48 ss08 kernel: LustreError:
+>> 12555:0:(brw_test.c:318:brw_client_done_rpc()) BRW RPC to
+>> 12345-10.165.32.18 at o2ib failed with -110
+>>
+>> # rpm -qa | egrep 'lustre|kernel' | sort
+>> dracut-kernel-004-356.el6.noarch
+>> kernel-2.6.32-504.8.1.el6_lustre.x86_64
+>> kernel-devel-2.6.32-504.8.1.el6_lustre.x86_64
+>> kernel-firmware-2.6.32-504.8.1.el6_lustre.x86_64
+>> kernel-headers-2.6.32-504.8.1.el6_lustre.x86_64
+>> lustre-2.7.0-2.6.32_504.8.1.el6_lustre.x86_64.x86_64
+>> lustre-iokit-2.7.0-2.6.32_504.8.1.el6_lustre.x86_64.x86_64
+>> lustre-modules-2.7.0-2.6.32_504.8.1.el6_lustre.x86_64.x86_64
+>> lustre-osd-ldiskfs-2.7.0-2.6.32_504.8.1.el6_lustre.x86_64.x86_64
+>> lustre-osd-ldiskfs-mount-2.7.0-2.6.32_504.8.1.el6_lustre.x86_64.x86_64
+>> lustre-tests-2.7.0-2.6.32_504.8.1.el6_lustre.x86_64.x86_64
+>> perf-2.6.32-504.8.1.el6_lustre.x86_64
+>> python-perf-2.6.32-504.8.1.el6_lustre.x86_64
+>>
+>> Using latest 2.7.63 build on 6.7 works.
+>>
+>> Any pointers are warmly welcome as I'd prefer to use 2.7.0.
+>>
+>> Regards,
+>> Magnus
+>>
+>> -------------- next part --------------
+>> An HTML attachment was scrubbed...
+>> URL:
+>> <https://urldefense.proofpoint.com/v2/url?u=http-3A__lists.lustre.org_pipermail_lustre-2Ddiscuss-2Dlustre.org_attachments_20151118_bc19b61a_attachment.html&d=AwICAg&c=-dg2m7zWuuDZ0MUcV7Sdqw&r=d_G2h_sZYG4xtHMeKo8QgjDmOcMVdQvYgM-5Dri1AOY&m=yntd6s6FbhcK6yz7f--sTQB8uauio2sPpZXJO07_GMM&s=fmaW2S-MSdcgBPqEnTVELb9GaBrR0zwaQlFI9_QrbYw&e=
+>> >
+>>
+>> ------------------------------
+>>
+>> Subject: Digest Footer
+>>
+>> _______________________________________________
+>> lustre-discuss mailing list
+>> lustre-discuss at lists.lustre.org
+>> https://urldefense.proofpoint.com/v2/url?u=http-3A__lists.lustre.org_listinfo.cgi_lustre-2Ddiscuss-2Dlustre.org&d=AwICAg&c=-dg2m7zWuuDZ0MUcV7Sdqw&r=d_G2h_sZYG4xtHMeKo8QgjDmOcMVdQvYgM-5Dri1AOY&m=yntd6s6FbhcK6yz7f--sTQB8uauio2sPpZXJO07_GMM&s=XPhf61e64WjkcxWw05wudsYWLfRBfsN0OiJF8O2DYE4&e=
+>>
+>>
+>>
+>> ------------------------------
+>>
+>> End of lustre-discuss Digest, Vol 116, Issue 9
+>> **********************************************
+>>
+
+From chris.hunter at yale.edu  Thu Nov 19 09:18:56 2015
+From: chris.hunter at yale.edu (Chris Hunter)
+Date: Thu, 19 Nov 2015 12:18:56 -0500
+Subject: [lustre-discuss] o2ib (ib_qib) with 2.7.0 rpms on centos 6.6
+In-Reply-To: <VI1PR04MB1279EC056F1B2DCE1F946BB5941B0@VI1PR04MB1279.eurprd04.prod.outlook.com>
+References: <mailman.1.1447880630.16279.lustre-discuss-lustre.org@lists.lustre.org>
+	<564CEA1F.9020302@yale.edu>
+	<VI1PR04MB1279EC056F1B2DCE1F946BB5941B0@VI1PR04MB1279.eurprd04.prod.outlook.com>
+Message-ID: <564E0480.60903@yale.edu>
+
+FYI,
+We encountered another issue when using RHEL IB kernel drivers. There 
+have been changes to ko2iblnd module parameters on lustre clients that 
+are not compatible with the RHEL IB stack.
+The changes are intended to improve performance on lustre when using 
+truescale hardware, and support newer generation of mellanox adapters. 
+Details are in LU-3322, LU-6723, LU-7101 From the ticket notes, its 
+pretty clear RHEL rdma stack is not part of their testing recipe.
+
+General overview of performance tuning is in openfabrics presentation:
+http://downloads.openfabrics.org/downloads/Media/OFSUG_2015/Friday/friday_02.pdf
+
+FWIW, ko2iblnd tuning failed for us in a mixed IB environment where 
+lustre servers use different HCAs from the lustre clients. Our solution 
+was to modify the modprobe ko2iblnd config and remove the new paramaters 
+(ie. use the defaults).
+
+regards,
+chris hunter
+chris.hunter at yale.edu
+
+On 11/19/2015 10:33 AM, Lassus, Magnus wrote:
+> Thank you very much Chris. True scale it is and using 2.6.32-504.23.4 solved it.
+>
+> Regards,
+> Magnus
+>
+> -----Original Message-----
+> From: Chris Hunter [mailto:chris.hunter at yale.edu]
+> Sent: 18 November 2015 23:14
+> To: Lassus, Magnus <magnus.lassus at wartsila.com>
+> Cc: lustre-discuss at lists.lustre.org
+> Subject: Re: [lustre-discuss] o2ib (ib_qib) with 2.7.0 rpms on centos 6.6
+>
+> Are you using truescale IB interfaces ?
+>
+> There is a known truescale bug in rhel/centos 6.6 kernels. You should
+> try kernel 2.6.32-504.23.4 or newer. Some details of the bug are in
+> LU-6698 and RHSA-2015-1081.
+>
+> regards,
+> chris hunter
+> yale hpc group
+>
+>> From: "Lassus, Magnus" <magnus.lassus at wartsila.com>
+>> To: "lustre-discuss at lists.lustre.org"
+>> 	<lustre-discuss at lists.lustre.org>
+>> Subject: [lustre-discuss] o2ib (ib_qib) with 2.7.0 rpms on centos 6.6:
+>> 	LNetError: kiblnd_init_rdma: Src buffer exhausted: 1 frags
+>> Message-ID:
+>> 	<HE1PR04MB1273C36E676E1824D8B2E3A4941C0 at HE1PR04MB1273.eurprd04.prod.outlook.com>
+>> 	
+>> Content-Type: text/plain; charset="us-ascii"
+>>
+>> Hi,
+>>
+>> I fail to understand where I go wrong in getting o2ib working using 2.7.0 rpms on top of CentOS 6.6. Running selftest I see:
+>>
+>> Nov 17 18:22:40 ss08 kernel: LNet: Added LNI 10.165.32.18 at o2ib [8/256/0/180]
+>> Nov 17 18:24:40 ss08 kernel: LNetError: 12532:0:(o2iblnd_cb.c:1123:kiblnd_init_rdma()) Src buffer exhausted: 1 frags
+>> Nov 17 18:24:40 ss08 kernel: LustreError: 12553:0:(brw_test.c:212:brw_check_page()) Bad data in page ffffea0070c20800: 0xbeefbeefbeefbeef, 0xeeb0eeb1eeb2eeb3 expec
+>> Nov 17 18:24:40 ss08 kernel: LustreError: 12553:0:(brw_test.c:238:brw_check_bulk()) Bulk page ffffea0070c20800 (0/256) is corrupted!
+>> Nov 17 18:24:40 ss08 kernel: LustreError: 12553:0:(brw_test.c:343:brw_client_done_rpc()) Bulk data from 12345-10.165.32.18 at o2ib is corrupted!
+>> Nov 17 18:24:40 ss08 kernel: LNetError: 12532:0:(o2iblnd_cb.c:1690:kiblnd_reply()) Can't setup rdma for GET from 10.165.32.18 at o2ib: -71
+>> Nov 17 18:25:31 ss08 kernel: LNetError: 12529:0:(o2iblnd_cb.c:3036:kiblnd_check_txs_locked()) Timed out tx: active_txs, 0 seconds
+>> Nov 17 18:25:31 ss08 kernel: LNetError: 12529:0:(o2iblnd_cb.c:3099:kiblnd_check_conns()) Timed out RDMA with 10.165.32.18 at o2ib (0): c: 7, oc: 0, rc: 7
+>> Nov 17 18:25:31 ss08 kernel: LustreError: 12558:0:(brw_test.c:388:brw_bulk_ready()) BRW bulk WRITE failed for RPC from 12345-10.165.32.18 at o2ib: -103
+>> Nov 17 18:25:31 ss08 kernel: LustreError: 12558:0:(brw_test.c:362:brw_server_rpc_done()) Bulk transfer from 12345-10.165.32.18 at o2ib has failed: -5
+>> Nov 17 18:25:48 ss08 kernel: LNet: 12581:0:(rpc.c:1077:srpc_client_rpc_expired()) Client RPC expired: service 11, peer 12345-10.165.32.18 at o2ib, timeout 64.
+>> Nov 17 18:25:48 ss08 kernel: LustreError: 12555:0:(brw_test.c:318:brw_client_done_rpc()) BRW RPC to 12345-10.165.32.18 at o2ib failed with -110
+>>
+>> # rpm -qa | egrep 'lustre|kernel' | sort
+>> dracut-kernel-004-356.el6.noarch
+>> kernel-2.6.32-504.8.1.el6_lustre.x86_64
+>> kernel-devel-2.6.32-504.8.1.el6_lustre.x86_64
+>> kernel-firmware-2.6.32-504.8.1.el6_lustre.x86_64
+>> kernel-headers-2.6.32-504.8.1.el6_lustre.x86_64
+>> lustre-2.7.0-2.6.32_504.8.1.el6_lustre.x86_64.x86_64
+>> lustre-iokit-2.7.0-2.6.32_504.8.1.el6_lustre.x86_64.x86_64
+>> lustre-modules-2.7.0-2.6.32_504.8.1.el6_lustre.x86_64.x86_64
+>> lustre-osd-ldiskfs-2.7.0-2.6.32_504.8.1.el6_lustre.x86_64.x86_64
+>> lustre-osd-ldiskfs-mount-2.7.0-2.6.32_504.8.1.el6_lustre.x86_64.x86_64
+>> lustre-tests-2.7.0-2.6.32_504.8.1.el6_lustre.x86_64.x86_64
+>> perf-2.6.32-504.8.1.el6_lustre.x86_64
+>> python-perf-2.6.32-504.8.1.el6_lustre.x86_64
+>>
+>> Using latest 2.7.63 build on 6.7 works.
+>>
+>> Any pointers are warmly welcome as I'd prefer to use 2.7.0.
+>>
+>> Regards,
+>> Magnus
+>>
+>> -------------- next part --------------
+>> An HTML attachment was scrubbed...
+>> URL: <https://urldefense.proofpoint.com/v2/url?u=http-3A__lists.lustre.org_pipermail_lustre-2Ddiscuss-2Dlustre.org_attachments_20151118_bc19b61a_attachment.html&d=AwICAg&c=-dg2m7zWuuDZ0MUcV7Sdqw&r=d_G2h_sZYG4xtHMeKo8QgjDmOcMVdQvYgM-5Dri1AOY&m=yntd6s6FbhcK6yz7f--sTQB8uauio2sPpZXJO07_GMM&s=fmaW2S-MSdcgBPqEnTVELb9GaBrR0zwaQlFI9_QrbYw&e= >
+>>
+>> ------------------------------
+>>
+>> Subject: Digest Footer
+>>
+>> _______________________________________________
+>> lustre-discuss mailing list
+>> lustre-discuss at lists.lustre.org
+>> https://urldefense.proofpoint.com/v2/url?u=http-3A__lists.lustre.org_listinfo.cgi_lustre-2Ddiscuss-2Dlustre.org&d=AwICAg&c=-dg2m7zWuuDZ0MUcV7Sdqw&r=d_G2h_sZYG4xtHMeKo8QgjDmOcMVdQvYgM-5Dri1AOY&m=yntd6s6FbhcK6yz7f--sTQB8uauio2sPpZXJO07_GMM&s=XPhf61e64WjkcxWw05wudsYWLfRBfsN0OiJF8O2DYE4&e=
+>>
+>>
+>> ------------------------------
+>>
+>> End of lustre-discuss Digest, Vol 116, Issue 9
+>> **********************************************
+>>
+
+From nrcrawfo at uci.edu  Fri Nov 20 11:36:11 2015
+From: nrcrawfo at uci.edu (Nathan R.M. Crawford)
+Date: Fri, 20 Nov 2015 11:36:11 -0800
+Subject: [lustre-discuss] 2.7.63 compilation problem with
+ OFED-3.18-1-20151109-0727 and ZFS 0.6.5.2; o2ib failure
+Message-ID: <CAO6--y=r9-O4zjqdG+o36Q1PCjtuxvT4cKJiC4JDxTrj+rxo0g@mail.gmail.com>
+
+Hi All,
+
+  I'm attempting to install Lustre on ZFS on EL6.7 using Truescale HCAs.
+Not surprisingly, this involves several pre-release versions of various
+packages. Also not surprisingly, there are some snags.
+
+Version info:
+Scientific Linux (CERN) 6.7 using kernel 2.6.32-573.7.1.el6.x86_64
+ZFS 0.6.5.2
+OFED 3.18-1-20151109-0727 (ib_qib)
+Lustre 2.7.63
+
+Lustre configure options:
+./configure --disable-ldiskfs --disable-gss --with-o2ib \
+--with-zfs=/usr/src/zfs-0.6.5.2 --with-spl=/usr/src/spl-0.6.5.2 \
+--with-linux=/usr/src/kernels/2.6.32-573.7.1.el6.x86_64 \
+--with-linux-obj=/usr/src/kernels/2.6.32-573.7.1.el6.x86_64
+
+  The compilation issue occurs in the osd-zfs part, but is due to some
+configure tests failing on redefined structures/functions in kthread.h.
+Elsewhere in configre, HAVE_COMPAT_RDMA is used to avoid the conflicting
+OFED and kernel versions of kthread.h, but I think this wasn't carried over
+into the zfs parts.
+
+  To work around this, I forced configure to add -DCONFIG_COMPAT_IS_KTHREAD
+to EXTRA_OFED_INCLUDE. The redefinition problem goes away and the code
+compiles. I can mount a lustre filesystem using tcp on ethernet or IPoIB,
+but o2ib fails when trying to mount an OST. The nodes can ping each other
+on o2ib, but throw up many errors during the lst brw tests.
+
+  Is there something trivial I'm missing? Otherwise, what is the most
+useful way to package up a bug report?
+
+Thanks,
+Nate Crawford
+
+-- 
+
+Dr. Nathan Crawford              nathan.crawford at uci.edu
+Modeling Facility Director
+Department of Chemistry
+1102 Natural Sciences II         Office: 2101 Natural Sciences II
+University of California, Irvine  Phone: 949-824-4508
+Irvine, CA 92697-2025, USA
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20151120/a0220969/attachment.htm>
+
+From rjperez at bnl.gov  Sun Nov 22 15:12:28 2015
+From: rjperez at bnl.gov (Perez, Rafael)
+Date: Sun, 22 Nov 2015 23:12:28 +0000
+Subject: [lustre-discuss] lustre 2.5.2 - unable to mount ost
+Message-ID: <C15181BC8323ED4C85F36D9FFAA9A01735C417DF@EX10-MB2.BNL.GOV>
+
+Hello.
+
+I'm wondering if someone can help.   We're running lustre 2.5.2 and our filesystem is unable to start due to one of the ost's which will not mount.  There seems to be some corruption with the configuration logs (or the "lfs1-client" log which is specific to our setup I'm guessing).  I am able to mount the underlying ldiskfs filesystem for this ost. Here is the mount command and syslog errors reported when attempting to mount:
+
+root at oss2 ~ # mount -t lustre /dev/mapper/ost5 /mnt/ost5
+mount.lustre: mount /dev/mapper/ost5 at /mnt/ost5 failed: No such file or directory
+Is the MGS specification correct?
+Is the filesystem name correct?
+If upgrading, is the copied client log valid? (see upgrade docs)
+
+
+LustreError: 10476:0:(llog_osd.c:254:llog_osd_read_header()) lfs1-OST0006-osd: bad log lfs1-client [0xa:0xcc:0x0] header magic: 0x20d1 (expected 0x10645539)
+LustreError: 10476:0:(llog_osd.c:254:llog_osd_read_header()) Skipped 1 previous similar message
+LustreError: 10476:0:(mgc_request.c:1707:mgc_llog_local_copy()) MGC172.31.11.121 at o2ib: failed to copy remote log lfs1-client: rc = -5
+LustreError: 13a-8: Failed to get MGS log lfs1-client and no local copy.
+LustreError: 15c-8: MGC172.31.11.121 at o2ib: The configuration from log 'lfs1-client' failed (-2). This may be the result of communication errors between this node and the MGS, a bad configuration, or other errors. See the syslog for more information.
+LustreError: 10476:0:(obd_mount_server.c:1285:server_start_targets()) lfs1-OST0006: failed to start LWP: -2
+LustreError: 10476:0:(obd_mount_server.c:1739:server_fill_super()) Unable to start targets: -2
+Lustre: Failing over lfs1-OST0006
+Lustre: server umount lfs1-OST0006 complete
+LustreError: 10476:0:(obd_mount.c:1323:lustre_fill_super()) Unable to mount  (-2)
+
+It looks like lustre has some built-in fencing mechanism and refuses to mount this volume.  We have 6 osts in total and the others can mount without issue.  Any suggestions on what to try?  I've already run e2fsck and that comes back with a few minor issues.  The other osts have the same thing but they are able to mount.
+
+Thanks,
+Rafael
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20151122/baa1cf14/attachment.htm>
+
+From rmohr at utk.edu  Mon Nov 23 07:57:50 2015
+From: rmohr at utk.edu (Mohr Jr, Richard Frank (Rick Mohr))
+Date: Mon, 23 Nov 2015 15:57:50 +0000
+Subject: [lustre-discuss] lustre 2.5.2 - unable to mount ost
+In-Reply-To: <C15181BC8323ED4C85F36D9FFAA9A01735C417DF@EX10-MB2.BNL.GOV>
+References: <C15181BC8323ED4C85F36D9FFAA9A01735C417DF@EX10-MB2.BNL.GOV>
+Message-ID: <AFAB4732-7D01-438E-A2FF-A5B1F9B0A930@utk.edu>
+
+
+> On Nov 22, 2015, at 6:12 PM, Perez, Rafael <rjperez at bnl.gov> wrote:
+> 
+> LustreError: 10476:0:(mgc_request.c:1707:mgc_llog_local_copy()) MGC172.31.11.121 at o2ib: failed to copy remote log lfs1-client: rc = -5
+> LustreError: 13a-8: Failed to get MGS log lfs1-client and no local copy.
+> LustreError: 15c-8: MGC172.31.11.121 at o2ib: The configuration from log 'lfs1-client' failed (-2). This may be the result of communication errors between this node and the MGS, a bad configuration, or other errors. See the syslog for more information.
+> LustreError: 10476:0:(obd_mount_server.c:1285:server_start_targets()) lfs1-OST0006: failed to start LWP: -2
+
+Does this server have other OSTs that mount? Or is this the only OST on this OSS server?  You can use tune2fs to list the OST config parameters and verify that they are correct.  I have also seen this kind of error when there are network problems.  I would look for IB errors or other signs of problems.  (Maybe even do a bandwidth test to see if it is performing as expected.)  You can also run ?lctl ping? to test LNet connectivity between the OSS server and the MGS server.
+
+If the network checks out and it really is the llog that is the problem, you can try doing a writeconf to fix things up.
+
+--
+Rick Mohr
+Senior HPC System Administrator
+National Institute for Computational Sciences
+http://www.nics.tennessee.edu
+
+
+From rjperez at bnl.gov  Mon Nov 23 11:13:02 2015
+From: rjperez at bnl.gov (Rafael Perez)
+Date: Mon, 23 Nov 2015 14:13:02 -0500
+Subject: [lustre-discuss] lustre 2.5.2 - unable to mount ost
+In-Reply-To: <AFAB4732-7D01-438E-A2FF-A5B1F9B0A930@utk.edu>
+References: <C15181BC8323ED4C85F36D9FFAA9A01735C417DF@EX10-MB2.BNL.GOV>
+	<AFAB4732-7D01-438E-A2FF-A5B1F9B0A930@utk.edu>
+Message-ID: <5653653E.20005@bnl.gov>
+
+Hi Rick,
+
+Thanks for your suggestions.  Turns out I was able to get the filesystem 
+started this morning and restore access to the critical data.  It was a 
+long journey of troubleshooting but here are the steps I ended up taking 
+to fix the issue.
+
+- stop the lustre filesystem (umount the osts and mdt/mgt)
+- mount the ldiskfs filesystem for the problematic ost (/dev/mapper/ost5 
+to /mnt/ost5 in this case)
+- backup the CONFIGS/lfs1-client file
+     # cp -a /mnt/ost5/CONFIGS/lfs1-client 
+/mnt/ost5/CONFIGS/lfs1-client.ORIG
+- copy a working non-corrupted 'lfs1-client' file from the MGS (from the 
+mounted ldiskfs filesystem on the MGS)
+     (there were signs of corruption in the file when I ran llog_reader 
+against the bad lfs1-client file and received unexpected output)
+- umount all ldiskfs filesystems
+- run a writeconf to the MDS and all OSTs
+     # tunefs.lustre --verbose --writeconf /dev/mapper/ostX
+- restart the filesystem
+     (this is where lfs1-OST0006 finally mounted!)
+- mount the filesystem on a client
+
+Our setup has 2 oss servers (oss1 and oss2) which serve 3 OSTs on each:
+oss1:
+/mnt/ost0
+/mnt/ost1
+/mnt/ost2
+
+oss2:
+/mnt/oss3
+/mnt/ost4
+/mnt/ost5
+
+I'm sending this out for reference.
+
+Thanks again,
+Rafael
+
+
+On 11/23/2015 10:57 AM, Mohr Jr, Richard Frank (Rick Mohr) wrote:
+>> On Nov 22, 2015, at 6:12 PM, Perez, Rafael <rjperez at bnl.gov> wrote:
+>>
+>> LustreError: 10476:0:(mgc_request.c:1707:mgc_llog_local_copy()) MGC172.31.11.121 at o2ib: failed to copy remote log lfs1-client: rc = -5
+>> LustreError: 13a-8: Failed to get MGS log lfs1-client and no local copy.
+>> LustreError: 15c-8: MGC172.31.11.121 at o2ib: The configuration from log 'lfs1-client' failed (-2). This may be the result of communication errors between this node and the MGS, a bad configuration, or other errors. See the syslog for more information.
+>> LustreError: 10476:0:(obd_mount_server.c:1285:server_start_targets()) lfs1-OST0006: failed to start LWP: -2
+> Does this server have other OSTs that mount? Or is this the only OST on this OSS server?  You can use tune2fs to list the OST config parameters and verify that they are correct.  I have also seen this kind of error when there are network problems.  I would look for IB errors or other signs of problems.  (Maybe even do a bandwidth test to see if it is performing as expected.)  You can also run ?lctl ping? to test LNet connectivity between the OSS server and the MGS server.
+>
+> If the network checks out and it really is the llog that is the problem, you can try doing a writeconf to fix things up.
+>
+> --
+> Rick Mohr
+> Senior HPC System Administrator
+> National Institute for Computational Sciences
+> http://www.nics.tennessee.edu
+>
+
+-- 
+Rafael Perez
+rjperez at bnl.gov
+ITD HPC Support, Sr Technology Engineer
+(631) 344-4426
+
+
+From faaland1 at llnl.gov  Mon Nov 23 13:35:11 2015
+From: faaland1 at llnl.gov (Faaland, Olaf P.)
+Date: Mon, 23 Nov 2015 21:35:11 +0000
+Subject: [lustre-discuss] Expanding a zfsonlinux OST pool
+In-Reply-To: <5653759B.2080701@umich.edu>
+References: <5653759B.2080701@umich.edu>
+Message-ID: <43111FD6D3DBA74A9134F6C11536F04AC67FEAD9@PRDEXMBX-08.the-lab.llnl.gov>
+
+Hello Bob,
+
+We did something similar - our MDS's used zpools based on spinning disks in JBODs and we switched to SSDs without bringing the filesystem down, using ZFS to replicate data.  It worked great for us.
+
+How are your pools organized (ie what does zpool status show)?  There might be options that are more or less risky, or take more or less time, depending on how zfs is using the disks.
+
+Also, how often are disks failing and how long does a replacement take to resilver, with your current disks?
+
+-Olaf
+
+________________________________
+From: Bob Ball [ball at umich.edu]
+Sent: Monday, November 23, 2015 12:22 PM
+To: Faaland, Olaf P.; Morrone, Chris
+Cc: Bob Ball
+Subject: Expanding a zfsonlinux OST pool
+
+Hi,
+
+We have some zfsonlinux pools in use with Lustre 2.7 that use some older disks, and we are rapidly running out of spares for those.  What we would _like_ to do, if possible, is replace all of those 750GB disks in an OST, one at a time with re-silver between, with 1TB disks, then expand the OST when the last is complete to utilize the larger space and the more reliable disks.
+
+Is this going to work?  One of us here found the following:
+
+According to the Oracle docs, a pool can autoexpand if you set it to
+do so.  I think the default must be off because the one I checked is
+off (but that does indicate support of the feature in the linux
+release also).
+
+http://docs.oracle.com/cd/E19253-01/819-5461/githb/index.html
+
+[root at umdist02 ~]# zpool get autoexpand ost-006
+NAME     PROPERTY    VALUE   SOURCE
+ost-006  autoexpand  off     default
+
+
+We are using zfsonlinux version 0.6.4.2.  Can we follow the procedures outlined in the oracle doc using zfsonlinux?
+
+I guess my initial question assumed the expansion would not happen until the last disk is added and re-silvered, but the document indicates this is not really necessary?
+
+Thanks,
+bob
+
+
+
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20151123/83a25400/attachment.htm>
+
+From ball at umich.edu  Tue Nov 24 05:25:38 2015
+From: ball at umich.edu (Bob Ball)
+Date: Tue, 24 Nov 2015 08:25:38 -0500
+Subject: [lustre-discuss] Expanding a zfsonlinux OST pool
+In-Reply-To: <43111FD6D3DBA74A9134F6C11536F04AC67FEAD9@PRDEXMBX-08.the-lab.llnl.gov>
+References: <5653759B.2080701@umich.edu>
+	<43111FD6D3DBA74A9134F6C11536F04AC67FEAD9@PRDEXMBX-08.the-lab.llnl.gov>
+Message-ID: <56546552.1000409@umich.edu>
+
+Thanks much for your reply, Olaf.
+
+Below for the answers.
+
+On 11/23/2015 4:35 PM, Faaland, Olaf P. wrote:
+> Hello Bob,
+>
+> We did something similar - our MDS's used zpools based on spinning 
+> disks in JBODs and we switched to SSDs without bringing the filesystem 
+> down, using ZFS to replicate data.  It worked great for us.
+>
+> How are your pools organized (ie what does zpool status show)? There 
+> might be options that are more or less risky, or take more or less 
+> time, depending on how zfs is using the disks.
+This is a typical pool, which consists of disks on Dell MD1000 shelves, 
+each a single-disk raid-0 to make the JBOD group, then assembled via pci 
+address into the zpools of 10 disks each.
+
+# zpool status ost-001
+   pool: ost-001
+  state: ONLINE
+   scan: none requested
+config:
+
+         NAME                                STATE     READ WRITE CKSUM
+         ost-001                             ONLINE       0     0 0
+           raidz2-0                          ONLINE       0     0 0
+             pci-0000:08:00.0-scsi-0:2:0:0   ONLINE       0     0 0
+             pci-0000:08:00.0-scsi-0:2:1:0   ONLINE       0     0 0
+             pci-0000:08:00.0-scsi-0:2:2:0   ONLINE       0     0 0
+             pci-0000:08:00.0-scsi-0:2:3:0   ONLINE       0     0 0
+             pci-0000:08:00.0-scsi-0:2:4:0   ONLINE       0     0 0
+             pci-0000:08:00.0-scsi-0:2:15:0  ONLINE       0     0 0
+             pci-0000:08:00.0-scsi-0:2:16:0  ONLINE       0     0 0
+             pci-0000:08:00.0-scsi-0:2:17:0  ONLINE       0     0 0
+             pci-0000:08:00.0-scsi-0:2:18:0  ONLINE       0     0 0
+             pci-0000:08:00.0-scsi-0:2:19:0  ONLINE       0     0 0
+
+errors: No known data errors
+
+
+Filesystem            Size  Used Avail Use% Mounted on
+ost-001/ost0024       5.4T  3.4T  2.0T  64% /mnt/ost-001
+
+>
+> Also, how often are disks failing and how long does a replacement take 
+> to resilver, with your current disks?
+These are old systems, and the underlying WD 750GB disks are going at an 
+average of 1 or 2 per week, with some 270 disks running this way.  Some 
+shelves have newer larger disks, and those disks are giving us no 
+issues.  We have a number of bigger, newer disk spares that we wanted to 
+swap in, giving us more of the 750GB units as spares.
+
+Resilvering typically takes 6hrs or so these days.
+
+bob
+
+>
+> -Olaf
+>
+> ------------------------------------------------------------------------
+> *From:* Bob Ball [ball at umich.edu]
+> *Sent:* Monday, November 23, 2015 12:22 PM
+> *To:* Faaland, Olaf P.; Morrone, Chris
+> *Cc:* Bob Ball
+> *Subject:* Expanding a zfsonlinux OST pool
+>
+> Hi,
+>
+> We have some zfsonlinux pools in use with Lustre 2.7 that use some 
+> older disks, and we are rapidly running out of spares for those.  What 
+> we would _like_ to do, if possible, is replace all of those 750GB 
+> disks in an OST, one at a time with re-silver between, with 1TB disks, 
+> then expand the OST when the last is complete to utilize the larger 
+> space and the more reliable disks.
+>
+> Is this going to work?  One of us here found the following:
+>
+>     According to the Oracle docs, a pool can autoexpand if you set it to
+>     do so.  I think the default must be off because the one I checked is
+>     off (but that does indicate support of the feature in the linux
+>     release also).
+>
+>     http://docs.oracle.com/cd/E19253-01/819-5461/githb/index.html
+>
+>     [root at umdist02 ~]# zpool get autoexpand ost-006
+>     NAME     PROPERTY    VALUE   SOURCE
+>     ost-006  autoexpand  off     default
+>
+> We are using zfsonlinux version 0.6.4.2.  Can we follow the procedures outlined in the oracle doc using zfsonlinux?
+>
+> I guess my initial question assumed the expansion would not happen until the last disk is added and re-silvered, but the document indicates this is not really necessary?
+>
+> Thanks,
+> bob
+>
+>
+
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20151124/b1d5fc7b/attachment.htm>
+
+From jerome.becot at inserm.fr  Tue Nov 24 06:29:25 2015
+From: jerome.becot at inserm.fr (=?UTF-8?B?SsOpcsO0bWUgQkVDT1Q=?=)
+Date: Tue, 24 Nov 2015 15:29:25 +0100
+Subject: [lustre-discuss] Lustre FS inodes getting full
+In-Reply-To: <D262BE3B.1190CC%andreas.dilger@intel.com>
+References: <563C7906.6080501@inserm.fr>
+	<6171D83B-C09A-4629-AB55-83F3F4059895@utk.edu>
+	<563CB4CF.3040305@inserm.fr>
+	<D262BE3B.1190CC%andreas.dilger@intel.com>
+Message-ID: <56547445.2000504@inserm.fr>
+
+Thanks for your answer.
+
+I am sorry I didn't thank you then.
+
+Does reducing the average file size has an impact on the performances ?
+Is there a reasonable size where going beyond may make the filesystem 
+unstable or so ?
+
+We are thinking of an average 100KB file size.
+
+Thank you again
+
+Le 07/11/2015 07:05, Dilger, Andreas a ?crit :
+> On 2015/11/06, 07:10, "lustre-discuss on behalf of J?r?me BECOT"
+> <lustre-discuss-bounces at lists.lustre.org on behalf of
+> jerome.becot at inserm.fr> wrote:
+>
+>> Yes that's why I understood. We don't use stripes.
+>>
+>> What I don't know is what determines the inodes limit on the OST. I
+>> guess that the underlaying filesystem (i.e. ldiskfs here) is the
+>> culprit. But then on a 15TB OST with ldiskfs, I didn't expect to have a
+>> 17M inodes limitation.
+>>
+>> We use programs that generates tons of small files, and now we're
+>> getting full by using only 30% of disk space.
+> The default formatting a 15TB OST assumes an average file size of 1MB,
+> which is normally a safe assumption for Lustre.
+>
+>> Is there any way to increase the max inode number available on the OSTs?
+> This can be changed at format time by specifying the average file size
+> (inode ratio) for the OSTs:
+>
+>      mkfs.lustre ... --mkfsoptions="-i <average_file_size>"
+>
+> But you may want to specify a slightly smaller average file size to give
+> some safety margin.
+>
+>> Here again I guess I will probably not have any other choice than
+>> switching to a ZFS backend ?
+> The best way to handle this would be to add one or two more OSTs to the
+> filesystem that are formatted with the smaller inode ratio, and Lustre
+> will chose these instead of the full ones.  You could then migrate files
+> from the older OSTs to the new ones until they are empty, reformat them
+> with the smaller inode ratio, and add them back into the filesystem.
+>
+> Cheers, Andreas
+>
+>> Le 06/11/2015 15:00, Mohr Jr, Richard Frank (Rick Mohr) a ?crit :
+>>> Every Lustre file will use an inode on the MDS and at least one inode
+>>> on an OST (more than one OST is the file stripe count is >1).  If your
+>>> OSTs don't have free inodes, Lustre cannot allocate an object for the
+>>> file's contents.
+>>>
+>>> The upper limit on the number of files will be the lesser of:
+>>>
+>>> 1) number of MDS inodes
+>>> 2) sum of inodes across all OSTs
+>>>
+>>> But depending upon file size and stripe count, you could end up with
+>>> less.
+>>>
+>>> -- Rick
+>>>
+>>>> On Nov 6, 2015, at 4:55 AM, J?r?me BECOT <jerome.becot at inserm.fr>
+>>>> wrote:
+>>>>
+>>>> Hi,
+>>>>
+>>>> We face a weird situation here. And i'd like to know if there is
+>>>> anything wrong and what can I do to fix that.
+>>>>
+>>>> We have a 30TB system with lustre 2.6 (1 MDS / 2 OSS). The inode usage
+>>>> is full though :
+>>>>
+>>>> root at SlurmMaster:~# df -i
+>>>> Filesystem                Inodes    IUsed      IFree IUse% Mounted on
+>>>> /dev/sda5                      0        0          0     - /
+>>>> udev                     8256017      390    8255627    1% /dev
+>>>> tmpfs                    8258094      347    8257747    1% /run
+>>>> tmpfs                    8258094        5    8258089    1% /run/lock
+>>>> tmpfs                    8258094        2    8258092    1% /run/shm
+>>>> /dev/sdb1                      0        0          0     - /home
+>>>> 10.0.1.60 at tcp:/lustre   37743327 37492361     250966  100% /scratch
+>>>> cgroup                   8258094        8    8258086    1%
+>>>> /sys/fs/cgroup
+>>>>
+>>>> root at SlurmMaster:~# lfs df -i
+>>>> UUID                      Inodes       IUsed       IFree IUse% Mounted
+>>>> on
+>>>> lustre-MDT0000_UUID   1169686528    37413529  1132272999   3%
+>>>> /scratch[MDT:0]
+>>>> lustre-OST0000_UUID     17160192    16996738      163454  99%
+>>>> /scratch[OST:0]
+>>>> lustre-OST0001_UUID     17160192    16996308      163884  99%
+>>>> /scratch[OST:1]
+>>>>
+>>>> filesystem summary:     37740867    37413529      327338  99% /scratch
+>>>>
+>>>> What is happening here ? I thought we would have a 4 billion files
+>>>> max, not 16 million ?
+>>>>
+>>>> Thanks
+>>>>
+>>>> -- 
+>>>> J?rome BECOT
+> Cheers, Andreas
+
+-- 
+J?rome BECOT
+
+Administrateur Syst?mes et R?seaux
+
+Mol?cules ? vis?e Th?rapeutique par des approches in Silico (MTi)
+Univ Paris Diderot, UMRS973 Inserm
+Case 013
+B?t. Lamarck A, porte 412
+35, rue H?l?ne Brion 75205 Paris Cedex 13
+France
+
+Tel : 01 57 27 83 82
+
+
+From andreas.dilger at intel.com  Tue Nov 24 17:52:57 2015
+From: andreas.dilger at intel.com (Dilger, Andreas)
+Date: Wed, 25 Nov 2015 01:52:57 +0000
+Subject: [lustre-discuss] Lustre FS inodes getting full
+In-Reply-To: <56547445.2000504@inserm.fr>
+References: <563C7906.6080501@inserm.fr>
+	<6171D83B-C09A-4629-AB55-83F3F4059895@utk.edu>
+	<563CB4CF.3040305@inserm.fr>
+	<D262BE3B.1190CC%andreas.dilger@intel.com>, <56547445.2000504@inserm.fr>
+Message-ID: <BFB1A03C-701D-4C1D-B385-943AD8BF6947@intel.com>
+
+Having more inodes on the OSTs will increase e2fsck time a bit, and reduce free space a bit, but is not otherwise harmful. 
+
+Cheers, Andreas
+
+> On Nov 24, 2015, at 07:29, J?r?me BECOT <jerome.becot at inserm.fr> wrote:
+> 
+> Thanks for your answer.
+> 
+> I am sorry I didn't thank you then.
+> 
+> Does reducing the average file size has an impact on the performances ?
+> Is there a reasonable size where going beyond may make the filesystem unstable or so ?
+> 
+> We are thinking of an average 100KB file size.
+> 
+> Thank you again
+> 
+> Le 07/11/2015 07:05, Dilger, Andreas a ?crit :
+>> On 2015/11/06, 07:10, "lustre-discuss on behalf of J?r?me BECOT"
+>> <lustre-discuss-bounces at lists.lustre.org on behalf of
+>> jerome.becot at inserm.fr> wrote:
+>> 
+>>> Yes that's why I understood. We don't use stripes.
+>>> 
+>>> What I don't know is what determines the inodes limit on the OST. I
+>>> guess that the underlaying filesystem (i.e. ldiskfs here) is the
+>>> culprit. But then on a 15TB OST with ldiskfs, I didn't expect to have a
+>>> 17M inodes limitation.
+>>> 
+>>> We use programs that generates tons of small files, and now we're
+>>> getting full by using only 30% of disk space.
+>> The default formatting a 15TB OST assumes an average file size of 1MB,
+>> which is normally a safe assumption for Lustre.
+>> 
+>>> Is there any way to increase the max inode number available on the OSTs?
+>> This can be changed at format time by specifying the average file size
+>> (inode ratio) for the OSTs:
+>> 
+>>     mkfs.lustre ... --mkfsoptions="-i <average_file_size>"
+>> 
+>> But you may want to specify a slightly smaller average file size to give
+>> some safety margin.
+>> 
+>>> Here again I guess I will probably not have any other choice than
+>>> switching to a ZFS backend ?
+>> The best way to handle this would be to add one or two more OSTs to the
+>> filesystem that are formatted with the smaller inode ratio, and Lustre
+>> will chose these instead of the full ones.  You could then migrate files
+>> from the older OSTs to the new ones until they are empty, reformat them
+>> with the smaller inode ratio, and add them back into the filesystem.
+>> 
+>> Cheers, Andreas
+>> 
+>>> Le 06/11/2015 15:00, Mohr Jr, Richard Frank (Rick Mohr) a ?crit :
+>>>> Every Lustre file will use an inode on the MDS and at least one inode
+>>>> on an OST (more than one OST is the file stripe count is >1).  If your
+>>>> OSTs don't have free inodes, Lustre cannot allocate an object for the
+>>>> file's contents.
+>>>> 
+>>>> The upper limit on the number of files will be the lesser of:
+>>>> 
+>>>> 1) number of MDS inodes
+>>>> 2) sum of inodes across all OSTs
+>>>> 
+>>>> But depending upon file size and stripe count, you could end up with
+>>>> less.
+>>>> 
+>>>> -- Rick
+>>>> 
+>>>>> On Nov 6, 2015, at 4:55 AM, J?r?me BECOT <jerome.becot at inserm.fr>
+>>>>> wrote:
+>>>>> 
+>>>>> Hi,
+>>>>> 
+>>>>> We face a weird situation here. And i'd like to know if there is
+>>>>> anything wrong and what can I do to fix that.
+>>>>> 
+>>>>> We have a 30TB system with lustre 2.6 (1 MDS / 2 OSS). The inode usage
+>>>>> is full though :
+>>>>> 
+>>>>> root at SlurmMaster:~# df -i
+>>>>> Filesystem                Inodes    IUsed      IFree IUse% Mounted on
+>>>>> /dev/sda5                      0        0          0     - /
+>>>>> udev                     8256017      390    8255627    1% /dev
+>>>>> tmpfs                    8258094      347    8257747    1% /run
+>>>>> tmpfs                    8258094        5    8258089    1% /run/lock
+>>>>> tmpfs                    8258094        2    8258092    1% /run/shm
+>>>>> /dev/sdb1                      0        0          0     - /home
+>>>>> 10.0.1.60 at tcp:/lustre   37743327 37492361     250966  100% /scratch
+>>>>> cgroup                   8258094        8    8258086    1%
+>>>>> /sys/fs/cgroup
+>>>>> 
+>>>>> root at SlurmMaster:~# lfs df -i
+>>>>> UUID                      Inodes       IUsed       IFree IUse% Mounted
+>>>>> on
+>>>>> lustre-MDT0000_UUID   1169686528    37413529  1132272999   3%
+>>>>> /scratch[MDT:0]
+>>>>> lustre-OST0000_UUID     17160192    16996738      163454  99%
+>>>>> /scratch[OST:0]
+>>>>> lustre-OST0001_UUID     17160192    16996308      163884  99%
+>>>>> /scratch[OST:1]
+>>>>> 
+>>>>> filesystem summary:     37740867    37413529      327338  99% /scratch
+>>>>> 
+>>>>> What is happening here ? I thought we would have a 4 billion files
+>>>>> max, not 16 million ?
+>>>>> 
+>>>>> Thanks
+>>>>> 
+>>>>> -- 
+>>>>> J?rome BECOT
+>> Cheers, Andreas
+> 
+> -- 
+> J?rome BECOT
+> 
+> Administrateur Syst?mes et R?seaux
+> 
+> Mol?cules ? vis?e Th?rapeutique par des approches in Silico (MTi)
+> Univ Paris Diderot, UMRS973 Inserm
+> Case 013
+> B?t. Lamarck A, porte 412
+> 35, rue H?l?ne Brion 75205 Paris Cedex 13
+> France
+> 
+> Tel : 01 57 27 83 82
+> 
+
+From jerome.becot at inserm.fr  Sat Nov 28 02:26:08 2015
+From: jerome.becot at inserm.fr (=?UTF-8?B?SsOpcsO0bWUgQkVDT1Q=?=)
+Date: Sat, 28 Nov 2015 11:26:08 +0100
+Subject: [lustre-discuss] Compiling from sources with Debian 8
+Message-ID: <56598140.8000509@inserm.fr>
+
+Hi there,
+
+We run lustre 2.6/2.7 on our Centos 6.6 (servers) and 7 (clients) 
+cluster. We have a few webservers running Debian that need to access the 
+storage. I followed the procedure given by Thomas Stibor about Ubuntu 14 
+last year.
+
+I could successfully compile the binaries and modules after some 
+digging. He also left an already compiled lustre 2.7.63 and modules for 
+kernel 3.16.0-4 online.
+
+If I install his binaries, it works well. If I install the one generated 
+by the procedure, the modules don't load and a weird thing happen. 
+Running dmesg warns me about one surprising thing :
+
+  > With his packages
+[212417.535369] LNet: HW CPU cores: 1, npartitions: 1
+[212417.538430] alg: No test for adler32 (adler32-zlib)
+[212417.538456] alg: No test for crc32 (crc32-table)
+[212425.548907] Lustre: Lustre: Build 
+Version:*v2_7_60_0-ge686e57-CHANGED-3.16.0-4-amd64*
+[212425.565330] LNet: Added LNI 172.27.7.118 at tcp1 [8/256/0/180]
+[212425.565354] LNet: Accept secure, port 988
+[212425.595531] Lustre: Mounted lustre-client
+
+ > With mine
+[209942.090874] LNet: HW CPU cores: 1, npartitions: 1
+[209942.092902] alg: No test for adler32 (adler32-zlib)
+[209950.092501] lnet: module is from the staging directory, the quality 
+is unknown, you have been warned.
+[209950.093589] lvfs: module is from the staging directory, the quality 
+is unknown, you have been warned.
+[209950.094634] obdclass: module is from the staging directory, the 
+quality is unknown, you have been warned.
+[209950.098595] Lustre: Lustre: Build Version: 
+*v2_3_64_0-g6e62c21-CHANGED-3.9.0*
+[209950.099999] ptlrpc: module is from the staging directory, the 
+quality is unknown, you have been warned.
+[209950.104615] ksocklnd: module is from the staging directory, the 
+quality is unknown, you have been warned.
+[209950.105237] LNetError: 845:0:(linux-tcpip.c:82:libcfs_ipif_query()) 
+Can't get flags for interface eth0
+[209950.105862] LNetError: 845:0:(socklnd.c:2824:ksocknal_startup()) 
+Can't get interface eth0 info: -515
+[209951.104194] LNetError: 105-4: Error -100 starting up LNI tcp
+[209951.104852] LustreError: 845:0:(events.c:566:ptlrpc_init_portals()) 
+network initialisation failed
+[209990.787541] ptlrpc: module is from the staging directory, the 
+quality is unknown, you have been warned.
+
+I pulled the master git branch, and coul obtain
+linux-patch-lustre_2.7.63.0-16-g8524994_all.deb 
+lustre-client-modules-3.16.7-ckt11-lustre-my-build_2.7.63.0-16-g8524994_amd64.deb 
+lustre-tests_2.7.63.0-16-g8524994_amd64.deb
+lustre_2.7.63.0-16-g8524994_amd64.changes 
+lustre-dev_2.7.63.0-16-g8524994_amd64.deb 
+lustre-utils_2.7.63.0-16-g8524994_amd64.deb
+lustre_2.7.63.0-16-g8524994.dsc                  lustre-release
+lustre_2.7.63.0-16-g8524994.tar.gz 
+lustre-source_2.7.63.0-16-g8524994_all.deb
+
+I just don't get it. Why the shown version of the module is 2.3 ?
+I tried to compile from the 2.7 branch but the 2.7.0 version doesn't 
+compile with kernel 3.16, as suggested in LU-7042
+
+I probably miss something. Sorry I'm not familiar with compilers 
+(usually the ./configure && make && make install works or warns you 
+about missing dependencies and i don't go farther).
+
+Thank you
+
+Jerome
+
+PS : Here is the procedure followed to compile
+
+
+apt-get install linux-headers-3.16.0-4-amd64 libtool automake 
+linux-source-3.16
+git clone git://git.whamcloud.com/fs/lustre-release.git
+cd /usr/src/
+tar xf linux-source-3.16.tar.xz
+cd /home/build/lustre-release/
+vi debian/rules (edit so it doesn't stop with autogen because it doesn't 
+find the kernel sources)
+(modify --with-linux= option with current path 
+--with-linux=/usr/src/linux-3.16 in kdist_config section)
+aptitude install module-assistant libreadline-dev debhelper  dpatch 
+libsnmp-dev quilt devscripts
+  vi debian/control
+(modify the dependency for unsatisfied linux-headers called 
+linux-headers-something in jessie)
+vi compile.sh
+#!/bin/bash
+unset DEBEMAIL
+unset EMAIL
+unset DEBFULLNAME
+unset NAME
+
+export DEBFULLNAME="Niemand Nobody"
+export EMAIL="npcomplete at example.com"
+
+# Extract lustre version, replace "_" by "." and remove leading letter "v".
+LUSTRE_VERSION=$(echo `git describe` | sed -e "s/_/\./g" | cut -c2-)
+
+# Add entry into debian/changelog such that packages have proper version 
+names.
+dch --newversion $LUSTRE_VERSION --distribution unstable --nomultimaint 
+-t "Build from official master upstream."
+
+#
+sh ./autogen.sh
+
+# Build debian packages.
+dpkg-buildpackage
+
+# Build modules.
+#export MODULE_LOC=${PWD}
+#cd /usr/src/linux
+#make-kpkg modules_image --append-to-version -lustre-my-build --revision 
+`date +"%Y%m%d"`
+
+Then i got stuck on "checking for external module build target" for a 
+while, fixed by running "make scripts" in the kernel source folder
+It finally compiled !
+
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20151128/aea3546f/attachment.htm>
+
+From paf at cray.com  Sat Nov 28 06:07:45 2015
+From: paf at cray.com (Patrick Farrell)
+Date: Sat, 28 Nov 2015 14:07:45 +0000
+Subject: [lustre-discuss] Compiling from sources with Debian 8
+In-Reply-To: <56598140.8000509@inserm.fr>
+References: <56598140.8000509@inserm.fr>
+Message-ID: <DB0C8A206669AC40B1C4E52A8584A6F614D364BB@CFWEX01.americas.cray.com>
+
+I suspect it might be a string format change that's affecting a step in the build process you gave.
+
+At first glance, I'd say manually verify the output of this step from compile.sh:
+# Extract lustre version, replace "_" by "." and remove leading letter "v".
+LUSTRE_VERSION=$(echo `git describe` | sed -e "s/_/\./g" | cut -c2-)
+
+It's possible the info provided by git describe changed slightly and the sed and cut commands don't match up any more.  You could fix them or set it manually.
+
+Good luck,
+Patrick Farrell
+________________________________________
+From: lustre-discuss [lustre-discuss-bounces at lists.lustre.org] on behalf of J?r?me BECOT [jerome.becot at inserm.fr]
+Sent: Saturday, November 28, 2015 4:26 AM
+To: lustre-discuss at lists.lustre.org
+Subject: [lustre-discuss] Compiling from sources with Debian 8
+
+Hi there,
+
+We run lustre 2.6/2.7 on our Centos 6.6 (servers) and 7 (clients) cluster. We have a few webservers running Debian that need to access the storage. I followed the procedure given by Thomas Stibor about Ubuntu 14 last year.
+
+I could successfully compile the binaries and modules after some digging. He also left an already compiled lustre 2.7.63 and modules for kernel 3.16.0-4 online.
+
+If I install his binaries, it works well. If I install the one generated by the procedure, the modules don't load and a weird thing happen. Running dmesg warns me about one surprising thing :
+
+ > With his packages
+[212417.535369] LNet: HW CPU cores: 1, npartitions: 1
+[212417.538430] alg: No test for adler32 (adler32-zlib)
+[212417.538456] alg: No test for crc32 (crc32-table)
+[212425.548907] Lustre: Lustre: Build Version: v2_7_60_0-ge686e57-CHANGED-3.16.0-4-amd64
+[212425.565330] LNet: Added LNI 172.27.7.118 at tcp1 [8/256/0/180]
+[212425.565354] LNet: Accept secure, port 988
+[212425.595531] Lustre: Mounted lustre-client
+
+> With mine
+[209942.090874] LNet: HW CPU cores: 1, npartitions: 1
+[209942.092902] alg: No test for adler32 (adler32-zlib)
+[209950.092501] lnet: module is from the staging directory, the quality is unknown, you have been warned.
+[209950.093589] lvfs: module is from the staging directory, the quality is unknown, you have been warned.
+[209950.094634] obdclass: module is from the staging directory, the quality is unknown, you have been warned.
+[209950.098595] Lustre: Lustre: Build Version: v2_3_64_0-g6e62c21-CHANGED-3.9.0
+[209950.099999] ptlrpc: module is from the staging directory, the quality is unknown, you have been warned.
+[209950.104615] ksocklnd: module is from the staging directory, the quality is unknown, you have been warned.
+[209950.105237] LNetError: 845:0:(linux-tcpip.c:82:libcfs_ipif_query()) Can't get flags for interface eth0
+[209950.105862] LNetError: 845:0:(socklnd.c:2824:ksocknal_startup()) Can't get interface eth0 info: -515
+[209951.104194] LNetError: 105-4: Error -100 starting up LNI tcp
+[209951.104852] LustreError: 845:0:(events.c:566:ptlrpc_init_portals()) network initialisation failed
+[209990.787541] ptlrpc: module is from the staging directory, the quality is unknown, you have been warned.
+
+I pulled the master git branch, and coul obtain
+linux-patch-lustre_2.7.63.0-16-g8524994_all.deb  lustre-client-modules-3.16.7-ckt11-lustre-my-build_2.7.63.0-16-g8524994_amd64.deb  lustre-tests_2.7.63.0-16-g8524994_amd64.deb
+lustre_2.7.63.0-16-g8524994_amd64.changes        lustre-dev_2.7.63.0-16-g8524994_amd64.deb                                          lustre-utils_2.7.63.0-16-g8524994_amd64.deb
+lustre_2.7.63.0-16-g8524994.dsc                  lustre-release
+lustre_2.7.63.0-16-g8524994.tar.gz               lustre-source_2.7.63.0-16-g8524994_all.deb
+
+I just don't get it. Why the shown version of the module is 2.3 ?
+I tried to compile from the 2.7 branch but the 2.7.0 version doesn't compile with kernel 3.16, as suggested in LU-7042
+
+I probably miss something. Sorry I'm not familiar with compilers (usually the ./configure && make && make install works or warns you about missing dependencies and i don't go farther).
+
+Thank you
+
+Jerome
+
+PS : Here is the procedure followed to compile
+
+
+apt-get install linux-headers-3.16.0-4-amd64 libtool automake linux-source-3.16
+git clone git://git.whamcloud.com/fs/lustre-release.git
+cd /usr/src/
+tar xf linux-source-3.16.tar.xz
+cd /home/build/lustre-release/
+vi debian/rules (edit so it doesn't stop with autogen because it doesn't find the kernel sources)
+(modify --with-linux= option with current path --with-linux=/usr/src/linux-3.16 in kdist_config section)
+aptitude install module-assistant libreadline-dev debhelper  dpatch libsnmp-dev quilt devscripts
+ vi debian/control
+(modify the dependency for unsatisfied linux-headers called linux-headers-something in jessie)
+vi compile.sh
+#!/bin/bash
+unset DEBEMAIL
+unset EMAIL
+unset DEBFULLNAME
+unset NAME
+
+export DEBFULLNAME="Niemand Nobody"
+export EMAIL="npcomplete at example.com"
+
+# Extract lustre version, replace "_" by "." and remove leading letter "v".
+LUSTRE_VERSION=$(echo `git describe` | sed -e "s/_/\./g" | cut -c2-)
+
+# Add entry into debian/changelog such that packages have proper version names.
+dch --newversion $LUSTRE_VERSION --distribution unstable --nomultimaint -t "Build from official master upstream."
+
+#
+sh ./autogen.sh
+
+# Build debian packages.
+dpkg-buildpackage
+
+# Build modules.
+#export MODULE_LOC=${PWD}
+#cd /usr/src/linux
+#make-kpkg modules_image --append-to-version -lustre-my-build --revision `date +"%Y%m%d"`
+
+Then i got stuck on "checking for external module build target" for a while, fixed by running "make scripts" in the kernel source folder
+It finally compiled !
+
+From andreas.dilger at intel.com  Sat Nov 28 09:07:40 2015
+From: andreas.dilger at intel.com (Dilger, Andreas)
+Date: Sat, 28 Nov 2015 17:07:40 +0000
+Subject: [lustre-discuss] Compiling from sources with Debian 8
+In-Reply-To: <56598140.8000509@inserm.fr>
+References: <56598140.8000509@inserm.fr>
+Message-ID: <408C31C4-2F5D-4872-8207-EE64CD0CA62D@intel.com>
+
+The 2.3.64 version means you are using the in-kernel Lustre client (confirmed by the waning messages about "staging"), and not the 2.7.x version from the Lustre master branch.
+
+It looks like Ubuntu is building the in-kernel client, and your modules are not being loaded.
+
+Cheers, Andreas
+
+On Nov 28, 2015, at 03:26, J?r?me BECOT <jerome.becot at inserm.fr<mailto:jerome.becot at inserm.fr>> wrote:
+
+Hi there,
+
+We run lustre 2.6/2.7 on our Centos 6.6 (servers) and 7 (clients) cluster. We have a few webservers running Debian that need to access the storage. I followed the procedure given by Thomas Stibor about Ubuntu 14 last year.
+
+I could successfully compile the binaries and modules after some digging. He also left an already compiled lustre 2.7.63 and modules for kernel 3.16.0-4 online.
+
+If I install his binaries, it works well. If I install the one generated by the procedure, the modules don't load and a weird thing happen. Running dmesg warns me about one surprising thing :
+
+ > With his packages
+[212417.535369] LNet: HW CPU cores: 1, npartitions: 1
+[212417.538430] alg: No test for adler32 (adler32-zlib)
+[212417.538456] alg: No test for crc32 (crc32-table)
+[212425.548907] Lustre: Lustre: Build Version: v2_7_60_0-ge686e57-CHANGED-3.16.0-4-amd64
+[212425.565330] LNet: Added LNI 172.27.7.118 at tcp1 [8/256/0/180]
+[212425.565354] LNet: Accept secure, port 988
+[212425.595531] Lustre: Mounted lustre-client
+
+> With mine
+[209942.090874] LNet: HW CPU cores: 1, npartitions: 1
+[209942.092902] alg: No test for adler32 (adler32-zlib)
+[209950.092501] lnet: module is from the staging directory, the quality is unknown, you have been warned.
+[209950.093589] lvfs: module is from the staging directory, the quality is unknown, you have been warned.
+[209950.094634] obdclass: module is from the staging directory, the quality is unknown, you have been warned.
+[209950.098595] Lustre: Lustre: Build Version: v2_3_64_0-g6e62c21-CHANGED-3.9.0
+[209950.099999] ptlrpc: module is from the staging directory, the quality is unknown, you have been warned.
+[209950.104615] ksocklnd: module is from the staging directory, the quality is unknown, you have been warned.
+[209950.105237] LNetError: 845:0:(linux-tcpip.c:82:libcfs_ipif_query()) Can't get flags for interface eth0
+[209950.105862] LNetError: 845:0:(socklnd.c:2824:ksocknal_startup()) Can't get interface eth0 info: -515
+[209951.104194] LNetError: 105-4: Error -100 starting up LNI tcp
+[209951.104852] LustreError: 845:0:(events.c:566:ptlrpc_init_portals()) network initialisation failed
+[209990.787541] ptlrpc: module is from the staging directory, the quality is unknown, you have been warned.
+
+I pulled the master git branch, and coul obtain
+linux-patch-lustre_2.7.63.0-16-g8524994_all.deb  lustre-client-modules-3.16.7-ckt11-lustre-my-build_2.7.63.0-16-g8524994_amd64.deb  lustre-tests_2.7.63.0-16-g8524994_amd64.deb
+lustre_2.7.63.0-16-g8524994_amd64.changes        lustre-dev_2.7.63.0-16-g8524994_amd64.deb                                          lustre-utils_2.7.63.0-16-g8524994_amd64.deb
+lustre_2.7.63.0-16-g8524994.dsc                  lustre-release
+lustre_2.7.63.0-16-g8524994.tar.gz               lustre-source_2.7.63.0-16-g8524994_all.deb
+
+I just don't get it. Why the shown version of the module is 2.3 ?
+I tried to compile from the 2.7 branch but the 2.7.0 version doesn't compile with kernel 3.16, as suggested in LU-7042
+
+I probably miss something. Sorry I'm not familiar with compilers (usually the ./configure && make && make install works or warns you about missing dependencies and i don't go farther).
+
+Thank you
+
+Jerome
+
+PS : Here is the procedure followed to compile
+
+
+apt-get install linux-headers-3.16.0-4-amd64 libtool automake linux-source-3.16
+git clone git://git.whamcloud.com/fs/lustre-release.git
+cd /usr/src/
+tar xf linux-source-3.16.tar.xz
+cd /home/build/lustre-release/
+vi debian/rules (edit so it doesn't stop with autogen because it doesn't find the kernel sources)
+(modify --with-linux= option with current path --with-linux=/usr/src/linux-3.16 in kdist_config section)
+aptitude install module-assistant libreadline-dev debhelper  dpatch libsnmp-dev quilt devscripts
+ vi debian/control
+(modify the dependency for unsatisfied linux-headers called linux-headers-something in jessie)
+vi compile.sh
+#!/bin/bash
+unset DEBEMAIL
+unset EMAIL
+unset DEBFULLNAME
+unset NAME
+
+export DEBFULLNAME="Niemand Nobody"
+export EMAIL="npcomplete at example.com<http://example.com>"
+
+# Extract lustre version, replace "_" by "." and remove leading letter "v".
+LUSTRE_VERSION=$(echo `git describe` | sed -e "s/_/\./g" | cut -c2-)
+
+# Add entry into debian/changelog such that packages have proper version names.
+dch --newversion $LUSTRE_VERSION --distribution unstable --nomultimaint -t "Build from official master upstream."
+
+#
+sh ./autogen.sh
+
+# Build debian packages.
+dpkg-buildpackage
+
+# Build modules.
+#export MODULE_LOC=${PWD}
+#cd /usr/src/linux
+#make-kpkg modules_image --append-to-version -lustre-my-build --revision `date +"%Y%m%d"`
+
+Then i got stuck on "checking for external module build target" for a while, fixed by running "make scripts" in the kernel source folder
+It finally compiled !
+
+_______________________________________________
+lustre-discuss mailing list
+lustre-discuss at lists.lustre.org<mailto:lustre-discuss at lists.lustre.org>
+http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org
+
+From jerome.becot at inserm.fr  Mon Nov 30 09:18:53 2015
+From: jerome.becot at inserm.fr (=?UTF-8?B?SsOpcsO0bWUgQkVDT1Q=?=)
+Date: Mon, 30 Nov 2015 18:18:53 +0100
+Subject: [lustre-discuss] Compiling from sources with Debian 8
+In-Reply-To: <408C31C4-2F5D-4872-8207-EE64CD0CA62D@intel.com>
+References: <56598140.8000509@inserm.fr>
+	<408C31C4-2F5D-4872-8207-EE64CD0CA62D@intel.com>
+Message-ID: <565C84FD.3080309@inserm.fr>
+
+So,
+
+I could move on with building the modules. They are successfully build 
+and installed but I had to change the module destination directory in 
+config/lustre-build-linux.m4 to target /lib/modules/`uname -r`/extra 
+directory (else it goes in "kernel" subdirectory and they never get loaded)
+
+Then it won't load anyway. I'm getting [440444.832446] lnet: no symbol 
+version for module_layout in dmesg
+If i copy the Module.symvers generated into the lustre-release folder to 
+/usr/src/linux, then i get
+
+
+[438311.953707] lnet: disagrees about version of symbol 
+libcfs_deregister_ioctl
+[438311.953710] lnet: Unknown symbol libcfs_deregister_ioctl (err -22)
+[438311.953725] lnet: Unknown symbol cfs_str2num_check (err 0)
+[438311.953760] lnet: Unknown symbol cfs_gettok (err 0)
+[438311.953782] lnet: Unknown symbol lprocfs_call_handler (err 0)
+
+(this is a sample of various symbol error)
+
+Any clue ? I'm close to make it now (i guess)
+
+
+Le 28/11/2015 18:07, Dilger, Andreas a ?crit :
+> The 2.3.64 version means you are using the in-kernel Lustre client (confirmed by the waning messages about "staging"), and not the 2.7.x version from the Lustre master branch.
+>
+> It looks like Ubuntu is building the in-kernel client, and your modules are not being loaded.
+>
+> Cheers, Andreas
+>
+> On Nov 28, 2015, at 03:26, J?r?me BECOT <jerome.becot at inserm.fr<mailto:jerome.becot at inserm.fr>> wrote:
+>
+> Hi there,
+>
+> We run lustre 2.6/2.7 on our Centos 6.6 (servers) and 7 (clients) cluster. We have a few webservers running Debian that need to access the storage. I followed the procedure given by Thomas Stibor about Ubuntu 14 last year.
+>
+> I could successfully compile the binaries and modules after some digging. He also left an already compiled lustre 2.7.63 and modules for kernel 3.16.0-4 online.
+>
+> If I install his binaries, it works well. If I install the one generated by the procedure, the modules don't load and a weird thing happen. Running dmesg warns me about one surprising thing :
+>
+>   > With his packages
+> [212417.535369] LNet: HW CPU cores: 1, npartitions: 1
+> [212417.538430] alg: No test for adler32 (adler32-zlib)
+> [212417.538456] alg: No test for crc32 (crc32-table)
+> [212425.548907] Lustre: Lustre: Build Version: v2_7_60_0-ge686e57-CHANGED-3.16.0-4-amd64
+> [212425.565330] LNet: Added LNI 172.27.7.118 at tcp1 [8/256/0/180]
+> [212425.565354] LNet: Accept secure, port 988
+> [212425.595531] Lustre: Mounted lustre-client
+>
+>> With mine
+> [209942.090874] LNet: HW CPU cores: 1, npartitions: 1
+> [209942.092902] alg: No test for adler32 (adler32-zlib)
+> [209950.092501] lnet: module is from the staging directory, the quality is unknown, you have been warned.
+> [209950.093589] lvfs: module is from the staging directory, the quality is unknown, you have been warned.
+> [209950.094634] obdclass: module is from the staging directory, the quality is unknown, you have been warned.
+> [209950.098595] Lustre: Lustre: Build Version: v2_3_64_0-g6e62c21-CHANGED-3.9.0
+> [209950.099999] ptlrpc: module is from the staging directory, the quality is unknown, you have been warned.
+> [209950.104615] ksocklnd: module is from the staging directory, the quality is unknown, you have been warned.
+> [209950.105237] LNetError: 845:0:(linux-tcpip.c:82:libcfs_ipif_query()) Can't get flags for interface eth0
+> [209950.105862] LNetError: 845:0:(socklnd.c:2824:ksocknal_startup()) Can't get interface eth0 info: -515
+> [209951.104194] LNetError: 105-4: Error -100 starting up LNI tcp
+> [209951.104852] LustreError: 845:0:(events.c:566:ptlrpc_init_portals()) network initialisation failed
+> [209990.787541] ptlrpc: module is from the staging directory, the quality is unknown, you have been warned.
+>
+> I pulled the master git branch, and coul obtain
+> linux-patch-lustre_2.7.63.0-16-g8524994_all.deb  lustre-client-modules-3.16.7-ckt11-lustre-my-build_2.7.63.0-16-g8524994_amd64.deb  lustre-tests_2.7.63.0-16-g8524994_amd64.deb
+> lustre_2.7.63.0-16-g8524994_amd64.changes        lustre-dev_2.7.63.0-16-g8524994_amd64.deb                                          lustre-utils_2.7.63.0-16-g8524994_amd64.deb
+> lustre_2.7.63.0-16-g8524994.dsc                  lustre-release
+> lustre_2.7.63.0-16-g8524994.tar.gz               lustre-source_2.7.63.0-16-g8524994_all.deb
+>
+> I just don't get it. Why the shown version of the module is 2.3 ?
+> I tried to compile from the 2.7 branch but the 2.7.0 version doesn't compile with kernel 3.16, as suggested in LU-7042
+>
+> I probably miss something. Sorry I'm not familiar with compilers (usually the ./configure && make && make install works or warns you about missing dependencies and i don't go farther).
+>
+> Thank you
+>
+> Jerome
+>
+> PS : Here is the procedure followed to compile
+>
+>
+> apt-get install linux-headers-3.16.0-4-amd64 libtool automake linux-source-3.16
+> git clone git://git.whamcloud.com/fs/lustre-release.git
+> cd /usr/src/
+> tar xf linux-source-3.16.tar.xz
+> cd /home/build/lustre-release/
+> vi debian/rules (edit so it doesn't stop with autogen because it doesn't find the kernel sources)
+> (modify --with-linux= option with current path --with-linux=/usr/src/linux-3.16 in kdist_config section)
+> aptitude install module-assistant libreadline-dev debhelper  dpatch libsnmp-dev quilt devscripts
+>   vi debian/control
+> (modify the dependency for unsatisfied linux-headers called linux-headers-something in jessie)
+> vi compile.sh
+> #!/bin/bash
+> unset DEBEMAIL
+> unset EMAIL
+> unset DEBFULLNAME
+> unset NAME
+>
+> export DEBFULLNAME="Niemand Nobody"
+> export EMAIL="npcomplete at example.com<http://example.com>"
+>
+> # Extract lustre version, replace "_" by "." and remove leading letter "v".
+> LUSTRE_VERSION=$(echo `git describe` | sed -e "s/_/\./g" | cut -c2-)
+>
+> # Add entry into debian/changelog such that packages have proper version names.
+> dch --newversion $LUSTRE_VERSION --distribution unstable --nomultimaint -t "Build from official master upstream."
+>
+> #
+> sh ./autogen.sh
+>
+> # Build debian packages.
+> dpkg-buildpackage
+>
+> # Build modules.
+> #export MODULE_LOC=${PWD}
+> #cd /usr/src/linux
+> #make-kpkg modules_image --append-to-version -lustre-my-build --revision `date +"%Y%m%d"`
+>
+> Then i got stuck on "checking for external module build target" for a while, fixed by running "make scripts" in the kernel source folder
+> It finally compiled !
+>
+> _______________________________________________
+> lustre-discuss mailing list
+> lustre-discuss at lists.lustre.org<mailto:lustre-discuss at lists.lustre.org>
+> http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org
+
+-- 
+J?rome BECOT
+
+Administrateur Syst?mes et R?seaux
+
+Mol?cules ? vis?e Th?rapeutique par des approches in Silico (MTi)
+Univ Paris Diderot, UMRS973 Inserm
+Case 013
+B?t. Lamarck A, porte 412
+35, rue H?l?ne Brion 75205 Paris Cedex 13
+France
+
+Tel : 01 57 27 83 82
+
+
+From ekolb at uvic.ca  Mon Nov 30 09:53:20 2015
+From: ekolb at uvic.ca (Eric Kolb)
+Date: Mon, 30 Nov 2015 09:53:20 -0800
+Subject: [lustre-discuss] Apache via NFS via Lustre
+Message-ID: <565C8D10.9010704@uvic.ca>
+
+Hello,
+
+Perhaps someone has seen a similar issue? If so any insight would be 
+appreciated.
+
+We recently migrated some websites from an NFS share by which the NFS 
+server is exporting a share sitting on a Lustre mount. Below is the issue.
+
+- sftp a file to website.ca - the load balancer will direct session to 
+server1 or server2, let us say server1 in this case
+
+- Accessing the file with Apache via server1 works but via server2 a NFS 
+EIO -13 error is encountered
+
+- On server1 (or server2) copy the file to /dev/null makes the file 
+accessible to Apache on either server1 or server2
+
+- As work around sftp file to a temporary location, then ssh into 
+website.ca and "cp tmp/file.jpeg www/file.jpeg", this allows then
+Apache on either server1 or server2 to access the file
+
+- Created an lseek C program to try mimicking a captured Apache strace 
+but it shows success on any combination of file access scenarios
+
+Prior to adding in Lustre no such such issues were encountered.
+
+Thanks,
+-- 
+Eric Kolb
+DCS - UVic Systems
+University of Victoria
+Office: 250-721-7658
+

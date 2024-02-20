@@ -1,0 +1,121 @@
+From neilb at suse.de  Wed Mar  4 16:26:46 2020
+From: neilb at suse.de (NeilBrown)
+Date: Thu, 05 Mar 2020 11:26:46 +1100
+Subject: [lustre-devel] Setting GFP_FS flag for Lustre threads doing DMU
+ calls?
+In-Reply-To: <F0FCA906-7B52-4DEF-B3C2-6B3E027CB846@amazon.com>
+References: <F0FCA906-7B52-4DEF-B3C2-6B3E027CB846@amazon.com>
+Message-ID: <87mu8vwss9.fsf@notabene.neil.brown.name>
+
+On Fri, Feb 28 2020, Degremont, Aurelien wrote:
+
+> Some thoughts on this?
+
+This particular stack trace looks to me like it should be handled
+internally to ZFS.
+
+In general, the safe and sensible approach is to call
+memalloc_nofs_save() whenever you take a lock that could possibly be
+involved in memory reclaim.
+Historically a lot of code doesn't do this, but instead relies on
+all using GFP_NOFS in all allocations that could happen while the lock
+is held.
+
+So the options are:
+ - use GFP_NOFS anywhere that a lock might be held
+ - call memalloc_nofs_save() whenever you take a lock that might cause
+   problems.
+
+It seems from the stack trace that  arc_buf_alloc_impl() doesn't set
+GFP_NOFS, and whatever takes the lock doesn't call memalloc_nofs_save().
+
+NeilBrown
+
+
+>
+> ?Le 14/02/2020 18:14, ? lustre-devel au nom de Degremont, Aurelien ? <lustre-devel-bounces at lists.lustre.org au nom de degremoa at amazon.com> a ?crit :
+>
+>     Hello
+>     
+>     I would like to bring a technical discussion undergoing for a ZFS patch which relates to Lustre.
+>     
+>     Debugging a deadlock on an OSS we noticed a Lustre thread deadlocked itself due to memory reclaim, an arc_read() can trigger kernel memory allocation that in turn leads to a memory reclaim callback and a deadlock within a single zfs process. (see below for the full stack)
+>     ZFS code should call spl_fstrans_mark() everywhere it could be doing memory allocation that could trigger ZFS cache reclaim. Doing so ended up adding GFP_FS flag for memory allocations in ZFS code.
+>     
+>     After discussing this with Brian on https://github.com/zfsonlinux/zfs/pull/9987, there is a discussion wondering where is the good spot to add this. For proper layering, it seems they should rather be done in Lustre threads calling DMU calls, likewise this is done in ZPL for ZFS.
+>     
+>     Brian said: "This will resolve the deadlock but it also somewhat violates the existing layering. Normally we call spl_fstrans_check() when setting up a new kthread if it's going to call the DMU interfaces, or for system calls it's done in our registered VFS callbacks. Feel free to update the PR, but before moving forward with this solution let's check with @adilger about potentially calling this on the Lustre side when they setup the threads which access the DMU. There may be other cases this doesn't cover."
+>     
+>     What do you think of it?
+>     
+>     PID: 108591  TASK: ffff888ee68ccb80  CPU: 12  COMMAND: "ldlm_bl_16"
+>      #0 [ffffc9002b98adc8] __schedule at ffffffff81610f2e
+>      #1 [ffffc9002b98ae68] schedule at ffffffff81611558
+>      #2 [ffffc9002b98ae70] schedule_preempt_disabled at ffffffff8161184a
+>      #3 [ffffc9002b98ae78] __mutex_lock at ffffffff816131e8
+>      #4 [ffffc9002b98af18] arc_buf_destroy at ffffffffa0bf37d7 [zfs]
+>      #5 [ffffc9002b98af48] dbuf_destroy at ffffffffa0bfa6fe [zfs]
+>      #6 [ffffc9002b98af88] dbuf_evict_one at ffffffffa0bfaa96 [zfs]
+>      #7 [ffffc9002b98afa0] dbuf_rele_and_unlock at ffffffffa0bfa561 [zfs]
+>      #8 [ffffc9002b98b050] dbuf_rele_and_unlock at ffffffffa0bfa32b [zfs]
+>      #9 [ffffc9002b98b100] osd_object_delete at ffffffffa0b64ecc [osd_zfs]
+>     #10 [ffffc9002b98b118] lu_object_free at ffffffffa06d6a74 [obdclass]
+>     #11 [ffffc9002b98b178] lu_site_purge_objects at ffffffffa06d7fc1 [obdclass]
+>     #12 [ffffc9002b98b220] lu_cache_shrink_scan at ffffffffa06d81b8 [obdclass]
+>     #13 [ffffc9002b98b278] shrink_slab at ffffffff811ca9d8
+>     #14 [ffffc9002b98b338] shrink_node at ffffffff811cfd94
+>     #15 [ffffc9002b98b3b8] do_try_to_free_pages at ffffffff811cfe63
+>     #16 [ffffc9002b98b408] try_to_free_pages at ffffffff811d01c4
+>     #17 [ffffc9002b98b488] __alloc_pages_slowpath at ffffffff811be7f2
+>     #18 [ffffc9002b98b580] __alloc_pages_nodemask at ffffffff811bf3ed
+>     #19 [ffffc9002b98b5e0] new_slab at ffffffff81226304
+>     #20 [ffffc9002b98b638] ___slab_alloc at ffffffff812272ab
+>     #21 [ffffc9002b98b6f8] __slab_alloc at ffffffff8122740c
+>     #22 [ffffc9002b98b708] kmem_cache_alloc at ffffffff81227578
+>     #23 [ffffc9002b98b740] spl_kmem_cache_alloc at ffffffffa048a1fd [spl]
+>     #24 [ffffc9002b98b780] arc_buf_alloc_impl at ffffffffa0befba2 [zfs]
+>     #25 [ffffc9002b98b7b0] arc_read at ffffffffa0bf0924 [zfs]
+>     #26 [ffffc9002b98b858] dbuf_read at ffffffffa0bf9083 [zfs]
+>     #27 [ffffc9002b98b900] dmu_buf_hold_by_dnode at ffffffffa0c04869 [zfs]
+>     #28 [ffffc9002b98b930] zap_get_leaf_byblk at ffffffffa0c71e86 [zfs]
+>     #29 [ffffc9002b98b988] zap_deref_leaf at ffffffffa0c720b6 [zfs]
+>     #30 [ffffc9002b98b9c0] fzap_lookup at ffffffffa0c730ca [zfs]
+>     #31 [ffffc9002b98ba38] zap_lookup_impl at ffffffffa0c77418 [zfs]
+>     #32 [ffffc9002b98ba78] zap_lookup_norm at ffffffffa0c77c89 [zfs]
+>     #33 [ffffc9002b98bae0] zap_lookup at ffffffffa0c77ce2 [zfs]
+>     #34 [ffffc9002b98bb08] osd_fid_lookup at ffffffffa0b6f4ef [osd_zfs]
+>     #35 [ffffc9002b98bb50] osd_object_init at ffffffffa0b68abf [osd_zfs]
+>     #36 [ffffc9002b98bbb0] lu_object_alloc at ffffffffa06d9778 [obdclass]
+>     #37 [ffffc9002b98bc08] lu_object_find_at at ffffffffa06d9b5a [obdclass]
+>     #38 [ffffc9002b98bc68] ofd_object_find at ffffffffa0f860a0 [ofd]
+>     #39 [ffffc9002b98bc88] ofd_lvbo_update at ffffffffa0f94cba [ofd]
+>     #40 [ffffc9002b98bd40] ldlm_cancel_lock_for_export at ffffffffa0923ba1 [ptlrpc]
+>     #41 [ffffc9002b98bd78] ldlm_cancel_locks_for_export_cb at ffffffffa0923e85 [ptlrpc]
+>     #42 [ffffc9002b98bd98] cfs_hash_for_each_relax at ffffffffa05a85a5 [libcfs]
+>     #43 [ffffc9002b98be18] cfs_hash_for_each_empty at ffffffffa05ab948 [libcfs]
+>     #44 [ffffc9002b98be58] ldlm_export_cancel_locks at ffffffffa092410f [ptlrpc]
+>     #45 [ffffc9002b98be80] ldlm_bl_thread_main at ffffffffa094d147 [ptlrpc]
+>     #46 [ffffc9002b98bf10] kthread at ffffffff810a921a
+>     
+>     
+>     Aur?lien
+>     
+>     
+>     _______________________________________________
+>     lustre-devel mailing list
+>     lustre-devel at lists.lustre.org
+>     http://lists.lustre.org/listinfo.cgi/lustre-devel-lustre.org
+>     
+>
+> _______________________________________________
+> lustre-devel mailing list
+> lustre-devel at lists.lustre.org
+> http://lists.lustre.org/listinfo.cgi/lustre-devel-lustre.org
+-------------- next part --------------
+A non-text attachment was scrubbed...
+Name: signature.asc
+Type: application/pgp-signature
+Size: 832 bytes
+Desc: not available
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20200305/710727a5/attachment.sig>
+

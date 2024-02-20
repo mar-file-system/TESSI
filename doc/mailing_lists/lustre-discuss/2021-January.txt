@@ -1,0 +1,2808 @@
+From darby.vicker-1 at nasa.gov  Tue Jan  5 07:47:35 2021
+From: darby.vicker-1 at nasa.gov (Vicker, Darby J. (JSC-EG111)[Jacobs Technology, Inc.])
+Date: Tue, 5 Jan 2021 15:47:35 +0000
+Subject: [lustre-discuss] Tuning for metadata performance
+In-Reply-To: <62208010-08E6-4222-9DC1-9FF18FB195C6@nasa.gov>
+References: <62208010-08E6-4222-9DC1-9FF18FB195C6@nasa.gov>
+Message-ID: <3BF047EB-0627-4327-A920-95DC8228D340@nasa.gov>
+
+Hello,
+
+I'm looking for some advice on tuning our existing lustre file system to achieve better metadata performance.  This file system is getting fairly old ? its been in production for almost 4 years now.  The hardware and our existing tuning efforts can be found here.
+
+http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/2017-April/014390.html
+
+The hardware is the same but we have upgraded the software stack a few times ? now on CentOS 7.6, ZFS 0.7.9 and lustre 2.10.8.  We do plan to upgrade to the latest CentOS 7.x and either lustre 2.12 or 2.13 soon.  The MDS hardware isn't well-described in that thread so here are more details:
+
+Chassis: Supermicro 2U Twin Server
+Processor: 4 x Quad?Core Xeon Processor E5?2637 v2 3.50GHz (2 sockets/8 cores per node)
+Memory: 16 x 16GB PC3?14900 1866MHz DDR3 ECC Registered DIMM (128GB per node)
+
+External JBOD:
+Chassis: 24x Hot?Swap 2.5" SAS ? 12Gb/s SAS Dual Expander
+Drives: 12 x 600GB SAS 3.0 12.0Gb/s 15000RPM ? 2.5" ? Seagate Enterprise Performance 15K HDD (512n)
+Controller Card: LSI SAS 9300-8e SAS 12Gb/s PCIe 3.0 8-Port Host Bus Adapter
+
+The above hardware and tuning served us well for a long time but the lab has grown, both in number of lustre clients (now up to ~200 ethernet clients and ~500 IB clients) and the number of users in the lab.  With the extra users have come different types of workloads.  Peviously, the file system was most used for workloads with a fairly small number of large files.  We now see workloads that include 100's of concurrent processes all doing mixed small and large file IO on a lot of files (e.g. each process clones a repo, compiles a code and runs a serial sim that writes a lot of data).
+
+I recently ran the io500 tests and our LFS stats for MDEasy and MDHard are pretty bad, even when compared to the lowest MD stats on the current io500 list.  Our standard NFS server handily beats our LFS wrt MD performance.  So I'm hopeful that we can squeeze more MD performance out of our LFS.  Obviously, software tuning on the existing hardware would be preferred but we are open to hardware additions/upgrades if that would help (e.g. adding more MDS's).  There are a lot of tuning options in both ZFS and lustre so I'm hoping someone can point me in the right direction.  Are DNE and/or DoM expected to help?  I attended the SC20 Lustre BoF and it sounds like 2.13 has some metadata performance improvements, so just an upgrade might help.  We have dual MDS's now but for HA, not performance.  I'd hate to lose the HA aspect as we utilize it for failover quite a bit (maintenance, etc.) but it would probably be worth it if MD performance was significantly improved.  If I understand correctly, there is some overhead with DNE and performance suffers with just two MDS's with a benefit with 4 or more MDS's, correct?  So that wouldn't be a good option for us unless we add MDS's?  Would an upgrade to SSD or NVMe in our MDTs help?
+
+I would greatly appreciate thoughts on the best path forward for making improvements.
+
+Thanks,
+Darby
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20210105/5df6d61f/attachment.html>
+
+From Timothy.Carlson at pnnl.gov  Tue Jan  5 08:21:04 2021
+From: Timothy.Carlson at pnnl.gov (Carlson, Timothy S)
+Date: Tue, 5 Jan 2021 16:21:04 +0000
+Subject: [lustre-discuss] Tuning for metadata performance
+Message-ID: <8560AA4D-1631-48D0-A417-27DF2FEF0D99@pnnl.gov>
+
+On the MDS, make sure you have turned off pre-fetch
+
+echo 1 > /sys/module/zfs/parameters/zfs_prefetch_disable
+
+On our ancient (similar vintage) file system this greatly reduced the load on the MDS so it didn?t come to a complete standstill when under pressure.  ZFS for the MDS was a horrible choice (I made the same mistake).
+
+Tim
+
+From: lustre-discuss <lustre-discuss-bounces at lists.lustre.org> on behalf of "Vicker, Darby J. (JSC-EG111)[Jacobs Technology, Inc.]" <darby.vicker-1 at nasa.gov>
+Date: Tuesday, January 5, 2021 at 7:48 AM
+To: "Lustre-discuss at lists.lustre.org" <lustre-discuss at lists.lustre.org>
+Subject: [lustre-discuss] Tuning for metadata performance
+
+Hello,
+
+I'm looking for some advice on tuning our existing lustre file system to achieve better metadata performance.  This file system is getting fairly old ? its been in production for almost 4 years now.  The hardware and our existing tuning efforts can be found here.
+
+http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/2017-April/014390.html<https://gcc02.safelinks.protection.outlook.com/?url=http%3A%2F%2Flists.lustre.org%2Fpipermail%2Flustre-discuss-lustre.org%2F2017-April%2F014390.html&data=04%7C01%7CTimothy.Carlson%40pnnl.gov%7C062535e12ed84200b30108d8b1914fbc%7Cd6faa5f90ae240338c0130048a38deeb%7C0%7C0%7C637454584963613419%7CUnknown%7CTWFpbGZsb3d8eyJWIjoiMC4wLjAwMDAiLCJQIjoiV2luMzIiLCJBTiI6Ik1haWwiLCJXVCI6Mn0%3D%7C1000&sdata=p4MEnFv0uvxtCtLwkTuZDAi0d47lTvtpSLPwb3f5ncY%3D&reserved=0>
+
+The hardware is the same but we have upgraded the software stack a few times ? now on CentOS 7.6, ZFS 0.7.9 and lustre 2.10.8.  We do plan to upgrade to the latest CentOS 7.x and either lustre 2.12 or 2.13 soon.  The MDS hardware isn't well-described in that thread so here are more details:
+
+Chassis: Supermicro 2U Twin Server
+Processor: 4 x Quad?Core Xeon Processor E5?2637 v2 3.50GHz (2 sockets/8 cores per node)
+Memory: 16 x 16GB PC3?14900 1866MHz DDR3 ECC Registered DIMM (128GB per node)
+
+External JBOD:
+Chassis: 24x Hot?Swap 2.5" SAS ? 12Gb/s SAS Dual Expander
+Drives: 12 x 600GB SAS 3.0 12.0Gb/s 15000RPM ? 2.5" ? Seagate Enterprise Performance 15K HDD (512n)
+Controller Card: LSI SAS 9300-8e SAS 12Gb/s PCIe 3.0 8-Port Host Bus Adapter
+
+The above hardware and tuning served us well for a long time but the lab has grown, both in number of lustre clients (now up to ~200 ethernet clients and ~500 IB clients) and the number of users in the lab.  With the extra users have come different types of workloads.  Peviously, the file system was most used for workloads with a fairly small number of large files.  We now see workloads that include 100's of concurrent processes all doing mixed small and large file IO on a lot of files (e.g. each process clones a repo, compiles a code and runs a serial sim that writes a lot of data).
+
+I recently ran the io500 tests and our LFS stats for MDEasy and MDHard are pretty bad, even when compared to the lowest MD stats on the current io500 list.  Our standard NFS server handily beats our LFS wrt MD performance.  So I'm hopeful that we can squeeze more MD performance out of our LFS.  Obviously, software tuning on the existing hardware would be preferred but we are open to hardware additions/upgrades if that would help (e.g. adding more MDS's).  There are a lot of tuning options in both ZFS and lustre so I'm hoping someone can point me in the right direction.  Are DNE and/or DoM expected to help?  I attended the SC20 Lustre BoF and it sounds like 2.13 has some metadata performance improvements, so just an upgrade might help.  We have dual MDS's now but for HA, not performance.  I'd hate to lose the HA aspect as we utilize it for failover quite a bit (maintenance, etc.) but it would probably be worth it if MD performance was significantly improved.  If I understand correctly, there is some overhead with DNE and performance suffers with just two MDS's with a benefit with 4 or more MDS's, correct?  So that wouldn't be a good option for us unless we add MDS's?  Would an upgrade to SSD or NVMe in our MDTs help?
+
+I would greatly appreciate thoughts on the best path forward for making improvements.
+
+Thanks,
+Darby
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20210105/e193c589/attachment-0001.html>
+
+From darby.vicker-1 at nasa.gov  Tue Jan  5 08:51:13 2021
+From: darby.vicker-1 at nasa.gov (Vicker, Darby J. (JSC-EG111)[Jacobs Technology, Inc.])
+Date: Tue, 5 Jan 2021 16:51:13 +0000
+Subject: [lustre-discuss] [EXTERNAL] Re: Tuning for metadata performance
+In-Reply-To: <8560AA4D-1631-48D0-A417-27DF2FEF0D99@pnnl.gov>
+References: <8560AA4D-1631-48D0-A417-27DF2FEF0D99@pnnl.gov>
+Message-ID: <6BF0F0FA-ED07-42AD-B118-E067125BC28E@nasa.gov>
+
+Yes, we've done that already.  Sorry, I should have posted all our module parameters.
+
+[root at hpfs-fsl-mds0 lustre]# cat /etc/modprobe.d/lustre.conf
+# Lustre modprobe configuration
+
+options lnet networks=tcp0(enp4s0),o2ib0(ib1),o2ib1(ib0)
+options ko2iblnd map_on_demand=32
+options osd_zfs osd_txg_sync_delay_us=0 osd_object_sync_delay_us=0
+options zfs zfs_txg_history=120 zfs_txg_timeout=15 zfs_prefetch_disable=1 zfs_txg_timeout=30 zfs_vdev_scheduler=deadline
+
+[root at hpfs-fsl-mds0 lustre]#
+
+Would you mind elaborating on why you think ZFS was a bad choice?  In general, we love the features it brings.
+
+From: "Carlson, Timothy S" <Timothy.Carlson at pnnl.gov>
+Date: Tuesday, January 5, 2021 at 9:21 AM
+To: "Vicker, Darby J. (JSC-EG111)[Jacobs Technology, Inc.]" <darby.vicker-1 at nasa.gov>, "lustre-discuss at lists.lustre.org" <lustre-discuss at lists.lustre.org>
+Subject: [EXTERNAL] Re: [lustre-discuss] Tuning for metadata performance
+
+On the MDS, make sure you have turned off pre-fetch
+
+echo 1 > /sys/module/zfs/parameters/zfs_prefetch_disable
+
+On our ancient (similar vintage) file system this greatly reduced the load on the MDS so it didn?t come to a complete standstill when under pressure.  ZFS for the MDS was a horrible choice (I made the same mistake).
+
+Tim
+
+From: lustre-discuss <lustre-discuss-bounces at lists.lustre.org> on behalf of "Vicker, Darby J. (JSC-EG111)[Jacobs Technology, Inc.]" <darby.vicker-1 at nasa.gov>
+Date: Tuesday, January 5, 2021 at 7:48 AM
+To: "Lustre-discuss at lists.lustre.org" <lustre-discuss at lists.lustre.org>
+Subject: [lustre-discuss] Tuning for metadata performance
+
+Hello,
+
+I'm looking for some advice on tuning our existing lustre file system to achieve better metadata performance.  This file system is getting fairly old ? its been in production for almost 4 years now.  The hardware and our existing tuning efforts can be found here.
+
+http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/2017-April/014390.html<https://gcc02.safelinks.protection.outlook.com/?url=http%3A%2F%2Flists.lustre.org%2Fpipermail%2Flustre-discuss-lustre.org%2F2017-April%2F014390.html&data=04%7C01%7Cdarby.vicker-1%40nasa.gov%7Cc535e40f55cf4bb5ac9208d8b195efa9%7C7005d45845be48ae8140d43da96dd17b%7C0%7C0%7C637454604822649714%7CUnknown%7CTWFpbGZsb3d8eyJWIjoiMC4wLjAwMDAiLCJQIjoiV2luMzIiLCJBTiI6Ik1haWwiLCJXVCI6Mn0%3D%7C1000&sdata=v7itMDRs9jWCw43ScQqmejiSHeDDbiogEOaT4ThOkdM%3D&reserved=0>
+
+The hardware is the same but we have upgraded the software stack a few times ? now on CentOS 7.6, ZFS 0.7.9 and lustre 2.10.8.  We do plan to upgrade to the latest CentOS 7.x and either lustre 2.12 or 2.13 soon.  The MDS hardware isn't well-described in that thread so here are more details:
+
+Chassis: Supermicro 2U Twin Server
+Processor: 4 x Quad?Core Xeon Processor E5?2637 v2 3.50GHz (2 sockets/8 cores per node)
+Memory: 16 x 16GB PC3?14900 1866MHz DDR3 ECC Registered DIMM (128GB per node)
+
+External JBOD:
+Chassis: 24x Hot?Swap 2.5" SAS ? 12Gb/s SAS Dual Expander
+Drives: 12 x 600GB SAS 3.0 12.0Gb/s 15000RPM ? 2.5" ? Seagate Enterprise Performance 15K HDD (512n)
+Controller Card: LSI SAS 9300-8e SAS 12Gb/s PCIe 3.0 8-Port Host Bus Adapter
+
+The above hardware and tuning served us well for a long time but the lab has grown, both in number of lustre clients (now up to ~200 ethernet clients and ~500 IB clients) and the number of users in the lab.  With the extra users have come different types of workloads.  Peviously, the file system was most used for workloads with a fairly small number of large files.  We now see workloads that include 100's of concurrent processes all doing mixed small and large file IO on a lot of files (e.g. each process clones a repo, compiles a code and runs a serial sim that writes a lot of data).
+
+I recently ran the io500 tests and our LFS stats for MDEasy and MDHard are pretty bad, even when compared to the lowest MD stats on the current io500 list.  Our standard NFS server handily beats our LFS wrt MD performance.  So I'm hopeful that we can squeeze more MD performance out of our LFS.  Obviously, software tuning on the existing hardware would be preferred but we are open to hardware additions/upgrades if that would help (e.g. adding more MDS's).  There are a lot of tuning options in both ZFS and lustre so I'm hoping someone can point me in the right direction.  Are DNE and/or DoM expected to help?  I attended the SC20 Lustre BoF and it sounds like 2.13 has some metadata performance improvements, so just an upgrade might help.  We have dual MDS's now but for HA, not performance.  I'd hate to lose the HA aspect as we utilize it for failover quite a bit (maintenance, etc.) but it would probably be worth it if MD performance was significantly improved.  If I understand correctly, there is some overhead with DNE and performance suffers with just two MDS's with a benefit with 4 or more MDS's, correct?  So that wouldn't be a good option for us unless we add MDS's?  Would an upgrade to SSD or NVMe in our MDTs help?
+
+I would greatly appreciate thoughts on the best path forward for making improvements.
+
+Thanks,
+Darby
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20210105/18b15753/attachment-0001.html>
+
+From Timothy.Carlson at pnnl.gov  Tue Jan  5 09:06:06 2021
+From: Timothy.Carlson at pnnl.gov (Carlson, Timothy S)
+Date: Tue, 5 Jan 2021 17:06:06 +0000
+Subject: [lustre-discuss] [EXTERNAL] Re: Tuning for metadata performance
+In-Reply-To: <6BF0F0FA-ED07-42AD-B118-E067125BC28E@nasa.gov>
+References: <8560AA4D-1631-48D0-A417-27DF2FEF0D99@pnnl.gov>
+ <6BF0F0FA-ED07-42AD-B118-E067125BC28E@nasa.gov>
+Message-ID: <6C028ECC-DF71-482C-A726-D536A9DA2AE8@pnnl.gov>
+
+The ZFS metadata performance always lagged behind ldiskfs.  While dated, a pretty graph of performance is here:
+
+https://www.intel.com/content/dam/www/public/us/en/documents/presentation/benefits-zfs-for-lustre-deployments.pdf
+
+Don?t get me wrong, I love ZFS for OSS systems. You would have to pull the compression capabilities from my cold dead hands.
+
+Tim
+
+From: "Vicker, Darby J. (JSC-EG111)[Jacobs Technology, Inc.]" <darby.vicker-1 at nasa.gov>
+Date: Tuesday, January 5, 2021 at 8:51 AM
+To: Timothy Carlson <Timothy.Carlson at pnnl.gov>, "Lustre-discuss at lists.lustre.org" <lustre-discuss at lists.lustre.org>
+Subject: Re: [EXTERNAL] Re: [lustre-discuss] Tuning for metadata performance
+
+Yes, we've done that already.  Sorry, I should have posted all our module parameters.
+
+[root at hpfs-fsl-mds0 lustre]# cat /etc/modprobe.d/lustre.conf
+# Lustre modprobe configuration
+
+options lnet networks=tcp0(enp4s0),o2ib0(ib1),o2ib1(ib0)
+options ko2iblnd map_on_demand=32
+options osd_zfs osd_txg_sync_delay_us=0 osd_object_sync_delay_us=0
+options zfs zfs_txg_history=120 zfs_txg_timeout=15 zfs_prefetch_disable=1 zfs_txg_timeout=30 zfs_vdev_scheduler=deadline
+
+[root at hpfs-fsl-mds0 lustre]#
+
+Would you mind elaborating on why you think ZFS was a bad choice?  In general, we love the features it brings.
+
+From: "Carlson, Timothy S" <Timothy.Carlson at pnnl.gov>
+Date: Tuesday, January 5, 2021 at 9:21 AM
+To: "Vicker, Darby J. (JSC-EG111)[Jacobs Technology, Inc.]" <darby.vicker-1 at nasa.gov>, "lustre-discuss at lists.lustre.org" <lustre-discuss at lists.lustre.org>
+Subject: [EXTERNAL] Re: [lustre-discuss] Tuning for metadata performance
+
+On the MDS, make sure you have turned off pre-fetch
+
+echo 1 > /sys/module/zfs/parameters/zfs_prefetch_disable
+
+On our ancient (similar vintage) file system this greatly reduced the load on the MDS so it didn?t come to a complete standstill when under pressure.  ZFS for the MDS was a horrible choice (I made the same mistake).
+
+Tim
+
+From: lustre-discuss <lustre-discuss-bounces at lists.lustre.org> on behalf of "Vicker, Darby J. (JSC-EG111)[Jacobs Technology, Inc.]" <darby.vicker-1 at nasa.gov>
+Date: Tuesday, January 5, 2021 at 7:48 AM
+To: "Lustre-discuss at lists.lustre.org" <lustre-discuss at lists.lustre.org>
+Subject: [lustre-discuss] Tuning for metadata performance
+
+Hello,
+
+I'm looking for some advice on tuning our existing lustre file system to achieve better metadata performance.  This file system is getting fairly old ? its been in production for almost 4 years now.  The hardware and our existing tuning efforts can be found here.
+
+http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/2017-April/014390.html<https://gcc02.safelinks.protection.outlook.com/?url=http%3A%2F%2Flists.lustre.org%2Fpipermail%2Flustre-discuss-lustre.org%2F2017-April%2F014390.html&data=04%7C01%7CTimothy.Carlson%40pnnl.gov%7C7641b50c0230452b041d08d8b19a2b3a%7Cd6faa5f90ae240338c0130048a38deeb%7C0%7C0%7C637454623006716869%7CUnknown%7CTWFpbGZsb3d8eyJWIjoiMC4wLjAwMDAiLCJQIjoiV2luMzIiLCJBTiI6Ik1haWwiLCJXVCI6Mn0%3D%7C1000&sdata=MhFgPSc6A8Zatdtr4y0SWv1gufvUMQG3TLB6eTV3ypQ%3D&reserved=0>
+
+The hardware is the same but we have upgraded the software stack a few times ? now on CentOS 7.6, ZFS 0.7.9 and lustre 2.10.8.  We do plan to upgrade to the latest CentOS 7.x and either lustre 2.12 or 2.13 soon.  The MDS hardware isn't well-described in that thread so here are more details:
+
+Chassis: Supermicro 2U Twin Server
+Processor: 4 x Quad?Core Xeon Processor E5?2637 v2 3.50GHz (2 sockets/8 cores per node)
+Memory: 16 x 16GB PC3?14900 1866MHz DDR3 ECC Registered DIMM (128GB per node)
+
+External JBOD:
+Chassis: 24x Hot?Swap 2.5" SAS ? 12Gb/s SAS Dual Expander
+Drives: 12 x 600GB SAS 3.0 12.0Gb/s 15000RPM ? 2.5" ? Seagate Enterprise Performance 15K HDD (512n)
+Controller Card: LSI SAS 9300-8e SAS 12Gb/s PCIe 3.0 8-Port Host Bus Adapter
+
+The above hardware and tuning served us well for a long time but the lab has grown, both in number of lustre clients (now up to ~200 ethernet clients and ~500 IB clients) and the number of users in the lab.  With the extra users have come different types of workloads.  Peviously, the file system was most used for workloads with a fairly small number of large files.  We now see workloads that include 100's of concurrent processes all doing mixed small and large file IO on a lot of files (e.g. each process clones a repo, compiles a code and runs a serial sim that writes a lot of data).
+
+I recently ran the io500 tests and our LFS stats for MDEasy and MDHard are pretty bad, even when compared to the lowest MD stats on the current io500 list.  Our standard NFS server handily beats our LFS wrt MD performance.  So I'm hopeful that we can squeeze more MD performance out of our LFS.  Obviously, software tuning on the existing hardware would be preferred but we are open to hardware additions/upgrades if that would help (e.g. adding more MDS's).  There are a lot of tuning options in both ZFS and lustre so I'm hoping someone can point me in the right direction.  Are DNE and/or DoM expected to help?  I attended the SC20 Lustre BoF and it sounds like 2.13 has some metadata performance improvements, so just an upgrade might help.  We have dual MDS's now but for HA, not performance.  I'd hate to lose the HA aspect as we utilize it for failover quite a bit (maintenance, etc.) but it would probably be worth it if MD performance was significantly improved.  If I understand correctly, there is some overhead with DNE and performance suffers with just two MDS's with a benefit with 4 or more MDS's, correct?  So that wouldn't be a good option for us unless we add MDS's?  Would an upgrade to SSD or NVMe in our MDTs help?
+
+I would greatly appreciate thoughts on the best path forward for making improvements.
+
+Thanks,
+Darby
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20210105/c8c84d00/attachment-0001.html>
+
+From adilger at whamcloud.com  Tue Jan  5 10:51:12 2021
+From: adilger at whamcloud.com (Andreas Dilger)
+Date: Tue, 5 Jan 2021 18:51:12 +0000
+Subject: [lustre-discuss] Tuning for metadata performance
+In-Reply-To: <3BF047EB-0627-4327-A920-95DC8228D340@nasa.gov>
+References: <62208010-08E6-4222-9DC1-9FF18FB195C6@nasa.gov>,
+ <3BF047EB-0627-4327-A920-95DC8228D340@nasa.gov>
+Message-ID: <A9846898-DE43-428B-8634-BEBEB3AEF9B5@whamcloud.com>
+
+Probably the best single thing you could do for metadata performance
+would be to switch to SSD, or better NVMe, storage.  ZFS is very sync
+and IOPS hungry, so using HDDs is killer for ZFS metadata performance.
+
+If you want to minimize the downtime, you could incrementally replace the
+HDDs in the zpool with larger SSD devices and resilver between each
+one.  I recall LLNL doing this in the first months of their first ZFS-based
+Lustre filesystem for this reason.
+
+Going to NVMe-based devices is even better for IOPS/bandwidth, but
+can't be done completely live.  You could potentially use repeated zfs
+send/recv to get an almost uptodate copy on a new MDS, then take a small
+outage to do the final resync. However, I've also seen reports that send/recv is painfully slow with HDD MDTs so you should probably test that before committing to a solution.
+
+Cheers, Andreas
+
+On Jan 5, 2021, at 08:47, Vicker, Darby J. (JSC-EG111)[Jacobs Technology, Inc.] <darby.vicker-1 at nasa.gov> wrote:
+
+?
+Hello,
+
+I'm looking for some advice on tuning our existing lustre file system to achieve better metadata performance.  This file system is getting fairly old ? its been in production for almost 4 years now.  The hardware and our existing tuning efforts can be found here.
+
+http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/2017-April/014390.html
+
+The hardware is the same but we have upgraded the software stack a few times ? now on CentOS 7.6, ZFS 0.7.9 and lustre 2.10.8.  We do plan to upgrade to the latest CentOS 7.x and either lustre 2.12 or 2.13 soon.  The MDS hardware isn't well-described in that thread so here are more details:
+
+Chassis: Supermicro 2U Twin Server
+Processor: 4 x Quad?Core Xeon Processor E5?2637 v2 3.50GHz (2 sockets/8 cores per node)
+Memory: 16 x 16GB PC3?14900 1866MHz DDR3 ECC Registered DIMM (128GB per node)
+
+External JBOD:
+Chassis: 24x Hot?Swap 2.5" SAS ? 12Gb/s SAS Dual Expander
+Drives: 12 x 600GB SAS 3.0 12.0Gb/s 15000RPM ? 2.5" ? Seagate Enterprise Performance 15K HDD (512n)
+Controller Card: LSI SAS 9300-8e SAS 12Gb/s PCIe 3.0 8-Port Host Bus Adapter
+
+The above hardware and tuning served us well for a long time but the lab has grown, both in number of lustre clients (now up to ~200 ethernet clients and ~500 IB clients) and the number of users in the lab.  With the extra users have come different types of workloads.  Peviously, the file system was most used for workloads with a fairly small number of large files.  We now see workloads that include 100's of concurrent processes all doing mixed small and large file IO on a lot of files (e.g. each process clones a repo, compiles a code and runs a serial sim that writes a lot of data).
+
+I recently ran the io500 tests and our LFS stats for MDEasy and MDHard are pretty bad, even when compared to the lowest MD stats on the current io500 list.  Our standard NFS server handily beats our LFS wrt MD performance.  So I'm hopeful that we can squeeze more MD performance out of our LFS.  Obviously, software tuning on the existing hardware would be preferred but we are open to hardware additions/upgrades if that would help (e.g. adding more MDS's).  There are a lot of tuning options in both ZFS and lustre so I'm hoping someone can point me in the right direction.  Are DNE and/or DoM expected to help?  I attended the SC20 Lustre BoF and it sounds like 2.13 has some metadata performance improvements, so just an upgrade might help.  We have dual MDS's now but for HA, not performance.  I'd hate to lose the HA aspect as we utilize it for failover quite a bit (maintenance, etc.) but it would probably be worth it if MD performance was significantly improved.  If I understand correctly, there is some overhead with DNE and performance suffers with just two MDS's with a benefit with 4 or more MDS's, correct?  So that wouldn't be a good option for us unless we add MDS's?  Would an upgrade to SSD or NVMe in our MDTs help?
+
+I would greatly appreciate thoughts on the best path forward for making improvements.
+
+Thanks,
+Darby
+_______________________________________________
+lustre-discuss mailing list
+lustre-discuss at lists.lustre.org
+http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20210105/90344ea5/attachment.html>
+
+From darby.vicker-1 at nasa.gov  Wed Jan  6 08:29:07 2021
+From: darby.vicker-1 at nasa.gov (Vicker, Darby J. (JSC-EG111)[Jacobs Technology, Inc.])
+Date: Wed, 6 Jan 2021 16:29:07 +0000
+Subject: [lustre-discuss] [EXTERNAL] Re: Tuning for metadata performance
+In-Reply-To: <A9846898-DE43-428B-8634-BEBEB3AEF9B5@whamcloud.com>
+References: <62208010-08E6-4222-9DC1-9FF18FB195C6@nasa.gov>
+ <3BF047EB-0627-4327-A920-95DC8228D340@nasa.gov>
+ <A9846898-DE43-428B-8634-BEBEB3AEF9B5@whamcloud.com>
+Message-ID: <8262EC9B-0334-48F2-ADDE-63A6B5A67C17@nasa.gov>
+
+My apologies ? I posted some bad info.  While we started out with the HDD's in the MDS, pretty early on we switched to SSD's.  So that's not the source of our MD slowness.  Can you do NVMe in an external JBOD?
+
+From: Andreas Dilger <adilger at whamcloud.com>
+Date: Tuesday, January 5, 2021 at 11:51 AM
+To: "Vicker, Darby J. (JSC-EG111)[Jacobs Technology, Inc.]" <darby.vicker-1 at nasa.gov>
+Cc: "lustre-discuss at lists.lustre.org" <lustre-discuss at lists.lustre.org>
+Subject: [EXTERNAL] Re: [lustre-discuss] Tuning for metadata performance
+
+Probably the best single thing you could do for metadata performance
+would be to switch to SSD, or better NVMe, storage.  ZFS is very sync
+and IOPS hungry, so using HDDs is killer for ZFS metadata performance.
+
+If you want to minimize the downtime, you could incrementally replace the
+HDDs in the zpool with larger SSD devices and resilver between each
+one.  I recall LLNL doing this in the first months of their first ZFS-based
+Lustre filesystem for this reason.
+
+Going to NVMe-based devices is even better for IOPS/bandwidth, but
+can't be done completely live.  You could potentially use repeated zfs
+send/recv to get an almost uptodate copy on a new MDS, then take a small
+outage to do the final resync. However, I've also seen reports that send/recv is painfully slow with HDD MDTs so you should probably test that before committing to a solution.
+
+Cheers, Andreas
+
+
+On Jan 5, 2021, at 08:47, Vicker, Darby J. (JSC-EG111)[Jacobs Technology, Inc.] <darby.vicker-1 at nasa.gov> wrote:
+Hello,
+
+I'm looking for some advice on tuning our existing lustre file system to achieve better metadata performance.  This file system is getting fairly old ? its been in production for almost 4 years now.  The hardware and our existing tuning efforts can be found here.
+
+http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/2017-April/014390.html<https://gcc02.safelinks.protection.outlook.com/?url=http%3A%2F%2Flists.lustre.org%2Fpipermail%2Flustre-discuss-lustre.org%2F2017-April%2F014390.html&data=04%7C01%7Cdarby.vicker-1%40nasa.gov%7C67d78e41f86c4f9698d908d8b1aae627%7C7005d45845be48ae8140d43da96dd17b%7C0%7C0%7C637454694848613577%7CUnknown%7CTWFpbGZsb3d8eyJWIjoiMC4wLjAwMDAiLCJQIjoiV2luMzIiLCJBTiI6Ik1haWwiLCJXVCI6Mn0%3D%7C1000&sdata=8e0e37AIG8sCXIIbQaQ41Gddhj2byrpACgn2NRIlJ0g%3D&reserved=0>
+
+The hardware is the same but we have upgraded the software stack a few times ? now on CentOS 7.6, ZFS 0.7.9 and lustre 2.10.8.  We do plan to upgrade to the latest CentOS 7.x and either lustre 2.12 or 2.13 soon.  The MDS hardware isn't well-described in that thread so here are more details:
+
+Chassis: Supermicro 2U Twin Server
+Processor: 4 x Quad?Core Xeon Processor E5?2637 v2 3.50GHz (2 sockets/8 cores per node)
+Memory: 16 x 16GB PC3?14900 1866MHz DDR3 ECC Registered DIMM (128GB per node)
+
+External JBOD:
+Chassis: 24x Hot?Swap 2.5" SAS ? 12Gb/s SAS Dual Expander
+Drives: 12 x 600GB SAS 3.0 12.0Gb/s 15000RPM ? 2.5" ? Seagate Enterprise Performance 15K HDD (512n)
+Controller Card: LSI SAS 9300-8e SAS 12Gb/s PCIe 3.0 8-Port Host Bus Adapter
+
+The above hardware and tuning served us well for a long time but the lab has grown, both in number of lustre clients (now up to ~200 ethernet clients and ~500 IB clients) and the number of users in the lab.  With the extra users have come different types of workloads.  Peviously, the file system was most used for workloads with a fairly small number of large files.  We now see workloads that include 100's of concurrent processes all doing mixed small and large file IO on a lot of files (e.g. each process clones a repo, compiles a code and runs a serial sim that writes a lot of data).
+
+I recently ran the io500 tests and our LFS stats for MDEasy and MDHard are pretty bad, even when compared to the lowest MD stats on the current io500 list.  Our standard NFS server handily beats our LFS wrt MD performance.  So I'm hopeful that we can squeeze more MD performance out of our LFS.  Obviously, software tuning on the existing hardware would be preferred but we are open to hardware additions/upgrades if that would help (e.g. adding more MDS's).  There are a lot of tuning options in both ZFS and lustre so I'm hoping someone can point me in the right direction.  Are DNE and/or DoM expected to help?  I attended the SC20 Lustre BoF and it sounds like 2.13 has some metadata performance improvements, so just an upgrade might help.  We have dual MDS's now but for HA, not performance.  I'd hate to lose the HA aspect as we utilize it for failover quite a bit (maintenance, etc.) but it would probably be worth it if MD performance was significantly improved.  If I understand correctly, there is some overhead with DNE and performance suffers with just two MDS's with a benefit with 4 or more MDS's, correct?  So that wouldn't be a good option for us unless we add MDS's?  Would an upgrade to SSD or NVMe in our MDTs help?
+
+I would greatly appreciate thoughts on the best path forward for making improvements.
+
+Thanks,
+Darby
+_______________________________________________
+lustre-discuss mailing list
+lustre-discuss at lists.lustre.org
+http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20210106/cbda6c6f/attachment-0001.html>
+
+From nathan.dauchy at noaa.gov  Thu Jan  7 07:54:02 2021
+From: nathan.dauchy at noaa.gov (Nathan Dauchy - NOAA Affiliate)
+Date: Thu, 7 Jan 2021 08:54:02 -0700
+Subject: [lustre-discuss] Improving file create performance with larger
+ create_count
+Message-ID: <CAO9q2D=5r9-Ydh93Fn4YobU301k8Y6nrvnnTxgGaTErmEscR-Q@mail.gmail.com>
+
+Greetings Lustre Experts!
+
+I am looking for assistance on how to improve file create rate, as measured
+with MDtest.
+
+In particular, this is for filesystems with (4) MDTs that use progressive
+file layouts (PFL) to place the first part of each file on one of the (2)
+Flash OSTs, with the remainder of large files on HDD OSTs using increasing
+stripe count (up to 32) as the files get larger.
+MDtest file create performance of this configuration is significantly lower
+(160k vs. 550k) than when using a simple stripe count of 1 on HDDs alone.
+MDtest was run with 0-size files (not using "-w") so no data should
+actually be written to the OSTs, and the IOPS and CPU and Network of the
+Flash OSSs should be plenty to sustain higher performance.  Our vendor
+pointed out that we are likely limited by the number of "precreated
+objects" for the flash OSTs (since there are only two of them, handling all
+files) and that it can be increased as an optimization.
+
+I have found the "create_count" and "max_create_count" tunables, but the
+Lustre manual only references those in the context of removing or disabling
+an OST.  So either the manual is incomplete or I'm looking at the wrong
+tunable.
+
+If create_count is indeed the right parameter to adjust...
+* What is the relation between create_count and max_create_count?  And why
+would I never see create_count more than half of max?
+MGS# lctl get_param osc.*OST0000-osc-MDT0000*.*create_count
+osc.FS1-OST0000-osc-MDT0000.create_count=10000
+osc.FS1-OST0000-osc-MDT0000.max_create_count=20000
+* Is there a hard-coded limit to the max value?
+MGS# lctl set_param osc.FS1-OST0000-osc-MDT0000.max_create_count=40000
+error: set_param: setting
+/sys/fs/lustre/osc/FS1-OST0000-osc-MDT0000/max_create_count=40000:
+Numerical result out of range
+* Is there a theoretical down side to pre-creating more objects?  (MDS or
+OSS memory usage?  Longer mount times? slower e2fsck?)
+* Are there other tunings we should be looking at to improve performance
+with Progressive File Layouts and our particular balance of just 2 Flash
+OSTs to 32 HDD OSTs?
+
+Thanks everyone for any suggestions!
+
+-Nathan
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20210107/197a12f9/attachment.html>
+
+From adilger at whamcloud.com  Thu Jan  7 20:56:45 2021
+From: adilger at whamcloud.com (Andreas Dilger)
+Date: Fri, 8 Jan 2021 04:56:45 +0000
+Subject: [lustre-discuss] Improving file create performance with larger
+ create_count
+In-Reply-To: <CAO9q2D=5r9-Ydh93Fn4YobU301k8Y6nrvnnTxgGaTErmEscR-Q@mail.gmail.com>
+References: <CAO9q2D=5r9-Ydh93Fn4YobU301k8Y6nrvnnTxgGaTErmEscR-Q@mail.gmail.com>
+Message-ID: <1A0399BA-4E34-401E-A01E-02AACEF0AF7F@whamcloud.com>
+
+On Jan 7, 2021, at 08:54, Nathan Dauchy - NOAA Affiliate <nathan.dauchy at noaa.gov<mailto:nathan.dauchy at noaa.gov>> wrote:
+
+Greetings Lustre Experts!
+
+I am looking for assistance on how to improve file create rate, as measured with MDtest.
+
+In particular, this is for filesystems with (4) MDTs that use progressive file layouts (PFL) to place the first part of each file on one of the (2) Flash OSTs, with the remainder of large files on HDD OSTs using increasing stripe count (up to 32) as the files get larger.
+MDtest file create performance of this configuration is significantly lower (160k vs. 550k) than when using a simple stripe count of 1 on HDDs alone.  MDtest was run with 0-size files (not using "-w") so no data should actually be written to the OSTs, and the IOPS and CPU and Network of the Flash OSSs should be plenty to sustain higher performance.
+
+Nathan,
+one thing to pay attention to is how large your PFL layout is.  If it is 4 components and/or you have an MDT formatted with an older (pre 2.10) version of Lustre, then the amount of xattr space for the layout directly in the MDT inode is relatively small.  Limiting the PFL layout to 3 components and having an MDT inode size of 1KB should avoid the extra overhead of writing to a separate xattr block for each create.
+
+The other potential source of overhead is if the flash OSTs have a very large number of objects vs. the HDD OSTs (e.g. hundreds of millions if there is *always* a flash component for each file and they are never removed from large files during OST migration) which make the OST object directories very large, and each create essentially goes into a separate directory block.  The saving grace in your case is that the flash OSTs have higher IOPS, so they _should_ be able to keep up with the HDD OSTs even if they have a higher workload.
+
+You could try isolating whether the bottleneck is from the 2 flash OSTs to 32 HDD OSTs, or because of the large layout size.  Try creating 1-stripe files in individual directories that are each setstripe to create only on a single OST.  That should show what the single OST create rate limit is.  You could compare this against the no-stripe create rate for the MDS.
+
+On the flip side, you could create files in a directory with a large layout that has many components, like:
+
+  lfs setstripe -E 16M -c 1 -i 1 -E 32M -i 2 -E 48M -i 3 -E eof -i 4  $MOUNT/ost1largedir
+
+to see how this affects the create rate.  The OST objects would be consumed 4x as fast, but from 4x OSTs (assume they are the HDD OSTs) so they _should_ be creating/consuming OST objects at the same rate as a 1-stripe file file, except the large layout size will push this to a separate xattr block and put much more IOPS onto the MDS.  You could try with the two flash OSTs, two objects on each of the two OSTs, which should get you 1/2 the create rate if the OST create rate is the limiting factor.  If this tanks performance then the issue is with the large layout xattr and not the OSTs.
+
+Our vendor pointed out that we are likely limited by the number of "precreated objects" for the flash OSTs (since there are only two of them, handling all files) and that it can be increased as an optimization.
+
+Sheesh, those vendors... :-)
+
+I have found the "create_count" and "max_create_count" tunables, but the Lustre manual only references those in the context of removing or disabling an OST.  So either the manual is incomplete or I'm looking at the wrong tunable.
+
+If create_count is indeed the right parameter to adjust...
+* What is the relation between create_count and max_create_count?  And why would I never see create_count more than half of max?
+MGS# lctl get_param osc.*OST0000-osc-MDT0000*.*create_count
+osc.FS1-OST0000-osc-MDT0000.create_count=10000
+osc.FS1-OST0000-osc-MDT0000.max_create_count=20000
+
+The important place to check the create_count/max_create_count on the MDS, since it is the one driving object creates to the OSTs.
+
+* Is there a hard-coded limit to the max value?
+MGS# lctl set_param osc.FS1-OST0000-osc-MDT0000.max_create_count=40000
+error: set_param: setting /sys/fs/lustre/osc/FS1-OST0000-osc-MDT0000/max_create_count=40000: Numerical result out of range
+
+The max_create_count is between 32 and 20000 (for protocol recovery reasons, since unused precreated objects are destroyed during recovery, and we put a cap on how many objects could be destroyed to avoid badness in case of a bug) so this is already at the maximum.  You should be able to increase the create_count to 20000 as well. However, this value is "auto tuned" based on how long it takes the OSS to create the requested objects.  If the OST_CREATE RPC takes too long then the MDS will ask for fewer objects next time.
+
+* Is there a theoretical down side to pre-creating more objects?  (MDS or OSS memory usage?  Longer mount times? slower e2fsck?)
+
+A bit slower e2fsck, but compared to the total filesystem size this is minor.  The biggest issue is that the old precreated objects will be destroyed during MDS-OSS recovery and new ones created.
+
+* Are there other tunings we should be looking at to improve performance with Progressive File Layouts and our particular balance of just 2 Flash OSTs to 32 HDD OSTs?
+
+Depends what the above results show.  There is the "obdfilter.*.precreate_batch" tunable, which can help optimize OST creates if there is a lot of lock contention on the object directories for create vs. concurrent IO, but it is unlikely to be an issue under normal usage.  If the problem is that the OSTs have huge numbers of objects and large object directories there are other potential optimizations possible.
+
+Cheers, Andreas
+--
+Andreas Dilger
+Principal Lustre Architect
+Whamcloud
+
+
+
+
+
+
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20210108/6e148290/attachment.html>
+
+From darby.vicker-1 at nasa.gov  Fri Jan  8 10:35:19 2021
+From: darby.vicker-1 at nasa.gov (Vicker, Darby J. (JSC-EG111)[Jacobs Technology, Inc.])
+Date: Fri, 8 Jan 2021 18:35:19 +0000
+Subject: [lustre-discuss] Tuning for metadata performance
+Message-ID: <5A11B273-43EC-4796-BDCB-6D4DFEB0E0B7@nasa.gov>
+
+Perhaps a better question to ask (although very closely related) would be how can we improve the MD tests in the io500 benchmark?
+
+In the info below this is the info on these file systems:
+
+nobackup ? a lustre FS on the hardware we've been discussing with a ZFS MDT, nominally running on mds0
+ephemeral ? a lustre FS on the hardware we've been discussing with an ldiskfs MDT, nominally running on mds1
+scratch ? a standard NFS mount
+local ? a local SSD
+
+A little more background on the motivation here.  We have some fairly large software development projects in the lab.  One of the largest active projects has a git repo with about 500,000 files totaling 5 GB in size. A clone of these repo takes 550 seconds on lustre and about 150 seconds on NFS.  A status takes 15 seconds on lustre and 3 seconds on NFS.  Not surprisingly, the timings are greatly reduced on a local SSD.  See the attached plot in git_timings.pdf for details.  The slowness on lustre is largely (completely?) driven by the MD performance.  Obviously, we work with the repo on a local file system when possible to avoid the performance hit.  But one of the workflows involves Monte Carlo analysis against this repo, varying dozens of parameters, running 1000's of cases and analyzing the results.  This produces a lot of data and necessitates the shared FS for both running the Monte Carlo cases and simply storing the amounts of data these runs produce.
+
+There are several other scenarios in which we are working with smaller, but still sizeable, data sets (git repos and other forms) on the lustre file system and the MD sluggishness is noticeable and annoying.  So we would like to try and improve MD performance.
+
+To further characterize and compare the IO performance on these file systems, I've run the io500 benchmarks.  The attached plots show the results.  This is a completely "out of the box" run on a single node.  That is, I'm just running "./io500.sh config-minimal.ini".  (I've run the 10-node results too (or tried to) for more direct comparison to the results on io500.org but that's a slightly different objective.)  I figure the single node run is analogous to a person working with a git repo scenario.  This is on a 10 gigabit ethernet client.  Details attached but the MD results are fairly consistent with the above git timings ? lustre is about 3x to 10x slower than NFS.  I'd be curious to get some feedback on these MD performance numbers.  Do they seem low compared to other LFS's out there?  As I mentioned in the original post in this thread, our numbers are quite low when compared to even the lowest numbers on the current io500 list.
+
+How is MD performance expected to increase with increasing numbers of clients?  I know bandwidth increases as you grab more OST' but would MD performance be expected to increase at all?  We are not using DoM or DNE.
+
+Also as mentioned before, we will upgrade lustre soon.  I'd like to stick with the 2.12 LTS stream.  But would the upcoming 2.14 have any potential MD performance advantages?
+
+
+From: lustre-discuss <lustre-discuss-bounces at lists.lustre.org> on behalf of "Vicker, Darby J. (JSC-EG111)[Jacobs Technology, Inc.]" <darby.vicker-1 at nasa.gov>
+Date: Wednesday, January 6, 2021 at 9:29 AM
+To: Andreas Dilger <adilger at whamcloud.com>
+Cc: "lustre-discuss at lists.lustre.org" <lustre-discuss at lists.lustre.org>
+Subject: Re: [lustre-discuss] [EXTERNAL] Re: Tuning for metadata performance
+
+My apologies ? I posted some bad info.  While we started out with the HDD's in the MDS, pretty early on we switched to SSD's.  So that's not the source of our MD slowness.  Can you do NVMe in an external JBOD?
+
+From: Andreas Dilger <adilger at whamcloud.com>
+Date: Tuesday, January 5, 2021 at 11:51 AM
+To: "Vicker, Darby J. (JSC-EG111)[Jacobs Technology, Inc.]" <darby.vicker-1 at nasa.gov>
+Cc: "lustre-discuss at lists.lustre.org" <lustre-discuss at lists.lustre.org>
+Subject: [EXTERNAL] Re: [lustre-discuss] Tuning for metadata performance
+
+Probably the best single thing you could do for metadata performance
+would be to switch to SSD, or better NVMe, storage.  ZFS is very sync
+and IOPS hungry, so using HDDs is killer for ZFS metadata performance.
+
+If you want to minimize the downtime, you could incrementally replace the
+HDDs in the zpool with larger SSD devices and resilver between each
+one.  I recall LLNL doing this in the first months of their first ZFS-based
+Lustre filesystem for this reason.
+
+Going to NVMe-based devices is even better for IOPS/bandwidth, but
+can't be done completely live.  You could potentially use repeated zfs
+send/recv to get an almost uptodate copy on a new MDS, then take a small
+outage to do the final resync. However, I've also seen reports that send/recv is painfully slow with HDD MDTs so you should probably test that before committing to a solution.
+
+Cheers, Andreas
+
+
+
+On Jan 5, 2021, at 08:47, Vicker, Darby J. (JSC-EG111)[Jacobs Technology, Inc.] <darby.vicker-1 at nasa.gov> wrote:
+Hello,
+
+I'm looking for some advice on tuning our existing lustre file system to achieve better metadata performance.  This file system is getting fairly old ? its been in production for almost 4 years now.  The hardware and our existing tuning efforts can be found here.
+
+http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/2017-April/014390.html<https://gcc02.safelinks.protection.outlook.com/?url=http%3A%2F%2Flists.lustre.org%2Fpipermail%2Flustre-discuss-lustre.org%2F2017-April%2F014390.html&data=04%7C01%7Cdarby.vicker-1%40nasa.gov%7C31c6f19d61644d8f288808d8b2603d72%7C7005d45845be48ae8140d43da96dd17b%7C0%7C0%7C637455473704814500%7CUnknown%7CTWFpbGZsb3d8eyJWIjoiMC4wLjAwMDAiLCJQIjoiV2luMzIiLCJBTiI6Ik1haWwiLCJXVCI6Mn0%3D%7C1000&sdata=0N7t8sXSdxRHBVDZX1yPrwwyy0l38LYq46GY%2BYovqas%3D&reserved=0>
+
+The hardware is the same but we have upgraded the software stack a few times ? now on CentOS 7.6, ZFS 0.7.9 and lustre 2.10.8.  We do plan to upgrade to the latest CentOS 7.x and either lustre 2.12 or 2.13 soon.  The MDS hardware isn't well-described in that thread so here are more details:
+
+Chassis: Supermicro 2U Twin Server
+Processor: 4 x Quad?Core Xeon Processor E5?2637 v2 3.50GHz (2 sockets/8 cores per node)
+Memory: 16 x 16GB PC3?14900 1866MHz DDR3 ECC Registered DIMM (128GB per node)
+
+External JBOD:
+Chassis: 24x Hot?Swap 2.5" SAS ? 12Gb/s SAS Dual Expander
+Drives: 12 x 600GB SAS 3.0 12.0Gb/s 15000RPM ? 2.5" ? Seagate Enterprise Performance 15K HDD (512n)
+Controller Card: LSI SAS 9300-8e SAS 12Gb/s PCIe 3.0 8-Port Host Bus Adapter
+
+The above hardware and tuning served us well for a long time but the lab has grown, both in number of lustre clients (now up to ~200 ethernet clients and ~500 IB clients) and the number of users in the lab.  With the extra users have come different types of workloads.  Peviously, the file system was most used for workloads with a fairly small number of large files.  We now see workloads that include 100's of concurrent processes all doing mixed small and large file IO on a lot of files (e.g. each process clones a repo, compiles a code and runs a serial sim that writes a lot of data).
+
+I recently ran the io500 tests and our LFS stats for MDEasy and MDHard are pretty bad, even when compared to the lowest MD stats on the current io500 list.  Our standard NFS server handily beats our LFS wrt MD performance.  So I'm hopeful that we can squeeze more MD performance out of our LFS.  Obviously, software tuning on the existing hardware would be preferred but we are open to hardware additions/upgrades if that would help (e.g. adding more MDS's).  There are a lot of tuning options in both ZFS and lustre so I'm hoping someone can point me in the right direction.  Are DNE and/or DoM expected to help?  I attended the SC20 Lustre BoF and it sounds like 2.13 has some metadata performance improvements, so just an upgrade might help.  We have dual MDS's now but for HA, not performance.  I'd hate to lose the HA aspect as we utilize it for failover quite a bit (maintenance, etc.) but it would probably be worth it if MD performance was significantly improved.  If I understand correctly, there is some overhead with DNE and performance suffers with just two MDS's with a benefit with 4 or more MDS's, correct?  So that wouldn't be a good option for us unless we add MDS's?  Would an upgrade to SSD or NVMe in our MDTs help?
+
+I would greatly appreciate thoughts on the best path forward for making improvements.
+
+Thanks,
+Darby
+_______________________________________________
+lustre-discuss mailing list
+lustre-discuss at lists.lustre.org
+http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20210108/260263e1/attachment-0001.html>
+-------------- next part --------------
+A non-text attachment was scrubbed...
+Name: io500.pdf
+Type: application/pdf
+Size: 9628 bytes
+Desc: io500.pdf
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20210108/260263e1/attachment-0002.pdf>
+-------------- next part --------------
+A non-text attachment was scrubbed...
+Name: git_timings.pdf
+Type: application/pdf
+Size: 4676 bytes
+Desc: git_timings.pdf
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20210108/260263e1/attachment-0003.pdf>
+
+From nathan.dauchy at noaa.gov  Fri Jan  8 15:27:54 2021
+From: nathan.dauchy at noaa.gov (Nathan Dauchy - NOAA Affiliate)
+Date: Fri, 8 Jan 2021 16:27:54 -0700
+Subject: [lustre-discuss] Improving file create performance with larger
+ create_count
+In-Reply-To: <1A0399BA-4E34-401E-A01E-02AACEF0AF7F@whamcloud.com>
+References: <CAO9q2D=5r9-Ydh93Fn4YobU301k8Y6nrvnnTxgGaTErmEscR-Q@mail.gmail.com>
+ <1A0399BA-4E34-401E-A01E-02AACEF0AF7F@whamcloud.com>
+Message-ID: <CAO9q2DkT0uppxTJJkpwvXTWdOtZhdSo6ydWC8Z9hL=V0V+a-rw@mail.gmail.com>
+
+Andreas, thanks for the insight and advice.  Followup details inline
+below...
+
+On Thu, Jan 7, 2021 at 9:56 PM Andreas Dilger <adilger at whamcloud.com> wrote:
+
+> On Jan 7, 2021, at 08:54, Nathan Dauchy - NOAA Affiliate wrote:
+>
+> I am looking for assistance on how to improve file create rate, as
+> measured with MDtest.
+>
+> one thing to pay attention to is how large your PFL layout is.  If it is 4
+> components and/or you have an MDT formatted with an older (pre 2.10)
+> version of Lustre, then the amount of xattr space for the layout directly
+> in the MDT inode is relatively small.  Limiting the PFL layout to 3
+> components and having an MDT inode size of 1KB should avoid the extra
+> overhead of writing to a separate xattr block for each create.
+>
+
+The PFL layout has 5 components, setup like this:
+lfs setstripe -E 128K -c 1 -S 128K -p SSD -E 32M -S 1M -c 1 -p HDD -E 1G -c
+4 -S 64M -E 32G -c 8 -E -1 -c 30
+
+The MDT is brand new, formatted with 2.12+.
+Using "dumpe2fs -h" it appears as though the inode size is indeed 1KB:
+dumpe2fs 1.45.2.cr2 (09-Apr-2020)
+Inode size:          1024
+
+Does the following debugfs command confirm or refute whether file layouts
+created with that config are staying within the MDT inode?  (I'm not sure
+if I can just do 32+24+632+47 = 735 < 1024, or if there is another constant
+value that needs to be added in.)
+
+MDS3# debugfs -c -R 'stat
+/REMOTE_PARENT_DIR/0x2c000f630:0x1:0x0/Nathan.Dauchy/empty' /dev/md66
+Size of extra inode fields: 32
+Extended attributes:
+  trusted.lma (24) = 00 00 00 00 00 00 00 00 33 f6 00 c0 02 00 00 00 02 00
+00 00 00 00 00 00
+  lma: fid=[0x2c000f633:0x2:0x0] compat=0 incompat=0
+  trusted.lov (632)
+  trusted.link (47)
+  trusted.som (24) = 04 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+00 00 00 00 00 00
+
+If I use a 3-component layout and an empty file like this:
+lfs setstripe -E 32M -S 1M -c 1 -p HDD -E 1G -c 4 -S 64M -E -1 -c 8 3comp
+...then the "trusted.lov" value is the only one that decreases:
+  trusted.lma (24) = 00 00 00 00 00 00 00 00 33 f6 00 c0 02 00 00 00 07 00
+00 00 00 00 00 00
+  lma: fid=[0x2c000f633:0x7:0x0] compat=0 incompat=0
+  trusted.link (47)
+  trusted.lov (392)
+  trusted.som (24) = 04 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+00 00 00 00 00 00
+
+The other potential source of overhead is if the flash OSTs have a very
+> large number of objects vs. the HDD OSTs (e.g. hundreds of millions if
+> there is *always* a flash component for each file and they are never
+> removed from large files during OST migration) which make the OST object
+> directories very large, and each create essentially goes into a separate
+> directory block.  The saving grace in your case is that the flash OSTs have
+> higher IOPS, so they _should_ be able to keep up with the HDD OSTs even if
+> they have a higher workload.
+>
+
+I don't believe this applies (to us at least) as it is a new and fairly
+empty filesystem.  Thanks for the heads up for what to watch for in the
+future though!
+
+
+> You could try isolating whether the bottleneck is from the 2 flash OSTs to
+> 32 HDD OSTs, or because of the large layout size.  Try creating 1-stripe
+> files in individual directories that are each setstripe to create only on a
+> single OST.  That should show what the single OST create rate limit is.
+> You could compare this against the no-stripe create rate for the MDS.
+>
+> On the flip side, you could create files in a directory with a large
+> layout that has many components, like:
+>
+>   lfs setstripe -E 16M -c 1 -i 1 -E 32M -i 2 -E 48M -i 3 -E eof -i 4
+>  $MOUNT/ost1largedir
+>
+> to see how this affects the create rate.  The OST objects would be
+> consumed 4x as fast, but from 4x OSTs (assume they are the HDD OSTs) so
+> they _should_ be creating/consuming OST objects at the same rate as a
+> 1-stripe file file, except the large layout size will push this to a
+> separate xattr block and put much more IOPS onto the MDS.  You could try
+> with the two flash OSTs, two objects on each of the two OSTs, which should
+> get you 1/2 the create rate if the OST create rate is the limiting factor.
+> If this tanks performance then the issue is with the large layout xattr and
+> not the OSTs.
+>
+
+Additional benchmarking is in progress already.  If we need more clues I'll
+add that to the list.
+
+> I have found the "create_count" and "max_create_count" tunables, but the
+> Lustre manual only references those in the context of removing or disabling
+> an OST.  So either the manual is incomplete or I'm looking at the wrong
+> tunable.
+>
+> The important place to check the create_count/max_create_count on the MDS,
+> since it is the one driving object creates to the OSTs.
+>
+
+Understood, that "MGS" was my typo replacing a hostname.  It's the "MDS".
+
+> * Are there other tunings we should be looking at to improve performance
+> with Progressive File Layouts and our particular balance of just 2 Flash
+> OSTs to 32 HDD OSTs?
+>
+>
+> Depends what the above results show.  There is the
+> "obdfilter.*.precreate_batch" tunable, which can help optimize OST creates
+> if there is a lot of lock contention on the object directories for create
+> vs. concurrent IO, but it is unlikely to be an issue under normal usage.
+> If the problem is that the OSTs have huge numbers of objects and large
+> object directories there are other potential optimizations possible.
+>
+
+With the simple mdtest 0-byte file test, it doesn't sound like contention
+would be the problem.  Neither is it that the OSTs have huge number of
+objects (yet).
+
+We will keep digging.
+
+Thanks again,
+Nathan
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20210108/017b4d15/attachment.html>
+
+From mdidomenico4 at gmail.com  Mon Jan 11 07:05:31 2021
+From: mdidomenico4 at gmail.com (Michael Di Domenico)
+Date: Mon, 11 Jan 2021 10:05:31 -0500
+Subject: [lustre-discuss] Tuning for metadata performance
+In-Reply-To: <5A11B273-43EC-4796-BDCB-6D4DFEB0E0B7@nasa.gov>
+References: <5A11B273-43EC-4796-BDCB-6D4DFEB0E0B7@nasa.gov>
+Message-ID: <CABOsP2MyGZ3p7HkXCjLsPzfQDkE+yOcx-9iBmjR_oQ9TKP-Wow@mail.gmail.com>
+
+perhaps i missed it somewhere, but in order to do a fair comparison
+can you detail the hardware/software behind the nfs server?
+
+On Fri, Jan 8, 2021 at 1:35 PM Vicker, Darby J. (JSC-EG111)[Jacobs
+Technology, Inc.] <darby.vicker-1 at nasa.gov> wrote:
+>
+> Perhaps a better question to ask (although very closely related) would be how can we improve the MD tests in the io500 benchmark?
+>
+>
+>
+> In the info below this is the info on these file systems:
+>
+>
+>
+> nobackup ? a lustre FS on the hardware we've been discussing with a ZFS MDT, nominally running on mds0
+>
+> ephemeral ? a lustre FS on the hardware we've been discussing with an ldiskfs MDT, nominally running on mds1
+>
+> scratch ? a standard NFS mount
+>
+> local ? a local SSD
+>
+>
+>
+> A little more background on the motivation here.  We have some fairly large software development projects in the lab.  One of the largest active projects has a git repo with about 500,000 files totaling 5 GB in size. A clone of these repo takes 550 seconds on lustre and about 150 seconds on NFS.  A status takes 15 seconds on lustre and 3 seconds on NFS.  Not surprisingly, the timings are greatly reduced on a local SSD.  See the attached plot in git_timings.pdf for details.  The slowness on lustre is largely (completely?) driven by the MD performance.  Obviously, we work with the repo on a local file system when possible to avoid the performance hit.  But one of the workflows involves Monte Carlo analysis against this repo, varying dozens of parameters, running 1000's of cases and analyzing the results.  This produces a lot of data and necessitates the shared FS for both running the Monte Carlo cases and simply storing the amounts of data these runs produce.
+>
+>
+>
+> There are several other scenarios in which we are working with smaller, but still sizeable, data sets (git repos and other forms) on the lustre file system and the MD sluggishness is noticeable and annoying.  So we would like to try and improve MD performance.
+>
+>
+>
+> To further characterize and compare the IO performance on these file systems, I've run the io500 benchmarks.  The attached plots show the results.  This is a completely "out of the box" run on a single node.  That is, I'm just running "./io500.sh config-minimal.ini".  (I've run the 10-node results too (or tried to) for more direct comparison to the results on io500.org but that's a slightly different objective.)  I figure the single node run is analogous to a person working with a git repo scenario.  This is on a 10 gigabit ethernet client.  Details attached but the MD results are fairly consistent with the above git timings ? lustre is about 3x to 10x slower than NFS.  I'd be curious to get some feedback on these MD performance numbers.  Do they seem low compared to other LFS's out there?  As I mentioned in the original post in this thread, our numbers are quite low when compared to even the lowest numbers on the current io500 list.
+>
+>
+>
+> How is MD performance expected to increase with increasing numbers of clients?  I know bandwidth increases as you grab more OST' but would MD performance be expected to increase at all?  We are not using DoM or DNE.
+>
+>
+>
+> Also as mentioned before, we will upgrade lustre soon.  I'd like to stick with the 2.12 LTS stream.  But would the upcoming 2.14 have any potential MD performance advantages?
+>
+>
+>
+>
+>
+> From: lustre-discuss <lustre-discuss-bounces at lists.lustre.org> on behalf of "Vicker, Darby J. (JSC-EG111)[Jacobs Technology, Inc.]" <darby.vicker-1 at nasa.gov>
+> Date: Wednesday, January 6, 2021 at 9:29 AM
+> To: Andreas Dilger <adilger at whamcloud.com>
+> Cc: "lustre-discuss at lists.lustre.org" <lustre-discuss at lists.lustre.org>
+> Subject: Re: [lustre-discuss] [EXTERNAL] Re: Tuning for metadata performance
+>
+>
+>
+> My apologies ? I posted some bad info.  While we started out with the HDD's in the MDS, pretty early on we switched to SSD's.  So that's not the source of our MD slowness.  Can you do NVMe in an external JBOD?
+>
+>
+>
+> From: Andreas Dilger <adilger at whamcloud.com>
+> Date: Tuesday, January 5, 2021 at 11:51 AM
+> To: "Vicker, Darby J. (JSC-EG111)[Jacobs Technology, Inc.]" <darby.vicker-1 at nasa.gov>
+> Cc: "lustre-discuss at lists.lustre.org" <lustre-discuss at lists.lustre.org>
+> Subject: [EXTERNAL] Re: [lustre-discuss] Tuning for metadata performance
+>
+>
+>
+> Probably the best single thing you could do for metadata performance
+>
+> would be to switch to SSD, or better NVMe, storage.  ZFS is very sync
+>
+> and IOPS hungry, so using HDDs is killer for ZFS metadata performance.
+>
+>
+>
+> If you want to minimize the downtime, you could incrementally replace the
+>
+> HDDs in the zpool with larger SSD devices and resilver between each
+>
+> one.  I recall LLNL doing this in the first months of their first ZFS-based
+>
+> Lustre filesystem for this reason.
+>
+>
+>
+> Going to NVMe-based devices is even better for IOPS/bandwidth, but
+>
+> can't be done completely live.  You could potentially use repeated zfs
+>
+> send/recv to get an almost uptodate copy on a new MDS, then take a small
+>
+> outage to do the final resync. However, I've also seen reports that send/recv is painfully slow with HDD MDTs so you should probably test that before committing to a solution.
+>
+>
+>
+> Cheers, Andreas
+>
+>
+>
+>
+> On Jan 5, 2021, at 08:47, Vicker, Darby J. (JSC-EG111)[Jacobs Technology, Inc.] <darby.vicker-1 at nasa.gov> wrote:
+>
+> Hello,
+>
+>
+>
+> I'm looking for some advice on tuning our existing lustre file system to achieve better metadata performance.  This file system is getting fairly old ? its been in production for almost 4 years now.  The hardware and our existing tuning efforts can be found here.
+>
+>
+>
+> http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/2017-April/014390.html
+>
+>
+>
+> The hardware is the same but we have upgraded the software stack a few times ? now on CentOS 7.6, ZFS 0.7.9 and lustre 2.10.8.  We do plan to upgrade to the latest CentOS 7.x and either lustre 2.12 or 2.13 soon.  The MDS hardware isn't well-described in that thread so here are more details:
+>
+>
+>
+> Chassis: Supermicro 2U Twin Server
+>
+> Processor: 4 x Quad?Core Xeon Processor E5?2637 v2 3.50GHz (2 sockets/8 cores per node)
+>
+> Memory: 16 x 16GB PC3?14900 1866MHz DDR3 ECC Registered DIMM (128GB per node)
+>
+>
+>
+> External JBOD:
+>
+> Chassis: 24x Hot?Swap 2.5" SAS ? 12Gb/s SAS Dual Expander
+>
+> Drives: 12 x 600GB SAS 3.0 12.0Gb/s 15000RPM ? 2.5" ? Seagate Enterprise Performance 15K HDD (512n)
+>
+> Controller Card: LSI SAS 9300-8e SAS 12Gb/s PCIe 3.0 8-Port Host Bus Adapter
+>
+>
+>
+> The above hardware and tuning served us well for a long time but the lab has grown, both in number of lustre clients (now up to ~200 ethernet clients and ~500 IB clients) and the number of users in the lab.  With the extra users have come different types of workloads.  Peviously, the file system was most used for workloads with a fairly small number of large files.  We now see workloads that include 100's of concurrent processes all doing mixed small and large file IO on a lot of files (e.g. each process clones a repo, compiles a code and runs a serial sim that writes a lot of data).
+>
+>
+>
+> I recently ran the io500 tests and our LFS stats for MDEasy and MDHard are pretty bad, even when compared to the lowest MD stats on the current io500 list.  Our standard NFS server handily beats our LFS wrt MD performance.  So I'm hopeful that we can squeeze more MD performance out of our LFS.  Obviously, software tuning on the existing hardware would be preferred but we are open to hardware additions/upgrades if that would help (e.g. adding more MDS's).  There are a lot of tuning options in both ZFS and lustre so I'm hoping someone can point me in the right direction.  Are DNE and/or DoM expected to help?  I attended the SC20 Lustre BoF and it sounds like 2.13 has some metadata performance improvements, so just an upgrade might help.  We have dual MDS's now but for HA, not performance.  I'd hate to lose the HA aspect as we utilize it for failover quite a bit (maintenance, etc.) but it would probably be worth it if MD performance was significantly improved.  If I understand correctly, there is some overhead with DNE and performance suffers with just two MDS's with a benefit with 4 or more MDS's, correct?  So that wouldn't be a good option for us unless we add MDS's?  Would an upgrade to SSD or NVMe in our MDTs help?
+>
+>
+>
+> I would greatly appreciate thoughts on the best path forward for making improvements.
+>
+>
+>
+> Thanks,
+>
+> Darby
+>
+> _______________________________________________
+> lustre-discuss mailing list
+> lustre-discuss at lists.lustre.org
+> http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org
+>
+> _______________________________________________
+> lustre-discuss mailing list
+> lustre-discuss at lists.lustre.org
+> http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org
+
+From darby.vicker-1 at nasa.gov  Mon Jan 11 10:45:44 2021
+From: darby.vicker-1 at nasa.gov (Vicker, Darby J. (JSC-EG111)[Jacobs Technology, Inc.])
+Date: Mon, 11 Jan 2021 18:45:44 +0000
+Subject: [lustre-discuss] [EXTERNAL] Re: Tuning for metadata performance
+In-Reply-To: <CABOsP2MyGZ3p7HkXCjLsPzfQDkE+yOcx-9iBmjR_oQ9TKP-Wow@mail.gmail.com>
+References: <5A11B273-43EC-4796-BDCB-6D4DFEB0E0B7@nasa.gov>
+ <CABOsP2MyGZ3p7HkXCjLsPzfQDkE+yOcx-9iBmjR_oQ9TKP-Wow@mail.gmail.com>
+Message-ID: <0FEB4220-7E80-4AE7-BB77-3ABC1ED49B38@nasa.gov>
+
+Sure.  Its a custom configuration on commodity hardware, which is quite a bit newer than the luster servers.  The overall setup is a bit complicated to support HA - two servers with an external JBOD with ZFS to manage the drives and the file system.  PCS to do the failover.  But none of that is too relevant in terms of performance so here are the hardware specs.  
+
+Servers:
+192 GB DDR4 2666 MHz ECC Memory
+16 total physical cores (2x Intel Xeon Gold 6144 CPU @ 3.50GHz) 
+LSI SAS Card (can't find exact model but very similar to the cards in the lustre servers)
+
+JBOD:
+Supermicro 3.5"
+24x 10TB 7200 RPM Seagate HDD's
+
+ZFS is used to configure the drives in a RAID10 with a zfs file system built on the zpool.  This is exported via NFS.  The only NFS tuning we are doing is to increase RPCNFSDCOUNT to 128 and export with async.  
+
+So the HW configuration is overall fairly similar.   This is another reason I'm hopeful that we'd be able to get our lustre MD performance as good or better than the NFS server given that the lustre MDS has SSD's and the NFS server has HDD's.  
+
+
+?-----Original Message-----
+From: lustre-discuss <lustre-discuss-bounces at lists.lustre.org> on behalf of Michael Di Domenico <mdidomenico4 at gmail.com>
+Date: Monday, January 11, 2021 at 8:07 AM
+Cc: "lustre-discuss at lists.lustre.org" <lustre-discuss at lists.lustre.org>
+Subject: [EXTERNAL] Re: [lustre-discuss] Tuning for metadata performance
+
+perhaps i missed it somewhere, but in order to do a fair comparison
+can you detail the hardware/software behind the nfs server?
+
+
+
+From amir.shehata.whamcloud at gmail.com  Mon Jan 11 14:20:05 2021
+From: amir.shehata.whamcloud at gmail.com (Amir Shehata)
+Date: Mon, 11 Jan 2021 14:20:05 -0800
+Subject: [lustre-discuss] Fwd: o2iblnd/socklnd security
+In-Reply-To: <CAAqp6i0+WcOhW8cOYZSrZu+UMAgaDMA=zZnfbtJW--Nk9PQ44A@mail.gmail.com>
+References: <CAAqp6i0+WcOhW8cOYZSrZu+UMAgaDMA=zZnfbtJW--Nk9PQ44A@mail.gmail.com>
+Message-ID: <CAAqp6i307mDokqO+ZtpYDF39bRgHVLhp5xJEQS3T0eOsORczxA@mail.gmail.com>
+
+Hi,
+
+Currently o2iblnd has two parameters
+
+use_privileged_port and require_privileged_port to control the port range
+to use. They control whether to use/accept a privileged port (1 -1023) or
+any port.
+
+Similarly socklnd has a similar parameter: accept_type. If set to "all"
+then any port range is accepted otherwise, only a privileged port is
+accepted.
+
+I'm trying to get a better idea of how these are being used on sites. And
+if so do sites value this level of control? IE do these parameters provide
+a level of security which is deemed valuable?
+
+thanks
+amir
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20210111/1713b1cf/attachment.html>
+
+From steveb at stackhpc.com  Tue Jan 12 06:29:31 2021
+From: steveb at stackhpc.com (Steve Brasier)
+Date: Tue, 12 Jan 2021 14:29:31 +0000
+Subject: [lustre-discuss] Output format for lctl device_list
+Message-ID: <CA+zeHV6_jamPgbbcgVTwHTKh8YAJrCD5NnNtBKeSQkKGeDL22w@mail.gmail.com>
+
+Hi all, does anyone know of documentation of the format of `lctl
+device_list`? In the below example (from a broken lustre server) some if
+it is sort-of obvious but some of it definitely isn't!
+
+[centos at dac-h22d5-u37-sv ~]$ sudo lctl dl
+  0 UP osd-ldiskfs MGS-osd MGS-osd_UUID 4
+  1 UP mgs MGS MGS 6
+  2 UP mgc MGC10.43.108.228 at tcp 87dac4ce-ab26-750c-b832-699daa726185 4
+  3 UP osd-ldiskfs dac-MDT0001-osd dac-MDT0001-osd_UUID 5
+  4 UP mds MDS MDS_uuid 2
+  5 UP lod dac-MDT0001-mdtlov dac-MDT0001-mdtlov_UUID 3
+  6 UP mdt dac-MDT0001 dac-MDT0001_UUID 2
+  7 UP mdd dac-MDD0001 dac-MDD0001_UUID 3
+
+thanks
+
+http://stackhpc.com/
+Please note I work Tuesday to Friday.
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20210112/444e86a3/attachment.html>
+
+From abeslam at gmail.com  Tue Jan 12 07:57:53 2021
+From: abeslam at gmail.com (abdeslam tahari)
+Date: Tue, 12 Jan 2021 16:57:53 +0100
+Subject: [lustre-discuss] luster support for Debain10 and ubunt 20.04
+Message-ID: <3cc9a54c-bfde-1afc-3206-eeca2f6b5212@gmail.com>
+
+Hello everybody
+
+
+For anybody who had the experience tou compile and/or use the 
+lustre-system and these two distributions Debian10 anD Ubuntu 20.04
+
+We have a lustre system actually under Centos7 and would like to move to 
+the Debian or Ubuntu
+
+so any feedback please and help would be very appreciated..
+
+Thank you all
+
+
+-- 
+Tahari.Abdeslam
+
+From mdidomenico4 at gmail.com  Tue Jan 12 09:48:04 2021
+From: mdidomenico4 at gmail.com (Michael Di Domenico)
+Date: Tue, 12 Jan 2021 12:48:04 -0500
+Subject: [lustre-discuss] [EXTERNAL] Re: Tuning for metadata performance
+In-Reply-To: <0FEB4220-7E80-4AE7-BB77-3ABC1ED49B38@nasa.gov>
+References: <5A11B273-43EC-4796-BDCB-6D4DFEB0E0B7@nasa.gov>
+ <CABOsP2MyGZ3p7HkXCjLsPzfQDkE+yOcx-9iBmjR_oQ9TKP-Wow@mail.gmail.com>
+ <0FEB4220-7E80-4AE7-BB77-3ABC1ED49B38@nasa.gov>
+Message-ID: <CABOsP2Mv1a0LzdB6dsu0YokLfYsAAQJ5tEyhE=7RfCZV=QmJzg@mail.gmail.com>
+
+have you run any analysis on the "A clone of these repo takes 550
+seconds on lustre", where you track the exact OP calls on lustre to
+see if it's a general slowness or if there is a specific OP that git
+is abusing?  i wonder if there's something specific that git is doing
+that lustre is unhappy with versus continuing to poke at the hardware
+or software tuning.
+
+thought less likely, i'd also be curious if you have any
+security/audit controls turned on on the clients.  i have some silly
+ones where i'm at that slow things down on lustre but not nfs because
+of how the kernel treats the filesystem
+
+i don't have any git repo's even close to that size so i can't perform
+the same analysis where i'm at.
+
+
+On Mon, Jan 11, 2021 at 1:45 PM Vicker, Darby J. (JSC-EG111)[Jacobs
+Technology, Inc.] <darby.vicker-1 at nasa.gov> wrote:
+>
+> Sure.  Its a custom configuration on commodity hardware, which is quite a bit newer than the luster servers.  The overall setup is a bit complicated to support HA - two servers with an external JBOD with ZFS to manage the drives and the file system.  PCS to do the failover.  But none of that is too relevant in terms of performance so here are the hardware specs.
+>
+> Servers:
+> 192 GB DDR4 2666 MHz ECC Memory
+> 16 total physical cores (2x Intel Xeon Gold 6144 CPU @ 3.50GHz)
+> LSI SAS Card (can't find exact model but very similar to the cards in the lustre servers)
+>
+> JBOD:
+> Supermicro 3.5"
+> 24x 10TB 7200 RPM Seagate HDD's
+>
+> ZFS is used to configure the drives in a RAID10 with a zfs file system built on the zpool.  This is exported via NFS.  The only NFS tuning we are doing is to increase RPCNFSDCOUNT to 128 and export with async.
+>
+> So the HW configuration is overall fairly similar.   This is another reason I'm hopeful that we'd be able to get our lustre MD performance as good or better than the NFS server given that the lustre MDS has SSD's and the NFS server has HDD's.
+>
+>
+> ?-----Original Message-----
+> From: lustre-discuss <lustre-discuss-bounces at lists.lustre.org> on behalf of Michael Di Domenico <mdidomenico4 at gmail.com>
+> Date: Monday, January 11, 2021 at 8:07 AM
+> Cc: "lustre-discuss at lists.lustre.org" <lustre-discuss at lists.lustre.org>
+> Subject: [EXTERNAL] Re: [lustre-discuss] Tuning for metadata performance
+>
+> perhaps i missed it somewhere, but in order to do a fair comparison
+> can you detail the hardware/software behind the nfs server?
+>
+>
+
+From darby.vicker-1 at nasa.gov  Tue Jan 12 10:55:08 2021
+From: darby.vicker-1 at nasa.gov (Vicker, Darby J. (JSC-EG111)[Jacobs Technology, Inc.])
+Date: Tue, 12 Jan 2021 18:55:08 +0000
+Subject: [lustre-discuss] Tuning for metadata performance
+Message-ID: <60899B95-1680-484A-B243-A404C70D08D1@nasa.gov>
+
+No, I haven't.  By what means do you suggest analyzing the OP calls?  Just an strace? Or the server-size debug commands as outlined in https://doc.lustre.org/lustre_manual.xhtml#dbdoclet.50438274_62472 ?
+
+We also have jobstats enabled and are outputting these to a file for later analysis.  So if I submitted this test in a slurm job, I'd get stats like:
+
+$ grep MDT /aerolab/admin/slurm/19435076_qsmoore
+	MDT:snapshot_time      : 2021-01-09 05:29:59
+	MDT:setattr            : 110
+	MDT:getattr            : 20908
+	MDT:mkdir              : 11
+	MDT:getxattr           : 20424
+	MDT:mknod              : 48
+	MDT:close              : 19829
+	MDT:unlink             : 9
+	MDT:open               : 20188
+$
+
+But you must be referring to an external tool like strace so I could do the same thing on both lustre and NFS.  
+
+?-----Original Message-----
+From: Michael Di Domenico <mdidomenico4 at gmail.com>
+Date: Tuesday, January 12, 2021 at 10:48 AM
+To: "Vicker, Darby J. (JSC-EG111)[Jacobs Technology, Inc.]" <darby.vicker-1 at nasa.gov>
+Cc: "lustre-discuss at lists.lustre.org" <lustre-discuss at lists.lustre.org>
+Subject: Re: [EXTERNAL] Re: [lustre-discuss] Tuning for metadata performance
+
+    have you run any analysis on the "A clone of these repo takes 550
+    seconds on lustre", where you track the exact OP calls on lustre to
+    see if it's a general slowness or if there is a specific OP that git
+    is abusing?  i wonder if there's something specific that git is doing
+    that lustre is unhappy with versus continuing to poke at the hardware
+    or software tuning.
+
+    thought less likely, i'd also be curious if you have any
+    security/audit controls turned on on the clients.  i have some silly
+    ones where i'm at that slow things down on lustre but not nfs because
+    of how the kernel treats the filesystem
+
+    i don't have any git repo's even close to that size so i can't perform
+    the same analysis where i'm at.
+
+
+    On Mon, Jan 11, 2021 at 1:45 PM Vicker, Darby J. (JSC-EG111)[Jacobs
+    Technology, Inc.] <darby.vicker-1 at nasa.gov> wrote:
+    >
+    > Sure.  Its a custom configuration on commodity hardware, which is quite a bit newer than the luster servers.  The overall setup is a bit complicated to support HA - two servers with an external JBOD with ZFS to manage the drives and the file system.  PCS to do the failover.  But none of that is too relevant in terms of performance so here are the hardware specs.
+    >
+    > Servers:
+    > 192 GB DDR4 2666 MHz ECC Memory
+    > 16 total physical cores (2x Intel Xeon Gold 6144 CPU @ 3.50GHz)
+    > LSI SAS Card (can't find exact model but very similar to the cards in the lustre servers)
+    >
+    > JBOD:
+    > Supermicro 3.5"
+    > 24x 10TB 7200 RPM Seagate HDD's
+    >
+    > ZFS is used to configure the drives in a RAID10 with a zfs file system built on the zpool.  This is exported via NFS.  The only NFS tuning we are doing is to increase RPCNFSDCOUNT to 128 and export with async.
+    >
+    > So the HW configuration is overall fairly similar.   This is another reason I'm hopeful that we'd be able to get our lustre MD performance as good or better than the NFS server given that the lustre MDS has SSD's and the NFS server has HDD's.
+    >
+    >
+    > -----Original Message-----
+    > From: lustre-discuss <lustre-discuss-bounces at lists.lustre.org> on behalf of Michael Di Domenico <mdidomenico4 at gmail.com>
+    > Date: Monday, January 11, 2021 at 8:07 AM
+    > Cc: "lustre-discuss at lists.lustre.org" <lustre-discuss at lists.lustre.org>
+    > Subject: [EXTERNAL] Re: [lustre-discuss] Tuning for metadata performance
+    >
+    > perhaps i missed it somewhere, but in order to do a fair comparison
+    > can you detail the hardware/software behind the nfs server?
+    >
+    >
+
+
+From mdidomenico4 at gmail.com  Tue Jan 12 11:40:34 2021
+From: mdidomenico4 at gmail.com (Michael Di Domenico)
+Date: Tue, 12 Jan 2021 14:40:34 -0500
+Subject: [lustre-discuss] Tuning for metadata performance
+In-Reply-To: <60899B95-1680-484A-B243-A404C70D08D1@nasa.gov>
+References: <60899B95-1680-484A-B243-A404C70D08D1@nasa.gov>
+Message-ID: <CABOsP2MTbvTCFEaV+eNZ5D46ukjhEZW=WvKf1yq=9hqvFDjaqg@mail.gmail.com>
+
+yes more or less.  i know on the lustre server side i can see the MDT
+operations, which I believe you can grab on the clients as well.
+which I believe is also what slurm is already telling you in the job
+stats you grep'ed.  i suspect it will be, but it would be interesting
+to see if 'strace -c' shows the same number of RPC between lustre and
+nfs
+
+maybe based on the operations count, the lustre folks can suggest more
+specific areas to optimize the filesystem
+
+
+On Tue, Jan 12, 2021 at 1:55 PM Vicker, Darby J. (JSC-EG111)[Jacobs
+Technology, Inc.] <darby.vicker-1 at nasa.gov> wrote:
+>
+> No, I haven't.  By what means do you suggest analyzing the OP calls?  Just an strace? Or the server-size debug commands as outlined in https://doc.lustre.org/lustre_manual.xhtml#dbdoclet.50438274_62472 ?
+>
+> We also have jobstats enabled and are outputting these to a file for later analysis.  So if I submitted this test in a slurm job, I'd get stats like:
+>
+> $ grep MDT /aerolab/admin/slurm/19435076_qsmoore
+>         MDT:snapshot_time      : 2021-01-09 05:29:59
+>         MDT:setattr            : 110
+>         MDT:getattr            : 20908
+>         MDT:mkdir              : 11
+>         MDT:getxattr           : 20424
+>         MDT:mknod              : 48
+>         MDT:close              : 19829
+>         MDT:unlink             : 9
+>         MDT:open               : 20188
+> $
+>
+> But you must be referring to an external tool like strace so I could do the same thing on both lustre and NFS.
+>
+> ?-----Original Message-----
+> From: Michael Di Domenico <mdidomenico4 at gmail.com>
+> Date: Tuesday, January 12, 2021 at 10:48 AM
+> To: "Vicker, Darby J. (JSC-EG111)[Jacobs Technology, Inc.]" <darby.vicker-1 at nasa.gov>
+> Cc: "lustre-discuss at lists.lustre.org" <lustre-discuss at lists.lustre.org>
+> Subject: Re: [EXTERNAL] Re: [lustre-discuss] Tuning for metadata performance
+>
+>     have you run any analysis on the "A clone of these repo takes 550
+>     seconds on lustre", where you track the exact OP calls on lustre to
+>     see if it's a general slowness or if there is a specific OP that git
+>     is abusing?  i wonder if there's something specific that git is doing
+>     that lustre is unhappy with versus continuing to poke at the hardware
+>     or software tuning.
+>
+>     thought less likely, i'd also be curious if you have any
+>     security/audit controls turned on on the clients.  i have some silly
+>     ones where i'm at that slow things down on lustre but not nfs because
+>     of how the kernel treats the filesystem
+>
+>     i don't have any git repo's even close to that size so i can't perform
+>     the same analysis where i'm at.
+>
+>
+>     On Mon, Jan 11, 2021 at 1:45 PM Vicker, Darby J. (JSC-EG111)[Jacobs
+>     Technology, Inc.] <darby.vicker-1 at nasa.gov> wrote:
+>     >
+>     > Sure.  Its a custom configuration on commodity hardware, which is quite a bit newer than the luster servers.  The overall setup is a bit complicated to support HA - two servers with an external JBOD with ZFS to manage the drives and the file system.  PCS to do the failover.  But none of that is too relevant in terms of performance so here are the hardware specs.
+>     >
+>     > Servers:
+>     > 192 GB DDR4 2666 MHz ECC Memory
+>     > 16 total physical cores (2x Intel Xeon Gold 6144 CPU @ 3.50GHz)
+>     > LSI SAS Card (can't find exact model but very similar to the cards in the lustre servers)
+>     >
+>     > JBOD:
+>     > Supermicro 3.5"
+>     > 24x 10TB 7200 RPM Seagate HDD's
+>     >
+>     > ZFS is used to configure the drives in a RAID10 with a zfs file system built on the zpool.  This is exported via NFS.  The only NFS tuning we are doing is to increase RPCNFSDCOUNT to 128 and export with async.
+>     >
+>     > So the HW configuration is overall fairly similar.   This is another reason I'm hopeful that we'd be able to get our lustre MD performance as good or better than the NFS server given that the lustre MDS has SSD's and the NFS server has HDD's.
+>     >
+>     >
+>     > -----Original Message-----
+>     > From: lustre-discuss <lustre-discuss-bounces at lists.lustre.org> on behalf of Michael Di Domenico <mdidomenico4 at gmail.com>
+>     > Date: Monday, January 11, 2021 at 8:07 AM
+>     > Cc: "lustre-discuss at lists.lustre.org" <lustre-discuss at lists.lustre.org>
+>     > Subject: [EXTERNAL] Re: [lustre-discuss] Tuning for metadata performance
+>     >
+>     > perhaps i missed it somewhere, but in order to do a fair comparison
+>     > can you detail the hardware/software behind the nfs server?
+>     >
+>     >
+>
+
+From cfaber at gmail.com  Tue Jan 12 14:47:26 2021
+From: cfaber at gmail.com (Colin Faber)
+Date: Tue, 12 Jan 2021 15:47:26 -0700
+Subject: [lustre-discuss] luster support for Debain10 and ubunt 20.04
+In-Reply-To: <3cc9a54c-bfde-1afc-3206-eeca2f6b5212@gmail.com>
+References: <3cc9a54c-bfde-1afc-3206-eeca2f6b5212@gmail.com>
+Message-ID: <CAJcXmBkbuzq0yc2uzpdi6vCz_4Br5=oUh9tQ_Yt3L0n=AKx0ng@mail.gmail.com>
+
+IIRC, master should compile without issue against the ubuntu 18.04 kernel,
+I don't know about 20.04 as I haven't tried yet.
+
+Have you had issues compiling?
+
+On Tue, Jan 12, 2021 at 12:36 PM abdeslam tahari <abeslam at gmail.com> wrote:
+
+> Hello everybody
+>
+>
+> For anybody who had the experience tou compile and/or use the
+> lustre-system and these two distributions Debian10 anD Ubuntu 20.04
+>
+> We have a lustre system actually under Centos7 and would like to move to
+> the Debian or Ubuntu
+>
+> so any feedback please and help would be very appreciated..
+>
+> Thank you all
+>
+>
+> --
+> Tahari.Abdeslam
+> _______________________________________________
+> lustre-discuss mailing list
+> lustre-discuss at lists.lustre.org
+> http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org
+>
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20210112/ddb2dece/attachment.html>
+
+From abeslam at gmail.com  Wed Jan 13 02:21:01 2021
+From: abeslam at gmail.com (Abdeslam Tahari)
+Date: Wed, 13 Jan 2021 11:21:01 +0100
+Subject: [lustre-discuss] luster support for Debain10 and ubunt 20.04
+In-Reply-To: <CAJcXmBkbuzq0yc2uzpdi6vCz_4Br5=oUh9tQ_Yt3L0n=AKx0ng@mail.gmail.com>
+References: <3cc9a54c-bfde-1afc-3206-eeca2f6b5212@gmail.com>
+ <CAJcXmBkbuzq0yc2uzpdi6vCz_4Br5=oUh9tQ_Yt3L0n=AKx0ng@mail.gmail.com>
+Message-ID: <CA+LuYSK2ZU2+X+RtYtbaGkWbfdTjkZUcQL=9bBT_u3Qx+BXEHQ@mail.gmail.com>
+
+Hello Colin
+
+No , i didn't try it till now but i will try both the 18.04. and the 20.4
+
+Thank you very much for your reply
+
+
+Le mar. 12 janv. 2021 ? 23:48, Colin Faber <cfaber at gmail.com> a ?crit :
+
+> IIRC, master should compile without issue against the ubuntu 18.04 kernel,
+> I don't know about 20.04 as I haven't tried yet.
+>
+> Have you had issues compiling?
+>
+> On Tue, Jan 12, 2021 at 12:36 PM abdeslam tahari <abeslam at gmail.com>
+> wrote:
+>
+>> Hello everybody
+>>
+>>
+>> For anybody who had the experience tou compile and/or use the
+>> lustre-system and these two distributions Debian10 anD Ubuntu 20.04
+>>
+>> We have a lustre system actually under Centos7 and would like to move to
+>> the Debian or Ubuntu
+>>
+>> so any feedback please and help would be very appreciated..
+>>
+>> Thank you all
+>>
+>>
+>> --
+>> Tahari.Abdeslam
+>> _______________________________________________
+>> lustre-discuss mailing list
+>> lustre-discuss at lists.lustre.org
+>> http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org
+>>
+>
+
+-- 
+Tahari.Abdeslam
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20210113/891ae13a/attachment.html>
+
+From darby.vicker-1 at nasa.gov  Wed Jan 13 15:49:05 2021
+From: darby.vicker-1 at nasa.gov (Vicker, Darby J. (JSC-EG111)[Jacobs Technology, Inc.])
+Date: Wed, 13 Jan 2021 23:49:05 +0000
+Subject: [lustre-discuss] [EXTERNAL] Re: Tuning for metadata performance
+In-Reply-To: <CABOsP2MTbvTCFEaV+eNZ5D46ukjhEZW=WvKf1yq=9hqvFDjaqg@mail.gmail.com>
+References: <60899B95-1680-484A-B243-A404C70D08D1@nasa.gov>
+ <CABOsP2MTbvTCFEaV+eNZ5D46ukjhEZW=WvKf1yq=9hqvFDjaqg@mail.gmail.com>
+Message-ID: <FF6CAC7E-CF18-4A70-8ADA-137F5D06BFF7@nasa.gov>
+
+I updated my git timings to include a run on our lustre FS's with the stripe count set to 1.  Our current default is a 3 segment PFL.  This did help a bit.  Updated plot attached.  
+
+I also did some runs on NFS and lustre (ldisk MDT, stripe count=1 if that makes a difference) with strace -c.  Results are attached and also below.  I also plotted the results.  I don't think there is anything earth shattering here - the git operations on lustre and NFS make almost the same number of calls to the same functions, the lustre version just spends (a lot) more time waiting.  But it was a good idea - thanks.  
+
+
+$ cat strace.clone.scratch.out
+% time     seconds  usecs/call     calls    errors syscall
+------ ----------- ----------- --------- --------- ----------------
+ 66.76   21.693112     7231037         3           wait4
+ 18.10    5.883054         367     16010           read
+  4.19    1.362333          32     41741      8059 open
+  3.85    1.251569           6    194499           write
+  3.23    1.048391          31     33635           fstat
+  2.71    0.879894          17     50473     45917 lstat
+  0.56    0.181915          22      7941         1 mkdir
+  0.39    0.126166           3     33706           close
+  0.10    0.033229           4      7944      7932 access
+  0.08    0.026800         558        48           munmap
+  0.01    0.004397          33       133           symlink
+  0.00    0.001168         292         4           clone
+  0.00    0.000408           4        99           mmap
+  0.00    0.000283           0       340           brk
+  0.00    0.000264           2        96        42 stat
+  0.00    0.000246           8        30           mprotect
+  0.00    0.000227           2       105           lseek
+  0.00    0.000220          15        14           rename
+  0.00    0.000219          12        18           getdents
+  0.00    0.000191          21         9           openat
+  0.00    0.000104           1        56         8 rt_sigreturn
+  0.00    0.000070           5        14        12 readlink
+  0.00    0.000058           3        17           rt_sigaction
+  0.00    0.000051          17         3           unlink
+  0.00    0.000046           5         8           pipe
+  0.00    0.000041           3        11           mremap
+  0.00    0.000031           6         5           chdir
+  0.00    0.000025          25         1           uname
+  0.00    0.000020          20         1           chmod
+  0.00    0.000015           3         5           getpid
+  0.00    0.000011           2         5           fcntl
+  0.00    0.000011           2         4           getcwd
+  0.00    0.000011           5         2         2 statfs
+  0.00    0.000009           2         4           clock_gettime
+  0.00    0.000008           4         2           ioctl
+  0.00    0.000006           3         2           getrlimit
+  0.00    0.000005           2         2           setitimer
+  0.00    0.000005           2         2           futex
+  0.00    0.000004           4         1           execve
+  0.00    0.000003           3         1           arch_prctl
+  0.00    0.000003           3         1           set_tid_address
+  0.00    0.000002           2         1           rt_sigprocmask
+  0.00    0.000002           2         1           set_robust_list
+  0.00    0.000000           0         1           fsync
+------ ----------- ----------- --------- --------- ----------------
+100.00   32.494627                386998     61973 total
+$ cat strace.clone.ephemeral1s.out 
+% time     seconds  usecs/call     calls    errors syscall
+------ ----------- ----------- --------- --------- ----------------
+ 71.86  119.077430    39692476         3           wait4
+ 11.46   18.987659          97    194757           write
+  4.31    7.138347         445     16012           read
+  3.67    6.073564         145     41741      8059 open
+  3.11    5.146797         101     50473     45917 lstat
+  2.64    4.382265         130     33635           fstat
+  2.16    3.571558         105     33706           close
+  0.48    0.799008         100      7941         1 mkdir
+  0.28    0.466472          58      7945      7933 access
+  0.02    0.028136         586        48           munmap
+  0.01    0.023113         173       133           symlink
+  0.00    0.002379         169        14           rename
+  0.00    0.001785           5       312        17 rt_sigreturn
+  0.00    0.001416         354         4           clone
+  0.00    0.001132          11        96        42 stat
+  0.00    0.000824           8        99           mmap
+  0.00    0.000731          40        18           getdents
+  0.00    0.000710          50        14        12 readlink
+  0.00    0.000657         219         3           unlink
+  0.00    0.000538           1       338           brk
+  0.00    0.000465          51         9           openat
+  0.00    0.000352          11        30           mprotect
+  0.00    0.000244         244         1           chmod
+  0.00    0.000227           2       105           lseek
+  0.00    0.000081          10         8           pipe
+  0.00    0.000050           2        17           rt_sigaction
+  0.00    0.000044           4        11           mremap
+  0.00    0.000044          44         1           uname
+  0.00    0.000026           5         5           chdir
+  0.00    0.000021           4         5           fcntl
+  0.00    0.000016           8         2         2 statfs
+  0.00    0.000012           6         2           ioctl
+  0.00    0.000011           2         4           getcwd
+  0.00    0.000010          10         1           execve
+  0.00    0.000007           3         2           getrlimit
+  0.00    0.000005           2         2           setitimer
+  0.00    0.000005           1         5           getpid
+  0.00    0.000004           4         1           arch_prctl
+  0.00    0.000004           2         2           futex
+  0.00    0.000004           1         4           clock_gettime
+  0.00    0.000003           3         1           rt_sigprocmask
+  0.00    0.000003           3         1           set_tid_address
+  0.00    0.000003           3         1           set_robust_list
+  0.00    0.000000           0         1           fsync
+------ ----------- ----------- --------- --------- ----------------
+100.00  165.706162                387513     61983 total
+$ cat strace.status.scratch.out 
+% time     seconds  usecs/call     calls    errors syscall
+------ ----------- ----------- --------- --------- ----------------
+ 61.47    0.688990          20     33734        13 lstat
+ 18.53    0.207653          13     15574           getdents
+ 13.33    0.149468          19      7787           openat
+  4.01    0.044946          16      2703      2247 open
+  1.99    0.022332           2      8243           close
+  0.13    0.001478           2       629           write
+  0.13    0.001442           2       483           read
+  0.11    0.001218          15        81           fstat
+  0.07    0.000831           6       121           munmap
+  0.07    0.000742           4       170           mmap
+  0.04    0.000426           5        85        68 stat
+  0.04    0.000420         420         1           rename
+  0.03    0.000354           1       212           brk
+  0.02    0.000261          10        26        13 access
+  0.02    0.000203           2        85           lseek
+  0.01    0.000068           2        29           mprotect
+  0.00    0.000020           4         5           chdir
+  0.00    0.000019           3         5           getcwd
+  0.00    0.000008           1         5           getpid
+  0.00    0.000007           3         2         2 statfs
+  0.00    0.000006           6         1           ioctl
+  0.00    0.000006           3         2           fcntl
+  0.00    0.000006           2         3         1 readlink
+  0.00    0.000005           1         4           clock_gettime
+  0.00    0.000004           2         2           getrlimit
+  0.00    0.000004           2         2           futex
+  0.00    0.000003           0         7           rt_sigaction
+  0.00    0.000001           1         1           rt_sigprocmask
+  0.00    0.000001           1         1           set_tid_address
+  0.00    0.000001           1         1           set_robust_list
+  0.00    0.000000           0        11           mremap
+  0.00    0.000000           0         1           execve
+  0.00    0.000000           0         1           arch_prctl
+------ ----------- ----------- --------- --------- ----------------
+100.00    1.120923                 70017      2344 total
+$ cat strace.status.ephemeral1s.out 
+% time     seconds  usecs/call     calls    errors syscall
+------ ----------- ----------- --------- --------- ----------------
+ 46.42    2.694706          79     33734        13 lstat
+ 28.29    1.642311         105     15574           getdents
+ 11.21    0.650799          83      7787           openat
+ 10.53    0.611098          76      7952           close
+  3.07    0.178217          80      2209      2044 open
+  0.33    0.018913          30       629           write
+  0.06    0.003425          12       265           read
+  0.02    0.001401          16        85        68 stat
+  0.02    0.001223          15        81           fstat
+  0.01    0.000793          16        48           munmap
+  0.01    0.000749           7        97           mmap
+  0.01    0.000461           2       212           brk
+  0.01    0.000457          17        26        13 access
+  0.01    0.000320          11        29           mprotect
+  0.00    0.000249         249         1           rename
+  0.00    0.000230           2        85           lseek
+  0.00    0.000084           7        11           mremap
+  0.00    0.000039           7         5           chdir
+  0.00    0.000026           5         5           getcwd
+  0.00    0.000020           2         7           rt_sigaction
+  0.00    0.000008           4         2           getrlimit
+  0.00    0.000006           6         1           execve
+  0.00    0.000006           6         1           set_tid_address
+  0.00    0.000005           5         1           rt_sigprocmask
+  0.00    0.000005           5         1           ioctl
+  0.00    0.000005           2         2           futex
+  0.00    0.000005           5         1           set_robust_list
+  0.00    0.000004           2         2           fcntl
+  0.00    0.000004           1         3         1 readlink
+  0.00    0.000002           0         5           getpid
+  0.00    0.000000           0         2         2 statfs
+  0.00    0.000000           0         1           arch_prctl
+  0.00    0.000000           0         4           clock_gettime
+------ ----------- ----------- --------- --------- ----------------
+100.00    5.805571                 68868      2141 total
+$
+
+?-----Original Message-----
+From: lustre-discuss <lustre-discuss-bounces at lists.lustre.org> on behalf of Michael Di Domenico <mdidomenico4 at gmail.com>
+Date: Tuesday, January 12, 2021 at 12:41 PM
+Cc: "lustre-discuss at lists.lustre.org" <lustre-discuss at lists.lustre.org>
+Subject: [EXTERNAL] Re: [lustre-discuss] Tuning for metadata performance
+
+    yes more or less.  i know on the lustre server side i can see the MDT
+    operations, which I believe you can grab on the clients as well.
+    which I believe is also what slurm is already telling you in the job
+    stats you grep'ed.  i suspect it will be, but it would be interesting
+    to see if 'strace -c' shows the same number of RPC between lustre and
+    nfs
+
+    maybe based on the operations count, the lustre folks can suggest more
+    specific areas to optimize the filesystem
+
+-------------- next part --------------
+A non-text attachment was scrubbed...
+Name: git_timings.pdf
+Type: application/pdf
+Size: 4972 bytes
+Desc: git_timings.pdf
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20210113/6368b834/attachment-0002.pdf>
+-------------- next part --------------
+A non-text attachment was scrubbed...
+Name: strace.clone.ephemeral1s.out
+Type: application/octet-stream
+Size: 2838 bytes
+Desc: strace.clone.ephemeral1s.out
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20210113/6368b834/attachment-0004.obj>
+-------------- next part --------------
+A non-text attachment was scrubbed...
+Name: strace.clone.scratch.out
+Type: application/octet-stream
+Size: 2838 bytes
+Desc: strace.clone.scratch.out
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20210113/6368b834/attachment-0005.obj>
+-------------- next part --------------
+A non-text attachment was scrubbed...
+Name: strace.status.ephemeral1s.out
+Type: application/octet-stream
+Size: 2198 bytes
+Desc: strace.status.ephemeral1s.out
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20210113/6368b834/attachment-0006.obj>
+-------------- next part --------------
+A non-text attachment was scrubbed...
+Name: strace.status.scratch.out
+Type: application/octet-stream
+Size: 2198 bytes
+Desc: strace.status.scratch.out
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20210113/6368b834/attachment-0007.obj>
+-------------- next part --------------
+A non-text attachment was scrubbed...
+Name: strace.pdf
+Type: application/pdf
+Size: 27848 bytes
+Desc: strace.pdf
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20210113/6368b834/attachment-0003.pdf>
+
+From andrew.elwell at gmail.com  Wed Jan 13 22:12:27 2021
+From: andrew.elwell at gmail.com (Andrew Elwell)
+Date: Thu, 14 Jan 2021 17:12:27 +1100
+Subject: [lustre-discuss] quotas not being enforced
+Message-ID: <CAANX9yfFiWsqbDfDBwZLoz_sdJnYc85amHODmguPMhQvUsMqbw@mail.gmail.com>
+
+Hi folks,
+I'm struggling to debug quota enforcement (or more worryingly, lack
+of) in recentish LTS releases.
+
+our test system (2 servers shared SAS disks between them) is running
+lustre-2.12.6-1.el7.x86_64
+e2fsprogs-1.45.6.wc3-0.el7.x86_64
+kernel-3.10.0-1160.2.1.el7_lustre.x86_64
+
+but the storage luns have been upgraded from 2.7 onwards (maybe a
+reformat at 2.10? - its a test system so gets a hard life)
+
+couple of things
+1) in the lustre manual (snapshot as at 2021-01-13) section 25.8 0
+Lustre Quota Statistics
+-- are these obsolete as in pre 2.4 versions?
+
+[root at pgfs-mds4 ~]# lctl get_param lquota.testfs-OST0000.stats
+error: get_param: param_path 'lquota/testfs-OST0000/stats': No such
+file or directory
+
+ie - is this what's referred to in LUDOC-362
+
+
+2) how long should I have to wait for changing enforcement on MGS to
+seeing it rattle out onto MDT/OSTs?
+
+[root at pgfs-mds3 ~]# lctl get_param osd-*.*.quota_slave.info | egrep
+'(name|enabled)'
+target name:    testfs-MDT0000
+quota enabled:  ug
+[root at pgfs-mds3 ~]# lctl conf_param testfs.quota.mdt=g
+[root at pgfs-mds3 ~]# mount -t lustre
+/dev/mapper/TEST_MGT on /lustre/testfs-MGT type lustre
+(ro,svname=MGS,nosvc,mgs,osd=osd-ldiskfs,user_xattr,errors=remount-ro)
+/dev/mapper/TEST_MDT0000 on /lustre/testfs-MDT0000 type lustre
+(ro,svname=testfs-MDT0000,mgsnode=10.10.36.145 at o2ib4:10.10.36.145 at o2ib4,osd=osd-ldiskfs,user_xattr,errors=remount-ro)
+[root at pgfs-mds3 ~]# lctl get_param osd-*.*.quota_slave.info
+osd-ldiskfs.testfs-MDT0000.quota_slave.info=
+target name:    testfs-MDT0000
+pool ID:        0
+type:           md
+quota enabled:  ug
+conn to master: setup
+space acct:     ug
+user uptodate:  glb[1],slv[1],reint[0]
+group uptodate: glb[1],slv[1],reint[0]
+project uptodate: glb[0],slv[0],reint[0]
+[root at pgfs-mds3 ~]#
+
+ie still showing user enforcement
+
+
+similarly
+[root at pgfs-mds3 ~]# lctl conf_param testfs.quota.ost=g
+... time passes
+[root at pgfs-mds4 ~]# lctl get_param osd-*.*.quota_slave.info | egrep
+'(name|enabled)'
+target name:    testfs-OST0000
+quota enabled:  none
+target name:    testfs-OST0001
+quota enabled:  none
+
+doesn't seem to be rippling out.
+
+Do I need to umount / tunefs --writeconf / e2fsck / whatever them? -
+where do I look for debug info on what's (not) happening?
+
+Many thanks
+Andrew
+
+From andrew.elwell at gmail.com  Wed Jan 13 23:28:39 2021
+From: andrew.elwell at gmail.com (Andrew Elwell)
+Date: Thu, 14 Jan 2021 18:28:39 +1100
+Subject: [lustre-discuss] quotas not being enforced
+In-Reply-To: <CAANX9yfFiWsqbDfDBwZLoz_sdJnYc85amHODmguPMhQvUsMqbw@mail.gmail.com>
+References: <CAANX9yfFiWsqbDfDBwZLoz_sdJnYc85amHODmguPMhQvUsMqbw@mail.gmail.com>
+Message-ID: <CAANX9ycayQnwZzppW4V8t22Pu136bEX_vWezTJCSMqbtZD3CFA@mail.gmail.com>
+
+On Thu, 14 Jan 2021 at 17:12, Andrew Elwell <andrew.elwell at gmail.com> wrote:
+> I'm struggling to debug quota enforcement (or more worryingly, lack
+> of) in recentish LTS releases.
+>
+> [root at pgfs-mds3 ~]# lctl conf_param testfs.quota.ost=g
+> ... time passes
+> [root at pgfs-mds4 ~]# lctl get_param osd-*.*.quota_slave.info | egrep
+> '(name|enabled)'
+> target name:    testfs-OST0000
+> quota enabled:  none
+> target name:    testfs-OST0001
+> quota enabled:  none
+>
+> doesn't seem to be rippling out.
+
+Not sure I've done the right thing, but poking via
+lctl set_param osd-ldiskfs.<whatever>.quota_slave.enabled=<whatever>
+*seems* to have done the trick!
+
+[root at pgfs-mds3 ~]# lctl get_param osd-*.*.quota_slave.info
+osd-ldiskfs.testfs-MDT0000.quota_slave.info=
+target name:    testfs-MDT0000
+pool ID:        0
+type:           md
+quota enabled:  ug
+conn to master: setup
+space acct:     ug
+user uptodate:  glb[1],slv[1],reint[0]
+group uptodate: glb[1],slv[1],reint[0]
+project uptodate: glb[0],slv[0],reint[0]
+[root at pgfs-mds3 ~]#  lctl get_param osd-ldiskfs.*.quota_slave.enabled
+osd-ldiskfs.testfs-MDT0000.quota_slave.enabled=ug
+[root at pgfs-mds3 ~]# lctl set_param
+osd-ldiskfs.testfs-MDT0000.quota_slave.enabled=g
+osd-ldiskfs.testfs-MDT0000.quota_slave.enabled=g
+[root at pgfs-mds3 ~]# lctl get_param osd-*.*.quota_slave.info
+osd-ldiskfs.testfs-MDT0000.quota_slave.info=
+target name:    testfs-MDT0000
+pool ID:        0
+type:           md
+quota enabled:  g
+conn to master: setup
+space acct:     ug
+user uptodate:  glb[1],slv[1],reint[0]
+group uptodate: glb[1],slv[1],reint[0]
+project uptodate: glb[0],slv[0],reint[0]
+
+Another Q - if I use the 2.12+ default quota feature (ie sudo lfs
+setquota -G -B 10m -I 1025 /testfs) and then read/write with an old
+client will it enforce the quotas (even if I can't manipulate /
+display them clearly) OK or is Something Bad (tm) going to happen
+behind the scenes? - it _seemed_ to be behaving as expected from a
+client side (2.7.mumble)
+
+Many thanks
+Andrew
+
+From mdidomenico4 at gmail.com  Thu Jan 14 06:04:41 2021
+From: mdidomenico4 at gmail.com (Michael Di Domenico)
+Date: Thu, 14 Jan 2021 09:04:41 -0500
+Subject: [lustre-discuss] [EXTERNAL] Re: Tuning for metadata performance
+In-Reply-To: <FF6CAC7E-CF18-4A70-8ADA-137F5D06BFF7@nasa.gov>
+References: <60899B95-1680-484A-B243-A404C70D08D1@nasa.gov>
+ <CABOsP2MTbvTCFEaV+eNZ5D46ukjhEZW=WvKf1yq=9hqvFDjaqg@mail.gmail.com>
+ <FF6CAC7E-CF18-4A70-8ADA-137F5D06BFF7@nasa.gov>
+Message-ID: <CABOsP2OHX1qhTM81CHr_dd2zuyoEAiAHiBp6qs8YyiNnJdwacQ@mail.gmail.com>
+
+interesting.  thanks for the detail.
+
+completely off the cuff, i could be totally wrong here, and i maybe
+misremembering something, but i believe i recall reading somewhere,
+when getxattr and getattr are called the MDT contacts the OSS's as
+well to get some info.  if that's true, this double hop is probably
+the extra wait time. the nfs server wouldn't have to do this, it just
+checks the local disk.
+
+if i'm not crazy and what i said has some truth, the one thing that
+might show a differential is if you lock all the files in the repo to
+a single OSS (you may have done this, i'm not sure)
+
+Again I'm no lustre genius, just trying to help.  the lustre dev's
+likely can explain better than i can.  i might be leading you down a
+rabbit hole.
+
+On Wed, Jan 13, 2021 at 6:49 PM Vicker, Darby J. (JSC-EG111)[Jacobs
+Technology, Inc.] <darby.vicker-1 at nasa.gov> wrote:
+>
+> I updated my git timings to include a run on our lustre FS's with the stripe count set to 1.  Our current default is a 3 segment PFL.  This did help a bit.  Updated plot attached.
+>
+> I also did some runs on NFS and lustre (ldisk MDT, stripe count=1 if that makes a difference) with strace -c.  Results are attached and also below.  I also plotted the results.  I don't think there is anything earth shattering here - the git operations on lustre and NFS make almost the same number of calls to the same functions, the lustre version just spends (a lot) more time waiting.  But it was a good idea - thanks.
+>
+>
+> $ cat strace.clone.scratch.out
+> % time     seconds  usecs/call     calls    errors syscall
+> ------ ----------- ----------- --------- --------- ----------------
+>  66.76   21.693112     7231037         3           wait4
+>  18.10    5.883054         367     16010           read
+>   4.19    1.362333          32     41741      8059 open
+>   3.85    1.251569           6    194499           write
+>   3.23    1.048391          31     33635           fstat
+>   2.71    0.879894          17     50473     45917 lstat
+>   0.56    0.181915          22      7941         1 mkdir
+>   0.39    0.126166           3     33706           close
+>   0.10    0.033229           4      7944      7932 access
+>   0.08    0.026800         558        48           munmap
+>   0.01    0.004397          33       133           symlink
+>   0.00    0.001168         292         4           clone
+>   0.00    0.000408           4        99           mmap
+>   0.00    0.000283           0       340           brk
+>   0.00    0.000264           2        96        42 stat
+>   0.00    0.000246           8        30           mprotect
+>   0.00    0.000227           2       105           lseek
+>   0.00    0.000220          15        14           rename
+>   0.00    0.000219          12        18           getdents
+>   0.00    0.000191          21         9           openat
+>   0.00    0.000104           1        56         8 rt_sigreturn
+>   0.00    0.000070           5        14        12 readlink
+>   0.00    0.000058           3        17           rt_sigaction
+>   0.00    0.000051          17         3           unlink
+>   0.00    0.000046           5         8           pipe
+>   0.00    0.000041           3        11           mremap
+>   0.00    0.000031           6         5           chdir
+>   0.00    0.000025          25         1           uname
+>   0.00    0.000020          20         1           chmod
+>   0.00    0.000015           3         5           getpid
+>   0.00    0.000011           2         5           fcntl
+>   0.00    0.000011           2         4           getcwd
+>   0.00    0.000011           5         2         2 statfs
+>   0.00    0.000009           2         4           clock_gettime
+>   0.00    0.000008           4         2           ioctl
+>   0.00    0.000006           3         2           getrlimit
+>   0.00    0.000005           2         2           setitimer
+>   0.00    0.000005           2         2           futex
+>   0.00    0.000004           4         1           execve
+>   0.00    0.000003           3         1           arch_prctl
+>   0.00    0.000003           3         1           set_tid_address
+>   0.00    0.000002           2         1           rt_sigprocmask
+>   0.00    0.000002           2         1           set_robust_list
+>   0.00    0.000000           0         1           fsync
+> ------ ----------- ----------- --------- --------- ----------------
+> 100.00   32.494627                386998     61973 total
+> $ cat strace.clone.ephemeral1s.out
+> % time     seconds  usecs/call     calls    errors syscall
+> ------ ----------- ----------- --------- --------- ----------------
+>  71.86  119.077430    39692476         3           wait4
+>  11.46   18.987659          97    194757           write
+>   4.31    7.138347         445     16012           read
+>   3.67    6.073564         145     41741      8059 open
+>   3.11    5.146797         101     50473     45917 lstat
+>   2.64    4.382265         130     33635           fstat
+>   2.16    3.571558         105     33706           close
+>   0.48    0.799008         100      7941         1 mkdir
+>   0.28    0.466472          58      7945      7933 access
+>   0.02    0.028136         586        48           munmap
+>   0.01    0.023113         173       133           symlink
+>   0.00    0.002379         169        14           rename
+>   0.00    0.001785           5       312        17 rt_sigreturn
+>   0.00    0.001416         354         4           clone
+>   0.00    0.001132          11        96        42 stat
+>   0.00    0.000824           8        99           mmap
+>   0.00    0.000731          40        18           getdents
+>   0.00    0.000710          50        14        12 readlink
+>   0.00    0.000657         219         3           unlink
+>   0.00    0.000538           1       338           brk
+>   0.00    0.000465          51         9           openat
+>   0.00    0.000352          11        30           mprotect
+>   0.00    0.000244         244         1           chmod
+>   0.00    0.000227           2       105           lseek
+>   0.00    0.000081          10         8           pipe
+>   0.00    0.000050           2        17           rt_sigaction
+>   0.00    0.000044           4        11           mremap
+>   0.00    0.000044          44         1           uname
+>   0.00    0.000026           5         5           chdir
+>   0.00    0.000021           4         5           fcntl
+>   0.00    0.000016           8         2         2 statfs
+>   0.00    0.000012           6         2           ioctl
+>   0.00    0.000011           2         4           getcwd
+>   0.00    0.000010          10         1           execve
+>   0.00    0.000007           3         2           getrlimit
+>   0.00    0.000005           2         2           setitimer
+>   0.00    0.000005           1         5           getpid
+>   0.00    0.000004           4         1           arch_prctl
+>   0.00    0.000004           2         2           futex
+>   0.00    0.000004           1         4           clock_gettime
+>   0.00    0.000003           3         1           rt_sigprocmask
+>   0.00    0.000003           3         1           set_tid_address
+>   0.00    0.000003           3         1           set_robust_list
+>   0.00    0.000000           0         1           fsync
+> ------ ----------- ----------- --------- --------- ----------------
+> 100.00  165.706162                387513     61983 total
+> $ cat strace.status.scratch.out
+> % time     seconds  usecs/call     calls    errors syscall
+> ------ ----------- ----------- --------- --------- ----------------
+>  61.47    0.688990          20     33734        13 lstat
+>  18.53    0.207653          13     15574           getdents
+>  13.33    0.149468          19      7787           openat
+>   4.01    0.044946          16      2703      2247 open
+>   1.99    0.022332           2      8243           close
+>   0.13    0.001478           2       629           write
+>   0.13    0.001442           2       483           read
+>   0.11    0.001218          15        81           fstat
+>   0.07    0.000831           6       121           munmap
+>   0.07    0.000742           4       170           mmap
+>   0.04    0.000426           5        85        68 stat
+>   0.04    0.000420         420         1           rename
+>   0.03    0.000354           1       212           brk
+>   0.02    0.000261          10        26        13 access
+>   0.02    0.000203           2        85           lseek
+>   0.01    0.000068           2        29           mprotect
+>   0.00    0.000020           4         5           chdir
+>   0.00    0.000019           3         5           getcwd
+>   0.00    0.000008           1         5           getpid
+>   0.00    0.000007           3         2         2 statfs
+>   0.00    0.000006           6         1           ioctl
+>   0.00    0.000006           3         2           fcntl
+>   0.00    0.000006           2         3         1 readlink
+>   0.00    0.000005           1         4           clock_gettime
+>   0.00    0.000004           2         2           getrlimit
+>   0.00    0.000004           2         2           futex
+>   0.00    0.000003           0         7           rt_sigaction
+>   0.00    0.000001           1         1           rt_sigprocmask
+>   0.00    0.000001           1         1           set_tid_address
+>   0.00    0.000001           1         1           set_robust_list
+>   0.00    0.000000           0        11           mremap
+>   0.00    0.000000           0         1           execve
+>   0.00    0.000000           0         1           arch_prctl
+> ------ ----------- ----------- --------- --------- ----------------
+> 100.00    1.120923                 70017      2344 total
+> $ cat strace.status.ephemeral1s.out
+> % time     seconds  usecs/call     calls    errors syscall
+> ------ ----------- ----------- --------- --------- ----------------
+>  46.42    2.694706          79     33734        13 lstat
+>  28.29    1.642311         105     15574           getdents
+>  11.21    0.650799          83      7787           openat
+>  10.53    0.611098          76      7952           close
+>   3.07    0.178217          80      2209      2044 open
+>   0.33    0.018913          30       629           write
+>   0.06    0.003425          12       265           read
+>   0.02    0.001401          16        85        68 stat
+>   0.02    0.001223          15        81           fstat
+>   0.01    0.000793          16        48           munmap
+>   0.01    0.000749           7        97           mmap
+>   0.01    0.000461           2       212           brk
+>   0.01    0.000457          17        26        13 access
+>   0.01    0.000320          11        29           mprotect
+>   0.00    0.000249         249         1           rename
+>   0.00    0.000230           2        85           lseek
+>   0.00    0.000084           7        11           mremap
+>   0.00    0.000039           7         5           chdir
+>   0.00    0.000026           5         5           getcwd
+>   0.00    0.000020           2         7           rt_sigaction
+>   0.00    0.000008           4         2           getrlimit
+>   0.00    0.000006           6         1           execve
+>   0.00    0.000006           6         1           set_tid_address
+>   0.00    0.000005           5         1           rt_sigprocmask
+>   0.00    0.000005           5         1           ioctl
+>   0.00    0.000005           2         2           futex
+>   0.00    0.000005           5         1           set_robust_list
+>   0.00    0.000004           2         2           fcntl
+>   0.00    0.000004           1         3         1 readlink
+>   0.00    0.000002           0         5           getpid
+>   0.00    0.000000           0         2         2 statfs
+>   0.00    0.000000           0         1           arch_prctl
+>   0.00    0.000000           0         4           clock_gettime
+> ------ ----------- ----------- --------- --------- ----------------
+> 100.00    5.805571                 68868      2141 total
+> $
+>
+> ?-----Original Message-----
+> From: lustre-discuss <lustre-discuss-bounces at lists.lustre.org> on behalf of Michael Di Domenico <mdidomenico4 at gmail.com>
+> Date: Tuesday, January 12, 2021 at 12:41 PM
+> Cc: "lustre-discuss at lists.lustre.org" <lustre-discuss at lists.lustre.org>
+> Subject: [EXTERNAL] Re: [lustre-discuss] Tuning for metadata performance
+>
+>     yes more or less.  i know on the lustre server side i can see the MDT
+>     operations, which I believe you can grab on the clients as well.
+>     which I believe is also what slurm is already telling you in the job
+>     stats you grep'ed.  i suspect it will be, but it would be interesting
+>     to see if 'strace -c' shows the same number of RPC between lustre and
+>     nfs
+>
+>     maybe based on the operations count, the lustre folks can suggest more
+>     specific areas to optimize the filesystem
+>
+
+From darby.vicker-1 at nasa.gov  Thu Jan 14 07:36:49 2021
+From: darby.vicker-1 at nasa.gov (Vicker, Darby J. (JSC-EG111)[Jacobs Technology, Inc.])
+Date: Thu, 14 Jan 2021 15:36:49 +0000
+Subject: [lustre-discuss] Tuning for metadata performance
+Message-ID: <27F5991B-2B2A-41A7-81B1-AE78F6BA6A53@nasa.gov>
+
+Sure. Thanks for the ideas.  
+
+Yes, I think that is correct.  If I understand correctly, that's one reason DoM is faster for small files.  But my understanding is also limited.  
+
+By a "single OSS", do you mean the same OSS for all files?  Or just 1 OSS for each individual file (but not necessarily the same OSS for all files).  I think you mean the latter.  All the lustre results I've sent so far are effectively using a single OSS (but not the same OSS) for all/almost all the files.  Our default PFL uses a single OST up to 32 MB, 4 OST's up to 1GB and 8 OST's beyond that.  In the git repo I've been using for this test, there are only 6 files bigger than 32 MB.  And there was the test where I explicitly set the stripe count to 1 for all files (ephemeral1s).  
+
+?-----Original Message-----
+From: lustre-discuss <lustre-discuss-bounces at lists.lustre.org> on behalf of Michael Di Domenico <mdidomenico4 at gmail.com>
+Date: Thursday, January 14, 2021 at 7:06 AM
+Cc: "lustre-discuss at lists.lustre.org" <lustre-discuss at lists.lustre.org>
+Subject: Re: [lustre-discuss] [EXTERNAL] Re: Tuning for metadata performance
+
+    interesting.  thanks for the detail.
+
+    completely off the cuff, i could be totally wrong here, and i maybe
+    misremembering something, but i believe i recall reading somewhere,
+    when getxattr and getattr are called the MDT contacts the OSS's as
+    well to get some info.  if that's true, this double hop is probably
+    the extra wait time. the nfs server wouldn't have to do this, it just
+    checks the local disk.
+
+    if i'm not crazy and what i said has some truth, the one thing that
+    might show a differential is if you lock all the files in the repo to
+    a single OSS (you may have done this, i'm not sure)
+
+    Again I'm no lustre genius, just trying to help.  the lustre dev's
+    likely can explain better than i can.  i might be leading you down a
+    rabbit hole.
+
+
+
+From mdidomenico4 at gmail.com  Thu Jan 14 07:58:05 2021
+From: mdidomenico4 at gmail.com (Michael Di Domenico)
+Date: Thu, 14 Jan 2021 10:58:05 -0500
+Subject: [lustre-discuss] Tuning for metadata performance
+In-Reply-To: <27F5991B-2B2A-41A7-81B1-AE78F6BA6A53@nasa.gov>
+References: <27F5991B-2B2A-41A7-81B1-AE78F6BA6A53@nasa.gov>
+Message-ID: <CABOsP2OEcfrNhONhOsD3==U0bh1v-Y89-yyueWNhZxBYvNEQjw@mail.gmail.com>
+
+On Thu, Jan 14, 2021 at 10:36 AM Vicker, Darby J. (JSC-EG111)[Jacobs
+Technology, Inc.] <darby.vicker-1 at nasa.gov> wrote:
+>
+>
+> By a "single OSS", do you mean the same OSS for all files?  Or just 1 OSS for each individual file (but not necessarily the same OSS for all files).  I think you mean the latter.  All the lustre results I've sent so far are effectively using a single OSS (but not the same OSS) for all/almost all the files.  Our default PFL uses a single OST up to 32 MB, 4 OST's up to 1GB and 8 OST's beyond that.  In the git repo I've been using for this test, there are only 6 files bigger than 32 MB.  And there was the test where I explicitly set the stripe count to 1 for all files (ephemeral1s).
+
+i mean locate all the files of the git repository on a single oss,
+maybe even a single ost.  not a mapping of one file per oss or
+striping files across oss's.
+
+the theory at least, is that by having all the files on a single
+oss/ost there might be a reduction in rpc's and/or an added cache
+effect from the disks and/or some readahead.  i don't know though,
+it's just a stab in the dark
+
+my hope is that by using a single client, single mdt, and single
+oss/ost you can push closer to the performance of nfs.  i suspect the
+added overhead of the mdt reaching across to the oss is going to
+prevent this though.  but it would be interesting nonetheless if we
+could move the needle at all
+
+if true, it might just be that the added RPC overhead of the MDS/OSS
+that the NFS doesn't have to contend with means the performance is
+what it is.  there's probably a way to measure the RPC latency at
+various points from client to disk through lustre, but i don't know
+how
+
+i'll give you this, it's an interesting research experiment.  if you
+could come up with a way to replicate your git repo with fluff data i
+could try to recreate the experiment and see how our results differ.
+
+From darby.vicker-1 at nasa.gov  Thu Jan 14 12:34:08 2021
+From: darby.vicker-1 at nasa.gov (Vicker, Darby J. (JSC-EG111)[Jacobs Technology, Inc.])
+Date: Thu, 14 Jan 2021 20:34:08 +0000
+Subject: [lustre-discuss] Tuning for metadata performance
+Message-ID: <0AF1E59E-A7B0-4000-8440-308B88C8B05A@nasa.gov>
+
+OK, I'll try a test with all files on the same OST.  
+
+How about we both do some tests with the linux kernel?  
+
+git clone git://git.kernel.org/pub/scm/linux/kernel/git/stable/linux-stable.git
+
+This is pretty comparable to the repo I'm working with.  
+$ du -hsc linux-stable
+4.8G	linux-stable
+4.8G	total
+$ find linux-stable | wc -l
+76026
+$
+
+
+This took a very long time for me to clone from the web.  But just cloning from disk to disk on a local SSD (git clone linux-stable linux-stable2) takes about 2 minutes - about the same as the repo I've been using.  I just cloned it from the local SSD to lustre and it took me about 11.5 mintues for the clone.  That timing is in line to what I reported earlier if you scale by the number of files.   
+
+(By the way, I must have added an extra 0 in my plot heading for the number of files - the repo I've been using has about 47,000 files, not 469,000 files.  My apologies for all the mis-information I've given in this thread!)  
+
+I would also love to know what your "out of the box" io500 MD test numbers look like (./io500.sh config-minimal.ini) as those should be a good data to compare too.  
+
+
+?-----Original Message-----
+From: lustre-discuss <lustre-discuss-bounces at lists.lustre.org> on behalf of Michael Di Domenico <mdidomenico4 at gmail.com>
+Date: Thursday, January 14, 2021 at 8:58 AM
+Cc: "lustre-discuss at lists.lustre.org" <lustre-discuss at lists.lustre.org>
+Subject: [EXTERNAL] Re: [lustre-discuss] Tuning for metadata performance
+
+    On Thu, Jan 14, 2021 at 10:36 AM Vicker, Darby J. (JSC-EG111)[Jacobs
+    Technology, Inc.] <darby.vicker-1 at nasa.gov> wrote:
+    >
+    >
+    > By a "single OSS", do you mean the same OSS for all files?  Or just 1 OSS for each individual file (but not necessarily the same OSS for all files).  I think you mean the latter.  All the lustre results I've sent so far are effectively using a single OSS (but not the same OSS) for all/almost all the files.  Our default PFL uses a single OST up to 32 MB, 4 OST's up to 1GB and 8 OST's beyond that.  In the git repo I've been using for this test, there are only 6 files bigger than 32 MB.  And there was the test where I explicitly set the stripe count to 1 for all files (ephemeral1s).
+
+    i mean locate all the files of the git repository on a single oss,
+    maybe even a single ost.  not a mapping of one file per oss or
+    striping files across oss's.
+
+    the theory at least, is that by having all the files on a single
+    oss/ost there might be a reduction in rpc's and/or an added cache
+    effect from the disks and/or some readahead.  i don't know though,
+    it's just a stab in the dark
+
+    my hope is that by using a single client, single mdt, and single
+    oss/ost you can push closer to the performance of nfs.  i suspect the
+    added overhead of the mdt reaching across to the oss is going to
+    prevent this though.  but it would be interesting nonetheless if we
+    could move the needle at all
+
+    if true, it might just be that the added RPC overhead of the MDS/OSS
+    that the NFS doesn't have to contend with means the performance is
+    what it is.  there's probably a way to measure the RPC latency at
+    various points from client to disk through lustre, but i don't know
+    how
+
+    i'll give you this, it's an interesting research experiment.  if you
+    could come up with a way to replicate your git repo with fluff data i
+    could try to recreate the experiment and see how our results differ.
+    _______________________________________________
+    lustre-discuss mailing list
+    lustre-discuss at lists.lustre.org
+    https://gcc02.safelinks.protection.outlook.com/?url=http%3A%2F%2Flists.lustre.org%2Flistinfo.cgi%2Flustre-discuss-lustre.org&amp;data=04%7C01%7Cdarby.vicker-1%40nasa.gov%7C9795cf3879ee4c04005e08d8b8a540e7%7C7005d45845be48ae8140d43da96dd17b%7C0%7C0%7C637462367183683842%7CUnknown%7CTWFpbGZsb3d8eyJWIjoiMC4wLjAwMDAiLCJQIjoiV2luMzIiLCJBTiI6Ik1haWwiLCJXVCI6Mn0%3D%7C3000&amp;sdata=%2FLh4t%2F89wlEphB%2BFz%2FOwCt1jwVCskHSA9teqkU17uvU%3D&amp;reserved=0
+
+
+From mdidomenico4 at gmail.com  Fri Jan 15 06:24:01 2021
+From: mdidomenico4 at gmail.com (Michael Di Domenico)
+Date: Fri, 15 Jan 2021 09:24:01 -0500
+Subject: [lustre-discuss] Tuning for metadata performance
+In-Reply-To: <0AF1E59E-A7B0-4000-8440-308B88C8B05A@nasa.gov>
+References: <0AF1E59E-A7B0-4000-8440-308B88C8B05A@nasa.gov>
+Message-ID: <CABOsP2OHQpVhR4F1NAY+DqgLL==t=yqz4zsKwHCZviV8VTbn7Q@mail.gmail.com>
+
+On Thu, Jan 14, 2021 at 3:34 PM Vicker, Darby J. (JSC-EG111)[Jacobs
+Technology, Inc.] <darby.vicker-1 at nasa.gov> wrote:
+> This took a very long time for me to clone from the web.  But just cloning from disk to disk on a local SSD (git clone linux-stable linux-stable2) takes about 2 minutes - about the same as the repo I've been using.  I just cloned it from the local SSD to lustre and it took me about 11.5 mintues for the clone.  That timing is in line to what I reported earlier if you scale by the number of files.
+>
+
+a first blush pass a cloning the kernel produced, 4mins on nfs and
+8mins on lustre.  i've done nothing to check/test/etc, literally just
+the git clones.  the source repo is sitting on a raid10 of 4 ssd's,
+the box is a server machine plenty of cpu's/memory and 10G ethernet
+
+so at least our numbers match.  my lustre system might be a little
+faster or less utilized then yours.  which might account for the
+shorter lustre time
+
+> I would also love to know what your "out of the box" io500 MD test numbers look like (./io500.sh config-minimal.ini) as those should be a good data to compare too.
+
+i've had no end of trouble trying to get this test to run and gave up.
+i'll give it another go and see what i can pull out.  the framework
+isn't the greatest in my opinion.  since i can't quesce my system, i'm
+not sure how relevant the results would be anyhow.
+
+From ferrao at versatushpc.com.br  Mon Jan 18 20:39:18 2021
+From: ferrao at versatushpc.com.br (=?utf-8?B?Vmluw61jaXVzIEZlcnLDo28=?=)
+Date: Tue, 19 Jan 2021 04:39:18 +0000
+Subject: [lustre-discuss] Cannot do a ping with LNet over Infiniband
+Message-ID: <AF119EEF-A62B-43C4-B0FB-9A7A1A271B3E@versatushpc.com.br>
+
+Hello,
+
+I?ve been scratching my head for three days now but I cannot do a simple ping over Infiniband using LNet. To be honest I have no idea of whats may be happening. LNet over TCP (on ethernet) seems to work fine. The only way LNet ping works is by pinging itself:
+
+[root at mds1 ~]# lctl ping 10.148.0.20 at o2ib1
+12345-0 at lo
+12345-10.24.2.12 at tcp1
+12345-10.148.0.20 at o2ib1
+
+Everything else just fails:
+
+[root at mds1 ~]# lctl ping 10.148.0.21 at o2ib1
+failed to ping 10.148.0.21 at o2ib1: Input/output error
+[root at mds1 ~]# dmesg -T | tail -n 2
+[Tue Jan 19 01:26:01 2021] LNet: 2424:0:(o2iblnd_cb.c:3405:kiblnd_check_conns()) Timed out tx for 10.148.0.21 at o2ib1: 5095 seconds
+[Tue Jan 19 01:26:01 2021] LNetError: 2362:0:(lib-move.c:2955:lnet_resend_pending_msgs_locked()) Error sending GET to 12345-10.148.0.21 at o2ib1: -125
+
+I can confirm that IPoIB network is working as expected:
+
+[root at mds1 ~]# ping 10.148.0.21
+PING 10.148.0.21 (10.148.0.21) 56(84) bytes of data.
+64 bytes from 10.148.0.21: icmp_seq=1 ttl=64 time=2.52 ms
+64 bytes from 10.148.0.21: icmp_seq=2 ttl=64 time=0.085 ms
+
+Configuration seem to match between the two example machines:
+
+[root at mds1 ~]# ifconfig ib0 | head -n 2
+Infiniband hardware address can be incorrect! Please read BUGS section in ifconfig(8).
+ib0: flags=4163<UP,BROADCAST,RUNNING,MULTICAST>  mtu 65520
+        inet 10.148.0.20  netmask 255.255.0.0  broadcast 10.148.255.255
+
+[root at mds2 ~]# ifconfig ib0 | head -n 2
+Infiniband hardware address can be incorrect! Please read BUGS section in ifconfig(8).
+ib0: flags=4163<UP,BROADCAST,RUNNING,MULTICAST>  mtu 65520
+        inet 10.148.0.21  netmask 255.255.0.0  broadcast 10.148.255.255
+
+Here?s the output of network configuration:
+[root at mds1 ~]# lnetctl net show 
+net:
+    - net type: lo
+      local NI(s):
+        - nid: 0 at lo
+          status: up
+    - net type: tcp1
+      local NI(s):
+        - nid: 10.24.2.12 at tcp1
+          status: up
+          interfaces:
+              0: bond0
+    - net type: o2ib1
+      local NI(s):
+        - nid: 10.148.0.20 at o2ib1
+          status: up
+          interfaces:
+              0: ib0
+
+Modules seems to be loaded:
+[root at mds1 ~]# lsmod | egrep "mlx|mlnx|lnet|rdma|ko2iblnd"
+lnet_selftest         274357  0 
+ko2iblnd              238469  1 
+lnet                  595358  4 ko2iblnd,lnet_selftest,ksocklnd
+libcfs                415577  4 lnet,ko2iblnd,lnet_selftest,ksocklnd
+rdma_ucm               26931  0 
+rdma_cm                64252  2 ko2iblnd,rdma_ucm
+iw_cm                  43918  1 rdma_cm
+ib_cm                  53015  3 rdma_cm,ib_ucm,ib_ipoib
+mlx4_en               142468  0 
+mlx4_ib               220791  0 
+mlx4_core             361489  2 mlx4_en,mlx4_ib
+mlx5_ib               398193  0 
+ib_uverbs             134646  3 mlx5_ib,ib_ucm,rdma_ucm
+ib_core               379808  11 rdma_cm,ib_cm,iw_cm,ko2iblnd,mlx4_ib,mlx5_ib,ib_ucm,ib_umad,ib_uverbs,rdma_ucm,ib_ipoib
+mlx5_core            1113637  1 mlx5_ib
+mlxfw                  18227  1 mlx5_core
+devlink                60067  4 mlx4_en,mlx4_ib,mlx4_core,mlx5_core
+mlx_compat             47141  15 rdma_cm,ib_cm,iw_cm,ko2iblnd,mlx4_en,mlx4_ib,mlx5_ib,ib_ucm,ib_core,ib_umad,ib_uverbs,mlx4_core,mlx5_core,rdma_ucm,ib_ipoib
+ptp                    23551  3 i40e,mlx4_en,mlx5_core
+
+Both systems were running CentOS 7.9, Lustre 2.12.6 (IB Branch) and Mellanox OFED 4.9-2.2.4.0.
+
+The only error message that I?ve found is the one that I?ve pasted in the start of this message on dmesg and tem I/O error.
+
+Any help is greatly appreciated.
+Thanks,
+Vin?cius.
+
+
+
+
+From andrew.elwell at gmail.com  Mon Jan 18 20:55:16 2021
+From: andrew.elwell at gmail.com (Andrew Elwell)
+Date: Tue, 19 Jan 2021 15:55:16 +1100
+Subject: [lustre-discuss] Determining server version from client
+Message-ID: <CAANX9yfZXADG+nY=QmTau+GuqBpNiT1P9pA=V7GtVZhw_No5Og@mail.gmail.com>
+
+Hi All,
+
+Is there a trivial command to determine the server side version of
+lustre (in my case, trying to confirm what types of quotas are allowed
+(project - 2.10+, default - 2.12+) ?
+
+I was hoping there'd be something in lfs, such as lfs getname
+--version which would ideally spit out something like
+
+$ lfs getname --version
+fs1-ffff9920dde7d000 /fs1 2.10.4
+testfs-ffff992073597800 /testfs 2.12.5
+
+but that's wishful thinking :-) as lfs --version merely gives me the
+client version as expected
+
+Is this something that's fairly trivial and I'll open a jira ticket
+for the request - I know it's done at mount time as the kernel can log
+kernel: Lustre: Server MGS version (2.5.1.0) is much older than
+client. Consider upgrading server (2.12.5)
+
+Many thanks
+
+Andrew
+
+From degremoa at amazon.com  Tue Jan 19 02:21:25 2021
+From: degremoa at amazon.com (Degremont, Aurelien)
+Date: Tue, 19 Jan 2021 10:21:25 +0000
+Subject: [lustre-discuss] Determining server version from client
+In-Reply-To: <CAANX9yfZXADG+nY=QmTau+GuqBpNiT1P9pA=V7GtVZhw_No5Og@mail.gmail.com>
+References: <CAANX9yfZXADG+nY=QmTau+GuqBpNiT1P9pA=V7GtVZhw_No5Og@mail.gmail.com>
+Message-ID: <49B8FEA4-73DE-4037-984B-EF9AE2C57DA3@amazon.com>
+
+Hi Andrew,
+
+There are no such things as a filesystem version, as a filesystem is made of MDTs, OSTs and clients. Each of them could have different Lustre versions (even if running too much different lustre versions between MDT and OST is not really supported).
+So, to get the Lustre version, you should check server versions, with this command by example:
+
+$ lctl get_param *.*.import | grep target_version
+
+The local Lustre client version could be read with
+
+
+$ lctl get_param version
+
+
+Aur?lien
+
+?Le 19/01/2021 05:56, ? lustre-discuss au nom de Andrew Elwell ? <lustre-discuss-bounces at lists.lustre.org au nom de andrew.elwell at gmail.com> a ?crit :
+
+    CAUTION: This email originated from outside of the organization. Do not click links or open attachments unless you can confirm the sender and know the content is safe.
+
+
+
+    Hi All,
+
+    Is there a trivial command to determine the server side version of
+    lustre (in my case, trying to confirm what types of quotas are allowed
+    (project - 2.10+, default - 2.12+) ?
+
+    I was hoping there'd be something in lfs, such as lfs getname
+    --version which would ideally spit out something like
+
+    $ lfs getname --version
+    fs1-ffff9920dde7d000 /fs1 2.10.4
+    testfs-ffff992073597800 /testfs 2.12.5
+
+    but that's wishful thinking :-) as lfs --version merely gives me the
+    client version as expected
+
+    Is this something that's fairly trivial and I'll open a jira ticket
+    for the request - I know it's done at mount time as the kernel can log
+    kernel: Lustre: Server MGS version (2.5.1.0) is much older than
+    client. Consider upgrading server (2.12.5)
+
+    Many thanks
+
+    Andrew
+    _______________________________________________
+    lustre-discuss mailing list
+    lustre-discuss at lists.lustre.org
+    http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org
+
+
+From ferrao at versatushpc.com.br  Tue Jan 19 17:21:03 2021
+From: ferrao at versatushpc.com.br (=?utf-8?B?Vmluw61jaXVzIEZlcnLDo28=?=)
+Date: Wed, 20 Jan 2021 01:21:03 +0000
+Subject: [lustre-discuss] Cannot do a ping with LNet over Infiniband
+In-Reply-To: <53A1E217-E45E-4A27-8974-E86F232256D3@hpe.com>
+References: <53A1E217-E45E-4A27-8974-E86F232256D3@hpe.com>
+Message-ID: <573416BB-578C-477A-8EE6-7D1F396080DA@versatushpc.com.br>
+
+Hi Chris, you nailed it.
+
+There?s something wrong with the Infiniband network. The bad news is that I don?t have control nor access to it.
+
+For the testing I initially done what you?ve said about -I on common ping:
+
+[root at mds1 ~]# ping -I ib0 10.148.0.21
+PING 10.148.0.21 (10.148.0.21) from 10.148.0.20 ib0: 56(84) bytes of data.
+64 bytes from 10.148.0.21: icmp_seq=1 ttl=64 time=0.067 ms
+64 bytes from 10.148.0.21: icmp_seq=2 ttl=64 time=0.079 ms
+64 bytes from 10.148.0.21: icmp_seq=3 ttl=64 time=0.078 ms
+
+After I?ve tried ibping which seems to be working:
+[root at mds1 ~]# ibping -G 0xb8599f0300e34b56
+Pong from mds2.localdomain.(none) (Lid 63): time 0.159 ms
+Pong from mds2.localdomain.(none) (Lid 63): time 0.177 ms
+Pong from mds2.localdomain.(none) (Lid 63): time 0.178 ms
+
+But ib_send_bw was a no go, I?ve fired up the server on mds2 but it didn?t work from the client side:
+
+[root at mds2 ~]# ib_send_bw
+
+************************************
+* Waiting for client to connect... *
+************************************
+
+[root at mds1 ~]# ib_send_bw 10.148.0.21 -a
+Couldn't connect to 10.148.0.21:18515
+Unable to open file descriptor for socket connection Unable to init the socket connection
+
+But after this initial testing I observed something at least strange. On mds2 it took a while to ping mds1:
+
+[root at mds2 ~]# ping 10.148.0.20
+PING 10.148.0.20 (10.148.0.20) 56(84) bytes of data.
+64 bytes from 10.148.0.20: icmp_seq=7 ttl=64 time=1.48 ms
+64 bytes from 10.148.0.20: icmp_seq=8 ttl=64 time=0.172 ms
+64 bytes from 10.148.0.20: icmp_seq=9 ttl=64 time=0.169 ms
+
+People note that the first icmp_seq was equal to 7.
+
+After doing this, ib_send_bw just works:
+[root at mds1 ~]# ib_send_bw 10.148.0.21
+---------------------------------------------------------------------------------------
+                    Send BW Test
+ Dual-port       : OFF		Device         : mlx5_0
+ Number of qps   : 1		Transport type : IB
+ Connection type : RC		Using SRQ      : OFF
+ PCIe relax order: ON
+ TX depth        : 128
+ CQ Moderation   : 1
+ Mtu             : 4096[B]
+ Link type       : IB
+ Max inline data : 0[B]
+ rdma_cm QPs	 : OFF
+ Data ex. method : Ethernet
+---------------------------------------------------------------------------------------
+ local address: LID 0x3e QPN 0x00c3 PSN 0xfa38c7
+ remote address: LID 0x3f QPN 0x008a PSN 0xd3f2c
+---------------------------------------------------------------------------------------
+ #bytes     #iterations    BW peak[MB/sec]    BW average[MB/sec]   MsgRate[Mpps]
+Conflicting CPU frequency values detected: 1199.926000 != 3296.337000. CPU Frequency is not max.
+ 65536      1000             11482.36            11473.00		   0.183568
+???????????????????????????????????????????
+
+So yeah, the first that I must suspect is OpenSM. But I don?t have access to it. That just a guess. Have anyone seem something like this?
+
+Thanks.
+Vin?cius.
+
+> On 19 Jan 2021, at 13:43, Horn, Chris <chris.horn at hpe.com> wrote:
+> 
+> You might try running an IB benchmark tool, e.g. ib_send_bw, between two hosts to verify that the network is working at that level.
+> 
+> Note that the 'ping' command doesn't always send traffic in the manner you might expect. You should use the '-I interface' option to make sure that the pings are being sent over the desired local interface.
+> 
+> Chris Horn
+> 
+> ?On 1/18/21, 10:39 PM, "lustre-discuss on behalf of Vin?cius Ferr?o" <lustre-discuss-bounces at lists.lustre.org on behalf of ferrao at versatushpc.com.br> wrote:
+> 
+>    Hello,
+> 
+>    I?ve been scratching my head for three days now but I cannot do a simple ping over Infiniband using LNet. To be honest I have no idea of whats may be happening. LNet over TCP (on ethernet) seems to work fine. The only way LNet ping works is by pinging itself:
+> 
+>    [root at mds1 ~]# lctl ping 10.148.0.20 at o2ib1
+>    12345-0 at lo
+>    12345-10.24.2.12 at tcp1
+>    12345-10.148.0.20 at o2ib1
+> 
+>    Everything else just fails:
+> 
+>    [root at mds1 ~]# lctl ping 10.148.0.21 at o2ib1
+>    failed to ping 10.148.0.21 at o2ib1: Input/output error
+>    [root at mds1 ~]# dmesg -T | tail -n 2
+>    [Tue Jan 19 01:26:01 2021] LNet: 2424:0:(o2iblnd_cb.c:3405:kiblnd_check_conns()) Timed out tx for 10.148.0.21 at o2ib1: 5095 seconds
+>    [Tue Jan 19 01:26:01 2021] LNetError: 2362:0:(lib-move.c:2955:lnet_resend_pending_msgs_locked()) Error sending GET to 12345-10.148.0.21 at o2ib1: -125
+> 
+>    I can confirm that IPoIB network is working as expected:
+> 
+>    [root at mds1 ~]# ping 10.148.0.21
+>    PING 10.148.0.21 (10.148.0.21) 56(84) bytes of data.
+>    64 bytes from 10.148.0.21: icmp_seq=1 ttl=64 time=2.52 ms
+>    64 bytes from 10.148.0.21: icmp_seq=2 ttl=64 time=0.085 ms
+> 
+>    Configuration seem to match between the two example machines:
+> 
+>    [root at mds1 ~]# ifconfig ib0 | head -n 2
+>    Infiniband hardware address can be incorrect! Please read BUGS section in ifconfig(8).
+>    ib0: flags=4163<UP,BROADCAST,RUNNING,MULTICAST>  mtu 65520
+>            inet 10.148.0.20  netmask 255.255.0.0  broadcast 10.148.255.255
+> 
+>    [root at mds2 ~]# ifconfig ib0 | head -n 2
+>    Infiniband hardware address can be incorrect! Please read BUGS section in ifconfig(8).
+>    ib0: flags=4163<UP,BROADCAST,RUNNING,MULTICAST>  mtu 65520
+>            inet 10.148.0.21  netmask 255.255.0.0  broadcast 10.148.255.255
+> 
+>    Here?s the output of network configuration:
+>    [root at mds1 ~]# lnetctl net show 
+>    net:
+>        - net type: lo
+>          local NI(s):
+>            - nid: 0 at lo
+>              status: up
+>        - net type: tcp1
+>          local NI(s):
+>            - nid: 10.24.2.12 at tcp1
+>              status: up
+>              interfaces:
+>                  0: bond0
+>        - net type: o2ib1
+>          local NI(s):
+>            - nid: 10.148.0.20 at o2ib1
+>              status: up
+>              interfaces:
+>                  0: ib0
+> 
+>    Modules seems to be loaded:
+>    [root at mds1 ~]# lsmod | egrep "mlx|mlnx|lnet|rdma|ko2iblnd"
+>    lnet_selftest         274357  0 
+>    ko2iblnd              238469  1 
+>    lnet                  595358  4 ko2iblnd,lnet_selftest,ksocklnd
+>    libcfs                415577  4 lnet,ko2iblnd,lnet_selftest,ksocklnd
+>    rdma_ucm               26931  0 
+>    rdma_cm                64252  2 ko2iblnd,rdma_ucm
+>    iw_cm                  43918  1 rdma_cm
+>    ib_cm                  53015  3 rdma_cm,ib_ucm,ib_ipoib
+>    mlx4_en               142468  0 
+>    mlx4_ib               220791  0 
+>    mlx4_core             361489  2 mlx4_en,mlx4_ib
+>    mlx5_ib               398193  0 
+>    ib_uverbs             134646  3 mlx5_ib,ib_ucm,rdma_ucm
+>    ib_core               379808  11 rdma_cm,ib_cm,iw_cm,ko2iblnd,mlx4_ib,mlx5_ib,ib_ucm,ib_umad,ib_uverbs,rdma_ucm,ib_ipoib
+>    mlx5_core            1113637  1 mlx5_ib
+>    mlxfw                  18227  1 mlx5_core
+>    devlink                60067  4 mlx4_en,mlx4_ib,mlx4_core,mlx5_core
+>    mlx_compat             47141  15 rdma_cm,ib_cm,iw_cm,ko2iblnd,mlx4_en,mlx4_ib,mlx5_ib,ib_ucm,ib_core,ib_umad,ib_uverbs,mlx4_core,mlx5_core,rdma_ucm,ib_ipoib
+>    ptp                    23551  3 i40e,mlx4_en,mlx5_core
+> 
+>    Both systems were running CentOS 7.9, Lustre 2.12.6 (IB Branch) and Mellanox OFED 4.9-2.2.4.0.
+> 
+>    The only error message that I?ve found is the one that I?ve pasted in the start of this message on dmesg and tem I/O error.
+> 
+>    Any help is greatly appreciated.
+>    Thanks,
+>    Vin?cius.
+> 
+> 
+> 
+>    _______________________________________________
+>    lustre-discuss mailing list
+>    lustre-discuss at lists.lustre.org
+>    http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org 
+> 
+
+
+From mdidomenico4 at gmail.com  Thu Jan 21 09:40:45 2021
+From: mdidomenico4 at gmail.com (Michael Di Domenico)
+Date: Thu, 21 Jan 2021 12:40:45 -0500
+Subject: [lustre-discuss] Cannot do a ping with LNet over Infiniband
+In-Reply-To: <AF119EEF-A62B-43C4-B0FB-9A7A1A271B3E@versatushpc.com.br>
+References: <AF119EEF-A62B-43C4-B0FB-9A7A1A271B3E@versatushpc.com.br>
+Message-ID: <CABOsP2PM__2zrZse2XnaTs8FLFm=Sa80=HjWYzQB3Ffs==gcDA@mail.gmail.com>
+
+it may seem a silly question, but because you don't show output from
+the .21 host is that also configured and up from an lnet perspective?
+
+On Mon, Jan 18, 2021 at 11:39 PM Vin?cius Ferr?o
+<ferrao at versatushpc.com.br> wrote:
+>
+> Hello,
+>
+> I?ve been scratching my head for three days now but I cannot do a simple ping over Infiniband using LNet. To be honest I have no idea of whats may be happening. LNet over TCP (on ethernet) seems to work fine. The only way LNet ping works is by pinging itself:
+>
+> [root at mds1 ~]# lctl ping 10.148.0.20 at o2ib1
+> 12345-0 at lo
+> 12345-10.24.2.12 at tcp1
+> 12345-10.148.0.20 at o2ib1
+>
+> Everything else just fails:
+>
+> [root at mds1 ~]# lctl ping 10.148.0.21 at o2ib1
+> failed to ping 10.148.0.21 at o2ib1: Input/output error
+> [root at mds1 ~]# dmesg -T | tail -n 2
+> [Tue Jan 19 01:26:01 2021] LNet: 2424:0:(o2iblnd_cb.c:3405:kiblnd_check_conns()) Timed out tx for 10.148.0.21 at o2ib1: 5095 seconds
+> [Tue Jan 19 01:26:01 2021] LNetError: 2362:0:(lib-move.c:2955:lnet_resend_pending_msgs_locked()) Error sending GET to 12345-10.148.0.21 at o2ib1: -125
+>
+> I can confirm that IPoIB network is working as expected:
+>
+> [root at mds1 ~]# ping 10.148.0.21
+> PING 10.148.0.21 (10.148.0.21) 56(84) bytes of data.
+> 64 bytes from 10.148.0.21: icmp_seq=1 ttl=64 time=2.52 ms
+> 64 bytes from 10.148.0.21: icmp_seq=2 ttl=64 time=0.085 ms
+>
+> Configuration seem to match between the two example machines:
+>
+> [root at mds1 ~]# ifconfig ib0 | head -n 2
+> Infiniband hardware address can be incorrect! Please read BUGS section in ifconfig(8).
+> ib0: flags=4163<UP,BROADCAST,RUNNING,MULTICAST>  mtu 65520
+>         inet 10.148.0.20  netmask 255.255.0.0  broadcast 10.148.255.255
+>
+> [root at mds2 ~]# ifconfig ib0 | head -n 2
+> Infiniband hardware address can be incorrect! Please read BUGS section in ifconfig(8).
+> ib0: flags=4163<UP,BROADCAST,RUNNING,MULTICAST>  mtu 65520
+>         inet 10.148.0.21  netmask 255.255.0.0  broadcast 10.148.255.255
+>
+> Here?s the output of network configuration:
+> [root at mds1 ~]# lnetctl net show
+> net:
+>     - net type: lo
+>       local NI(s):
+>         - nid: 0 at lo
+>           status: up
+>     - net type: tcp1
+>       local NI(s):
+>         - nid: 10.24.2.12 at tcp1
+>           status: up
+>           interfaces:
+>               0: bond0
+>     - net type: o2ib1
+>       local NI(s):
+>         - nid: 10.148.0.20 at o2ib1
+>           status: up
+>           interfaces:
+>               0: ib0
+>
+> Modules seems to be loaded:
+> [root at mds1 ~]# lsmod | egrep "mlx|mlnx|lnet|rdma|ko2iblnd"
+> lnet_selftest         274357  0
+> ko2iblnd              238469  1
+> lnet                  595358  4 ko2iblnd,lnet_selftest,ksocklnd
+> libcfs                415577  4 lnet,ko2iblnd,lnet_selftest,ksocklnd
+> rdma_ucm               26931  0
+> rdma_cm                64252  2 ko2iblnd,rdma_ucm
+> iw_cm                  43918  1 rdma_cm
+> ib_cm                  53015  3 rdma_cm,ib_ucm,ib_ipoib
+> mlx4_en               142468  0
+> mlx4_ib               220791  0
+> mlx4_core             361489  2 mlx4_en,mlx4_ib
+> mlx5_ib               398193  0
+> ib_uverbs             134646  3 mlx5_ib,ib_ucm,rdma_ucm
+> ib_core               379808  11 rdma_cm,ib_cm,iw_cm,ko2iblnd,mlx4_ib,mlx5_ib,ib_ucm,ib_umad,ib_uverbs,rdma_ucm,ib_ipoib
+> mlx5_core            1113637  1 mlx5_ib
+> mlxfw                  18227  1 mlx5_core
+> devlink                60067  4 mlx4_en,mlx4_ib,mlx4_core,mlx5_core
+> mlx_compat             47141  15 rdma_cm,ib_cm,iw_cm,ko2iblnd,mlx4_en,mlx4_ib,mlx5_ib,ib_ucm,ib_core,ib_umad,ib_uverbs,mlx4_core,mlx5_core,rdma_ucm,ib_ipoib
+> ptp                    23551  3 i40e,mlx4_en,mlx5_core
+>
+> Both systems were running CentOS 7.9, Lustre 2.12.6 (IB Branch) and Mellanox OFED 4.9-2.2.4.0.
+>
+> The only error message that I?ve found is the one that I?ve pasted in the start of this message on dmesg and tem I/O error.
+>
+> Any help is greatly appreciated.
+> Thanks,
+> Vin?cius.
+>
+>
+>
+> _______________________________________________
+> lustre-discuss mailing list
+> lustre-discuss at lists.lustre.org
+> http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org
+
+From thhsieh at twcp1.phys.ntu.edu.tw  Fri Jan 22 01:01:40 2021
+From: thhsieh at twcp1.phys.ntu.edu.tw (Tung-Han Hsieh)
+Date: Fri, 22 Jan 2021 17:01:40 +0800
+Subject: [lustre-discuss] Lustre MDT with ZFS backend
+Message-ID: <20210122090140.4b5ufqdocmkmoi5z@twcp1.phys.ntu.edu.tw>
+
+Dear All,
+
+Recently we read from this mailing list and learned that currently
+Lustre file system MDT with ZFS backend has poor performance. Too
+bad that we did not notice this before deploying this configuration
+to many of our cluster systems. Now that there are already too much
+amount of data to reconfigure them back to MDT with ldiskfs backend.
+
+So now the only way for us is looking forward and try to do our best.
+I read this article about the improvement of MDT with ZFS:
+
+https://www.nextplatform.com/2017/01/11/bolstering-lustre-zfs-highlights-continuing-work/
+
+It seems that MDT with ZFS already had large improvement over time,
+but in our applications it is still not enough. So I am asking that
+whether there is a roadmap to improve this part ?
+
+Furthermore, I saw that ZFS already has version 2.0.1. Is there any
+plan of Lustre part to integrate and take advantages of the new ZFS
+software ?
+
+In the meanwhile, currently we have the following configurations and
+tunings in our Lustre system to try to overcome various performance
+bottlenecks (both MDT and OST are ZFS backend):
+
+- Linux kernel 4.19.126 + MLNX_OFED-4.6 + Lustre-2.12.6 + ZFS-0.7.3
+  (ps. We build all the above software by ourselves in Debian-9.12)
+
+- Loading zfs module with the following options
+  (Many thanks to the suggestions by Riccardo Veraldi):
+  options zfs zfs_prefetch_disable=1
+  options zfs zfs_txg_history=120
+  options zfs metaslab_debug_unload=1
+  options zfs zfs_vdev_async_write_active_min_dirty_percent=20
+  options zfs zfs_vdev_scrub_min_active=48
+  options zfs zfs_vdev_scrub_max_active=128
+  options zfs zfs_vdev_sync_write_min_active=8
+  options zfs zfs_vdev_sync_write_max_active=32
+  options zfs zfs_vdev_sync_read_min_active=8
+  options zfs zfs_vdev_sync_read_max_active=32
+  options zfs zfs_vdev_async_read_min_active=8
+  options zfs zfs_vdev_async_read_max_active=32
+  options zfs zfs_top_maxinflight=320
+  options zfs zfs_txg_timeout=30
+  options zfs zfs_dirty_data_max_percent=40
+  options zfs zfs_vdev_async_write_min_active=8
+  options zfs zfs_vdev_async_write_max_active=32
+
+- ZFS pool is configured with the following options:
+  zfs set atime=off <pool>
+  zfs set redundant_metadata=most <pool>
+  zfs set xattr=sa <pool>
+  zfs set recordsize=1M <pool>
+
+- Set the grant_shrink option to 0 for all clients of Lustre:
+  lctl set_param osc.*.grant_shrink=0
+
+These are all we have learned so far. We are wondering whether
+there are still something we have overlooked (e.g., are iommu
+and intel_iommu settings of kernel parameters help)? We will be
+very appreciated if anyone could give us further suggestions.
+
+
+Best Regards,
+
+T.H.Hsieh
+
+From adilger at whamcloud.com  Sat Jan 23 03:26:33 2021
+From: adilger at whamcloud.com (Andreas Dilger)
+Date: Sat, 23 Jan 2021 11:26:33 +0000
+Subject: [lustre-discuss] Lustre MDT with ZFS backend
+In-Reply-To: <20210122090140.4b5ufqdocmkmoi5z@twcp1.phys.ntu.edu.tw>
+References: <20210122090140.4b5ufqdocmkmoi5z@twcp1.phys.ntu.edu.tw>
+Message-ID: <C0A8AD34-B612-473A-A978-73FC8D6E961B@whamcloud.com>
+
+On Jan 22, 2021, at 02:01, Tung-Han Hsieh <thhsieh at twcp1.phys.ntu.edu.tw<mailto:thhsieh at twcp1.phys.ntu.edu.tw>> wrote:
+
+Recently we read from this mailing list and learned that currently
+Lustre file system MDT with ZFS backend has poor performance. Too
+bad that we did not notice this before deploying this configuration
+to many of our cluster systems. Now that there are already too much
+amount of data to reconfigure them back to MDT with ldiskfs backend.
+
+So now the only way for us is looking forward and try to do our best.
+I read this article about the improvement of MDT with ZFS:
+
+https://www.nextplatform.com/2017/01/11/bolstering-lustre-zfs-highlights-continuing-work/
+
+It seems that MDT with ZFS already had large improvement over time,
+but in our applications it is still not enough. So I am asking that
+whether there is a roadmap to improve this part ?
+
+There are a number of different organizations that are using Lustre and
+ZFS, and of course many developers working to improve ZFS itself.
+
+Definitely you would want to use all-flash storage for the MDT, if you
+are not already.
+
+Furthermore, I saw that ZFS already has version 2.0.1. Is there any
+plan of Lustre part to integrate and take advantages of the new ZFS
+software ?
+
+The soon-to-be-released Lustre 2.14 is known to work with ZFS 2.0, so
+you are welcome to test that out and report if it improves performance.
+
+Cheers, Andreas
+
+In the meanwhile, currently we have the following configurations and
+tunings in our Lustre system to try to overcome various performance
+bottlenecks (both MDT and OST are ZFS backend):
+
+- Linux kernel 4.19.126 + MLNX_OFED-4.6 + Lustre-2.12.6 + ZFS-0.7.3
+ (ps. We build all the above software by ourselves in Debian-9.12)
+
+- Loading zfs module with the following options
+ (Many thanks to the suggestions by Riccardo Veraldi):
+ options zfs zfs_prefetch_disable=1
+ options zfs zfs_txg_history=120
+ options zfs metaslab_debug_unload=1
+ options zfs zfs_vdev_async_write_active_min_dirty_percent=20
+ options zfs zfs_vdev_scrub_min_active=48
+ options zfs zfs_vdev_scrub_max_active=128
+ options zfs zfs_vdev_sync_write_min_active=8
+ options zfs zfs_vdev_sync_write_max_active=32
+ options zfs zfs_vdev_sync_read_min_active=8
+ options zfs zfs_vdev_sync_read_max_active=32
+ options zfs zfs_vdev_async_read_min_active=8
+ options zfs zfs_vdev_async_read_max_active=32
+ options zfs zfs_top_maxinflight=320
+ options zfs zfs_txg_timeout=30
+ options zfs zfs_dirty_data_max_percent=40
+ options zfs zfs_vdev_async_write_min_active=8
+ options zfs zfs_vdev_async_write_max_active=32
+
+- ZFS pool is configured with the following options:
+ zfs set atime=off <pool>
+ zfs set redundant_metadata=most <pool>
+ zfs set xattr=sa <pool>
+ zfs set recordsize=1M <pool>
+
+- Set the grant_shrink option to 0 for all clients of Lustre:
+ lctl set_param osc.*.grant_shrink=0
+
+These are all we have learned so far. We are wondering whether
+there are still something we have overlooked (e.g., are iommu
+and intel_iommu settings of kernel parameters help)? We will be
+very appreciated if anyone could give us further suggestions.
+
+Cheers, Andreas
+--
+Andreas Dilger
+Principal Lustre Architect
+Whamcloud
+
+
+
+
+
+
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20210123/1f1ae956/attachment.html>
+
+From strosahl at jlab.org  Tue Jan 26 13:33:10 2021
+From: strosahl at jlab.org (Kurt Strosahl)
+Date: Tue, 26 Jan 2021 21:33:10 +0000
+Subject: [lustre-discuss] A question about processors for an MDS
+Message-ID: <BLAPR09MB6225FDE9A28097636E093F9AA7BC9@BLAPR09MB6225.namprd09.prod.outlook.com>
+
+Hello,
+
+    I'm in the planning phase of a new luster file system, and while going over MDS hardware I saw that AMD had some pretty good chips (price wise) compared to Intel.  Has anyone had experiences with AMD based MDS systems, are they any different?  I've always done Intel based ones in the past.
+
+w/r,
+
+Kurt J. Strosahl
+System Administrator: Lustre, HPC
+Scientific Computing Group, Thomas Jefferson National Accelerator Facility
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20210126/f068e659/attachment.html>
+

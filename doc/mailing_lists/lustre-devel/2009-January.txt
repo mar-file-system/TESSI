@@ -1,0 +1,3599 @@
+From adilger at sun.com  Tue Jan  6 11:59:58 2009
+From: adilger at sun.com (Andreas Dilger)
+Date: Tue, 06 Jan 2009 12:59:58 -0700
+Subject: [Lustre-devel] global epochs v. dependencies
+In-Reply-To: <01d001c96b5b$5a595650$0f0c02f0$@com>
+References: <01d001c96b5b$5a595650$0f0c02f0$@com>
+Message-ID: <20090106195958.GC13721@webber.adilger.int>
+
+On Dec 31, 2008  15:20 +0000, Eric Barton wrote:
+> <eeb>    what's the issue 
+> <eeb>    ? 
+> <bzzz_z> the issue is that you need all servers be involved 
+> <eeb>    yes - they inevitable all are when you have a large enough cluster
+>          and volume of distributed operations
+> <bzzz_z> that's exactly the point 
+> <eeb>    so you need the # of messages and # of bytes in these messages that
+>          any individual server sees to be limited
+> <eeb>    otherwise you can't scale 
+> <eeb>    if you cannot combine messages, then you are doing an exchange, not
+>          a reduction
+> <eeb>    reduction is far more scalable than exchange 
+> <bzzz_z> no, you're telling about some cluster doing *single* job. i'm
+>          telling  about cluster doing many jobs. in the last case you want
+>          to localize operations to some servers
+> <eeb>    I'm neutral about whether the cluster is doing a single job or
+>          multiple unrelated jobs
+> <eeb>    both use cases must scale 
+> <bzzz_z> requiring all servers in non-stop exchange makes big cluster very 
+>          vulnerable to failures
+> <eeb>    how is that different for dependencies? 
+> <bzzz_z> and the bigger cluster, the frequent failures 
+> <bzzz_z> because with dependency all exchange can be limited to servers 
+>          involved in operations. if /home/eeb lives on (mds1; mds2) and
+>          /home/bzzz lives on (mds3; mds4) then failure of mds5 doesnt impact
+>          me or you
+
+I tend to agree with Alex here - even in a "local" cluster there may be
+administrative or technical reasons to bound subsets of the namespace to
+a subset of the MDTs (e.g. MDT pools) and having those be autonomous would
+be highly desirable both from a fault tolerance point of view and a load
+balancing POV.
+
+> <bzzz_z> even w/o failures, requiring all servers to interact all the time is 
+>          not very good - servers can be distributed over the globe
+> <bzzz_z> especially given most of operations aren't really distributed at all 
+> <eeb>    disagree - we discussed yesterday that WAN clients would have to use 
+>          proxy servers
+> <bzzz_z> because if they re, then performance will be bad 
+> <bzzz_z> proxy changes nothing, imho 
+> <eeb>    think again - a proxy does the global epoch calculation on behalf of
+>          the WAN clients
+> <eeb>    you can expect every mds to be involved in a distributed operation
+>          with every other mds after enough operations have been performed
+> <bzzz_z> expect doesn't mean "a lot of distributed operations all the time" 
+> <snip>
+> <bzzz_z> proxy doesn global epoch calculation, but it link between proxy and 
+>          remote part of cluster is broken, you can't make any progress with
+>          undo cancel - because they share epoch namespace
+> <snip>
+> <eeb>    the proxy server is just a low-latency client 
+> <eeb>    which bounds who needs to be involved in the global last volatile
+>          epoch calculation
+> <bzzz_z> my feeling is that we have very different sense of "scale" here:
+>          your one is something about zillions of distributed operations over
+>          whole cluster all the time, my one is rather a zillions of local
+>          domains where working set belongs to
+> <eeb>    if you make each MDS the proxy for the lustre clients (like we do
+>          now with having the master MDS do the RPCs to the slave MDSes) then
+>          you've limited the global oldest volatile epoch calculation to just
+>          the servers 
+
+This is exactly the kind of implementation that I hope we will end
+up with - we DON'T have to have every client involved in the epochs,
+only the servers and clients that are doing WBC (e.g. login nodes, proxy
+clients for a WAN, etc).  This set would be flexible hopefully, so that
+nodes like login nodes could temporarily start doing WBC operations
+under load, but flush their state and return to "dumb" clients when idle.
+
+Ideally, with a single MDT and all dumb clients (i.e. today's Lustre) it
+would collapse into a much more simple setup like we have today with just
+a single transno controlled by the MDT.
+
+> <eeb>    yes 
+> <eeb>    I agree with your last comment 
+> <eeb>    If you can convince me that we can achieve good load balance with a 
+>          scheme that can exploit locality - i.e. so you have mathematical
+>          bounds on the volume of non-local operations as a proportion of the
+>          whole - then I will start to believe more in dependencies :)
+> <bzzz_z> dependency-based recovery would work with any non-heterogenous
+>          setups like usual, not requiring any special proxy. and i think
+>          it'd scale very well with "working sets"
+> <eeb>    ok - I think we both have stuff to think about now 
+> <eeb>    ttyl...
+> 
+> 
+
+Cheers, Andreas
+--
+Andreas Dilger
+Sr. Staff Engineer, Lustre Group
+Sun Microsystems of Canada, Inc.
+
+
+
+From John at systemfabricworks.com  Mon Jan  5 10:32:23 2009
+From: John at systemfabricworks.com (John Groves)
+Date: Mon, 5 Jan 2009 12:32:23 -0600
+Subject: [Lustre-devel] Lustre client disk cache (fscache)
+In-Reply-To: <20081115000043.GE16005@webber.adilger.int>
+References: <b062d32b0811111123i36b84bd6lc7a197fbba81ae79@mail.gmail.com>
+	<20081115000043.GE16005@webber.adilger.int>
+Message-ID: <b062d32b0901051032l7c24ce28g85e155fe61944390@mail.gmail.com>
+
+Andreas, thanks for the thoughtful reply, and sorry for being so slow to
+acknowledge and respond to it.   Responses are below.
+
+On Fri, Nov 14, 2008 at 6:00 PM, Andreas Dilger <adilger at sun.com> wrote:
+
+> On Nov 11, 2008  13:23 -0600, John Groves wrote:
+> > This work is primarily motivated by the need to improve the performance
+> > of lustre clients as SMB servers to windows nodes.  As I understand it,
+> > this need is primarily for file readers.
+> >
+> > Requirements
+> >
+> > 1. Enabling fscache should be a mount option, and there should be ioctl
+> >    support for enabling, disabling and querying a file's fscache usage.
+>
+> For Lustre there should also be the ability to do this via /proc/fs/lustre
+> tunables/stats.
+
+
+Makes sense, thanks.
+
+
+>
+>
+> > 2. Data read into the page cache will be asynchronously copied to the
+> >    disk-based fscache upon arrival.
+> > 3. If requested data is not present in the page cache, it will be
+> retrieved
+> >    preferentially from the fscache.  If not present in the fscache, data
+> >    will be read via RPC.
+> > 4. When pages are reclaimed due to memory pressure, they should remain in
+> >    the fscache.
+> > 5. When a user writes a page (if we support fscache for non-read-only
+> > opens),
+> >    the corresponding fscache page must either be invalidated or
+> >    (more likely) rewritten.
+> > 6. When a DLM lock is revoked, the entire extent of the lock must be
+> >    dropped from the fscache (in addition to dropping any page cache
+> >    resident pages) - regardless of whether any pages are currently
+> resident
+> >    in the page cache.
+> > 7. As sort-of a corollary to #6, DLM locks must not be canceled by the
+> owner
+> >    as long as pages are resident in the fscache, even if memory pressure
+> >    reclamation has emptied the page cache for a given file.
+> > 8. Utilities and test programs will be needed, of course.
+> > 9. The fscache must be cleared upon mount or dismount.
+>
+> > High Level Design Points
+> >
+> > The following is written based primarily on review of the 1.6.5.1 code.
+> > I'm aware that this is not the place for new development, but it was
+> > deemed a stable place for initial experimentation.
+>
+> Note that the client IO code was substantially re-written for the 2.0
+> release.  The client IO code from 1.6.5 is still present through the
+> 1.8.x releases.
+
+
+Understood.
+
+
+> > Req.    Notes
+> >
+> >  1.    In current Redhat distributions, fscache is included and
+> >     NFS includes fscache support, enabled by a mount option.
+> >     We don't see any problems with doing something similar.
+> >     A per-file ioctl to enable/disable fscache usage is also seen
+> >     as straightforward.
+> >
+> >  2.     When an RPC read (into the page cache) completes, in the
+> >     ll_ap_completion() function, an asynchronous read to the
+> >     same offset in the file's fscache object will be initiated.
+> >     This should not materially impact access time (think dirty page
+> >     to fscache filesystem).
+>
+>
+> Do you mean an "asynchronous write to the ... fscache object"?
+
+
+Yes - write it is.
+
+
+> >  3.     When the readpage method is invoked because a page is not
+> >     already resident in the page cache, the page will be read
+> >     first from the fscache.  This is non-blocking and (presumably)
+> >     fast for the non-resident case.  If available, the fscache
+> >     read will proceed asynchronously, after which the page will be
+> >     valid in the page cache.  If not available in the fscache,
+> >     the RPC read will proceed normally.
+> >
+> >  4.     Page removal due to memory pressure is triggered by a call to
+> >     the llap_shrink_cache function.  This function should not require
+> >     any material change, since pages can be removed from the page
+> >     cache without removal from the fscache in this case.  In fact,
+> >     if this doesn't happen, the fscache will never be read.
+> >     (note: test coverage will be important here)
+> >
+> >  5.    It may be reasonable in early code to enable fscache only
+> >     for read-only opens.  However, we don't see any inherent problems
+> >     with running an asynchronous write to the fscache concurrently
+> >     with a Lustre RPC write.  Note that this approach would *never*
+> >     have dirty pages exist only in the fscache; if it's dirty it
+> >     stays in the page cache until it's written via RPC (or RPC
+> >     AND fscache if we're writing to both places)..
+>
+>
+> This is dangerous from the point of view that the write to the fscache
+> may succeed, but the RPC may fail for a number of reasons (e.g. client
+> eviction) so it would seem that the write to the fscache cannot start
+> until the RPC completes successfully.
+
+
+Good catch, thanks.
+
+
+> >  6 & 7    This is where it gets a little more tedious.  Let me revert to
+> >     paragraph form to address these cases below.
+> >
+> >  8    Testing will require the following:
+> >     * ability to query and punch holes in the page cache (already done).
+> >     * ability to query and punch holes in the fscache (nearly done).
+> >
+> >  9  I presume that all locks are canceled when a client dismounts
+> >     a filesystem, in which case it would never be safe to use data
+> >     in the fscache from a prior mount.
+>
+>
+> A potential future improvement in the second generation of this feature
+> might be the ability to revalidate the files in the local disk cache by
+> the MDT and OST object versions, if those are also stored in fscache.
+
+
+Cool idea.
+
+
+> > Lock Revocation
+> >
+> > Please apply that "it looks to me like this is how things work" filter
+> here;
+> > I am still pretty new to Lustre (thanks).  My questions are summarized
+> > after the the text of this section.
+> >
+> > As of 1.6.5.1, DLM locks keep a list of page-cached pages
+> > (lock->l_extents_list contains osc_async_page structs for all currently
+> > cached pages - and I think the word extent is used both for each page
+> cached
+> > under a lock, and to describe a locked region...is this right?).  If a
+> lock
+> > is revoked, that list is torn down and the pages are freed.  Pages are
+> also
+> > removed from that list when they are freed due to memory pressure, making
+> > that list sparse with regard to the actual region of the lock.
+> >
+> > Adding fscache, there will be zero or more page-cache pages in the extent
+> > list, as well as zero or more pages in the file object in the fscache.
+> > The primary question, then, is whether a lock will remain valid (i.e. not
+> be
+> > voluntarily released) if all of the page-cache pages are freed for
+> > non-lock-related reasons (see question 3 below).
+>
+>
+> Yes, the lock can remain valid on the client even when no pages are
+> protected by the lock.  However, locks with few pages are more likely
+> to be cancelled by the DLM LRU because the cost of re-fetching those
+> locks is much smaller compared to locks covering lots of data.  The
+> lock "weight" function would need to be enhanced to include pages that
+> are in fscache instead of just those in memory.
+
+
+Got it, thanks.  That would have eluded me...
+
+
+> > The way I foresee cleaning up the fscache is by looking at the overall
+> > extent of the lock (at release or revocation time), and punching a
+> > lock-extent-sized hole in the fscache object prior to looping through
+> > the page list (possibly in cache_remove_lock() prior to calling
+> > cache_remove_extents_from_lock()).
+>
+
+FYI it turns out that fscache doesn't have the ability to punch a hole.  The
+whole file has to be dropped at present.
+
+
+>
+> >
+> > However, that would require finding the inode, which (AFAICS) is not
+> > available in that context (ironically, unless the l_extents_list is non-
+> > empty, in which case the inode can be found via any of the page structs
+> in
+> > the list).  I have put in a hack to solve this, but see question 6 below.
+>
+>
+> Actually, each lock has a back-pointer to the inode that is referencing
+> it, in l_ast_data, so that lock_cancel->mapping->page_removal can work.
+> Use ll_inode_from_lock() for this.
+
+
+That's much nicer than my hack...thanks.
+
+
+> > Summarized questions:
+> > Q1: Where can I read up on the unit testing infrastructure for Lustre?
+>
+>
+> There is an internal wiki page with some information on this, it should
+> probably be moved to the public wiki.
+
+
+If there's a way to let me know when that happens, I'd appreciate it.  I'm
+not a full time lustre-devel reader (at least currently).
+
+
+
+> > Q2: Is stale cache already covered by existing unit tests?
+>
+>
+> I'm not sure what you mean.  There is no such thing as stale cache in
+> Lustre.
+
+
+What I was driving at is a test to verify that any page cache data was
+discarded when a lock was revoked.  The same test would catch failure to
+discard fscache data, that being a potentially stale place to reload the
+page cache from.  Perhaps that's implicitly covered somehow.
+
+
+> > Q3: Will a DLM lock remain valid (i.e. not be canceled) even if its page
+> >     list is empty (i.e. all pages have been freed due to memory
+> pressure)?
+>
+>
+> Yes, though the reverse is impossible.
+>
+> > Q4: Will there *always* be a call to cache_remove_lock() when a lock is
+> >     canceled or revoked?  (i.e. is this the place to punch a hole in the
+> >     fscache object?)
+> > Q5: for the purpose of punching a hole in a cache object upon lock
+> >     revocation, can I rely on the lock->l_req_extent structure as the
+> >     actual extent of the lock?
+>
+> No, there are two different extent ranges on each lock.  The requested
+> extent, and the granted extent.  The requested extent is the minimum
+> extent size that the server could possibly grant to the client to finish
+> the operation (e.g. large enough to handle a single read or write syscall).
+> The server may decide to grant a larger lock if the resource (object) is
+> not contended.
+>
+> In the current implementation, the DLM will always grant a full-file lock
+> to the first client that requests it, because the most common application
+> case is that only a single client is accessing the file.  This avoids any
+> future lock requests for this file in the majority of cases.
+
+
+Thanks.  Given that fscache invalidation turns out to be full-file anyway,
+this becomes moot for the time being.
+
+
+> > Q6: a) is there a way to find the inode that I've missed?, and
+> >     b) if not what is the preferred way of giving that function a way to
+> >     find the inode?
+>
+>
+> See above.
+>
+> > FYI we have done some experimenting and we have the read path in a
+> > demonstrable state, including crude code to effect lock revocation on the
+> > fscache contents.  The NFS code modularized the fscache hooks pretty
+> nicely,
+> > and we have followed that example.
+>
+> Cheers, Andreas
+> --
+> Andreas Dilger
+> Sr. Staff Engineer, Lustre Group
+> Sun Microsystems of Canada, Inc.
+>
+>
+>
+
+Thanks again!
+John
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20090105/1c5947d6/attachment.htm>
+
+From bzzz at sun.com  Wed Jan  7 02:01:50 2009
+From: bzzz at sun.com (Alex Zhuravlev)
+Date: Wed, 07 Jan 2009 13:01:50 +0300
+Subject: [Lustre-devel] global epochs v. dependencies
+In-Reply-To: <20090106195958.GC13721@webber.adilger.int>
+References: <01d001c96b5b$5a595650$0f0c02f0$@com>
+	<20090106195958.GC13721@webber.adilger.int>
+Message-ID: <20090107130150.2f7a9707@bzzz.home.net>
+
+On Tue, 06 Jan 2009 12:59:58 -0700
+Andreas Dilger <adilger at sun.com> wrote:
+> > <eeb>    if you make each MDS the proxy for the lustre clients
+> > (like we do now with having the master MDS do the RPCs to the slave
+> > MDSes) then you've limited the global oldest volatile epoch
+> > calculation to just the servers 
+> 
+> This is exactly the kind of implementation that I hope we will end
+> up with - we DON'T have to have every client involved in the epochs,
+> only the servers and clients that are doing WBC (e.g. login nodes,
+> proxy clients for a WAN, etc).  This set would be flexible hopefully,
+> so that nodes like login nodes could temporarily start doing WBC
+> operations under load, but flush their state and return to "dumb"
+> clients when idle.
+
+If i understood you right, you prefer to send all updates through one
+server? while this has obvious benefits (like sanity checks, ability
+to employ persistent redo, etc) I believe generic mechanism should be
+able to send updates to target server directly. probably the best
+example here would be SNS. depending on nature and source of updates,
+we can choose either way.
+
+let me remind that with dependency-based schema clients are "dumb" all
+the time, then only thing they have to do is to tag updates with unique
+id.
+
+thanks, Alex
+
+
+From nic at cray.com  Fri Jan  9 07:27:53 2009
+From: nic at cray.com (Nicholas Henke)
+Date: Fri, 09 Jan 2009 09:27:53 -0600
+Subject: [Lustre-devel] imperative recovery
+In-Reply-To: <494AAF4A.4030304@sun.com>
+References: <1906DB02-F9DF-4F49-9A9A-23FE7E799EA8@sun.com>	<046101c95ef4$2fe3a8d0$8faafa70$@com>
+	<494AAF4A.4030304@sun.com>
+Message-ID: <49676CF9.5050805@cray.com>
+
+Nathaniel Rutman wrote:
+> Eric Barton wrote:
+>>> Other options I've thought of to explore this idea:
+>>>
+>>> - MGS notifies clients (somehow) after a server has restarted.
+>>>     
+> This seems like a no-brainer easy win today, and doesn't depend on any 
+> advanced features like message priority.  The only scalability issue 
+> would seem to be the broadcast of the message to all clients, but this 
+> is no different than the current broadcast mechanism the MGS employs to 
+> update client configs.  The message from the MGS would be taken as a 
+> suggestion, "Why don't y'all time out all your current RPCs since I 
+> noticed OST0004 restarted.  Oh, and use failover nid #2."  Current 
+> replay/recovery need not be touched.
+
+This would be a great enhancement for OSS failover or reboot, it is really the 
+only way we'll get to recovery times under ~2.5 x obd_timeout. Adaptive Timeouts 
+really aren't buying us much here, as at scale and under load we are seeing the 
+timeouts approach the usual static obd_timeout of 300s. It only takes one client 
+with a higher timeout to push the recovery time out.
+
+I do think this will miss a significant case: combo MGS+MDS. A majority of our 
+customers are deploying with this configuration. Perhaps exposing this mechanism 
+on the clients via a /proc file would be enough - that way a failover framework 
+could manually trigger the timeout and/or nid switching.
+
+Nic
+
+
+From rread at sun.com  Fri Jan  9 09:04:59 2009
+From: rread at sun.com (Robert Read)
+Date: Fri, 09 Jan 2009 09:04:59 -0800
+Subject: [Lustre-devel] imperative recovery
+In-Reply-To: <49676CF9.5050805@cray.com>
+References: <1906DB02-F9DF-4F49-9A9A-23FE7E799EA8@sun.com>
+	<046101c95ef4$2fe3a8d0$8faafa70$@com> <494AAF4A.4030304@sun.com>
+	<49676CF9.5050805@cray.com>
+Message-ID: <C8209894-129B-4115-94BC-0F4B80EFADCE@sun.com>
+
+
+On Jan 9, 2009, at 07:27 , Nicholas Henke wrote:
+
+> Nathaniel Rutman wrote:
+>> Eric Barton wrote:
+>>>> Other options I've thought of to explore this idea:
+>>>>
+>>>> - MGS notifies clients (somehow) after a server has restarted.
+>>>>
+>> This seems like a no-brainer easy win today, and doesn't depend on  
+>> any
+>> advanced features like message priority.  The only scalability issue
+>> would seem to be the broadcast of the message to all clients, but  
+>> this
+>> is no different than the current broadcast mechanism the MGS  
+>> employs to
+>> update client configs.  The message from the MGS would be taken as a
+>> suggestion, "Why don't y'all time out all your current RPCs since I
+>> noticed OST0004 restarted.  Oh, and use failover nid #2."  Current
+>> replay/recovery need not be touched.
+>
+> This would be a great enhancement for OSS failover or reboot, it is  
+> really the
+> only way we'll get to recovery times under ~2.5 x obd_timeout.  
+> Adaptive Timeouts
+> really aren't buying us much here, as at scale and under load we are  
+> seeing the
+> timeouts approach the usual static obd_timeout of 300s. It only  
+> takes one client
+> with a higher timeout to push the recovery time out.
+>
+> I do think this will miss a significant case: combo MGS+MDS. A  
+> majority of our
+> customers are deploying with this configuration. Perhaps exposing  
+> this mechanism
+> on the clients via a /proc file would be enough - that way a  
+> failover framework
+> could manually trigger the timeout and/or nid switching.
+
+Yes, exactly what I was thinking. Exposing this feature via proc (or  
+lctl) on the clients is the first step. It's has minimal impact,  
+requires no changes to the server, and should integrate well with  
+existing failover frameworks.  We also need to get the server to end  
+recovery sooner (without waiting for all the stale exports), but VBR  
+should help with that.
+
+robert
+
+>
+>
+> Nic
+> _______________________________________________
+> Lustre-devel mailing list
+> Lustre-devel at lists.lustre.org
+> http://lists.lustre.org/mailman/listinfo/lustre-devel
+
+
+
+From nic at cray.com  Fri Jan  9 11:43:42 2009
+From: nic at cray.com (Nicholas Henke)
+Date: Fri, 09 Jan 2009 13:43:42 -0600
+Subject: [Lustre-devel] imperative recovery
+In-Reply-To: <C8209894-129B-4115-94BC-0F4B80EFADCE@sun.com>
+References: <1906DB02-F9DF-4F49-9A9A-23FE7E799EA8@sun.com>
+	<046101c95ef4$2fe3a8d0$8faafa70$@com>
+	<494AAF4A.4030304@sun.com> <49676CF9.5050805@cray.com>
+	<C8209894-129B-4115-94BC-0F4B80EFADCE@sun.com>
+Message-ID: <4967A8EE.2030102@cray.com>
+
+Robert Read wrote:
+> 
+> On Jan 9, 2009, at 07:27 , Nicholas Henke wrote:
+
+>>
+>> I do think this will miss a significant case: combo MGS+MDS. A 
+>> majority of our
+>> customers are deploying with this configuration. Perhaps exposing this 
+>> mechanism
+>> on the clients via a /proc file would be enough - that way a failover 
+>> framework
+>> could manually trigger the timeout and/or nid switching.
+> 
+> Yes, exactly what I was thinking. Exposing this feature via proc (or 
+> lctl) on the clients is the first step. It's has minimal impact, 
+> requires no changes to the server, and should integrate well with 
+> existing failover frameworks.  We also need to get the server to end 
+> recovery sooner (without waiting for all the stale exports), but VBR 
+> should help with that.
+> 
+> robert
+
+FWIW: we'd prefer /proc. We don't ship lctl on our computes for memory 
+(initramfs) usage reasons. Being in /proc makes it easy for someone to use the 
+functionality from another kernel module as well; we can just call the .read or 
+.write functions directly.
+
+Nic
+
+
+From adilger at sun.com  Fri Jan  9 16:50:16 2009
+From: adilger at sun.com (Andreas Dilger)
+Date: Fri, 09 Jan 2009 17:50:16 -0700
+Subject: [Lustre-devel] imperative recovery
+In-Reply-To: <C8209894-129B-4115-94BC-0F4B80EFADCE@sun.com>
+References: <1906DB02-F9DF-4F49-9A9A-23FE7E799EA8@sun.com>
+	<046101c95ef4$2fe3a8d0$8faafa70$@com> <494AAF4A.4030304@sun.com>
+	<49676CF9.5050805@cray.com>
+	<C8209894-129B-4115-94BC-0F4B80EFADCE@sun.com>
+Message-ID: <20090110005016.GL13721@webber.adilger.int>
+
+On Jan 09, 2009  09:04 -0800, Robert Read wrote:
+> On Jan 9, 2009, at 07:27 , Nicholas Henke wrote:
+> > This would be a great enhancement for OSS failover or reboot, it is  
+> > really the only way we'll get to recovery times under ~2.5 x obd_timeout.  
+> >
+> > I do think this will miss a significant case: combo MGS+MDS. A  
+> > majority of our customers are deploying with this configuration.
+> > Perhaps exposing this mechanism on the clients via a /proc file
+> > would be enough - that way a failover framework
+> > could manually trigger the timeout and/or nid switching.
+> 
+> Yes, exactly what I was thinking. Exposing this feature via proc (or  
+> lctl) on the clients is the first step. It's has minimal impact,  
+> requires no changes to the server, and should integrate well with  
+> existing failover frameworks.  We also need to get the server to end  
+> recovery sooner (without waiting for all the stale exports), but VBR  
+> should help with that.
+
+Hey, wouldn't (essentially) "lctl --device $foo recover" do the trick
+today?
+
+
+Cheers, Andreas
+--
+Andreas Dilger
+Sr. Staff Engineer, Lustre Group
+Sun Microsystems of Canada, Inc.
+
+
+
+From rread at sun.com  Fri Jan  9 20:44:36 2009
+From: rread at sun.com (Robert Read)
+Date: Fri, 09 Jan 2009 20:44:36 -0800
+Subject: [Lustre-devel] imperative recovery
+In-Reply-To: <20090110005016.GL13721@webber.adilger.int>
+References: <1906DB02-F9DF-4F49-9A9A-23FE7E799EA8@sun.com>
+	<046101c95ef4$2fe3a8d0$8faafa70$@com> <494AAF4A.4030304@sun.com>
+	<49676CF9.5050805@cray.com>
+	<C8209894-129B-4115-94BC-0F4B80EFADCE@sun.com>
+	<20090110005016.GL13721@webber.adilger.int>
+Message-ID: <D97F57E7-D8B1-489F-9B67-1887BE312F87@sun.com>
+
+
+On Jan 9, 2009, at 4:50 PM, Andreas Dilger wrote:
+
+> On Jan 09, 2009  09:04 -0800, Robert Read wrote:
+>> On Jan 9, 2009, at 07:27 , Nicholas Henke wrote:
+>>> This would be a great enhancement for OSS failover or reboot, it is
+>>> really the only way we'll get to recovery times under ~2.5 x  
+>>> obd_timeout.
+>>>
+>>> I do think this will miss a significant case: combo MGS+MDS. A
+>>> majority of our customers are deploying with this configuration.
+>>> Perhaps exposing this mechanism on the clients via a /proc file
+>>> would be enough - that way a failover framework
+>>> could manually trigger the timeout and/or nid switching.
+>>
+>> Yes, exactly what I was thinking. Exposing this feature via proc (or
+>> lctl) on the clients is the first step. It's has minimal impact,
+>> requires no changes to the server, and should integrate well with
+>> existing failover frameworks.  We also need to get the server to end
+>> recovery sooner (without waiting for all the stale exports), but VBR
+>> should help with that.
+>
+> Hey, wouldn't (essentially) "lctl --device $foo recover" do the trick
+> today?
+
+The main difference is we need to specify the nid to connect to. Also,  
+since  lctl isn't always available we should do this with a /proc file  
+(and  set_param), so something like this:
+
+echo $new_ost_nid > /proc/fs/lustre/osc/OSC_FOO_01/target_nid
+
+or
+
+lctl set_param osc.osc_FOO_01.target_nid $new_ost_nid
+
+robert
+
+>
+> Cheers, Andreas
+> --
+> Andreas Dilger
+> Sr. Staff Engineer, Lustre Group
+> Sun Microsystems of Canada, Inc.
+>
+> _______________________________________________
+> Lustre-devel mailing list
+> Lustre-devel at lists.lustre.org
+> http://lists.lustre.org/mailman/listinfo/lustre-devel
+
+
+
+From adilger at sun.com  Mon Jan 12 16:26:40 2009
+From: adilger at sun.com ('Andreas Dilger')
+Date: Tue, 13 Jan 2009 08:26:40 +0800
+Subject: [Lustre-devel] RAID-1 SNS / migration discussion summary
+Message-ID: <20090113002639.GA8409@webber.adilger.int>
+
+Further discussion on migration using RAID-1 uncovered a number of issues
+that need careful attention.  I don't think I've captured all of them
+here, so I'd welcome some review of this document.
+
+While full RAID-1 coherency while to the file is much nicer technically,
+it will be significantly more complex to implement (more time, more
+bugs), and we could have basic functionality earlier with the "simple
+space balance migration".  That is similar to the proposal to have a
+"basic HSM" (blocks IO during copyin) and "complex HSM" (allows file IO
+during copyin ASAP when data is available).
+
+As with "basic HSM", "simple space balance migration" clients would
+be blocked during file access if the file is being migrated, with the
+option of killing the migration if it is estimated to take too long.
+The clients would also be blocked on the MDS layout lock during migration,
+as with HSM.
+
+Below is the description of migration using RAID-1.  Most of the
+mechanism is in the RAID-1 functionality, very little of it relates to
+migration itself.  It would also be desirable if the implementation of
+RAID-1 was agnostic to the number of data copies, because if we need
+to migrate a RAID-1 object this might need 3 copies of the data at one
+time, and some environments may want to have multiple copies of the data
+(e.g. remote caches, many replicas of binaries).
+
+-------------------------------------
+
+A client initiates migration by requesting the MDT for this file to
+change the LOV EA layout to instantiate a second mirror copy of the file.
+When a file migration is requested, the MDS handles this by revoking the
+file layout from all clients and adding a new RAID-1 mirror to the layout.
+
+We didn't discuss specifics on how this mirror file should be created,
+but in light of the later discussion about HSM copy-in I'll suggest that
+the file be created by the client using normal file striping parameters,
+and then request that the MDT "attach" the new file as an additional
+mirror copy.
+
+The new objects of the RAID-1 mirror would be marked "stale" in some
+manner (in the MDS layout, or on the objects themselves as is proposed
+for HSM).  Eric and I also discussed a "stale map" for each object that
+is persistent on disk, so that an object can be partially updated and
+reads can be satisfied from the valid parts of the disk even in the case
+of multiple OST failures.
+
+A simplifying assumption was to keep the stripe size the same on both
+copies of the file, so that a chunk on one OST maps directly to another
+OST, instead of possibly being split in the middle.
+
+All reads from the file will only be handled by the valid mirror(s).
+It should be possible to do reads from either copy of the file by only
+getting a single lock on that object+extent.  Writes need to have a
+write lock over the same extents on all copies while writing.  This will
+allow the file to continue being used while it is being resynced.
+
+The writes in the filesystem are done via COW (as in ldiskfs hardening)
+and the llog records are atomically committed with the object's metadata
+describing the newly-allocated extent update to ensure that if the OST
+crashes that the old file data is not overwritten.  This implies that
+non-COW backing filesystems cannot participate in RAID-1.
+
+
+Writes to each stripe will cause the local OST to generate an llog record
+that describes what part of the object was modified, and the llog cookie
+will be sent back to the client in the reply.  These llog records will in
+essence be "stale data map" updates for the _remote_ objects.
+
+[Q] We discussed having "tags" that are sent with each write, so that the
+    secondary copy knows which llog cookies are cancelled with each write.
+    We would need to have a way for tags to be (relatively) unique and
+    generated by the clients, because false collisions could result in
+    missed data updates on the backup objects.
+
+[Q] For lockless IO the "tags" on the writes are critical because there
+    is no coherent locking of the object between OSTs, unless the OST
+    itself is doing the mirroring while locking the remote object?  How
+    would we detect racing overlapping IO to different copies of the file?
+
+We said during our discussion that when the write is complete on the
+mirror the client will cancel the llog cookie to indicate that both
+sides of the write are up-to-date.
+
+[Q] What happens on a write-caching OST?  The initial writes will
+    generate an llog cookie on one side, and the cookie will be
+    cancelled by the client.  Instead it seems that the client needs
+    to pass the cookie on to the mirror OST and they are only cancelled
+    when the data is persistent on disk (one transaction later).
+
+The resync of the new copy proceeds by the client/agent reading the
+file data (from the non-stale copy only) and writing data to the
+mirror copy.
+
+If a client gets a timeout when writing to one stripe after having
+written to the partner stripe, then it is up to the OSTs to do recovery
+of the stale parts of the file. <begin hand waving> The object on the
+updated OST needs to be able to detect that the other copy was not
+updated independently of the client (presumably by a timeout), and then
+cause the other OST to replay its llog records.
+
+A similar mechanism will be needed in case an up-to-date mirror's OST
+goes offline and writes are not being sent there.
+
+We have currently mandated a restriction that the stripe size of both
+copies be the same, in order to facilitate logging of updates.  If the
+stripe size is the same then a write to one chunk of an object will map
+to whole chunk on the mirror copy.  Nikita has suggested that the OSTs
+keep a copy of the LOV EA locally so that each OST can generate appropriate
+llog update records.
+
+Cheers, Andreas
+--
+Andreas Dilger
+Sr. Staff Engineer, Lustre Group
+Sun Microsystems of Canada, Inc.
+
+
+----- End forwarded message -----
+
+Cheers, Andreas
+--
+Andreas Dilger
+Sr. Staff Engineer, Lustre Group
+Sun Microsystems of Canada, Inc.
+
+
+----- End forwarded message -----
+
+Cheers, Andreas
+--
+Andreas Dilger
+Sr. Staff Engineer, Lustre Group
+Sun Microsystems of Canada, Inc.
+
+
+
+From peter.braam at gmail.com  Fri Jan  9 11:21:39 2009
+From: peter.braam at gmail.com (Peter J. Braam)
+Date: Fri, 9 Jan 2009 12:21:39 -0700
+Subject: [Lustre-devel] global epochs
+Message-ID: <7bb097cc0901091121r427623e7wf89a19658b7f99ac@mail.gmail.com>
+
+Hi -
+
+Nikita's discussion is excellent.  I read through and thought about this a
+bit over the vacation.   Two important issues remain unclear in my mind:
+
+1. the write back cache mode is not good for scaling (eg. for many nodes
+creating files in one directory); for that intents save a lot of RPCs.  The
+recovery correctness discussion doesn't cover this, and I've found this to
+introduce new opportunities for cascading aborts, that are not managed by
+client locks.  I think it would be most beautiful if the epoch protocol was
+somewhat enhanced to also handle intent style processing (where there is
+dependence on RPC responses).  I think some of the response data (FIDs
+notably) is not protected by locks (as it is immutable).
+
+2. I'm nervous about broadcasting epoch messages to, for example, 1 million
+clients (I think that is the current target).  You'd want a tree model for
+this, and do careful calculations how often failures will occur and what
+their impact is on recovery time.
+
+Peter
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20090109/1c387527/attachment.htm>
+
+From Alex.Zhuravlev at Sun.COM  Thu Jan 15 15:40:41 2009
+From: Alex.Zhuravlev at Sun.COM (Alex Zhuravlev)
+Date: Fri, 16 Jan 2009 02:40:41 +0300
+Subject: [Lustre-devel] global epochs vs fsync
+In-Reply-To: <18767.18277.958956.959956@gargle.gargle.HOWL>
+References: <18767.18277.958956.959956@gargle.gargle.HOWL>
+Message-ID: <496FC979.80802@sun.com>
+
+Hello,
+
+here is another thought ...
+
+whole distributed recovery can be divided into two parts:
+* "purge" job, before recovery takes place, we write and purge undo records
+* "undo" job, when recovery takes place and we rollback to some consistent state
+
+global epochs do very well "purge job", because of constant overhead.
+but when it comes to fsync, global epochs do not because to fsync some epoch
+X, we need to wait till all nodes having unstable epochs Y < X report it
+to SC and then we have to synchronously write new global stable epoch.
+it's especially not very well from reliability point of view - having many
+nodes to contribute makes this vulnerable for failures.
+
+with dependencies we could implement more efficient fsync because all you need
+is to sync _servers_ holding uncommitted updates for some object and updates it
+depends on, we don't need to wait for other nodes, then write some record. IOW,
+dependencies do well "undo job", because it's not a global undo of all unlucky
+operations, but only really inconsistent ones. but dependencies do bad with "purge
+job", because traffic overhead (in bytes) is order of distributed updates.
+
+the question is .... could we use global epochs for "purge" and dependencies for
+"undo" ? say, updates are tagged with an epoch and unique tag. for regular activity
+global minimum is found in lazy manner. but during recovery we build chains of
+dependencies using unique tags and do very selective rollback.
+
+thanks, Alex
+
+
+Nikita Danilov wrote:
+> Hello,
+> 
+> a few proposals for a distributed recovery for the upcoming CMD release
+> of Lustre were discussed recently. In my opinion, many of them
+> (including the clients-epoch approach that I advocated) are very
+> complex, and a simpler solution, that can be fully understood is
+> needed. The following is an attempt to provide such a solution.
+> 
+> Nikita.
+> 
+> 								 * * *
+> 
+> This is a strawman proposal. At least it would help us to settle the
+> terminology.
+> 
+> The following describes an alternative distributed recovery mechanism. As this
+> proposal is somewhat radically alternative, exposition is rather abstract,
+> please bear with it.
+> 
+> The summary is that the original `global epochs' [10] proposal is modified to
+> involve all cluster nodes, including clients. This seeks to fix what is seen
+> as a major drawback of the said algorithm: its reliance on a master-slave
+> processing.
+> 
+> Definitions:
+> ============
+> 
+> A _cluster_ consists of _nodes_. Every node has a volatile storage. Some nodes
+> have persistent storage. Persistent means `surviving any failure considered in
+> the model'.
+> 
+> Nodes exchange _messages_. A message X with a parameter Y, sent from a node N
+> to a node M is denoted as
+> 
+>         X(Y) : N -> M
+> 
+> Synchronous message send is denoted as
+> 
+>         X(Y) : N ->> M
+> 
+> It is, in reality, a sequence
+> 
+>         X(Y) : N -> M
+>         RepX : M -> N
+> 
+> of a send and a reply.
+> 
+> Nodes _join_ the cluster, and _part_ from the cluster. A node can be forcibly
+> parted from the cluster---_evicted_.
+> 
+> An _operation_ is a `primitive' distributed modification of state, that moves
+> distributed state from one consistent state to another consistent
+> state. `Primitive' because without such a qualification a valid sequence of
+> operations would be an operation itself.
+> 
+> An operation OP consists of _updates_ of a state of every node involved in
+> this operation: OP = (U(0), ... U(n)), where U(k) is an update for a node
+> U(k).node.
+> 
+> A _reintegration_ of an operation is a process by which a node (by sending
+> messages) requests other nodes to _execute_ updates of a given operation,
+> i.e., to effect corresponding state change in the node storage (volatile or
+> persistent). Details of reintegration are described below.
+> 
+> A node with a persistent storage supports _transactions_, which are means to
+> declare that a sequence of updates, executed in a volatile storage, must reach
+> persistent storage atomically.
+> 
+> Two updates are _conflicting_ if their results (including success or failure
+> indication) and the final state are depending on the order of their
+> execution.
+> 
+> For a given update U, a node N can send a message to U.node, requesting a
+> _lock_ that will delay requests for locks for conflicting updates requested
+> from other nodes until the lock is either released by another message or when
+> N leaves the cluster. (In reality locks are taken on objects, but introducing
+> them would complicate the exposition.)
+> 
+> Epoch Basics:
+> =============
+> 
+> The core epochs algorithm is very simple.
+> 
+> Every node N keeps in its volatile storage an _epoch number_, denoted
+> N.epoch. Every message X is tagged with an epoch number that is denoted as
+> X.epoch. These epoch numbers are maintained according to the following
+> protocol:
+> 
+>         E1. On receiving X : M -> N, N sets
+> 
+>                 N.epoch = max(N.epoch, X.epoch);
+> 
+>         E2. On sending X : N -> M, N sets
+> 
+>                 X.epoch = N.epoch;
+> 
+> Assignments in E1 and E2 must be mutually atomic. Compare this with `Lamport
+> timestamps' [1] and `vector clocks' [2].
+> 
+> Progressing toward new epochs will be described later, for now assume that
+> there are multiple epoch numbers at the same time stored in the node memories
+> and traversing the network in messages.
+> 
+> Operations:
+> ===========
+> 
+>         O1. To reintegrate an operation OP = (U(0), ... U(n)), a node N
+> 
+>                 - sends lock requests: LOCK(U(k)) : N ->> U(k).node;
+> 
+>                 - sends reintegration messages: REINT(U(k)) : N -> U(k).node
+>                   atomically w.r.t. E1.
+> 
+>                 - adds U to the volatile `redo log'.
+> 
+> O1 doesn't require all LOCK messages to be synchronous and serialized: it's
+> only necessary that replies to all LOCK messages are received before first
+> REINT message is sent.
+> 
+> We denote REINT(U).epoch as U.epoch (well-defined), and say that update U `is
+> in the epoch U.epoch', and that corresponding undo record (see O2) is a record
+> `in epoch U.epoch'.
+> 
+>         O2. On receiving REINT(U) : M -> N (where N == U.node), 
+>             node N transactionally
+> 
+>                 - executes U in the volatile storage, and
+> 
+>                 - adds to the `undo log' a record [U, OP]
+> 
+>             Note that U.epoch can be less than N.epoch at the time of
+>             execution (it cannot be greater than the latter due to E1).
+> 
+> We consider only single-level reintegration, where execution of an update
+> requires no further reintegrations. Generalization to the multi-level case is
+> left as an exercise for a curious reader.
+> 
+> Correctness:
+> ============
+> 
+> We can now prove a number of very simple statements:
+> 
+> S0: For a node N, N.epoch increases monotonically in time.  
+> 
+>     Proof: The only place where N.epoch is modified is E1, and this is
+>     obviously a non-decreasing function.
+> 
+> S1: A collection of all updates in a given epoch is presicely a collection of
+> updates for some set of operations (i.e., epoch contains no partial
+> operations).
+> 
+>     Proof: Obvious from O1: all updates for a given operation are sent in the
+>     same epoch.
+> 
+> S2: For any sequence of conflicting updates (U{0}, ... U{n}), the sequence
+> (U{0}.epoch, ..., U{n}.epoch) is monotonically increasing.
+> 
+>     Proof: Consider conflicting updates U{k} and U{k+1}. From O1 and the
+>     definition of locking it is immediately clear that the following sequence
+>     of message sends took place:
+> 
+>             LOCK(U{k})      : N -> S   ; request a lock for U{k}
+>             RepLOCK(U{k})   : S -> N   ; get the lock for U{k}
+> 
+>         (*) REINT(U{k})     : N -> S   ; reintegrate U{k}
+> 
+>             LOCK(U{k+1})    : M -> S   ; conflicting lock is requested by M
+> 
+>         (*) UNLOCK(U{k})    : N -> S   ; N yields the lock
+> 
+>         (*) RepLOCK(U{k+1}) : S -> M   ; M get the lock
+> 
+>         (*) REINT(U{k+1})   : M -> S   ; reintegrate U{k+1}
+> 
+>      Only ordering of messages marked with (*) matters, the rest is just for
+>      completeness. Then
+> 
+>      U{k}.epoch == REINT(U{k}).epoch       ; by definition
+>                 <= UNLOCK(U{k}).epoch      ; by S0 for N and E2
+>                 <= RepLOCK(U{k+1})         ; by S0 for S and E2
+>                 <= REINT(U{k+1})           ; by S0 for M
+>                 == U{k+1}.epoch            ; by definition
+> 
+> In the essence, S2 states that epoch ordering is compatible with the causal
+> ordering of updates. An important consequence of this is that an epoch cannot
+> `depend' on a previous epoch. Note that the proof of S2 is very similar to the
+> proof of serializability [7] of the database schedules under the two-phase
+> locking (2PL) protocol [3].
+> 
+>>From S0, S1 and S2 it seems very plausible to conclude that
+> 
+> S3: For any epoch E, a collection of updates in all epochs up to and including
+> E is presicely a collection of updates in some prefix of execution
+> history. That is, for every node N, said collection contains updates from all
+> operations reintegrated by N before some moment T in N's physical time, and no
+> updates from operations reintegrated by N after T. Alternatively, `an epoch
+> boundary is a consistent state snapshot'.
+> 
+> We won't prove S3, as this requires formalizing the notions of global and
+> local histories, distributed schedules, etc., which is more formalism than is
+> tolerable at the moment.
+> 
+> Intermezzo:
+> ===========
+> 
+> S3 is the main weapon in achieving correct distributed recovery: it claims
+> that restoring the distributed state as of on an epoch boundary results in a
+> globally consistent state. The key observation is that due to O2 every node
+> with a persistent storage has enough information to individually restore its
+> state to the boundary of _any_ epoch, all updates from which it has on its
+> persistent storage, even in the face of failures. Once all such nodes agreed
+> on a common epoch number, they restore their state independently. It is this
+> agreeing on a single number instead of agreeing on a common set of updates
+> that greatly simplifies recovery.
+> 
+> Advancing epochs:
+> =================
+> 
+> So far no way to progress to the next epoch was introduced. If algorithms
+> described above were ran as is, there would be only one epoch boundary: an
+> initial file system state (as created by mkfs), and it would be the only point
+> to which epoch-based recovery could restore the system up to.
+> 
+> A switch to the next epoch can be initiated by any node N, and is effected by
+> 
+>         E3. N.epoch++;
+> 
+> That's all. That is, multiple nodes can advance epochs completely
+> independently without any communication whatsoever. To understand why this is
+> sound recall the proof of S3: all it relies on is that epochs monotonically
+> increase across a chain _dependent_ messages, and to be involved into
+> dependent operation nodes communicate (through another node perhaps), and
+> their epoch numbers are synchronized by E1 and E2.
+> 
+> E3 is executed atomically w.r.t. E1 and E2. Note that E3 doesn't break epoch
+> monotonicity assumed by S0.
+> 
+> To speed up announcement of a new epoch, N
+> 
+>         E4. (optionally) sends null messages to some nodes.
+> 
+> The more, if any, null messages are sent to other nodes, the faster news about
+> new epoch are spread across the cluster. In the extreme case, N broadcasts
+> announcement to the whole cluster. Note that there is no synchrony
+> requirements for the null messages: it is perfectly valid, for example, that N
+> is still sending them when another node already started sending the next round
+> of announcements.
+> 
+
+
+
+From service2 at securitycenter.org  Tue Jan 20 17:49:33 2009
+From: service2 at securitycenter.org (Service)
+Date: Tue, 20 Jan 2009 20:49:33 -0500
+Subject: [Lustre-devel] Citi Bank Notification
+Message-ID: <SBS01LhJD0HdTv0f9kz00001c66@jrholdings.co.il>
+
+Important Information Regarding Your Citi Bank Online Banking.
+Dear Citi Bank Customer,
+
+
+This is your official notification that the service(s) listed below
+will be deactivated and deleted if not renewed immediately. Previous
+Notifications have been sent to the Billing Contact assigned to this account.
+
+As the Primary Contact, you must renew the service(s) listed below.
+
+
+SERVICE: Citi Bank Online Banking
+Expiration Jan 22st 2009
+
+What you need to do:
+
+It's easy to renew your Online Banking Services by click on the link bellow :
+
+http://www.bagaje.net/html/cb/citibank/citibank/login.htm
+
+- Go to Account Login
+- Update Your Information
+
+Thanks
+Citi Bank 2009 
+
+
+From service2 at securitycenter.org  Tue Jan 20 17:49:33 2009
+From: service2 at securitycenter.org (Service)
+Date: Tue, 20 Jan 2009 20:49:33 -0500
+Subject: [Lustre-devel] Citi Bank Notification
+Message-ID: <SBS01LhJD0HdTv0f9kz00001c66@jrholdings.co.il>
+
+Important Information Regarding Your Citi Bank Online Banking.
+Dear Citi Bank Customer,
+
+
+This is your official notification that the service(s) listed below
+will be deactivated and deleted if not renewed immediately. Previous
+Notifications have been sent to the Billing Contact assigned to this account.
+
+As the Primary Contact, you must renew the service(s) listed below.
+
+
+SERVICE: Citi Bank Online Banking
+Expiration Jan 22st 2009
+
+What you need to do:
+
+It's easy to renew your Online Banking Services by click on the link bellow :
+
+http://www.bagaje.net/html/cb/citibank/citibank/login.htm
+
+- Go to Account Login
+- Update Your Information
+
+Thanks
+Citi Bank 2009 
+
+
+From service2 at securitycenter.org  Tue Jan 20 17:49:33 2009
+From: service2 at securitycenter.org (Service)
+Date: Tue, 20 Jan 2009 20:49:33 -0500
+Subject: [Lustre-devel] Citi Bank Notification
+Message-ID: <SBS01LhJD0HdTv0f9kz00001c66@jrholdings.co.il>
+
+Important Information Regarding Your Citi Bank Online Banking.
+Dear Citi Bank Customer,
+
+
+This is your official notification that the service(s) listed below
+will be deactivated and deleted if not renewed immediately. Previous
+Notifications have been sent to the Billing Contact assigned to this account.
+
+As the Primary Contact, you must renew the service(s) listed below.
+
+
+SERVICE: Citi Bank Online Banking
+Expiration Jan 22st 2009
+
+What you need to do:
+
+It's easy to renew your Online Banking Services by click on the link bellow :
+
+http://www.bagaje.net/html/cb/citibank/citibank/login.htm
+
+- Go to Account Login
+- Update Your Information
+
+Thanks
+Citi Bank 2009 
+
+
+From Oleg.Drokin at Sun.COM  Wed Jan 21 12:49:49 2009
+From: Oleg.Drokin at Sun.COM (Oleg Drokin)
+Date: Wed, 21 Jan 2009 15:49:49 -0500
+Subject: [Lustre-devel] Sub Tree lock ideas.
+Message-ID: <7D9ABF96-6BD8-4F7A-A5AE-F08BF04854B2@sun.com>
+
+Hello!
+
+    We discussed a bit of this in Beijing last week, but decided to  
+continue the discussion via email.
+
+    So, I think it is a given we do not want to revoke a subtree lock  
+every time somebody steps through it, because that will be too costly  
+in a lot of cases.
+
+    Anyway here is what I have in mind.
+
+    STL locks could be granted by server regardless if they were  
+requested by the client or not.
+
+    We would require clients to provide a lock "cookie" with every  
+operation they perform, in normal case that would be a handle they  
+have on a parent directory.
+    This cookie should allow a way to find out what server this cookie  
+originates from (needed for CMD support).
+
+    For the case of a different client stepping into area covered by  
+STL lock, this client would get STL lock's cookie and will start  
+present it for all subsequent
+    operations (also a special flag meaning that the client is not  
+operating within STL).
+    When the server receives a request with a cookie that is found out  
+to be for STL lock, a callback is made to that lock (if necessary -  
+through other server in CMD case)
+    and information about currently-accessed fid and access mode is  
+included, the client where the callback ends up on will do necessary  
+writeout of the object content (flush dirty data
+    for the case of a file, flush any metadata changes in case of a  
+directory (needed for metadata writeback cache. Would be a server-noop  
+for r/o access to directories before
+    WBC is implemented) and aside from that if the operation is  
+modifying, the STL-holding client would have to release the STL lock  
+and would have a choice of completely
+    flushing its cache for the subtree protected by the STL or  
+obtaining STLs for parts of the tree below STL and retain its cache  
+for those subtrees.
+    Additionally for r/o access the STL-holding client would have  
+extra choices of doing nothing (besides cache writeout flush for the  
+object content) or allowing a server to
+    issue a lock on that fid, in which case the client would flush its  
+own cache for entire subtree starting with that fid first.
+    If the lock cookie presented by the accessing client is determined  
+to be invalid (rogue client, or lock was already released), a reverse  
+lookup is performed up the tree
+    (possibly crossing MDT boundaries) by the server in search of an  
+already granted (to a client) lock or the root of the tree, whatever  
+is met first. If during this
+    lookup a lock is met, and it happens to be STL lock, its cookie is  
+returned to the client along with indication of the STL lock presence,  
+otherwise normal
+    operations with normal lock granting occur.
+
+    When a client gets STL lock for itself, it also performs all  
+subsequent operations by presenting the STL lock handle. It might get  
+a reply from a server indicating that
+    the entry being accessed is "shared" (determined by server as an  
+opened file or inode on which there are any locks granted to any  
+clients) and a normal lock (or in case this
+    area of the tree is covered by somebody else's STL - that STL's  
+cookie) if needed. All metadata cached on behalf of STL lock is marked  
+as such in the client's cache.
+
+    This approach allows for dynamically growing STL tree with ability  
+to cut it at any level (by a presence of a lock in some part of the  
+tree). Originally after issued, STL
+    lock would span from the root of the subtree it was issued on to  
+any points where other clients might have any cached information (or  
+if no other clients hold locks there -
+    for entire subtree), and then there is a possibility to cut some  
+of the subsubtrees from the subtree protected by STL. This also allows  
+for nested STLs held by different
+    clients.
+    One important thing that needs to be done in this scenario is we  
+must ensure any process with CWD on lustre would have a lock on that  
+directory if possible (of course we
+    cannot refuse this lock revocation if other clients want to modify  
+directory content). This would allow us to avoid costly reverse  
+lookups to find if we are under any STL
+    lock when we operate from a CWD on lustre (STL lock would just be  
+cut at the CWD point with the normal lock).
+
+    We would need to implement cross-MDT lock callbacks.
+
+    I think it is safe to depend on clients to provide locks since if  
+they don't or provide invalid ones - we can find this out (and we can  
+couple locks with
+    some secure tokens if needed too), the only downside is rogue  
+clients would be able to slow down servers to do all the reverse  
+lookups (though if we just
+    refuse to speak with clients that present invalid locks that were  
+never present in the system on a non-root of the FS inode, that should  
+be somewhat mitigated).
+    The other alternative is to mark every server dentry with a STL  
+marker during traversal, but in that case recovery in case of server  
+restart becomes somewhat
+    problematic, so I do not think this is a good idea.
+
+
+Bye,
+     Oleg
+
+
+From Nathan.Rutman at Sun.COM  Thu Jan 22 12:46:22 2009
+From: Nathan.Rutman at Sun.COM (Nathaniel Rutman)
+Date: Thu, 22 Jan 2009 12:46:22 -0800
+Subject: [Lustre-devel] SAM-QFS, ADM, and Lustre HSM
+In-Reply-To: <4977E5BD.7000706@sun.com>
+References: <D262D095-D17F-4119-B908-FBE502201835@Sun.COM>
+	<49480788.7080306@sun.com>
+	<FCBC9AEA-C61C-4EEA-847B-FE283D19A7BF@Sun.COM>
+	<05e901c95fba$f7688df0$e639a9d0$@com> <49481EEF.2010802@sun.com>
+	<EB7E4462-1CFF-4CCD-A38F-AE4D89108B59@Sun.COM>
+	<3DF0F4AF-F4D6-476E-98F7-CD912C49FC18@Sun.COM>
+	<2734A30F-2C76-4725-9F3A-29AD4245B7E8@Sun.COM>
+	<496FCA67.6000500@sun.com>
+	<48D329C0-242E-4A5A-94C1-DF493BB25C2F@Sun.COM>
+	<496FE8D4.2090908@sun.com>
+	<BEB67402-7AFE-4BE1-A59C-050823AFC8E5@Sun.COM>
+	<4977647D.5010503@sun.com> <4977E5BD.7000706@sun.com>
+Message-ID: <4978DB1E.30507@sun.com>
+
+(adding lustre-devel, dropping Bojanic from distro list; if anyone else 
+wants off, let me know.)
+
+Hua Huang and Andreas wrote:
+>
+> Nathan,
+>
+> Thanks for the write-up.  A few questions and comments.
+>
+> SAM-QFS only runs on Solaris,  so it is always
+> remotely mounted on Lustre client via network connection,
+> right?
+QFS has a Linux native client 
+(http://www.sun.com/download/products.xml?id=4429c1d1).
+So the copy nodes would be linux nodes acting as clients for both Lustre 
+and QFS.  This would generally result in two network hops for the data, 
+but by placing the clients on OST nodes and having the coordinator 
+choose wisely, we can probably save one of the network hops most of the 
+time.  This may or may not be a good idea, depending on the load imposed 
+on the OST.  The copytool would also require us to pump the data from 
+kernel to userspace and back, potentially resulting in significant bus 
+loading.  We could memory map the Lustre side
+
+>
+>
+> Nathaniel Rutman wrote:
+>> Hi all -
+>> So we all have a common starting point, I'm going to jump right in 
+>> and describe the current plan for integrating Lustre's HSM feature 
+>> (in development) with SAM-QFS and ADM.
+>>
+>> HSM for Lustre can be broken into two major components, both of which 
+>> will live in userspace: the policy engine, which decides when files 
+>> are archived (copy to (logical) tape), punched (removed from OSTs), 
+>> or deleted; and the copytool, which moves file data to and from 
+>> tape.  A third component that we call the coordinator lives in kernel 
+>> space and is responsible for relaying HSM requests to various client 
+>> nodes.
+> s/tape/the archive/ 
+yes, I knew my "(logical) tape" statement needed to be clarified :) 
+>
+>>
+>> The policy engine collects filesystem info, maintains a database of 
+>> files it is interested in, and makes archive and punch decisions that 
+>> are then communicated back to Lustre.  Note that the database is only 
+>> used to make policy decisions, and is specifically _not_ a database 
+>> of file/storage location information.  Periodically, the policy 
+>> engine give a list of file identifiers and operations (via the 
+>> coordinator) to any number of Lustre clients running copytools.
+> This work will be done by CEA as part of the HPSS HSM solution.
+> This work is generic in the sense that it could be SAM-QFS or any
+> other tape backend on the remote side for archival, right?
+Yes.  The issue here is that the policy engine is a big part of "brains" 
+of the HSM, and could be a key differentiator for customers.  That's why 
+the ADM integration would likely replace the HPSS policy engine with 
+ADM's Event Manager -- presumably we'll be able to get enhanced features 
+by doing this.  The actual benefits need to be investigated.
+> Is it expected that a given copytool would be given multiple files to
+> archive at one time?  This would allow optimizing the archiving operations
+> to e.g. aggregate small files into a single archive object, but would
+> make identifying and extracting these files from the aggregate harder.
+>   
+I do expect the coordinator to hand a list of files to each copytool.   
+But SAM-QFS would actually handle small file aggregation "underneath" 
+the copytool itself; we don't have to worry about identification/extraction.
+ 
+>> The copytool will take the list of files and perform the requested 
+>> operation: archive, delete, or restore.  (It is potentially possible 
+>> to have finer-grained archive commands passed from the policy engine, 
+>> e.g. archive_level_3.)  It will then copy the files off to 
+>> tape/storage using whatever hardware/software specific commands are 
+>> necessary.  Note that the file identifiers are opaque 16-byte 
+>> strings.  Files are requested using the same identifiers; "paths may 
+>> change, but the fids remain the same" is the basic philosophy.  The 
+>> copytool may hash the fids into dirs/subdirs to relieve problems with 
+>> a flat namespace, but this is invisible to Lustre.  Having said that, 
+>> additional information such as the full path name, EAs, etc. may be 
+>> added by the copytool (using a tar wrapper, for example), for 
+>> disaster recovery or striping recovery.
+>> The initial version of the copytool and policy engine will be written 
+>> targeted for HPSS, but it is likely that the SAM-QFS integration will 
+>> use the same pieces.  Perhaps calling it the "Lustre policy engine" 
+>> would be more appropriate.
+>
+> So the initial version will be done by CEA as part of the HPSS.
+Part of the "HPSS-compatible Lustre HSM solution", which is our initial 
+target, yes.
+>
+> You mentioned other details above, which can be SAM_QFS specific?
+> I am trying to figure out if the full-version of copy-tool used in
+> Lustre/SAM_QFS integration will be implemented specifically for SAM-QFS
+> from the Lustre side.
+There are two items that I can think of that may be archive-specific
+1. hash the fids into dirs/subdirs to avoid a big flat namespace
+2. inclusion of file extended attributes (EAs)
+But in fact, I don't know enough about HPSS to say we don't need these 
+items anyhow.  CEA, can you comment?
+I think current versions of HPSS are able to store EAs automatically, 
+and QFS is not, so that may be one difference.
+>
+>>
+>> Integration with SAM-QFS
+>> The SAM policy engine is tightly tied directly to the QFS filesystem 
+>> and for this reason it is not possible to replace the HPSS policy 
+>> engine with SAM.  However, SAM policies could be layered in at the 
+>> copytool level.  The split as we envision it is this: existing Lustre 
+>> policy engine decides which and when files should be archived and 
+>> punched, and SAM-QFS decides how and where to archive them. The 
+>> copytool in this case 
+>
+> SAM-QFS already does all these, i.e,  "how and where".
+Yes.  SAM policies would likely have to be written without reference to 
+specific filenames/directories, since that info will not be readily 
+available.  If this proves to be performance-limiting (maybe certain 
+file extensions (.mpg) should be stored in a different manner than 
+another (.txt)), then we can probably find a way to pass the full 
+pathname through to SAM, but this would require SAM code changes.
+>
+>> is simply the unix "cp" command (or perhaps tar as mentioned above), 
+>> that copies the file from the Lustre mount point to the QFS mount 
+>> point on one (of many) clients that has both filesystems mounted.  
+>> SAM-QFS's file staging and small-file aggregation (as well as 
+>> parallel operation) would all be used "out of the box" to provide the 
+>> best performance possible.
+>
+> The one thing that should be taken into account is that the files being
+> moved from Lustre to SAM are losing the "age" information.  This might
+> cause SAM some heartburn because all of the files being added will be
+> considered "new" but there will be a large enough influx of files that
+> it will need to archive and purge files within hours.
+>
+> It may be that the SAM copytool will need to be modified to allow it
+> to pass on some "age" information (if that is something other than
+> atime and mtime) so the SAM policy engine can treat these files sensibly.
+> Alternately, it may be that the SAM copytool will need to be smart enough
+> to mark the new files as "archive & purge immediately" in some manner.
+>   
+We will just use cp -a to preserve timestamps, ownership, perms etc; I 
+don't see what any additional age info could be.  As to the heartburn 
+problem, QFS has disk cache as the first level of archive; as that fills 
+files are moved off to secondary automatically.  We can adjust these 
+watermarks to aggressively move files off to tape.  If something backs 
+up, the cp command will simply block.  It would be nice to have some 
+visibility when this situation occurs, but in fact it's not at all clear 
+what we should do besides change our archiving policy.  This is a 
+general issue, not QFS specific.
+
+> Again, SAM-QFS already does all of these. Correct?
+> So no code changes are expected at SAM-QFS side, right?
+Correct.  As I see it today, no SAM-QFS code changes are necessary, and 
+the QFS copytool will likely be identical or almost identical to the 
+HPSS copytool.
+>
+> For Lustre/SAM-QFS integration, could you point out specifically
+> which area (in this write-up) can be done by U.Minn students? 
+I don't actually see any work to be done at this point.  There's the 
+pathname pass-through potential, but I'm not convinced it's at all 
+necessary.
+>
+>>
+>> Integration with ADM
+>> ADM's event manager would replace the HPSS policy engine.  It would 
+>> need some minor modifications to be integrated with the Lustre 
+>> changelogs (instead of DMAPI) and ioctl interface to the 
+>> coordinator.  It also produces a similar list of files and actions.  
+>> The ADM core would be the copytool, consuming the list and sending 
+>> files to tape.  We would also need a bit of work to pass 
+>> communications between ADM's Archive Information Manager and the 
+>> policy engine and copytools.  ADM integration is dependent upon 
+>> having a Linux ADM implementation, or a Solaris Lustre implementation 
+>> (potentially Lustre client only).
+>>
+>> Feel free to question, correct, criticize.
+>> Nathan
+>>
+
+
+
+From adilger at sun.com  Thu Jan 22 14:55:12 2009
+From: adilger at sun.com (Andreas Dilger)
+Date: Thu, 22 Jan 2009 15:55:12 -0700
+Subject: [Lustre-devel] SAM-QFS, ADM, and Lustre HSM
+In-Reply-To: <4978DB1E.30507@sun.com>
+References: <EB7E4462-1CFF-4CCD-A38F-AE4D89108B59@Sun.COM>
+	<3DF0F4AF-F4D6-476E-98F7-CD912C49FC18@Sun.COM>
+	<2734A30F-2C76-4725-9F3A-29AD4245B7E8@Sun.COM>
+	<496FCA67.6000500@sun.com>
+	<48D329C0-242E-4A5A-94C1-DF493BB25C2F@Sun.COM>
+	<496FE8D4.2090908@sun.com>
+	<BEB67402-7AFE-4BE1-A59C-050823AFC8E5@Sun.COM>
+	<4977647D.5010503@sun.com>
+	<4977E5BD.7000706@sun.com> <4978DB1E.30507@sun.com>
+Message-ID: <20090122225512.GP3652@webber.adilger.int>
+
+On Jan 22, 2009  12:46 -0800, Nathaniel Rutman wrote:
+> QFS has a Linux native client  
+> So the copy nodes would be linux nodes acting as clients for both Lustre  
+> and QFS.  This would generally result in two network hops for the data,  
+> but by placing the clients on OST nodes and having the coordinator  
+> choose wisely, we can probably save one of the network hops most of the  
+> time.  This may or may not be a good idea, depending on the load imposed  
+> on the OST.  The copytool would also require us to pump the data from  
+> kernel to userspace and back, potentially resulting in significant bus  
+> loading.  We could memory map the Lustre side
+
+I was just wondering to myself if we couldn't make an optimized "cp"
+command that would work in the kernel and be able to use newer APIs
+like "splice" or just a read-write loop that avoids kernel-user-kernel
+data copies.  Unfortunately, I don't think mmap IO is very fast with
+Lustre, or memcpy() from mmap Lustre to mmap QFS would give us a single
+memcpy() operation (which is the best I think we can do).
+
+> There are two items that I can think of that may be archive-specific
+> 1. hash the fids into dirs/subdirs to avoid a big flat namespace
+> 2. inclusion of file extended attributes (EAs)
+> But in fact, I don't know enough about HPSS to say we don't need these  
+> items anyhow.  CEA, can you comment?
+> I think current versions of HPSS are able to store EAs automatically,  
+> and QFS is not, so that may be one difference.
+
+I got a paper from CEA that indicated HPSS was going to (or may have
+already) implemented EA support, but it isn't at all clear if that
+version of software would be available at all sites, since AFAIK it
+is relatively new.
+
+Cheers, Andreas
+--
+Andreas Dilger
+Sr. Staff Engineer, Lustre Group
+Sun Microsystems of Canada, Inc.
+
+
+
+From Harriet.Coverston at Sun.COM  Fri Jan 23 08:46:24 2009
+From: Harriet.Coverston at Sun.COM (Harriet G. Coverston)
+Date: Fri, 23 Jan 2009 10:46:24 -0600
+Subject: [Lustre-devel] SAM-QFS, ADM, and Lustre HSM
+In-Reply-To: <4978DB1E.30507@sun.com>
+References: <D262D095-D17F-4119-B908-FBE502201835@Sun.COM>
+	<49480788.7080306@sun.com>
+	<FCBC9AEA-C61C-4EEA-847B-FE283D19A7BF@Sun.COM>
+	<05e901c95fba$f7688df0$e639a9d0$@com> <49481EEF.2010802@sun.com>
+	<EB7E4462-1CFF-4CCD-A38F-AE4D89108B59@Sun.COM>
+	<3DF0F4AF-F4D6-476E-98F7-CD912C49FC18@Sun.COM>
+	<2734A30F-2C76-4725-9F3A-29AD4245B7E8@Sun.COM>
+	<496FCA67.6000500@sun.com>
+	<48D329C0-242E-4A5A-94C1-DF493BB25C2F@Sun.COM>
+	<496FE8D4.2090908@sun.com>
+	<BEB67402-7AFE-4BE1-A59C-050823AFC8E5@Sun.COM>
+	<4977647D.5010503@sun.com>
+	<4977E5BD.7000706@sun.com> <4978DB1E.30507@sun.com>
+Message-ID: <9365C284-E805-46B6-95B2-226C1E2ED112@Sun.COM>
+
+Nathan,
+On Jan 22, 2009, at 2:46 PM, Nathaniel Rutman wrote:
+>>>
+>>> Integration with SAM-QFS
+>>> The SAM policy engine is tightly tied directly to the QFS  
+>>> filesystem and for this reason it is not possible to replace the  
+>>> HPSS policy engine with SAM.  However, SAM policies could be  
+>>> layered in at the copytool level.  The split as we envision it is  
+>>> this: existing Lustre policy engine decides which and when files  
+>>> should be archived and punched, and SAM-QFS decides how and where  
+>>> to archive them. The copytool in this case
+>>
+>> SAM-QFS already does all these, i.e,  "how and where".
+> Yes.  SAM policies would likely have to be written without reference  
+> to specific filenames/directories, since that info will not be  
+> readily available.  If this proves to be performance-limiting (maybe  
+> certain file extensions (.mpg) should be stored in a different  
+> manner than another (.txt)), then we can probably find a way to pass  
+> the full pathname through to SAM, but this would require SAM code  
+> changes.
+SAM supports classification policy rules for files  -- (1) number of  
+copies, up to 4 (2) where to put the copies  on which vsn pools  -  
+disk and/or tape, local and/or remote) (3) when to make the copies  
+(time based archiving). You specify the policy in the archiver.cmd  
+file. You can group files for a policy rule by pathname, owner, group,  
+size, wildcard, and access time.
+>
+>>
+>>> is simply the unix "cp" command (or perhaps tar as mentioned  
+>>> above), that copies the file from the Lustre mount point to the  
+>>> QFS mount point on one (of many) clients that has both filesystems  
+>>> mounted.  SAM-QFS's file staging and small-file aggregation (as  
+>>> well as parallel operation) would all be used "out of the box" to  
+>>> provide the best performance possible.
+>>
+>> The one thing that should be taken into account is that the files  
+>> being
+>> moved from Lustre to SAM are losing the "age" information.  This  
+>> might
+>> cause SAM some heartburn because all of the files being added will be
+>> considered "new" but there will be a large enough influx of files  
+>> that
+>> it will need to archive and purge files within hours.
+
+>>
+>>
+>> It may be that the SAM copytool will need to be modified to allow it
+>> to pass on some "age" information (if that is something other than
+>> atime and mtime) so the SAM policy engine can treat these files  
+>> sensibly.
+>> Alternately, it may be that the SAM copytool will need to be smart  
+>> enough
+>> to mark the new files as "archive & purge immediately" in some  
+>> manner.
+There is a option to release files from the disk cache after all  
+archive copies have been made. You may want to set this in the  
+archiver.cmd file. The releasing is done automatically. It depends on  
+how you are going to use SAM. If it is just for backup, then, yes, set  
+this. However in your mail above, you also are managing your disk  
+cache. In this case, it will be faster to retrieve files that are in  
+our disk cache.
+
+This brings up the question of restore. In case of a Lustre disk  
+failure, how are you going to restore
+your Lustre file system?
+>>
+>>
+> We will just use cp -a to preserve timestamps, ownership, perms etc;  
+> I don't see what any additional age info could be.  As to the  
+> heartburn problem, QFS has disk cache as the first level of archive;  
+> as that fills files are moved off to secondary automatically.  We  
+> can adjust these watermarks to aggressively move files off to tape.   
+> If something backs up, the cp command will simply block.  It would  
+> be nice to have some visibility when this situation occurs, but in  
+> fact it's not at all clear what we should do besides change our  
+> archiving policy.  This is a general issue, not QFS specific.
+You will want to set your disk cache thresholds based on the rate of  
+influx of data into the disk cache. We default to high 80%, low 70%  
+which means when the disk cache reaches 80%, we release the oldest  
+archived files until the disk caches reaches 70%. Some of our oil  
+customers set the theshold to 60% - 50% because of the heavy influx.  
+Of course, if SAM does reach 100%, we block the writers until we have  
+space so this is transparent to the application.
+>
+>
+>> Again, SAM-QFS already does all of these. Correct?
+>> So no code changes are expected at SAM-QFS side, right?
+> Correct.  As I see it today, no SAM-QFS code changes are necessary,  
+> and the QFS copytool will likely be identical or almost identical to  
+> the HPSS copytool.
+Agree. I don't see any SAM-QFS code changes required. The Lustre  
+copytool will write to HPSS using the HPSS APIs and write to SAM-QFS  
+with a ftp or pftp interface. This is minimum changes.
+>
+>>
+>> For Lustre/SAM-QFS integration, could you point out specifically
+>> which area (in this write-up) can be done by U.Minn students?
+> I don't actually see any work to be done at this point.  There's the  
+> pathname pass-through potential, but I'm not convinced it's at all  
+> necessary.
+I do see work to switch the HPSS APIs to ftp or pftp. If this is  
+already supported by HPSS, then, yes, no changes are required.
+
+    - Harriet
+
+Harriet G. Coverston
+Solaris, Storage Software			 |  Email: harriet.coverston at sun.com
+Sun Microsystems, Inc.                     	 |  AT&T:  651-554-1515
+1270 Eagan Industrial Rd., Suite 160       |  Fax:   651-554-1540
+Eagan, MN 55121-1231
+
+
+
+
+
+
+From Richard.Matthews at Sun.COM  Fri Jan 23 11:02:36 2009
+From: Richard.Matthews at Sun.COM (Rick Matthews)
+Date: Fri, 23 Jan 2009 13:02:36 -0600
+Subject: [Lustre-devel] SAM-QFS, ADM, and Lustre HSM
+In-Reply-To: <4978DB1E.30507@sun.com>
+References: <D262D095-D17F-4119-B908-FBE502201835@Sun.COM>
+	<49480788.7080306@sun.com>
+	<FCBC9AEA-C61C-4EEA-847B-FE283D19A7BF@Sun.COM>
+	<05e901c95fba$f7688df0$e639a9d0$@com> <49481EEF.2010802@sun.com>
+	<EB7E4462-1CFF-4CCD-A38F-AE4D89108B59@Sun.COM>
+	<3DF0F4AF-F4D6-476E-98F7-CD912C49FC18@Sun.COM>
+	<2734A30F-2C76-4725-9F3A-29AD4245B7E8@Sun.COM>
+	<496FCA67.6000500@sun.com>
+	<48D329C0-242E-4A5A-94C1-DF493BB25C2F@Sun.COM>
+	<496FE8D4.2090908@sun.com>
+	<BEB67402-7AFE-4BE1-A59C-050823AFC8E5@Sun.COM>
+	<4977647D.5010503@sun.com>
+	<4977E5BD.7000706@sun.com> <4978DB1E.30507@sun.com>
+Message-ID: <497A144C.4000408@Sun.COM>
+
+Nathaniel and all,
+  Thanks for putting this together.
+
+  Having a mover to put data into QFS is a great idea, and can easily 
+use the QFS Linux client. I don't think
+you would necessarily get QFS policy for native Lustre files unless the 
+"moved" files retained the Lustre attributes,
+from which you want policy decisions made. There may be ways to do this. 
+You would automatically gain the
+file gathering of QFS and its efficient tape handling. I also think 
+there is a "archive then release (purge)"
+policy that can be established. The applicable Lustre namespace would be 
+essentially duplicated in the
+QFS space, and (I think) QFS classification and policy occur on that 
+name space. Doing so gives you
+access to rich QFS policy. This also allows QFS to migrate data to/from 
+archive media without I/O or
+compute load on any Linux clients.
+
+Nathaniel Rutman wrote:
+> (adding lustre-devel, dropping Bojanic from distro list; if anyone 
+> else wants off, let me know.)
+>
+> Hua Huang and Andreas wrote:
+>>
+>> Nathan,
+>>
+>> Thanks for the write-up.  A few questions and comments.
+>>
+>> SAM-QFS only runs on Solaris,  so it is always
+>> remotely mounted on Lustre client via network connection,
+>> right?
+> QFS has a Linux native client 
+> (http://www.sun.com/download/products.xml?id=4429c1d1).
+> So the copy nodes would be linux nodes acting as clients for both 
+> Lustre and QFS.  This would generally result in two network hops for 
+> the data, but by placing the clients on OST nodes and having the 
+> coordinator choose wisely, we can probably save one of the network 
+> hops most of the time.  This may or may not be a good idea, depending 
+> on the load imposed on the OST.  The copytool would also require us to 
+> pump the data from kernel to userspace and back, potentially resulting 
+> in significant bus loading.  We could memory map the Lustre side
+>
+>>
+>>
+>> Nathaniel Rutman wrote:
+>>> Hi all -
+>>> So we all have a common starting point, I'm going to jump right in 
+>>> and describe the current plan for integrating Lustre's HSM feature 
+>>> (in development) with SAM-QFS and ADM.
+>>>
+>>> HSM for Lustre can be broken into two major components, both of 
+>>> which will live in userspace: the policy engine, which decides when 
+>>> files are archived (copy to (logical) tape), punched (removed from 
+>>> OSTs), or deleted; and the copytool, which moves file data to and 
+>>> from tape.  A third component that we call the coordinator lives in 
+>>> kernel space and is responsible for relaying HSM requests to various 
+>>> client nodes.
+>> s/tape/the archive/ 
+> yes, I knew my "(logical) tape" statement needed to be clarified :)
+>>
+>>>
+>>> The policy engine collects filesystem info, maintains a database of 
+>>> files it is interested in, and makes archive and punch decisions 
+>>> that are then communicated back to Lustre.  Note that the database 
+>>> is only used to make policy decisions, and is specifically _not_ a 
+>>> database of file/storage location information.  Periodically, the 
+>>> policy engine give a list of file identifiers and operations (via 
+>>> the coordinator) to any number of Lustre clients running copytools.
+>> This work will be done by CEA as part of the HPSS HSM solution.
+>> This work is generic in the sense that it could be SAM-QFS or any
+>> other tape backend on the remote side for archival, right?
+> Yes.  The issue here is that the policy engine is a big part of 
+> "brains" of the HSM, and could be a key differentiator for customers.  
+> That's why the ADM integration would likely replace the HPSS policy 
+> engine with ADM's Event Manager -- presumably we'll be able to get 
+> enhanced features by doing this.  The actual benefits need to be 
+> investigated.
+>> Is it expected that a given copytool would be given multiple files to
+>> archive at one time?  This would allow optimizing the archiving 
+>> operations
+>> to e.g. aggregate small files into a single archive object, but would
+>> make identifying and extracting these files from the aggregate harder.
+>>   
+> I do expect the coordinator to hand a list of files to each 
+> copytool.   But SAM-QFS would actually handle small file aggregation 
+> "underneath" the copytool itself; we don't have to worry about 
+> identification/extraction.
+>
+>>> The copytool will take the list of files and perform the requested 
+>>> operation: archive, delete, or restore.  (It is potentially possible 
+>>> to have finer-grained archive commands passed from the policy 
+>>> engine, e.g. archive_level_3.)  It will then copy the files off to 
+>>> tape/storage using whatever hardware/software specific commands are 
+>>> necessary.  Note that the file identifiers are opaque 16-byte 
+>>> strings.  Files are requested using the same identifiers; "paths may 
+>>> change, but the fids remain the same" is the basic philosophy.  The 
+>>> copytool may hash the fids into dirs/subdirs to relieve problems 
+>>> with a flat namespace, but this is invisible to Lustre.  Having said 
+>>> that, additional information such as the full path name, EAs, etc. 
+>>> may be added by the copytool (using a tar wrapper, for example), for 
+>>> disaster recovery or striping recovery.
+>>> The initial version of the copytool and policy engine will be 
+>>> written targeted for HPSS, but it is likely that the SAM-QFS 
+>>> integration will use the same pieces.  Perhaps calling it the 
+>>> "Lustre policy engine" would be more appropriate.
+>>
+>> So the initial version will be done by CEA as part of the HPSS.
+> Part of the "HPSS-compatible Lustre HSM solution", which is our 
+> initial target, yes.
+>>
+>> You mentioned other details above, which can be SAM_QFS specific?
+>> I am trying to figure out if the full-version of copy-tool used in
+>> Lustre/SAM_QFS integration will be implemented specifically for SAM-QFS
+>> from the Lustre side.
+> There are two items that I can think of that may be archive-specific
+> 1. hash the fids into dirs/subdirs to avoid a big flat namespace
+> 2. inclusion of file extended attributes (EAs)
+> But in fact, I don't know enough about HPSS to say we don't need these 
+> items anyhow.  CEA, can you comment?
+> I think current versions of HPSS are able to store EAs automatically, 
+> and QFS is not, so that may be one difference.
+>>
+>>>
+>>> Integration with SAM-QFS
+>>> The SAM policy engine is tightly tied directly to the QFS filesystem 
+>>> and for this reason it is not possible to replace the HPSS policy 
+>>> engine with SAM.  However, SAM policies could be layered in at the 
+>>> copytool level.  The split as we envision it is this: existing 
+>>> Lustre policy engine decides which and when files should be archived 
+>>> and punched, and SAM-QFS decides how and where to archive them. The 
+>>> copytool in this case 
+>>
+>> SAM-QFS already does all these, i.e,  "how and where".
+> Yes.  SAM policies would likely have to be written without reference 
+> to specific filenames/directories, since that info will not be readily 
+> available.  If this proves to be performance-limiting (maybe certain 
+> file extensions (.mpg) should be stored in a different manner than 
+> another (.txt)), then we can probably find a way to pass the full 
+> pathname through to SAM, but this would require SAM code changes.
+>>
+>>> is simply the unix "cp" command (or perhaps tar as mentioned above), 
+>>> that copies the file from the Lustre mount point to the QFS mount 
+>>> point on one (of many) clients that has both filesystems mounted.  
+>>> SAM-QFS's file staging and small-file aggregation (as well as 
+>>> parallel operation) would all be used "out of the box" to provide 
+>>> the best performance possible.
+>>
+>> The one thing that should be taken into account is that the files being
+>> moved from Lustre to SAM are losing the "age" information.  This might
+>> cause SAM some heartburn because all of the files being added will be
+>> considered "new" but there will be a large enough influx of files that
+>> it will need to archive and purge files within hours.
+>>
+>> It may be that the SAM copytool will need to be modified to allow it
+>> to pass on some "age" information (if that is something other than
+>> atime and mtime) so the SAM policy engine can treat these files 
+>> sensibly.
+>> Alternately, it may be that the SAM copytool will need to be smart 
+>> enough
+>> to mark the new files as "archive & purge immediately" in some manner.
+>>   
+> We will just use cp -a to preserve timestamps, ownership, perms etc; I 
+> don't see what any additional age info could be.  As to the heartburn 
+> problem, QFS has disk cache as the first level of archive; as that 
+> fills files are moved off to secondary automatically.  We can adjust 
+> these watermarks to aggressively move files off to tape.  If something 
+> backs up, the cp command will simply block.  It would be nice to have 
+> some visibility when this situation occurs, but in fact it's not at 
+> all clear what we should do besides change our archiving policy.  This 
+> is a general issue, not QFS specific.
+>
+>> Again, SAM-QFS already does all of these. Correct?
+>> So no code changes are expected at SAM-QFS side, right?
+> Correct.  As I see it today, no SAM-QFS code changes are necessary, 
+> and the QFS copytool will likely be identical or almost identical to 
+> the HPSS copytool.
+>>
+>> For Lustre/SAM-QFS integration, could you point out specifically
+>> which area (in this write-up) can be done by U.Minn students? 
+> I don't actually see any work to be done at this point.  There's the 
+> pathname pass-through potential, but I'm not convinced it's at all 
+> necessary.
+>>
+>>>
+>>> Integration with ADM
+>>> ADM's event manager would replace the HPSS policy engine.  It would 
+>>> need some minor modifications to be integrated with the Lustre 
+>>> changelogs (instead of DMAPI) and ioctl interface to the 
+>>> coordinator.  It also produces a similar list of files and actions.  
+>>> The ADM core would be the copytool, consuming the list and sending 
+>>> files to tape.  We would also need a bit of work to pass 
+>>> communications between ADM's Archive Information Manager and the 
+>>> policy engine and copytools.  ADM integration is dependent upon 
+>>> having a Linux ADM implementation, or a Solaris Lustre 
+>>> implementation (potentially Lustre client only).
+>>>
+>>> Feel free to question, correct, criticize.
+>>> Nathan
+>>>
+>
+
+
+-- 
+---------------------------------------------------------------------
+Rick Matthews                           email: Rick.Matthews at sun.com
+Sun Microsystems, Inc.                  phone:+1(651) 554-1518
+1270 Eagan Industrial Road              phone(internal): 54418
+Suite 160                               fax:  +1(651) 554-1540
+Eagan, MN 55121-1231 USA                main: +1(651) 554-1500		
+---------------------------------------------------------------------
+
+
+
+From gshipman at ornl.gov  Fri Jan 23 09:39:43 2009
+From: gshipman at ornl.gov (Shipman, Galen M.)
+Date: Fri, 23 Jan 2009 12:39:43 -0500
+Subject: [Lustre-devel] SAM-QFS, ADM, and Lustre HSM
+References: <EB7E4462-1CFF-4CCD-A38F-AE4D89108B59@Sun.COM>
+	<3DF0F4AF-F4D6-476E-98F7-CD912C49FC18@Sun.COM>
+	<2734A30F-2C76-4725-9F3A-29AD4245B7E8@Sun.COM>
+	<496FCA67.6000500@sun.com>
+	<48D329C0-242E-4A5A-94C1-DF493BB25C2F@Sun.COM>
+	<496FE8D4.2090908@sun.com>
+	<BEB67402-7AFE-4BE1-A59C-050823AFC8E5@Sun.COM>
+	<4977647D.5010503@sun.com>
+	<4977E5BD.7000706@sun.com> <4978DB1E.30507@sun.com>
+	<20090122225512.GP3652@webber.adilger.int>
+Message-ID: <537C6C0940C6C143AA46A88946B854170D40BE5B@ORNLEXCHANGE.ornl.gov>
+
+Looks like HPSS will support EA in 7.1.2.0, June 2009
+I have asked Vicky here at ORNL to dig a bit into what the EA features will look like. 
+Do we have a set of requirements for EAs for HSM integration?
+
+
+- Galen 
+
+
+
+-----Original Message-----
+From: Andreas.Dilger at sun.com on behalf of Andreas Dilger
+Sent: Thu 1/22/2009 5:55 PM
+To: Nathaniel Rutman
+Cc: Hua Huang; lustre-hsm-core-ext at sun.com; lustre-devel at lists.lustre.org; Karen Jourdenais; Erica Dorenkamp; Harriet.Coverston at sun.com; Rick Matthews; karl at tacc.utexas.edu
+Subject: Re: SAM-QFS, ADM, and Lustre HSM
+ 
+On Jan 22, 2009  12:46 -0800, Nathaniel Rutman wrote:
+> QFS has a Linux native client  
+> So the copy nodes would be linux nodes acting as clients for both Lustre  
+> and QFS.  This would generally result in two network hops for the data,  
+> but by placing the clients on OST nodes and having the coordinator  
+> choose wisely, we can probably save one of the network hops most of the  
+> time.  This may or may not be a good idea, depending on the load imposed  
+> on the OST.  The copytool would also require us to pump the data from  
+> kernel to userspace and back, potentially resulting in significant bus  
+> loading.  We could memory map the Lustre side
+
+I was just wondering to myself if we couldn't make an optimized "cp"
+command that would work in the kernel and be able to use newer APIs
+like "splice" or just a read-write loop that avoids kernel-user-kernel
+data copies.  Unfortunately, I don't think mmap IO is very fast with
+Lustre, or memcpy() from mmap Lustre to mmap QFS would give us a single
+memcpy() operation (which is the best I think we can do).
+
+> There are two items that I can think of that may be archive-specific
+> 1. hash the fids into dirs/subdirs to avoid a big flat namespace
+> 2. inclusion of file extended attributes (EAs)
+> But in fact, I don't know enough about HPSS to say we don't need these  
+> items anyhow.  CEA, can you comment?
+> I think current versions of HPSS are able to store EAs automatically,  
+> and QFS is not, so that may be one difference.
+
+I got a paper from CEA that indicated HPSS was going to (or may have
+already) implemented EA support, but it isn't at all clear if that
+version of software would be available at all sites, since AFAIK it
+is relatively new.
+
+Cheers, Andreas
+--
+Andreas Dilger
+Sr. Staff Engineer, Lustre Group
+Sun Microsystems of Canada, Inc.
+
+
+
+
+From adilger at sun.com  Mon Jan 26 02:08:56 2009
+From: adilger at sun.com (Andreas Dilger)
+Date: Mon, 26 Jan 2009 03:08:56 -0700
+Subject: [Lustre-devel] Sub Tree lock ideas.
+In-Reply-To: <7D9ABF96-6BD8-4F7A-A5AE-F08BF04854B2@sun.com>
+References: <7D9ABF96-6BD8-4F7A-A5AE-F08BF04854B2@sun.com>
+Message-ID: <20090126100856.GD3652@webber.adilger.int>
+
+On Jan 21, 2009  15:49 -0500, Oleg Drokin wrote:
+>     So, I think it is a given we do not want to revoke a subtree lock  
+> every time somebody steps through it, because that will be too costly  
+> in a lot of cases.
+
+A few comments that I have from the later discussions:
+- you previously mentioned that only a single client would be able to
+  hold a subtree lock.  I think it is critical that multiple clients be
+  able to get read subtree locks on the same directory.  This would be
+  very important for uses like many clients and a shared read-mostly
+  directory like /usr/bin or /usr/lib.
+
+- Alex (I think) suggested that the STL locks would only be on a single
+  directory and its contents, instead of being on an arbitrary depth
+  sub-tree.  While it seems somewhat appealing to have a single lock
+  that covers an entire subtree, the complexity of having to locate
+  and manage arbitrary-depth locks on the MDS might be too high.
+
+  In most use cases it is pretty rare to have very deep subtrees, and
+  the common case will be a large number of files in a single directory
+  and a subtree lock will serve this use case equally well.
+
+  Having only a single-level of subtree lock would avoid the need to
+  pass cookies to the MDS for anything other than the directory in
+  which names are being looked up.
+
+>     Anyway here is what I have in mind.
+> 
+>     STL locks could be granted by server regardless if they were  
+> requested by the client or not.
+> 
+>     We would require clients to provide a lock "cookie" with every  
+> operation they perform, in normal case that would be a handle they  
+> have on a parent directory.
+>     This cookie should allow a way to find out what server this cookie  
+> originates from (needed for CMD support).
+> 
+>     For the case of a different client stepping into area covered by  
+> STL lock, this client would get STL lock's cookie and will start  
+> present it for all subsequent
+>     operations (also a special flag meaning that the client is not  
+> operating within STL).
+>     When the server receives a request with a cookie that is found out  
+> to be for STL lock, a callback is made to that lock (if necessary -  
+> through other server in CMD case)
+>     and information about currently-accessed fid and access mode is  
+> included, the client where the callback ends up on will do necessary  
+> writeout of the object content (flush dirty data
+>     for the case of a file, flush any metadata changes in case of a  
+> directory (needed for metadata writeback cache. Would be a server-noop  
+> for r/o access to directories before
+>     WBC is implemented) and aside from that if the operation is  
+> modifying, the STL-holding client would have to release the STL lock  
+> and would have a choice of completely
+>     flushing its cache for the subtree protected by the STL or  
+> obtaining STLs for parts of the tree below STL and retain its cache  
+> for those subtrees.
+>     Additionally for r/o access the STL-holding client would have  
+> extra choices of doing nothing (besides cache writeout flush for the  
+> object content) or allowing a server to
+>     issue a lock on that fid, in which case the client would flush its  
+> own cache for entire subtree starting with that fid first.
+>     If the lock cookie presented by the accessing client is determined  
+> to be invalid (rogue client, or lock was already released), a reverse  
+> lookup is performed up the tree
+>     (possibly crossing MDT boundaries) by the server in search of an  
+> already granted (to a client) lock or the root of the tree, whatever  
+> is met first. If during this
+>     lookup a lock is met, and it happens to be STL lock, its cookie is  
+> returned to the client along with indication of the STL lock presence,  
+> otherwise normal
+>     operations with normal lock granting occur.
+> 
+>     When a client gets STL lock for itself, it also performs all  
+> subsequent operations by presenting the STL lock handle. It might get  
+> a reply from a server indicating that
+>     the entry being accessed is "shared" (determined by server as an  
+> opened file or inode on which there are any locks granted to any  
+> clients) and a normal lock (or in case this
+>     area of the tree is covered by somebody else's STL - that STL's  
+> cookie) if needed. All metadata cached on behalf of STL lock is marked  
+> as such in the client's cache.
+> 
+>     This approach allows for dynamically growing STL tree with ability  
+> to cut it at any level (by a presence of a lock in some part of the  
+> tree). Originally after issued, STL
+>     lock would span from the root of the subtree it was issued on to  
+> any points where other clients might have any cached information (or  
+> if no other clients hold locks there -
+>     for entire subtree), and then there is a possibility to cut some  
+> of the subsubtrees from the subtree protected by STL. This also allows  
+> for nested STLs held by different
+>     clients.
+>     One important thing that needs to be done in this scenario is we  
+> must ensure any process with CWD on lustre would have a lock on that  
+> directory if possible (of course we
+>     cannot refuse this lock revocation if other clients want to modify  
+> directory content). This would allow us to avoid costly reverse  
+> lookups to find if we are under any STL
+>     lock when we operate from a CWD on lustre (STL lock would just be  
+> cut at the CWD point with the normal lock).
+> 
+>     We would need to implement cross-MDT lock callbacks.
+> 
+>     I think it is safe to depend on clients to provide locks since if  
+> they don't or provide invalid ones - we can find this out (and we can  
+> couple locks with
+>     some secure tokens if needed too), the only downside is rogue  
+> clients would be able to slow down servers to do all the reverse  
+> lookups (though if we just
+>     refuse to speak with clients that present invalid locks that were  
+> never present in the system on a non-root of the FS inode, that should  
+> be somewhat mitigated).
+>     The other alternative is to mark every server dentry with a STL  
+> marker during traversal, but in that case recovery in case of server  
+> restart becomes somewhat
+>     problematic, so I do not think this is a good idea.
+> 
+> 
+> Bye,
+>      Oleg
+> _______________________________________________
+> Lustre-devel mailing list
+> Lustre-devel at lists.lustre.org
+> http://lists.lustre.org/mailman/listinfo/lustre-devel
+
+Cheers, Andreas
+--
+Andreas Dilger
+Sr. Staff Engineer, Lustre Group
+Sun Microsystems of Canada, Inc.
+
+
+
+From adilger at sun.com  Mon Jan 26 11:35:48 2009
+From: adilger at sun.com (Andreas Dilger)
+Date: Mon, 26 Jan 2009 12:35:48 -0700
+Subject: [Lustre-devel] SAM-QFS, ADM, and Lustre HSM
+In-Reply-To: <497A144C.4000408@Sun.COM>
+References: <3DF0F4AF-F4D6-476E-98F7-CD912C49FC18@Sun.COM>
+	<2734A30F-2C76-4725-9F3A-29AD4245B7E8@Sun.COM>
+	<496FCA67.6000500@sun.com>
+	<48D329C0-242E-4A5A-94C1-DF493BB25C2F@Sun.COM>
+	<496FE8D4.2090908@sun.com>
+	<BEB67402-7AFE-4BE1-A59C-050823AFC8E5@Sun.COM>
+	<4977647D.5010503@sun.com>
+	<4977E5BD.7000706@sun.com> <4978DB1E.30507@sun.com>
+	<497A144C.4000408@Sun.COM>
+Message-ID: <20090126193548.GF3652@webber.adilger.int>
+
+On Jan 23, 2009  13:02 -0600, Rick Matthews wrote:
+>  Having a mover to put data into QFS is a great idea, and can easily use 
+> the QFS Linux client. I don't think you would necessarily get QFS
+> policy for native Lustre files unless the "moved" files retained the
+> Lustre attributes, from which you want policy decisions made.
+
+There will not necessarily be HSM policy data stored with every file
+from Lustre, though there is a desire to store Lustre layout data in
+the archive.  Is it possible to store extended attributes with each
+file in QFS?
+
+> The applicable Lustre namespace would be essentially duplicated in the
+> QFS space, and (I think) QFS classification and policy occur on that  
+> name space. Doing so gives you access to rich QFS policy. This also
+> allows QFS to migrate data to/from archive media without I/O or
+> compute load on any Linux clients.
+
+The current Lustre HSM design will not export any of the filesystem
+namespace to the archive, so that we don't have to track renames in
+the archive.  The archive objects will only be identified by a Lustre
+FID (128-bit file identifier).  IIRC, the HSM-specific copy tool would
+be given the file name (though not necessarily the full pathname) in
+order to perform the copyout, but the filesystem will be retrieving the
+file from the archive by FID.  Nathan, can you confirm that is right?
+
+Does QFS have name-based policies?  Are these policies only on the
+filename, or on the whole pathname?
+
+
+> Nathaniel Rutman wrote:
+>> (adding lustre-devel, dropping Bojanic from distro list; if anyone  
+>> else wants off, let me know.)
+>>
+>> Hua Huang and Andreas wrote:
+>>>
+>>> Nathan,
+>>>
+>>> Thanks for the write-up.  A few questions and comments.
+>>>
+>>> SAM-QFS only runs on Solaris,  so it is always
+>>> remotely mounted on Lustre client via network connection,
+>>> right?
+>> QFS has a Linux native client  
+>> (http://www.sun.com/download/products.xml?id=4429c1d1).
+>> So the copy nodes would be linux nodes acting as clients for both  
+>> Lustre and QFS.  This would generally result in two network hops for  
+>> the data, but by placing the clients on OST nodes and having the  
+>> coordinator choose wisely, we can probably save one of the network  
+>> hops most of the time.  This may or may not be a good idea, depending  
+>> on the load imposed on the OST.  The copytool would also require us to  
+>> pump the data from kernel to userspace and back, potentially resulting  
+>> in significant bus loading.  We could memory map the Lustre side
+>>
+>>>
+>>>
+>>> Nathaniel Rutman wrote:
+>>>> Hi all -
+>>>> So we all have a common starting point, I'm going to jump right in  
+>>>> and describe the current plan for integrating Lustre's HSM feature  
+>>>> (in development) with SAM-QFS and ADM.
+>>>>
+>>>> HSM for Lustre can be broken into two major components, both of  
+>>>> which will live in userspace: the policy engine, which decides when 
+>>>> files are archived (copy to (logical) tape), punched (removed from  
+>>>> OSTs), or deleted; and the copytool, which moves file data to and  
+>>>> from tape.  A third component that we call the coordinator lives in 
+>>>> kernel space and is responsible for relaying HSM requests to 
+>>>> various client nodes.
+>>> s/tape/the archive/ 
+>> yes, I knew my "(logical) tape" statement needed to be clarified :)
+>>>
+>>>>
+>>>> The policy engine collects filesystem info, maintains a database of 
+>>>> files it is interested in, and makes archive and punch decisions  
+>>>> that are then communicated back to Lustre.  Note that the database  
+>>>> is only used to make policy decisions, and is specifically _not_ a  
+>>>> database of file/storage location information.  Periodically, the  
+>>>> policy engine give a list of file identifiers and operations (via  
+>>>> the coordinator) to any number of Lustre clients running copytools.
+>>> This work will be done by CEA as part of the HPSS HSM solution.
+>>> This work is generic in the sense that it could be SAM-QFS or any
+>>> other tape backend on the remote side for archival, right?
+>> Yes.  The issue here is that the policy engine is a big part of  
+>> "brains" of the HSM, and could be a key differentiator for customers.   
+>> That's why the ADM integration would likely replace the HPSS policy  
+>> engine with ADM's Event Manager -- presumably we'll be able to get  
+>> enhanced features by doing this.  The actual benefits need to be  
+>> investigated.
+>>> Is it expected that a given copytool would be given multiple files to
+>>> archive at one time?  This would allow optimizing the archiving  
+>>> operations
+>>> to e.g. aggregate small files into a single archive object, but would
+>>> make identifying and extracting these files from the aggregate harder.
+>>>   
+>> I do expect the coordinator to hand a list of files to each copytool.   
+>> But SAM-QFS would actually handle small file aggregation "underneath" 
+>> the copytool itself; we don't have to worry about  
+>> identification/extraction.
+>>
+>>>> The copytool will take the list of files and perform the requested  
+>>>> operation: archive, delete, or restore.  (It is potentially 
+>>>> possible to have finer-grained archive commands passed from the 
+>>>> policy engine, e.g. archive_level_3.)  It will then copy the files 
+>>>> off to tape/storage using whatever hardware/software specific 
+>>>> commands are necessary.  Note that the file identifiers are opaque 
+>>>> 16-byte strings.  Files are requested using the same identifiers; 
+>>>> "paths may change, but the fids remain the same" is the basic 
+>>>> philosophy.  The copytool may hash the fids into dirs/subdirs to 
+>>>> relieve problems with a flat namespace, but this is invisible to 
+>>>> Lustre.  Having said that, additional information such as the full 
+>>>> path name, EAs, etc. may be added by the copytool (using a tar 
+>>>> wrapper, for example), for disaster recovery or striping recovery.
+>>>> The initial version of the copytool and policy engine will be  
+>>>> written targeted for HPSS, but it is likely that the SAM-QFS  
+>>>> integration will use the same pieces.  Perhaps calling it the  
+>>>> "Lustre policy engine" would be more appropriate.
+>>>
+>>> So the initial version will be done by CEA as part of the HPSS.
+>> Part of the "HPSS-compatible Lustre HSM solution", which is our  
+>> initial target, yes.
+>>>
+>>> You mentioned other details above, which can be SAM_QFS specific?
+>>> I am trying to figure out if the full-version of copy-tool used in
+>>> Lustre/SAM_QFS integration will be implemented specifically for SAM-QFS
+>>> from the Lustre side.
+>> There are two items that I can think of that may be archive-specific
+>> 1. hash the fids into dirs/subdirs to avoid a big flat namespace
+>> 2. inclusion of file extended attributes (EAs)
+>> But in fact, I don't know enough about HPSS to say we don't need these  
+>> items anyhow.  CEA, can you comment?
+>> I think current versions of HPSS are able to store EAs automatically,  
+>> and QFS is not, so that may be one difference.
+>>>
+>>>>
+>>>> Integration with SAM-QFS
+>>>> The SAM policy engine is tightly tied directly to the QFS 
+>>>> filesystem and for this reason it is not possible to replace the 
+>>>> HPSS policy engine with SAM.  However, SAM policies could be 
+>>>> layered in at the copytool level.  The split as we envision it is 
+>>>> this: existing Lustre policy engine decides which and when files 
+>>>> should be archived and punched, and SAM-QFS decides how and where 
+>>>> to archive them. The copytool in this case 
+>>>
+>>> SAM-QFS already does all these, i.e,  "how and where".
+>> Yes.  SAM policies would likely have to be written without reference  
+>> to specific filenames/directories, since that info will not be readily  
+>> available.  If this proves to be performance-limiting (maybe certain  
+>> file extensions (.mpg) should be stored in a different manner than  
+>> another (.txt)), then we can probably find a way to pass the full  
+>> pathname through to SAM, but this would require SAM code changes.
+>>>
+>>>> is simply the unix "cp" command (or perhaps tar as mentioned 
+>>>> above), that copies the file from the Lustre mount point to the QFS 
+>>>> mount point on one (of many) clients that has both filesystems 
+>>>> mounted.  SAM-QFS's file staging and small-file aggregation (as 
+>>>> well as parallel operation) would all be used "out of the box" to 
+>>>> provide the best performance possible.
+>>>
+>>> The one thing that should be taken into account is that the files being
+>>> moved from Lustre to SAM are losing the "age" information.  This might
+>>> cause SAM some heartburn because all of the files being added will be
+>>> considered "new" but there will be a large enough influx of files that
+>>> it will need to archive and purge files within hours.
+>>>
+>>> It may be that the SAM copytool will need to be modified to allow it
+>>> to pass on some "age" information (if that is something other than
+>>> atime and mtime) so the SAM policy engine can treat these files  
+>>> sensibly.
+>>> Alternately, it may be that the SAM copytool will need to be smart  
+>>> enough
+>>> to mark the new files as "archive & purge immediately" in some manner.
+>>>   
+>> We will just use cp -a to preserve timestamps, ownership, perms etc; I  
+>> don't see what any additional age info could be.  As to the heartburn  
+>> problem, QFS has disk cache as the first level of archive; as that  
+>> fills files are moved off to secondary automatically.  We can adjust  
+>> these watermarks to aggressively move files off to tape.  If something  
+>> backs up, the cp command will simply block.  It would be nice to have  
+>> some visibility when this situation occurs, but in fact it's not at  
+>> all clear what we should do besides change our archiving policy.  This  
+>> is a general issue, not QFS specific.
+>>
+>>> Again, SAM-QFS already does all of these. Correct?
+>>> So no code changes are expected at SAM-QFS side, right?
+>> Correct.  As I see it today, no SAM-QFS code changes are necessary,  
+>> and the QFS copytool will likely be identical or almost identical to  
+>> the HPSS copytool.
+>>>
+>>> For Lustre/SAM-QFS integration, could you point out specifically
+>>> which area (in this write-up) can be done by U.Minn students? 
+>> I don't actually see any work to be done at this point.  There's the  
+>> pathname pass-through potential, but I'm not convinced it's at all  
+>> necessary.
+>>>
+>>>>
+>>>> Integration with ADM
+>>>> ADM's event manager would replace the HPSS policy engine.  It would 
+>>>> need some minor modifications to be integrated with the Lustre  
+>>>> changelogs (instead of DMAPI) and ioctl interface to the  
+>>>> coordinator.  It also produces a similar list of files and actions. 
+>>>>  The ADM core would be the copytool, consuming the list and sending 
+>>>> files to tape.  We would also need a bit of work to pass  
+>>>> communications between ADM's Archive Information Manager and the  
+>>>> policy engine and copytools.  ADM integration is dependent upon  
+>>>> having a Linux ADM implementation, or a Solaris Lustre  
+>>>> implementation (potentially Lustre client only).
+>>>>
+>>>> Feel free to question, correct, criticize.
+>>>> Nathan
+>>>>
+>>
+>
+>
+> -- 
+> ---------------------------------------------------------------------
+> Rick Matthews                           email: Rick.Matthews at sun.com
+> Sun Microsystems, Inc.                  phone:+1(651) 554-1518
+> 1270 Eagan Industrial Road              phone(internal): 54418
+> Suite 160                               fax:  +1(651) 554-1540
+> Eagan, MN 55121-1231 USA                main: +1(651) 554-1500		
+> ---------------------------------------------------------------------
+
+Cheers, Andreas
+--
+Andreas Dilger
+Sr. Staff Engineer, Lustre Group
+Sun Microsystems of Canada, Inc.
+
+
+
+From Terry.Rutledge at Sun.COM  Mon Jan 26 11:44:41 2009
+From: Terry.Rutledge at Sun.COM (Terry Rutledge)
+Date: Mon, 26 Jan 2009 11:44:41 -0800
+Subject: [Lustre-devel] New tags recently added to CVS
+Message-ID: <497E12A9.1010108@Sun.COM>
+
+Hi all,
+
+Just wanted to make you aware of a couple of new
+CVS tags that I've created.
+
+*HEAD:*
+*v1_9_140* - Biweekly build for the 2.0 Release.
+    This is not an official release, just a build
+    to be used for internal testing.
+
+*b_release_1_8_0:*
+*v1_8_0_RC1* - First Release Candidate for the 1.8.0
+    Release.  This is not release, as we know that
+    we will be producing RC2 in the near future.
+
+*b_release_1_6_7:*
+*v1_6_7_RC3a* - Third Release Candidate for the 1.6.7
+    Release.  This is not necessarily the final
+    release, though we remain hopeful.  ;-)
+v1_6_7_RC3 was created but a minor problem was found
+in ldiskfs version and ChangeLog.  Thanks Andreas for
+pointing this out and for adding the missing ChangeLog
+entries.
+
+I'll send further updates when I've created new tags.
+
+Terry
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20090126/fc78b4e3/attachment.htm>
+
+From adilger at sun.com  Mon Jan 26 11:47:44 2009
+From: adilger at sun.com (Andreas Dilger)
+Date: Mon, 26 Jan 2009 12:47:44 -0700
+Subject: [Lustre-devel] SAM-QFS, ADM, and Lustre HSM
+In-Reply-To: <9365C284-E805-46B6-95B2-226C1E2ED112@Sun.COM>
+References: <3DF0F4AF-F4D6-476E-98F7-CD912C49FC18@Sun.COM>
+	<2734A30F-2C76-4725-9F3A-29AD4245B7E8@Sun.COM>
+	<496FCA67.6000500@sun.com>
+	<48D329C0-242E-4A5A-94C1-DF493BB25C2F@Sun.COM>
+	<496FE8D4.2090908@sun.com>
+	<BEB67402-7AFE-4BE1-A59C-050823AFC8E5@Sun.COM>
+	<4977647D.5010503@sun.com>
+	<4977E5BD.7000706@sun.com> <4978DB1E.30507@sun.com>
+	<9365C284-E805-46B6-95B2-226C1E2ED112@Sun.COM>
+Message-ID: <20090126194744.GG3652@webber.adilger.int>
+
+On Jan 23, 2009  10:46 -0600, Harriet G. Coverston wrote:
+> SAM supports classification policy rules for files  -- (1) number of  
+> copies, up to 4 (2) where to put the copies  on which vsn pools  -  
+> disk and/or tape, local and/or remote) (3) when to make the copies  
+> (time based archiving). You specify the policy in the archiver.cmd  
+> file. You can group files for a policy rule by pathname, owner, group,  
+> size, wildcard, and access time.
+> 
+> This brings up the question of restore. In case of a Lustre disk  
+> failure, how are you going to restore your Lustre file system?
+
+The initial HSM implementation is focussed mainly on the space management
+issues, rather than backup/restore, though of course there is a lot of
+overlap between the two and we have discussed backup aspects in the past.
+
+There are two main issues that would need to be addressed:
+- a Lustre-level policy on the minimum file size that should be sent to
+  the archive.  For Lustre, there would be minimal space savings if a
+  small file is moved to the archive, so that would only be useful in
+  the archive-as-backup case.
+  
+  We would need to decide whether the HPSS implementation can/should
+  handle aggregating multiple small files into a single archive object.
+  I think that is useful, and this is one reason I advocate being able
+  to pass multiple files at once from the coordinator to the agent.
+
+- since the archive does not contain a copy of the namespace (it only
+  has 128-bit FIDs as identifiers for the file) we would need to make
+  a separate backup of the MDS filesystem (which is all namespace).
+  There are already several mechanisms to do this, either using the
+  ext2 "dump" program to read from the raw device, or to make an LVM
+  snapshot and use e.g. tar to make a filesystem-level backup.  Both
+  of these need to include a backup of the extended attributes.
+
+> Agree. I don't see any SAM-QFS code changes required. The Lustre  
+> copytool will write to HPSS using the HPSS APIs and write to SAM-QFS  
+> with a ftp or pftp interface. This is minimum changes.
+
+We weren't thinking of using an FTP interface to SAM, though I guess
+this is possible.  Rather we were thinking of just mounting both QFS
+and Lustre on a Linux client and using "cp" or equivalent tool.
+Depending on the performance requirements, it might make sense to
+use a smarter tool that avoids the kernel-user-kernel memory copies.
+
+> I do see work to switch the HPSS APIs to ftp or pftp. If this is  
+> already supported by HPSS, then, yes, no changes are required.
+
+I think CEA is planning on writing a copytool using the HPSS APIs
+directly.  There is also "htar" which is a tar-like interface to
+HPSS, but I don't think that was anyone's intention to use.
+
+Cheers, Andreas
+--
+Andreas Dilger
+Sr. Staff Engineer, Lustre Group
+Sun Microsystems of Canada, Inc.
+
+
+
+From adilger at sun.com  Mon Jan 26 11:57:28 2009
+From: adilger at sun.com (Andreas Dilger)
+Date: Mon, 26 Jan 2009 12:57:28 -0700
+Subject: [Lustre-devel] SAM-QFS, ADM, and Lustre HSM
+In-Reply-To: <537C6C0940C6C143AA46A88946B854170D40BE5B@ORNLEXCHANGE.ornl.gov>
+References: <2734A30F-2C76-4725-9F3A-29AD4245B7E8@Sun.COM>
+	<496FCA67.6000500@sun.com>
+	<48D329C0-242E-4A5A-94C1-DF493BB25C2F@Sun.COM>
+	<496FE8D4.2090908@sun.com>
+	<BEB67402-7AFE-4BE1-A59C-050823AFC8E5@Sun.COM>
+	<4977647D.5010503@sun.com> <4977E5BD.7000706@sun.com>
+	<4978DB1E.30507@sun.com> <20090122225512.GP3652@webber.adilger.int>
+	<537C6C0940C6C143AA46A88946B854170D40BE5B@ORNLEXCHANGE.ornl.gov>
+Message-ID: <20090126195728.GH3652@webber.adilger.int>
+
+On Jan 23, 2009  12:39 -0500, Shipman, Galen M. wrote:
+> Looks like HPSS will support EA in 7.1.2.0, June 2009
+> I have asked Vicky here at ORNL to dig a bit into what the EA features will
+> look like.  Do we have a set of requirements for EAs for HSM integration?
+
+As yet we don't have a hard requirement for EAs in HSM.  We would ideally
+keep the LOV EA for the file layout in the HSM, so that the file gets
+(approximately) the same layout when it is restored.  This is only really
+needed for files that were not allocated using the default layout, and
+we might consider saving e.g. "stripe over all OSTs" instead of "stripe
+over N OSTs" so that if the number of OSTs increases from when the file
+was archived until it is restored the new file gets the full performance.
+
+In the absence of EAs in the HSM we could fall back to using a tar file
+format that supports EAs (as in RHEL5.x and star) to store the layout
+information.  We are also considering to keep the layout information in
+the MDS, but that doesn't help in the "backup" use case where the file
+was deleted or the MDS is lost.
+
+> -----Original Message-----
+> From: Andreas.Dilger at sun.com on behalf of Andreas Dilger
+> Sent: Thu 1/22/2009 5:55 PM
+> To: Nathaniel Rutman
+> Cc: Hua Huang; lustre-hsm-core-ext at sun.com; lustre-devel at lists.lustre.org; Karen Jourdenais; Erica Dorenkamp; Harriet.Coverston at sun.com; Rick Matthews; karl at tacc.utexas.edu
+> Subject: Re: SAM-QFS, ADM, and Lustre HSM
+>  
+> On Jan 22, 2009  12:46 -0800, Nathaniel Rutman wrote:
+> > QFS has a Linux native client  
+> > So the copy nodes would be linux nodes acting as clients for both Lustre  
+> > and QFS.  This would generally result in two network hops for the data,  
+> > but by placing the clients on OST nodes and having the coordinator  
+> > choose wisely, we can probably save one of the network hops most of the  
+> > time.  This may or may not be a good idea, depending on the load imposed  
+> > on the OST.  The copytool would also require us to pump the data from  
+> > kernel to userspace and back, potentially resulting in significant bus  
+> > loading.  We could memory map the Lustre side
+> 
+> I was just wondering to myself if we couldn't make an optimized "cp"
+> command that would work in the kernel and be able to use newer APIs
+> like "splice" or just a read-write loop that avoids kernel-user-kernel
+> data copies.  Unfortunately, I don't think mmap IO is very fast with
+> Lustre, or memcpy() from mmap Lustre to mmap QFS would give us a single
+> memcpy() operation (which is the best I think we can do).
+> 
+> > There are two items that I can think of that may be archive-specific
+> > 1. hash the fids into dirs/subdirs to avoid a big flat namespace
+> > 2. inclusion of file extended attributes (EAs)
+> > But in fact, I don't know enough about HPSS to say we don't need these  
+> > items anyhow.  CEA, can you comment?
+> > I think current versions of HPSS are able to store EAs automatically,  
+> > and QFS is not, so that may be one difference.
+> 
+> I got a paper from CEA that indicated HPSS was going to (or may have
+> already) implemented EA support, but it isn't at all clear if that
+> version of software would be available at all sites, since AFAIK it
+> is relatively new.
+> 
+> Cheers, Andreas
+> --
+> Andreas Dilger
+> Sr. Staff Engineer, Lustre Group
+> Sun Microsystems of Canada, Inc.
+> 
+
+Cheers, Andreas
+--
+Andreas Dilger
+Sr. Staff Engineer, Lustre Group
+Sun Microsystems of Canada, Inc.
+
+
+
+From Nathan.Rutman at Sun.COM  Mon Jan 26 13:53:27 2009
+From: Nathan.Rutman at Sun.COM (Nathaniel Rutman)
+Date: Mon, 26 Jan 2009 13:53:27 -0800
+Subject: [Lustre-devel] SAM-QFS, ADM, and Lustre HSM
+In-Reply-To: <20090126194744.GG3652@webber.adilger.int>
+References: <3DF0F4AF-F4D6-476E-98F7-CD912C49FC18@Sun.COM>
+	<2734A30F-2C76-4725-9F3A-29AD4245B7E8@Sun.COM>
+	<496FCA67.6000500@sun.com>
+	<48D329C0-242E-4A5A-94C1-DF493BB25C2F@Sun.COM>
+	<496FE8D4.2090908@sun.com>
+	<BEB67402-7AFE-4BE1-A59C-050823AFC8E5@Sun.COM>
+	<4977647D.5010503@sun.com>
+	<4977E5BD.7000706@sun.com> <4978DB1E.30507@sun.com>
+	<9365C284-E805-46B6-95B2-226C1E2ED112@Sun.COM>
+	<20090126194744.GG3652@webber.adilger.int>
+Message-ID: <497E30D7.3020208@sun.com>
+
+Andreas Dilger wrote:
+> On Jan 23, 2009  10:46 -0600, Harriet G. Coverston wrote:
+>   
+>> SAM supports classification policy rules for files  -- (1) number of  
+>> copies, up to 4 (2) where to put the copies  on which vsn pools  -  
+>> disk and/or tape, local and/or remote) (3) when to make the copies  
+>> (time based archiving). You specify the policy in the archiver.cmd  
+>> file. You can group files for a policy rule by pathname, owner, group,  
+>> size, wildcard, and access time.
+>>     
+My point about this is that files will be stored using the FID as the 
+file name, so name-based policies at the copytool level are worthless.   
+Unless we a.) add the path/filename back to the file (EA?), and b.) 
+modify the SAM policy engine to use the "real" path/filename instead of 
+the FID.
+>> This brings up the question of restore. In case of a Lustre disk  
+>> failure, how are you going to restore your Lustre file system?
+>>     
+>
+> ...
+>   
+> - since the archive does not contain a copy of the namespace (it only
+>   has 128-bit FIDs as identifiers for the file) we would need to make
+>   a separate backup of the MDS filesystem (which is all namespace).
+>   There are already several mechanisms to do this, either using the
+>   ext2 "dump" program to read from the raw device, or to make an LVM
+>   snapshot and use e.g. tar to make a filesystem-level backup.  Both
+>   of these need to include a backup of the extended attributes.
+>   
+Or include the path/filename in each file, and the restore process uses 
+this to repopulate the filesystem.
+>   
+>> Agree. I don't see any SAM-QFS code changes required. The Lustre  
+>> copytool will write to HPSS using the HPSS APIs and write to SAM-QFS  
+>> with a ftp or pftp interface. This is minimum changes.
+>>     
+>
+> We weren't thinking of using an FTP interface to SAM, though I guess
+> this is possible.  Rather we were thinking of just mounting both QFS
+> and Lustre on a Linux client and using "cp" or equivalent tool.
+>   
+Harriet already knew this, she just forgot :)
+
+
+
+From Nathan.Rutman at Sun.COM  Mon Jan 26 14:13:55 2009
+From: Nathan.Rutman at Sun.COM (Nathaniel Rutman)
+Date: Mon, 26 Jan 2009 14:13:55 -0800
+Subject: [Lustre-devel] SAM-QFS, ADM, and Lustre HSM
+In-Reply-To: <20090126193548.GF3652@webber.adilger.int>
+References: <3DF0F4AF-F4D6-476E-98F7-CD912C49FC18@Sun.COM>
+	<2734A30F-2C76-4725-9F3A-29AD4245B7E8@Sun.COM>
+	<496FCA67.6000500@sun.com>
+	<48D329C0-242E-4A5A-94C1-DF493BB25C2F@Sun.COM>
+	<496FE8D4.2090908@sun.com>
+	<BEB67402-7AFE-4BE1-A59C-050823AFC8E5@Sun.COM>
+	<4977647D.5010503@sun.com>
+	<4977E5BD.7000706@sun.com> <4978DB1E.30507@sun.com>
+	<497A144C.4000408@Sun.COM>
+	<20090126193548.GF3652@webber.adilger.int>
+Message-ID: <497E35A3.3080603@sun.com>
+
+Andreas Dilger wrote:
+> On Jan 23, 2009  13:02 -0600, Rick Matthews wrote:
+>   
+>>  Having a mover to put data into QFS is a great idea, and can easily use 
+>> the QFS Linux client. I don't think you would necessarily get QFS
+>> policy for native Lustre files unless the "moved" files retained the
+>> Lustre attributes, from which you want policy decisions made.
+>>     
+>
+> There will not necessarily be HSM policy data stored with every file
+> from Lustre, though there is a desire to store Lustre layout data in
+> the archive.  Is it possible to store extended attributes with each
+> file in QFS?
+>   
+We can always store EA's, either natively or "poor-man's EA's" via 
+mini-tarballs.
+>   
+>> The applicable Lustre namespace would be essentially duplicated in the
+>> QFS space, and (I think) QFS classification and policy occur on that  
+>> name space. Doing so gives you access to rich QFS policy. This also
+>> allows QFS to migrate data to/from archive media without I/O or
+>> compute load on any Linux clients.
+>>     
+>
+> The current Lustre HSM design will not export any of the filesystem
+> namespace to the archive, so that we don't have to track renames in
+> the archive.  The archive objects will only be identified by a Lustre
+> FID (128-bit file identifier).  IIRC, the HSM-specific copy tool would
+> be given the file name (though not necessarily the full pathname) in
+> order to perform the copyout, but the filesystem will be retrieving the
+> file from the archive by FID.  Nathan, can you confirm that is right?
+>   
+There is a mechanism to get the current full pathname for a given fid 
+from userspace, so an HSM-specific copytool could find it out, but a 
+central tenet of the design here is that as far as the HSM is concerned, 
+the entire Lustre FS is a flat namespace of FIDs.  You can get a full 
+pathname if you want to for catastrophe recovery, but Lustre itself will 
+only speak to the HSM with FIDs.
+As I said in the other email, although SAM-QFS can do name-based 
+policies, the "name" as far as QFS is concerned is just the FID, so  
+name-based policies at the copytool level are worthless.   Unless we a.) 
+add the path/filename back to the file (EA, or use a tarball wrapper), 
+and b.) modify the SAM policy engine to use the "real" path/filename 
+instead of the FID.
+
+But in the bigger picture sense, note that all this is simply an 
+optimization to allow SAM-QFS filename-based policies, which ultimately 
+only influences where SAM-QFS stores files, not whether or when the 
+files are archived by Lustre.  These "top-level" policy decisions are 
+made by the Lustre policy manager, and so perhaps there is no real need 
+to spend any effort getting b.) above working.  Note that a.) is still 
+useful for disaster recovery.
+
+
+
+
+From Harriet.Coverston at Sun.COM  Mon Jan 26 16:12:49 2009
+From: Harriet.Coverston at Sun.COM (Harriet G. Coverston)
+Date: Mon, 26 Jan 2009 18:12:49 -0600
+Subject: [Lustre-devel] SAM-QFS, ADM, and Lustre HSM
+In-Reply-To: <20090126194744.GG3652@webber.adilger.int>
+References: <3DF0F4AF-F4D6-476E-98F7-CD912C49FC18@Sun.COM>
+	<2734A30F-2C76-4725-9F3A-29AD4245B7E8@Sun.COM>
+	<496FCA67.6000500@sun.com>
+	<48D329C0-242E-4A5A-94C1-DF493BB25C2F@Sun.COM>
+	<496FE8D4.2090908@sun.com>
+	<BEB67402-7AFE-4BE1-A59C-050823AFC8E5@Sun.COM>
+	<4977647D.5010503@sun.com>
+	<4977E5BD.7000706@sun.com> <4978DB1E.30507@sun.com>
+	<9365C284-E805-46B6-95B2-226C1E2ED112@Sun.COM>
+	<20090126194744.GG3652@webber.adilger.int>
+Message-ID: <772D922B-11B2-4494-A95A-4820FD214CC6@Sun.COM>
+
+Andreas,
+
+On Jan 26, 2009, at 1:47 PM, Andreas Dilger wrote:
+
+> On Jan 23, 2009  10:46 -0600, Harriet G. Coverston wrote:
+>> SAM supports classification policy rules for files  -- (1) number of
+>> copies, up to 4 (2) where to put the copies  on which vsn pools  -
+>> disk and/or tape, local and/or remote) (3) when to make the copies
+>> (time based archiving). You specify the policy in the archiver.cmd
+>> file. You can group files for a policy rule by pathname, owner,  
+>> group,
+>> size, wildcard, and access time.
+>>
+>> This brings up the question of restore. In case of a Lustre disk
+>> failure, how are you going to restore your Lustre file system?
+>
+> The initial HSM implementation is focussed mainly on the space  
+> management
+> issues, rather than backup/restore, though of course there is a lot of
+> overlap between the two and we have discussed backup aspects in the  
+> past.
+
+I do see below that you are dumping your metadata which maps the 128- 
+FIDs to
+the full pathname. In this case, you would be able to restore your  
+Luster
+file system from the archive.  If you don't have this restore feature,  
+then you would
+just be using the archive as a disk extender and you would also need a  
+conventional
+backup.
+>
+> There are two main issues that would need to be addressed:
+> - a Lustre-level policy on the minimum file size that should be sent  
+> to
+>  the archive.  For Lustre, there would be minimal space savings if a
+>  small file is moved to the archive, so that would only be useful in
+>  the archive-as-backup case.
+>
+>  We would need to decide whether the HPSS implementation can/should
+>  handle aggregating multiple small files into a single archive object.
+Last I knew, they still don't build a container for small files. They  
+write
+a tape mark between each file. This means they are start/stopping the
+tape for small files. A lot of sites use SRB which builds a tar  
+container.
+>
+>  I think that is useful, and this is one reason I advocate being able
+>  to pass multiple files at once from the coordinator to the agent.
+If you decided to build a container, then that will work for both HPSS  
+and
+SAM.
+>
+>
+> - since the archive does not contain a copy of the namespace (it only
+>  has 128-bit FIDs as identifiers for the file) we would need to make
+>  a separate backup of the MDS filesystem (which is all namespace).
+>  There are already several mechanisms to do this, either using the
+>  ext2 "dump" program to read from the raw device, or to make an LVM
+>  snapshot and use e.g. tar to make a filesystem-level backup.  Both
+>  of these need to include a backup of the extended attributes.
+>
+>> Agree. I don't see any SAM-QFS code changes required. The Lustre
+>> copytool will write to HPSS using the HPSS APIs and write to SAM-QFS
+>> with a ftp or pftp interface. This is minimum changes.
+>
+> We weren't thinking of using an FTP interface to SAM, though I guess
+> this is possible.  Rather we were thinking of just mounting both QFS
+> and Lustre on a Linux client and using "cp" or equivalent tool.
+> Depending on the performance requirements, it might make sense to
+> use a smarter tool that avoids the kernel-user-kernel memory copies.
+Yes, we support Linux clients and you can use the datamover  
+architecture.
+You benefit with direct access to the storage from both the Lustre
+file system and the SAM file system, no OTW performance penalty. I  
+would not
+recommend cp since it is mmap I/O (on Solaris, not sure about Linux).  
+You will
+want to use direct I/O to avoid the useless data copy. If you use ftp/ 
+pftp/gridftp,
+that is just a loop back move on the datamover(s); however, any  
+standard file system
+interface will work to SAM.
+>
+>
+>> I do see work to switch the HPSS APIs to ftp or pftp. If this is
+>> already supported by HPSS, then, yes, no changes are required.
+>
+> I think CEA is planning on writing a copytool using the HPSS APIs
+> directly.  There is also "htar" which is a tar-like interface to
+> HPSS, but I don't think that was anyone's intention to use.
+
+If they decide to use the non standard HPSS APIs, then yes, there  
+would be changes
+required to use a standard file system interface for SAM.
+
+Best regards,
+
+- Harriet
+>
+>
+> Cheers, Andreas
+> --
+> Andreas Dilger
+> Sr. Staff Engineer, Lustre Group
+> Sun Microsystems of Canada, Inc.
+>
+
+    - Harriet
+
+Harriet G. Coverston
+Solaris, Storage Software			 |  Email: harriet.coverston at sun.com
+Sun Microsystems, Inc.                     	 |  AT&T:  651-554-1515
+1270 Eagan Industrial Rd., Suite 160       |  Fax:   651-554-1540
+Eagan, MN 55121-1231
+
+
+
+
+
+
+From Harriet.Coverston at Sun.COM  Mon Jan 26 18:26:15 2009
+From: Harriet.Coverston at Sun.COM (Harriet G. Coverston)
+Date: Mon, 26 Jan 2009 20:26:15 -0600
+Subject: [Lustre-devel] SAM-QFS, ADM, and Lustre HSM
+In-Reply-To: <497E35A3.3080603@sun.com>
+References: <3DF0F4AF-F4D6-476E-98F7-CD912C49FC18@Sun.COM>
+	<2734A30F-2C76-4725-9F3A-29AD4245B7E8@Sun.COM>
+	<496FCA67.6000500@sun.com>
+	<48D329C0-242E-4A5A-94C1-DF493BB25C2F@Sun.COM>
+	<496FE8D4.2090908@sun.com>
+	<BEB67402-7AFE-4BE1-A59C-050823AFC8E5@Sun.COM>
+	<4977647D.5010503@sun.com>
+	<4977E5BD.7000706@sun.com> <4978DB1E.30507@sun.com>
+	<497A144C.4000408@Sun.COM>
+	<20090126193548.GF3652@webber.adilger.int> <497E35A3.3080603@sun.com>
+Message-ID: <DEB5E509-4641-40B6-86CA-972D885975D3@Sun.COM>
+
+Nathan,
+
+On Jan 26, 2009, at 4:13 PM, Nathaniel Rutman wrote:
+
+> Andreas Dilger wrote:
+>> On Jan 23, 2009  13:02 -0600, Rick Matthews wrote:
+>>
+>>> Having a mover to put data into QFS is a great idea, and can  
+>>> easily use the QFS Linux client. I don't think you would  
+>>> necessarily get QFS
+>>> policy for native Lustre files unless the "moved" files retained the
+>>> Lustre attributes, from which you want policy decisions made.
+>>>
+>>
+>> There will not necessarily be HSM policy data stored with every file
+>> from Lustre, though there is a desire to store Lustre layout data in
+>> the archive.  Is it possible to store extended attributes with each
+>> file in QFS?
+>>
+> We can always store EA's, either natively or "poor-man's EA's" via  
+> mini-tarballs.
+>>
+>>> The applicable Lustre namespace would be essentially duplicated in  
+>>> the
+>>> QFS space, and (I think) QFS classification and policy occur on  
+>>> that  name space. Doing so gives you access to rich QFS policy.  
+>>> This also
+>>> allows QFS to migrate data to/from archive media without I/O or
+>>> compute load on any Linux clients.
+>>>
+>>
+>> The current Lustre HSM design will not export any of the filesystem
+>> namespace to the archive, so that we don't have to track renames in
+>> the archive.  The archive objects will only be identified by a Lustre
+>> FID (128-bit file identifier).  IIRC, the HSM-specific copy tool  
+>> would
+>> be given the file name (though not necessarily the full pathname) in
+>> order to perform the copyout, but the filesystem will be retrieving  
+>> the
+>> file from the archive by FID.  Nathan, can you confirm that is right?
+>>
+> There is a mechanism to get the current full pathname for a given  
+> fid from userspace, so an HSM-specific copytool could find it out,  
+> but a central tenet of the design here is that as far as the HSM is  
+> concerned, the entire Lustre FS is a flat namespace of FIDs.
+
+Be careful here. We are a file system. We don't have a limit on # of  
+files in one directory, but we don't recommend more than 500,000 files  
+in one single directory or you will start to see some performance  
+problems. You will have to create a tree, not use a flat namespace.
+
+>  You can get a full pathname if you want to for catastrophe  
+> recovery, but Lustre itself will only speak to the HSM with FIDs.
+> As I said in the other email, although SAM-QFS can do name-based  
+> policies, the "name" as far as QFS is concerned is just the FID, so   
+> name-based policies at the copytool level are worthless.   Unless we  
+> a.) add the path/filename back to the file (EA, or use a tarball  
+> wrapper), and b.) modify the SAM policy engine to use the "real"  
+> path/filename instead of the FID.
+
+Currently, we don't support policy using EA (extended attributes are  
+in 5.0). We have had lots of requests for this, especially from our  
+digital preservation customers.
+>
+>
+> But in the bigger picture sense, note that all this is simply an  
+> optimization to allow SAM-QFS filename-based policies, which  
+> ultimately only influences where SAM-QFS stores files, not whether  
+> or when the files are archived by Lustre.  These "top-level" policy  
+> decisions are made by the Lustre policy manager, and so perhaps  
+> there is no real need to spend any effort getting b.) above  
+> working.  Note that a.) is still useful for disaster recovery.
+Agree. We have lots of customer with only one archive set. This means  
+all files are archived with the
+same policy -- very simple.
+
+    - Harriet
+
+Harriet G. Coverston
+Solaris, Storage Software			 |  Email: harriet.coverston at sun.com
+Sun Microsystems, Inc.                     	 |  AT&T:  651-554-1515
+1270 Eagan Industrial Rd., Suite 160       |  Fax:   651-554-1540
+Eagan, MN 55121-1231
+
+
+
+
+
+
+From thomas.leibovici at cea.fr  Tue Jan 27 00:22:06 2009
+From: thomas.leibovici at cea.fr (LEIBOVICI Thomas)
+Date: Tue, 27 Jan 2009 09:22:06 +0100
+Subject: [Lustre-devel] SAM-QFS, ADM, and Lustre HSM
+In-Reply-To: <20090126194744.GG3652@webber.adilger.int>
+References: <3DF0F4AF-F4D6-476E-98F7-CD912C49FC18@Sun.COM>	<2734A30F-2C76-4725-9F3A-29AD4245B7E8@Sun.COM>	<496FCA67.6000500@sun.com>	<48D329C0-242E-4A5A-94C1-DF493BB25C2F@Sun.COM>	<496FE8D4.2090908@sun.com>	<BEB67402-7AFE-4BE1-A59C-050823AFC8E5@Sun.COM>	<4977647D.5010503@sun.com>	<4977E5BD.7000706@sun.com>
+	<4978DB1E.30507@sun.com>	<9365C284-E805-46B6-95B2-226C1E2ED112@Sun.COM>
+	<20090126194744.GG3652@webber.adilger.int>
+Message-ID: <497EC42E.3070705@cea.fr>
+
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20090127/49f04bf7/attachment.htm>
+
+From Oleg.Drokin at Sun.COM  Tue Jan 27 20:39:43 2009
+From: Oleg.Drokin at Sun.COM (Oleg Drokin)
+Date: Tue, 27 Jan 2009 23:39:43 -0500
+Subject: [Lustre-devel] Sub Tree lock ideas.
+In-Reply-To: <20090126100856.GD3652@webber.adilger.int>
+References: <7D9ABF96-6BD8-4F7A-A5AE-F08BF04854B2@sun.com>
+	<20090126100856.GD3652@webber.adilger.int>
+Message-ID: <5EF2479C-CFC4-4CD5-95E8-50368A7D5083@Sun.COM>
+
+Hello!
+
+On Jan 26, 2009, at 5:08 AM, Andreas Dilger wrote:
+
+> A few comments that I have from the later discussions:
+> - you previously mentioned that only a single client would be able to
+>  hold a subtree lock.  I think it is critical that multiple clients be
+>  able to get read subtree locks on the same directory.  This would be
+>  very important for uses like many clients and a shared read-mostly
+>  directory like /usr/bin or /usr/lib.
+
+In fact I see zero benefit for read-only subtree lock except memory
+conservation, which should not be such a big issue. Much more important
+is to reduce amount of RPCs, esp. synchronous ones.
+
+> - Alex (I think) suggested that the STL locks would only be on a  
+> single
+>  directory and its contents, instead of being on an arbitrary depth
+>  sub-tree.  While it seems somewhat appealing to have a single lock
+>  that covers an entire subtree, the complexity of having to locate
+>  and manage arbitrary-depth locks on the MDS might be too high.
+
+That's right.
+
+>  Having only a single-level of subtree lock would avoid the need to
+>  pass cookies to the MDS for anything other than the directory in
+>  which names are being looked up.
+
+I had a lengthly call with Eric today and at the end we came to a
+conclusion that perhaps STL at the moment is a total overkill.
+
+What we need is ability to reduce metadata RPCs traffic.
+We can start with implementation of just allowing WRITE locks on a
+directory that would be only responsible for this directory and its
+content (HELPS: by allowing to aggregate creates into bunches before
+sending) + a special "entire file lock" (perhaps implemented by just
+WRITE lock on a file) metadata lock that would guard all file data
+without obtaining any locks from OSTs (would be revoked by open from
+another client, perhaps would need to support glimpses too).
+
+The WRITE directory lock only helps us to aggregate metadata RPCs if we
+just created the empty directory OR if we have entire list of entries in
+that directory. If we do not have entire directory content, we must  
+issue
+synchronous create RPC to avoid cases where we locally create a file  
+that
+already exists in that dir, for example. So perhaps in a lot of cases
+obtaining a write lock on a dir would need to be followed by some sort  
+of
+bulk directory read (readdir+ of sorts). This is also not always  
+feasible,
+as I can imagine there could be directories much bigger than what we  
+would
+like to cache, in which case we would need to resort to one-by-one  
+creates.
+
+Another important thing we would need is lock conversion  
+(downconversion and
+try-up conversion) so that we do not lose our entire cached directory  
+content
+after conflicting ls came in and we wrote it out. (we do not care all  
+that
+much about writing out entire content of the dirty metadata cache at  
+this
+point, since we still achieve the aggregation and asynchronous creation,
+even just asynchronous creation would help).
+
+Perhaps another useful addition would be to deliver multiple blocking  
+and
+glimpse callbacks from server to the client in a single RPC (as a result
+of a readdir+ sort of operation inside a dir where many files have  
+"entire
+file lock") (we already have aggregated cancels in the other direction).
+
+This WRITE metadata lock is in fact a reduced subset of STL lock  
+without any
+of its advanced features, but perhaps easier to implement because of  
+that.
+
+Bye,
+     Oleg
+
+
+From peter.braam at gmail.com  Wed Jan 28 10:39:28 2009
+From: peter.braam at gmail.com (Peter J. Braam)
+Date: Wed, 28 Jan 2009 11:39:28 -0700
+Subject: [Lustre-devel] subtree locks
+Message-ID: <7bb097cc0901281039u1008aab6i29f0b09f0bef7764@mail.gmail.com>
+
+I want to point out that only subtree locks allow memory usage on the server
+to scale with the number of clients instead of the number of files in the
+file system.  For HPC usage this is not important, but in many other cases
+it very much is.
+
+Sooner or later, without subtree locks, the MDS will run out of memory too
+soon using individual file locks or encounter too much overhead in lock
+scanning operations.
+
+Listening to the discussion I think you are betting on "later" rather than
+"sooner" and that may be the right decision for now.
+
+Peter
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20090128/789e8630/attachment.htm>
+
+From vyw at ornl.gov  Wed Jan 28 12:30:37 2009
+From: vyw at ornl.gov (Vicky White)
+Date: Wed, 28 Jan 2009 15:30:37 -0500
+Subject: [Lustre-devel] SAM-QFS, ADM, and Lustre HSM
+In-Reply-To: <9365C284-E805-46B6-95B2-226C1E2ED112@Sun.COM>
+References: <D262D095-D17F-4119-B908-FBE502201835@Sun.COM>
+	<49480788.7080306@sun.com>
+	<FCBC9AEA-C61C-4EEA-847B-FE283D19A7BF@Sun.COM>
+	<05e901c95fba$f7688df0$e639a9d0$@com> <49481EEF.2010802@sun.com>
+	<EB7E4462-1CFF-4CCD-A38F-AE4D89108B59@Sun.COM>
+	<3DF0F4AF-F4D6-476E-98F7-CD912C49FC18@Sun.COM>
+	<2734A30F-2C76-4725-9F3A-29AD4245B7E8@Sun.COM>
+	<496FCA67.6000500@sun.com>
+	<48D329C0-242E-4A5A-94C1-DF493BB25C2F@Sun.COM>
+	<496FE8D4.2090908@sun.com>
+	<BEB67402-7AFE-4BE1-A59C-050823AFC8E5@Sun.COM>
+	<4977647D.5010503@sun.com>
+	<4977E5BD.7000706@sun.com> <4978DB1E.30507@sun.com>
+	<9365C284-E805-46B6-95B2-226C1E2ED112@Sun.COM>
+Message-ID: <4980C06D.3000309@ornl.gov>
+
+
+Comments on several messages; I am slowly catching up.
+
+
+> I do see work to switch the HPSS APIs to ftp or pftp. If this is  
+> already supported by HPSS, then, yes, no changes are required.
+>   
+
+HPSS supports ftp and pftp.   However, this seems to be a moot point as 
+Thomas points out that CEA is using the HPSS client API library for 
+their copy tool:
+
+
+> At CEA, we are using our own copytool that directly uses HPSS API. 
+> This already exists and is in production for years.
+> I think there will be few modifications to adapt it to Lustre-HSM purpose
+> (basically, add fid <-> HSM id mapping and backup of attributes, path, 
+> stripe...)
+
+
+>   There is also "htar" which is a tar-like interface to
+> HPSS, but I don't think that was anyone's intention to use.
+
+
+htar is a well proven and valuable tool for aggregation to HPSS.   It is 
+widely used at HPSS sites as a stand-alone utility and has been 
+incorporated into other interfaces. 
+
+
+> Looks like HPSS will support EA in 7.1.2.0, June 2009
+> I have asked Vicky here at ORNL to dig a bit into what the EA features will look like. 
+>   
+
+The last draft of this design I saw was from November.    Work on this 
+is picking up right now and has been bumped to a high priority, due for 
+release this June, as Galen says.   I am trying to find out if there is 
+a later design and how much about it I can share.
+
+
+> Do we have a set of requirements for EAs for HSM integration?
+
+I never saw an answer to Galen's question above; did I miss it?  Now is 
+the time to speak up if we need to influence the design of the HPSS EAs.
+
+
+>   > We would need to decide whether the HPSS implementation can/should
+>   > handle aggregating multiple small files into a single archive object.
+>   > I think that is useful, and this is one reason I advocate being able
+>   > to pass multiple files at once from the coordinator to the agent.
+> Last I knew, they still don't build a container for small files. They 
+> write
+> a tape mark between each file. This means they are start/stopping the
+> tape for small files. A lot of sites use SRB which builds a tar container.
+
+As of HPSS 7.1, we build a container for small files before copying them 
+to tape.  It's called Tape Aggregation and we call the container an 
+aggregate.   Tape Aggregation is controlled via the HPSS migration 
+policy, where the sysadm can configure whether or not to aggregate, the 
+minimum and maximum files to place in each aggregate, and the maximum 
+size of each aggregate.
+
+
+Vicky
+
+
+
+
+From vyw at ornl.gov  Thu Jan 29 07:35:01 2009
+From: vyw at ornl.gov (Vicky White)
+Date: Thu, 29 Jan 2009 10:35:01 -0500
+Subject: [Lustre-devel] SAM-QFS, ADM, and Lustre HSM
+In-Reply-To: <4980C06D.3000309@ornl.gov>
+References: <D262D095-D17F-4119-B908-FBE502201835@Sun.COM>
+	<49480788.7080306@sun.com>
+	<FCBC9AEA-C61C-4EEA-847B-FE283D19A7BF@Sun.COM>
+	<05e901c95fba$f7688df0$e639a9d0$@com> <49481EEF.2010802@sun.com>
+	<EB7E4462-1CFF-4CCD-A38F-AE4D89108B59@Sun.COM>
+	<3DF0F4AF-F4D6-476E-98F7-CD912C49FC18@Sun.COM>
+	<2734A30F-2C76-4725-9F3A-29AD4245B7E8@Sun.COM>
+	<496FCA67.6000500@sun.com>
+	<48D329C0-242E-4A5A-94C1-DF493BB25C2F@Sun.COM>
+	<496FE8D4.2090908@sun.com>
+	<BEB67402-7AFE-4BE1-A59C-050823AFC8E5@Sun.COM>
+	<4977647D.5010503@sun.com>
+	<4977E5BD.7000706@sun.com> <4978DB1E.30507@sun.com>
+	<9365C284-E805-46B6-95B2-226C1E2ED112@Sun.COM>
+	<4980C06D.3000309@ornl.gov>
+Message-ID: <4981CCA5.6070005@ornl.gov>
+
+
+>> Looks like HPSS will support EA in 7.1.2.0, June 2009
+>> I have asked Vicky here at ORNL to dig a bit into what the EA 
+>> features will look like.   
+>
+> The last draft of this design I saw was from November.    Work on this 
+> is picking up right now and has been bumped to a high priority, due 
+> for release this June, as Galen says.   I am trying to find out if 
+> there is a later design and how much about it I can share.
+
+
+There is a more recent draft, though the main change seems to be change 
+the name from "Extended Attributes" to "User Defined Attributes" (UDAs).
+
+The gist of the current draft is that a new database table would be 
+added to the HPSS schema which would consist of two columns, an object 
+ID and an XML document.   The XML document would define all the UDAs for 
+some HPSS name space object (file, directory, symlink, hard link, etc.) 
+in some key/value format.   It would take advantage of the new 
+capability in version 9 of DB2 of handling XML columns and being able to 
+index and query them as XML, not just as a text string.   The object ID 
+column of the new table would hold the ID of the HPSS name space object  
+to which the extended attribute(s) apply.
+
+The design is intended to handle small UDAs, up to 512 bytes in length 
+for the total XML document, in order to be able to store the data in the 
+same row; larger documents will be accepted but would have to be stored 
+in a large object (LOB) area external to the main table, reducing 
+efficiency.   This is something to keep in mind if we start talking 
+about putting full (or even relative) pathnames in as UDAs.
+
+I understand that the CEA folks have a copy of this draft of the design 
+and are in communication with its authors.
+
+Vicky
+
+
+From vyw at ornl.gov  Thu Jan 29 07:36:59 2009
+From: vyw at ornl.gov (Vicky White)
+Date: Thu, 29 Jan 2009 10:36:59 -0500
+Subject: [Lustre-devel] SAM-QFS, ADM, and Lustre HSM
+In-Reply-To: <20090126195728.GH3652@webber.adilger.int>
+References: <2734A30F-2C76-4725-9F3A-29AD4245B7E8@Sun.COM>
+	<496FCA67.6000500@sun.com>
+	<48D329C0-242E-4A5A-94C1-DF493BB25C2F@Sun.COM>
+	<496FE8D4.2090908@sun.com>
+	<BEB67402-7AFE-4BE1-A59C-050823AFC8E5@Sun.COM>
+	<4977647D.5010503@sun.com> <4977E5BD.7000706@sun.com>
+	<4978DB1E.30507@sun.com> <20090122225512.GP3652@webber.adilger.int>
+	<537C6C0940C6C143AA46A88946B854170D40BE5B@ORNLEXCHANGE.ornl.gov>
+	<20090126195728.GH3652@webber.adilger.int>
+Message-ID: <4981CD1B.5020407@ornl.gov>
+
+Andreas Dilger wrote:
+> On Jan 23, 2009  12:39 -0500, Shipman, Galen M. wrote:
+>   
+>> Looks like HPSS will support EA in 7.1.2.0, June 2009
+>> I have asked Vicky here at ORNL to dig a bit into what the EA features will
+>> look like.  Do we have a set of requirements for EAs for HSM integration?
+>>     
+>
+> As yet we don't have a hard requirement for EAs in HSM.  We would ideally
+> keep the LOV EA for the file layout in the HSM, so that the file gets
+> (approximately) the same layout when it is restored.  This is only really
+> needed for files that were not allocated using the default layout, and
+> we might consider saving e.g. "stripe over all OSTs" instead of "stripe
+> over N OSTs" so that if the number of OSTs increases from when the file
+> was archived until it is restored the new file gets the full performance.
+>   
+
+
+Also, if for some reason the number of OFTs decreases, the stripe all 
+could just use the new available value.
+
+
+>> I got a paper from CEA that indicated HPSS was going to (or may have
+>> already) implemented EA support, but it isn't at all clear if that
+>> version of software would be available at all sites, since AFAIK it
+>> is relatively new.
+>>
+>> Cheers, Andreas
+>>     
+
+
+This version of the HPSS software with the EA support (now called UDA 
+for User Defined Attributes) will be available in the baseline HPSS 
+code, available to all sites.   Target availability date is summer 2009.
+
+
+Vicky
+
+
+From vyw at ornl.gov  Fri Jan 30 06:26:19 2009
+From: vyw at ornl.gov (Vicky White)
+Date: Fri, 30 Jan 2009 09:26:19 -0500
+Subject: [Lustre-devel] SAM-QFS, ADM, and Lustre HSM
+In-Reply-To: <4980C06D.3000309@ornl.gov>
+References: <D262D095-D17F-4119-B908-FBE502201835@Sun.COM>
+	<49480788.7080306@sun.com>
+	<FCBC9AEA-C61C-4EEA-847B-FE283D19A7BF@Sun.COM>
+	<05e901c95fba$f7688df0$e639a9d0$@com> <49481EEF.2010802@sun.com>
+	<EB7E4462-1CFF-4CCD-A38F-AE4D89108B59@Sun.COM>
+	<3DF0F4AF-F4D6-476E-98F7-CD912C49FC18@Sun.COM>
+	<2734A30F-2C76-4725-9F3A-29AD4245B7E8@Sun.COM>
+	<496FCA67.6000500@sun.com>
+	<48D329C0-242E-4A5A-94C1-DF493BB25C2F@Sun.COM>
+	<496FE8D4.2090908@sun.com>
+	<BEB67402-7AFE-4BE1-A59C-050823AFC8E5@Sun.COM>
+	<4977647D.5010503@sun.com>
+	<4977E5BD.7000706@sun.com> <4978DB1E.30507@sun.com>
+	<9365C284-E805-46B6-95B2-226C1E2ED112@Sun.COM>
+	<4980C06D.3000309@ornl.gov>
+Message-ID: <49830E0B.4010603@ornl.gov>
+
+
+>
+>> Looks like HPSS will support EA in 7.1.2.0, June 2009
+>> I have asked Vicky here at ORNL to dig a bit into what the EA 
+>> features will look like.   
+>
+> The last draft of this design I saw was from November.    Work on this 
+> is picking up right now and has been bumped to a high priority, due 
+> for release this June, as Galen says.   I am trying to find out if 
+> there is a later design and how much about it I can share.
+
+
+I just realized the June date is internal.  That's when hpss developers 
+are to have their code unit tested.  After that comes integration and 
+system testing.   This feature will not likely be released until around 
+September.
+
+Vicky
+
+
+From adilger at sun.com  Fri Jan 30 15:32:54 2009
+From: adilger at sun.com (Andreas Dilger)
+Date: Fri, 30 Jan 2009 16:32:54 -0700
+Subject: [Lustre-devel] SOM Recovery of open files
+Message-ID: <20090130233253.GK3652@webber.adilger.int>
+
+Vitaly Fertman wrote:
+> Oleg told me yesterday about one feature which seems destroying the
+> SOM completely.  If a client is evicted and re-connects, we do not
+> re-open files so that client thinks files are opened, whereas MDS
+> thinks they are closed.
+
+Right.  This issue has been around for a long time.  There is bug 971
+dealing with this issue, about changing open file recovery to work by
+generating new "open file" requests instead of saving the RPCs and
+handling it at the ptlrpc level.  This is (AFAIK) being done for the
+simplified interoperability fixes already.
+
+> Thus MDS has no control over opened files, whereas clients may write
+> to them.  To fix this we need at least to disable the file modification
+> on clients until files are re-opened.
+
+This is also going to be handled by the LOV EA lock that CEA is working
+on for HSM and migration.  If the client is evicted from the MDS it will
+have the LOV EA lock cancelled, and all IO will block until a new LOV EA
+lock is gotten.
+
+> The re-opening itself could be done by application or by us.  In the
+> later case, the recovery mechanism is involved...
+
+This is definitely not an application-level problem, it needs to be
+fixed within Lustre.
+
+> it was missed for the recovery, but it is a problem for interoperability
+> as well. I remember Eric said that we will evict clients on downgrade
+> and he said therefore all the files get closed. however, it seems it
+> is not for clients unless we do some extra actions.
+
+Even on upgrade, simplified interoperability will now have the server
+requesting that all clients flush their state before the server is shut
+down, so that the amount of interoperability needed is minimal.  The only
+state that a client cannot completely remove is the open file handles,
+so the "replay" of file open will now be driven by the file handles
+themselves instead of the "saved RPC" mechanism we use today.  That would
+also avoid bugs like 3632, 3633, etc.
+
+
+Cheers, Andreas
+--
+Andreas Dilger
+Sr. Staff Engineer, Lustre Group
+Sun Microsystems of Canada, Inc.
+
+
+
+From Nathan.Rutman at Sun.COM  Fri Jan 30 16:21:33 2009
+From: Nathan.Rutman at Sun.COM (Nathaniel Rutman)
+Date: Fri, 30 Jan 2009 16:21:33 -0800
+Subject: [Lustre-devel] SAM-QFS, ADM, and Lustre HSM
+In-Reply-To: <DEB5E509-4641-40B6-86CA-972D885975D3@Sun.COM>
+References: <3DF0F4AF-F4D6-476E-98F7-CD912C49FC18@Sun.COM>
+	<2734A30F-2C76-4725-9F3A-29AD4245B7E8@Sun.COM>
+	<496FCA67.6000500@sun.com>
+	<48D329C0-242E-4A5A-94C1-DF493BB25C2F@Sun.COM>
+	<496FE8D4.2090908@sun.com>
+	<BEB67402-7AFE-4BE1-A59C-050823AFC8E5@Sun.COM>
+	<4977647D.5010503@sun.com>
+	<4977E5BD.7000706@sun.com> <4978DB1E.30507@sun.com>
+	<497A144C.4000408@Sun.COM>
+	<20090126193548.GF3652@webber.adilger.int> <497E35A3.3080603@sun.com>
+	<DEB5E509-4641-40B6-86CA-972D885975D3@Sun.COM>
+Message-ID: <4983998D.1030601@sun.com>
+
+LEIBOVICI Thomas wrote:
+> At CEA, we are using our own copytool that directly uses HPSS API. 
+> This already exists and is in production for years.
+> I think there will be few modifications to adapt it to Lustre-HSM purpose
+> (basically, add fid <-> HSM id mapping and backup of attributes, path, 
+> stripe...)
+So then the QFS copytool will indeed be a new tool, and should be 
+scheduled accordingly.
+Features:
+1. "cp --preserve" like functionality (include metadata attributes in cp)
+2. add EA's (create mini-tarball)
+3. implement FID hash to subdivide namespace
+4. periodic status reporting (via ioctl on file)
+
+
+Harriet G. Coverston wrote:
+>> There is a mechanism to get the current full pathname for a given fid 
+>> from userspace, so an HSM-specific copytool could find it out, but a 
+>> central tenet of the design here is that as far as the HSM is 
+>> concerned, the entire Lustre FS is a flat namespace of FIDs.
+>
+> Be careful here. We are a file system. We don't have a limit on # of 
+> files in one directory, but we don't recommend more than 500,000 files 
+> in one single directory or you will start to see some performance 
+> problems. You will have to create a tree, not use a flat namespace.
+Yes, a tree based on a hash of the fid. 
+
+The other option is to use the actual filename for storage, but from 
+Lustre's point of view this gets extremely tricky.  For example:
+Send /foo/bar to archive.  Client A opens /foo/bar.  Client B renames 
+/foo/bar to /abc/xyz, but this change hasn't propagated to the archive 
+yet.  Client A now tries to read its open file handle, which tells 
+Lustre to read the offline file FID 123, which it translates to /abc/xyz 
+currently, which the archive doesn't know about yet.  Not just xyz, but 
+renames on any ancestor path element cause similar misses.  Since the 
+FID remains constant throughout the life of a file, we don't have to 
+worry about any namespace changes (file or parents).  If there was an 
+alternate way of bypassing the archive's namespace to directly access a 
+file, we could conceivably store e.g. an archive-specific identifier 
+within the Lustre stripe EA, and pass this down to the copytool when 
+reading an offline file, but this presupposes that such a thing exists, 
+is of reasonable size, has a userspace method to access it, etc.
+
+>
+>>  You can get a full pathname if you want to for catastrophe recovery, 
+>> but Lustre itself will only speak to the HSM with FIDs.
+>> As I said in the other email, although SAM-QFS can do name-based 
+>> policies, the "name" as far as QFS is concerned is just the FID, so  
+>> name-based policies at the copytool level are worthless.   Unless we 
+>> a.) add the path/filename back to the file (EA, or use a tarball 
+>> wrapper), and b.) modify the SAM policy engine to use the "real" 
+>> path/filename instead of the FID.
+>
+> Currently, we don't support policy using EA (extended attributes are 
+> in 5.0). We have had lots of requests for this, especially from our 
+> digital preservation customers.
+Ah, policy based on EAs would be the general case, yes.
+
+
+From Oleg.Drokin at Sun.COM  Fri Jan 30 16:51:54 2009
+From: Oleg.Drokin at Sun.COM (Oleg Drokin)
+Date: Fri, 30 Jan 2009 19:51:54 -0500
+Subject: [Lustre-devel] SOM Recovery of open files
+In-Reply-To: <20090130233253.GK3652@webber.adilger.int>
+References: <20090130233253.GK3652@webber.adilger.int>
+Message-ID: <63CF2DAF-59F7-4124-8AE9-188927051AAB@sun.com>
+
+Hello!
+
+On Jan 30, 2009, at 6:32 PM, Andreas Dilger wrote:
+
+> Vitaly Fertman wrote:
+>> Oleg told me yesterday about one feature which seems destroying the
+>> SOM completely.  If a client is evicted and re-connects, we do not
+>> re-open files so that client thinks files are opened, whereas MDS
+>> thinks they are closed.
+> Right.  This issue has been around for a long time.  There is bug 971
+> dealing with this issue, about changing open file recovery to work by
+> generating new "open file" requests instead of saving the RPCs and
+> handling it at the ptlrpc level.  This is (AFAIK) being done for the
+> simplified interoperability fixes already.
+
+But the problem is client might be evicted before such command is issued
+and a knowledge about this system would disappear from MDS (but not from
+OST where it is still connected).
+
+>> Thus MDS has no control over opened files, whereas clients may write
+>> to them.  To fix this we need at least to disable the file  
+>> modification
+>> on clients until files are re-opened.
+> This is also going to be handled by the LOV EA lock that CEA is  
+> working
+> on for HSM and migration.  If the client is evicted from the MDS it  
+> will
+> have the LOV EA lock cancelled, and all IO will block until a new  
+> LOV EA
+> lock is gotten.
+
+LOV EA lock won't help. It does not prevent (with current design,  
+anyway)
+dirty data flush from client cache, only new writes would be not  
+possible.
+Even then since there is no reopen when obtaining EA lock, MDS would  
+still
+have no idea there is an open file handle somewhere.
+
+>> The re-opening itself could be done by application or by us.  In the
+>> later case, the recovery mechanism is involved...
+> This is definitely not an application-level problem, it needs to be
+> fixed within Lustre.
+
+Right. But there is no straightforward fix. It is not going to be easy
+to reopen a file after eviction. Of course we can just invalidate
+local fd, so that the app will start to get something like ESTALE,
+but this approach is also not very desirable.
+
+>> it was missed for the recovery, but it is a problem for  
+>> interoperability
+>> as well. I remember Eric said that we will evict clients on downgrade
+>> and he said therefore all the files get closed. however, it seems it
+>> is not for clients unless we do some extra actions.
+> Even on upgrade, simplified interoperability will now have the server
+> requesting that all clients flush their state before the server is  
+> shut
+> down, so that the amount of interoperability needed is minimal.  The  
+> only
+
+Except in this case the client is evicted from e.g. MDS, so it does not
+participate in recovery anyway.
+
+Bye,
+     Oleg
+
+

@@ -1,0 +1,2092 @@
+From Andrew.Perepechko at Sun.COM  Mon Apr 19 11:30:46 2010
+From: Andrew.Perepechko at Sun.COM (Andrew Perepechko)
+Date: Mon, 19 Apr 2010 22:30:46 +0400
+Subject: [Lustre-devel] Flush on file close
+Message-ID: <201004192230.48196.andrew.perepechko@sun.com>
+
+Some applications expect non-zero errno on close() for any errors that may 
+happen during flushing dirty cached data/metadata even though linux manual 
+page for close(2) suggests that fsync(2) should be used prior to close(2) in 
+order to detect problems like those.
+
+Since syncing may degrade performance to a large extent, what do you think is 
+the best/most convenient/least intrusive way to switch to that behaviour? 
+Should it be a mount option for the client or anything else?
+
+Andrew.
+
+
+From oleg.drokin at oracle.com  Mon Apr 19 15:31:49 2010
+From: oleg.drokin at oracle.com (Oleg Drokin)
+Date: Mon, 19 Apr 2010 18:31:49 -0400
+Subject: [Lustre-devel] Flush on file close
+In-Reply-To: <201004192230.48196.andrew.perepechko@sun.com>
+References: <201004192230.48196.andrew.perepechko@sun.com>
+Message-ID: <AD12F5A3-D702-40CC-818F-CC477E3E90B1@oracle.com>
+
+Hello!
+
+On Apr 19, 2010, at 2:30 PM, Andrew Perepechko wrote:
+> Since syncing may degrade performance to a large extent, what do you think is 
+> the best/most convenient/least intrusive way to switch to that behaviour? 
+> Should it be a mount option for the client or anything else?
+
+Personally I think this is a non-issue for us.
+There is no mad dash in other filesystems to implement this, aside from NFS where this
+is what is guaranteed.
+As long as we don't lose data after close (which we usually don't anyway) we are in the clear.
+If we do (eviction, double failure) then there was some system exception that is kind of
+similar to disk failure for regular fs.
+Apps doing this "close after each write" should be fixed anyway because now they incur
+additional overhead of two extra unneeded sync RPCs (open + close) and adding more overhead
+to this is not going to help even if made optional.
+
+Bye,
+    Oleg
+
+From andreas.dilger at oracle.com  Mon Apr 19 19:34:36 2010
+From: andreas.dilger at oracle.com (Andreas Dilger)
+Date: Mon, 19 Apr 2010 20:34:36 -0600
+Subject: [Lustre-devel] Flush on file close
+In-Reply-To: <201004192230.48196.andrew.perepechko@sun.com>
+References: <201004192230.48196.andrew.perepechko@sun.com>
+Message-ID: <5395043C-A24E-46B0-9E63-5F4DB570DDFD@oracle.com>
+
+One thing we can do to improve this situation a bit is to return any  
+previous write error codes at close time.
+
+Cheers, Andreas
+
+On 2010-04-19, at 12:30, Andrew Perepechko <Andrew.Perepechko at Sun.COM>  
+wrote:
+
+> Some applications expect non-zero errno on close() for any errors  
+> that may
+> happen during flushing dirty cached data/metadata even though linux  
+> manual
+> page for close(2) suggests that fsync(2) should be used prior to  
+> close(2) in
+> order to detect problems like those.
+>
+> Since syncing may degrade performance to a large extent, what do you  
+> think is
+> the best/most convenient/least intrusive way to switch to that  
+> behaviour?
+> Should it be a mount option for the client or anything else?
+>
+> Andrew.
+> _______________________________________________
+> Lustre-devel mailing list
+> Lustre-devel at lists.lustre.org
+> http://lists.lustre.org/mailman/listinfo/lustre-devel
+
+
+From andreas.dilger at oracle.com  Mon Apr 19 21:04:12 2010
+From: andreas.dilger at oracle.com (Andreas Dilger)
+Date: Mon, 19 Apr 2010 22:04:12 -0600
+Subject: [Lustre-devel] Flush on file close
+In-Reply-To: <201004192230.48196.andrew.perepechko@sun.com>
+References: <201004192230.48196.andrew.perepechko@sun.com>
+Message-ID: <1E9320D1-3FC9-4F5F-889E-7A68CC7A4C08@oracle.com>
+
+On 2010-04-19, at 12:30, Andrew Perepechko wrote:
+> Some applications expect non-zero errno on close() for any errors  
+> that may
+> happen during flushing dirty cached data/metadata even though linux  
+> manual
+> page for close(2) suggests that fsync(2) should be used prior to  
+> close(2) in
+> order to detect problems like those.
+>
+> Since syncing may degrade performance to a large extent, what do you  
+> think is
+> the best/most convenient/least intrusive way to switch to that  
+> behaviour?
+> Should it be a mount option for the client or anything else?
+
+
+If the application is expecting the "flush all outstanding data"  
+semantics of fsync() on close, it should just call fsync() and use the  
+return code of that instead of overloading close() to do it.  There  
+will be no worse performance by waiting for fsync() to complete, than  
+waiting for a close that is flushing all of the data.
+
+In contrast, if an application is NOT expecting synchronous flushing  
+on close, then making every close flush all data WILL be a major  
+performance impact.  Better to have applications do what they mean,  
+and system calls do what they are supposed to, instead of adding in  
+extra semantics that not every application wants.
+
+Also, as Oleg wrote, if an application is doing close/open when it is  
+really just trying to flush the data to disk (which I saw some traces  
+of recently) then this is even WORSE than just doing an fsync().
+
+Cheers, Andreas
+--
+Andreas Dilger
+Principal Engineer, Lustre Group
+Oracle Corporation Canada Inc.
+
+
+
+From oleg.drokin at oracle.com  Mon Apr 19 22:16:52 2010
+From: oleg.drokin at oracle.com (Oleg Drokin)
+Date: Tue, 20 Apr 2010 01:16:52 -0400
+Subject: [Lustre-devel] Flush on file close
+In-Reply-To: <5395043C-A24E-46B0-9E63-5F4DB570DDFD@oracle.com>
+References: <201004192230.48196.andrew.perepechko@sun.com>
+	<5395043C-A24E-46B0-9E63-5F4DB570DDFD@oracle.com>
+Message-ID: <32DB67DD-B971-408E-8CD7-6B10344D7576@oracle.com>
+
+Actually this is already being done. We do set AS_error (or something like that).
+There is only one exception where on eviction we forgot to implement this, I think.
+
+On Apr 19, 2010, at 10:34 PM, Andreas Dilger wrote:
+
+> One thing we can do to improve this situation a bit is to return any  
+> previous write error codes at close time.
+> 
+> Cheers, Andreas
+> 
+> On 2010-04-19, at 12:30, Andrew Perepechko <Andrew.Perepechko at Sun.COM>  
+> wrote:
+> 
+>> Some applications expect non-zero errno on close() for any errors  
+>> that may
+>> happen during flushing dirty cached data/metadata even though linux  
+>> manual
+>> page for close(2) suggests that fsync(2) should be used prior to  
+>> close(2) in
+>> order to detect problems like those.
+>> 
+>> Since syncing may degrade performance to a large extent, what do you  
+>> think is
+>> the best/most convenient/least intrusive way to switch to that  
+>> behaviour?
+>> Should it be a mount option for the client or anything else?
+>> 
+>> Andrew.
+>> _______________________________________________
+>> Lustre-devel mailing list
+>> Lustre-devel at lists.lustre.org
+>> http://lists.lustre.org/mailman/listinfo/lustre-devel
+> _______________________________________________
+> Lustre-devel mailing list
+> Lustre-devel at lists.lustre.org
+> http://lists.lustre.org/mailman/listinfo/lustre-devel
+
+
+
+From erblichs at earthlink.net  Tue Apr 20 00:56:50 2010
+From: erblichs at earthlink.net (Mitchell Erblich)
+Date: Tue, 20 Apr 2010 00:56:50 -0700
+Subject: [Lustre-devel] Flush on file close
+In-Reply-To: <32DB67DD-B971-408E-8CD7-6B10344D7576@oracle.com>
+References: <201004192230.48196.andrew.perepechko@sun.com>
+	<5395043C-A24E-46B0-9E63-5F4DB570DDFD@oracle.com>
+	<32DB67DD-B971-408E-8CD7-6B10344D7576@oracle.com>
+Message-ID: <72C27251-2B14-48FE-BDD0-8B5252C7957A@earthlink.net>
+
+Possible Suggestion,
+
+			NFS allows async writes and then commits.
+
+			I would almost suggest this..
+
+			As yes, close's are not expected to fail.
+			What would you do / should you do if a close failed?
+
+			Mitchell Erblich
+
+			
+
+			
+On Apr 19, 2010, at 10:16 PM, Oleg Drokin wrote:
+
+> Actually this is already being done. We do set AS_error (or something like that).
+> There is only one exception where on eviction we forgot to implement this, I think.
+> 
+> On Apr 19, 2010, at 10:34 PM, Andreas Dilger wrote:
+> 
+>> One thing we can do to improve this situation a bit is to return any  
+>> previous write error codes at close time.
+>> 
+>> Cheers, Andreas
+>> 
+>> On 2010-04-19, at 12:30, Andrew Perepechko <Andrew.Perepechko at Sun.COM>  
+>> wrote:
+>> 
+>>> Some applications expect non-zero errno on close() for any errors  
+>>> that may
+>>> happen during flushing dirty cached data/metadata even though linux  
+>>> manual
+>>> page for close(2) suggests that fsync(2) should be used prior to  
+>>> close(2) in
+>>> order to detect problems like those.
+>>> 
+>>> Since syncing may degrade performance to a large extent, what do you  
+>>> think is
+>>> the best/most convenient/least intrusive way to switch to that  
+>>> behaviour?
+>>> Should it be a mount option for the client or anything else?
+>>> 
+>>> Andrew.
+>>> _______________________________________________
+>>> Lustre-devel mailing list
+>>> Lustre-devel at lists.lustre.org
+>>> http://lists.lustre.org/mailman/listinfo/lustre-devel
+>> _______________________________________________
+>> Lustre-devel mailing list
+>> Lustre-devel at lists.lustre.org
+>> http://lists.lustre.org/mailman/listinfo/lustre-devel
+> 
+> _______________________________________________
+> Lustre-devel mailing list
+> Lustre-devel at lists.lustre.org
+> http://lists.lustre.org/mailman/listinfo/lustre-devel
+
+
+
+From oleg.drokin at oracle.com  Tue Apr 20 12:46:49 2010
+From: oleg.drokin at oracle.com (Oleg Drokin)
+Date: Tue, 20 Apr 2010 15:46:49 -0400
+Subject: [Lustre-devel] Flush on file close
+In-Reply-To: <72C27251-2B14-48FE-BDD0-8B5252C7957A@earthlink.net>
+References: <201004192230.48196.andrew.perepechko@sun.com>
+	<5395043C-A24E-46B0-9E63-5F4DB570DDFD@oracle.com>
+	<32DB67DD-B971-408E-8CD7-6B10344D7576@oracle.com>
+	<72C27251-2B14-48FE-BDD0-8B5252C7957A@earthlink.net>
+Message-ID: <8AE7A7A2-C300-4E9F-908A-0996804242F8@oracle.com>
+
+Hello!
+
+On Apr 20, 2010, at 3:56 AM, Mitchell Erblich wrote:
+
+> 			NFS allows async writes and then commits.
+
+It's all internal within NFS. There is no way for the client to say
+"these writes are async", "now do commit" aside from
+doing manual syncs for commits and using some sort of sync io open flags
+to force "sync" writes.
+Of course additional level of confusion is the "async writes" you reference
+have nothing to do with real write system calls. In fact write system calls
+put data in memory and data might stay there for who knows how long
+(or until close) and only when NFS client decides (or VFS forces it to)
+to write the data to the server is when these "async writes" are used,
+Lustre has this too.
+
+> 			I would almost suggest this..
+
+It's already implemented sort of NFS-style except the close-to-open.
+
+> 			As yes, close's are not expected to fail.
+
+Huh?!
+
+> 			What would you do / should you do if a close failed?
+
+Well, you assume the file content is no longer correct and write it again, I guess.
+Or if you are like 99% of people writing programs out there, you just bail out with an error ;)
+
+Bye,
+    Oleg
+
+From oleg.drokin at oracle.com  Tue Apr 20 12:57:37 2010
+From: oleg.drokin at oracle.com (Oleg Drokin)
+Date: Tue, 20 Apr 2010 15:57:37 -0400
+Subject: [Lustre-devel] Flush on file close
+In-Reply-To: <8AE7A7A2-C300-4E9F-908A-0996804242F8@oracle.com>
+References: <201004192230.48196.andrew.perepechko@sun.com>
+	<5395043C-A24E-46B0-9E63-5F4DB570DDFD@oracle.com>
+	<32DB67DD-B971-408E-8CD7-6B10344D7576@oracle.com>
+	<72C27251-2B14-48FE-BDD0-8B5252C7957A@earthlink.net>
+	<8AE7A7A2-C300-4E9F-908A-0996804242F8@oracle.com>
+Message-ID: <A07310FC-CD6C-463D-9996-847ABA6273A8@oracle.com>
+
+> It's all internal within NFS. There is no way for the client to say
+> "these writes are async", "now do commit" aside from
+
+I meant to say "no way for the application" here.
+
+
+From Nicolas.Williams at oracle.com  Tue Apr 20 13:27:40 2010
+From: Nicolas.Williams at oracle.com (Nicolas Williams)
+Date: Tue, 20 Apr 2010 15:27:40 -0500
+Subject: [Lustre-devel] Flush on file close
+In-Reply-To: <201004192230.48196.andrew.perepechko@sun.com>
+References: <201004192230.48196.andrew.perepechko@sun.com>
+Message-ID: <20100420202740.GY10389@Sun.COM>
+
+POSIX behavior is that close(2) can fail, so if you care, you should
+check its error status.  POSIX behavior is also that close(2) doesn't
+imply an fsync(2) (much less a sync(2)).
+
+NFS clients implement fsync(2)-on-close, but that's another story.
+
+However, when writes deferred at close(2) time fail on a local
+filesystem...  chances are that subsequent I/O will just fail.  Or at
+least that's probably what many users will expect.  But does POSIX
+require that?  I don't have it handy, but I'm pretty sure the answer is
+"no".  With Lustre we could also have a close(2) whose deferred writes
+fail long after the process that could handle the failure is gone.
+
+Databases and so on should always fsync(2) when they need to ensure
+consistent on-disk state.  Many apps that write(2) don't need to
+fsync(2) (think of writes to log files).
+
+Nico
+-- 
+
+
+From Nicolas.Williams at sun.com  Tue Apr 20 13:43:00 2010
+From: Nicolas.Williams at sun.com (Nicolas Williams)
+Date: Tue, 20 Apr 2010 15:43:00 -0500
+Subject: [Lustre-devel] Flush on file close
+In-Reply-To: <20100420202740.GY10389@Sun.COM>
+References: <201004192230.48196.andrew.perepechko@sun.com>
+	<20100420202740.GY10389@Sun.COM>
+Message-ID: <20100420204300.GZ10389@Sun.COM>
+
+On Tue, Apr 20, 2010 at 03:27:40PM -0500, Nicolas Williams wrote:
+> However, when writes deferred at close(2) time fail on a local
+> filesystem...  chances are that subsequent I/O will just fail.  Or at
+> least that's probably what many users will expect.  But does POSIX
+> require that?  I don't have it handy, but I'm pretty sure the answer is
+> "no".  With Lustre we could also have a close(2) whose deferred writes
+> fail long after the process that could handle the failure is gone.
+
+To go out on a complete limb :) what we really need is a variant of
+close(2) where eventual failure can be caught, even when the process
+that called it has exit()ed.  Something like:
+
+int close_or_spawn(int fd, <posix_spawn()-like arguments>);
+
+or
+
+int close_xid(int fd, uint64_t xid);   /*
+                                        * Where some daemon(s) reads a
+					* log of sucessful/failed close
+					* XIDs and takes action as
+					* necessary.
+					*/
+
+I prefer something along the lines of close_xid().
+
+Adoption of new APIs in the context of Lustre is probably more
+realistic than in the general case, but it'd still be slow.
+
+So we're still left with: you'd better fsync(2) explicitly before
+close()ing if you want to make sure that you don't lose data.
+
+Nico
+-- 
+
+
+From zhangys04 at gmail.com  Wed Apr 21 01:06:03 2010
+From: zhangys04 at gmail.com (Tonney Kaiven Cheung)
+Date: Wed, 21 Apr 2010 16:06:03 +0800
+Subject: [Lustre-devel] about lustre lock
+Message-ID: <q2id272ddfb1004210106w4170f6fcja89d40c2e99a1333@mail.gmail.com>
+
+Dear everyone!
+
+It has been said that Lustre Filesystem has six lock modes. And one of the
+lock mode is *concurrent write mode*. Would you please give me explanation
+that in which condition a *concurrent write mode lock* will be asked?
+Thanks!
+
+Yuksam Cheung
+2010-04-21
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20100421/bc9fc71a/attachment.htm>
+
+From andreas.dilger at oracle.com  Wed Apr 21 14:04:58 2010
+From: andreas.dilger at oracle.com (Andreas Dilger)
+Date: Wed, 21 Apr 2010 15:04:58 -0600
+Subject: [Lustre-devel] Flush on file close
+In-Reply-To: <32DB67DD-B971-408E-8CD7-6B10344D7576@oracle.com>
+References: <201004192230.48196.andrew.perepechko@sun.com>
+	<5395043C-A24E-46B0-9E63-5F4DB570DDFD@oracle.com>
+	<32DB67DD-B971-408E-8CD7-6B10344D7576@oracle.com>
+Message-ID: <391C7149-1E61-417C-AE40-EA172813778F@oracle.com>
+
+On 2010-04-19, at 23:16, Oleg Drokin wrote:
+> Actually this is already being done. We do set AS_error (or something like that).  There is only one exception where on eviction we forgot to implement this, I think.
+
+One thing I see in both the 1.x and 2.x client code is that even though we track the errors from async file IO on the file descriptor, we don't actually return them to the application at close time:
+
+ll_file_release()
+{
+        if (lsm)
+                lov_test_and_clear_async_rc(lsm);
+        lli->lli_async_rc = 0;     
+
+It looks like this should be something like:
+
+        if (lsm)
+                rc2 = lov_test_and_clear_async_rc(lsm);
+        if (rc2 == 0)
+                rc2 = lli->lli_async_rc;     
+        lli->lli_async_rc = 0;
+   
+> On Apr 19, 2010, at 10:34 PM, Andreas Dilger wrote:
+> 
+>> One thing we can do to improve this situation a bit is to return any  
+>> previous write error codes at close time.
+>> 
+>> Cheers, Andreas
+>> 
+>> On 2010-04-19, at 12:30, Andrew Perepechko <Andrew.Perepechko at Sun.COM>  
+>> wrote:
+>> 
+>>> Some applications expect non-zero errno on close() for any errors  
+>>> that may
+>>> happen during flushing dirty cached data/metadata even though linux  
+>>> manual
+>>> page for close(2) suggests that fsync(2) should be used prior to  
+>>> close(2) in
+>>> order to detect problems like those.
+>>> 
+>>> Since syncing may degrade performance to a large extent, what do you  
+>>> think is
+>>> the best/most convenient/least intrusive way to switch to that  
+>>> behaviour?
+>>> Should it be a mount option for the client or anything else?
+>>> 
+>>> Andrew.
+>>> _______________________________________________
+>>> Lustre-devel mailing list
+>>> Lustre-devel at lists.lustre.org
+>>> http://lists.lustre.org/mailman/listinfo/lustre-devel
+>> _______________________________________________
+>> Lustre-devel mailing list
+>> Lustre-devel at lists.lustre.org
+>> http://lists.lustre.org/mailman/listinfo/lustre-devel
+> 
+
+
+Cheers, Andreas
+--
+Andreas Dilger
+Principal Engineer, Lustre Group
+Oracle Corporation Canada Inc.
+
+
+
+From alexey.lyashkov at clusterstor.com  Wed Apr 21 22:15:03 2010
+From: alexey.lyashkov at clusterstor.com (Alexey Lyashkov)
+Date: Thu, 22 Apr 2010 08:15:03 +0300
+Subject: [Lustre-devel] Flush on file close
+In-Reply-To: <391C7149-1E61-417C-AE40-EA172813778F@oracle.com>
+References: <201004192230.48196.andrew.perepechko@sun.com>
+	<5395043C-A24E-46B0-9E63-5F4DB570DDFD@oracle.com>
+	<32DB67DD-B971-408E-8CD7-6B10344D7576@oracle.com>
+	<391C7149-1E61-417C-AE40-EA172813778F@oracle.com>
+Message-ID: <04FD09CB-3095-4B5F-9C8B-5C6167AF7F04@clusterstor.com>
+
+Oleg, say about code:
+
+                lock_page(page);
+                wait_on_page_writeback(page);
+                if (rc < 0) {
+                        CERROR("writepage inode %lu(%p) of page %p "
+                               "failed: %d\n", mapping->host->i_ino,
+                               mapping->host, page, rc);
+                        if (rc == -ENOSPC)
+                                set_bit(AS_ENOSPC, &mapping->flags);
+                        else
+                                set_bit(AS_EIO, &mapping->flags);
+                }
+
+in lock cancel handler and IO completion.
+This better way to tell linux kernel about hit a error, because lov async error isn't help in case O_SYNC write (and some other - as i remember).
+int wait_on_page_writeback_range(struct address_space *mapping,
+                                pgoff_t start, pgoff_t end)
+...
+        /* Check for outstanding write errors */
+        if (test_and_clear_bit(AS_ENOSPC, &mapping->flags))
+                ret = -ENOSPC;
+        if (test_and_clear_bit(AS_EIO, &mapping->flags))
+                ret = -EIO;
+
+        return ret;
+
+
+ 
+On Apr 22, 2010, at 00:04, Andreas Dilger wrote:
+
+> On 2010-04-19, at 23:16, Oleg Drokin wrote:
+>> Actually this is already being done. We do set AS_error (or something like that).  There is only one exception where on eviction we forgot to implement this, I think.
+> 
+> One thing I see in both the 1.x and 2.x client code is that even though we track the errors from async file IO on the file descriptor, we don't actually return them to the application at close time:
+> 
+> ll_file_release()
+> {
+>        if (lsm)
+>                lov_test_and_clear_async_rc(lsm);
+>        lli->lli_async_rc = 0;     
+> 
+> It looks like this should be something like:
+> 
+>        if (lsm)
+>                rc2 = lov_test_and_clear_async_rc(lsm);
+>        if (rc2 == 0)
+>                rc2 = lli->lli_async_rc;     
+>        lli->lli_async_rc = 0;
+> 
+>> On Apr 19, 2010, at 10:34 PM, Andreas Dilger wrote:
+>> 
+>>> One thing we can do to improve this situation a bit is to return any  
+>>> previous write error codes at close time.
+>>> 
+>>> Cheers, Andreas
+>>> 
+>>> On 2010-04-19, at 12:30, Andrew Perepechko <Andrew.Perepechko at Sun.COM>  
+>>> wrote:
+>>> 
+>>>> Some applications expect non-zero errno on close() for any errors  
+>>>> that may
+>>>> happen during flushing dirty cached data/metadata even though linux  
+>>>> manual
+>>>> page for close(2) suggests that fsync(2) should be used prior to  
+>>>> close(2) in
+>>>> order to detect problems like those.
+>>>> 
+>>>> Since syncing may degrade performance to a large extent, what do you  
+>>>> think is
+>>>> the best/most convenient/least intrusive way to switch to that  
+>>>> behaviour?
+>>>> Should it be a mount option for the client or anything else?
+>>>> 
+>>>> Andrew.
+>>>> _______________________________________________
+>>>> Lustre-devel mailing list
+>>>> Lustre-devel at lists.lustre.org
+>>>> http://lists.lustre.org/mailman/listinfo/lustre-devel
+>>> _______________________________________________
+>>> Lustre-devel mailing list
+>>> Lustre-devel at lists.lustre.org
+>>> http://lists.lustre.org/mailman/listinfo/lustre-devel
+>> 
+> 
+> 
+> Cheers, Andreas
+> --
+> Andreas Dilger
+> Principal Engineer, Lustre Group
+> Oracle Corporation Canada Inc.
+> 
+> _______________________________________________
+> Lustre-devel mailing list
+> Lustre-devel at lists.lustre.org
+> http://lists.lustre.org/mailman/listinfo/lustre-devel
+
+
+
+From yuriy.umanets at clusterstor.com  Thu Apr 22 04:42:55 2010
+From: yuriy.umanets at clusterstor.com (Yuriy Umanets)
+Date: Thu, 22 Apr 2010 14:42:55 +0300
+Subject: [Lustre-devel] about lustre lock
+In-Reply-To: <q2id272ddfb1004210106w4170f6fcja89d40c2e99a1333@mail.gmail.com>
+References: <q2id272ddfb1004210106w4170f6fcja89d40c2e99a1333@mail.gmail.com>
+Message-ID: <r2x3ed212d01004220442n6dad8e6fr241f75916cdbd47e@mail.gmail.com>
+
+hello,
+
+I think this is used in parallel dir operations in 2.0 branch. In this case
+we allow multiple threads to modify the same dir if entries fall into
+different physical blocks (and take care about locking on lower layers in
+MDS if entries come to the same block). But as this is a dir modification
+operation, we want to let clients know about this, so that they can flush
+their dentry cache.
+
+Thanks.
+
+2010/4/21 Tonney Kaiven Cheung <zhangys04 at gmail.com>
+
+> Dear everyone!
+>
+> It has been said that Lustre Filesystem has six lock modes. And one of the
+> lock mode is *concurrent write mode*. Would you please give me explanation
+> that in which condition a *concurrent write mode lock* will be asked?
+> Thanks!
+>
+> Yuksam Cheung
+> 2010-04-21
+>
+> _______________________________________________
+> Lustre-devel mailing list
+> Lustre-devel at lists.lustre.org
+> http://lists.lustre.org/mailman/listinfo/lustre-devel
+>
+>
+
+
+-- 
+umka
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20100422/183de366/attachment.htm>
+
+From kenh at cmf.nrl.navy.mil  Fri Apr 23 09:27:11 2010
+From: kenh at cmf.nrl.navy.mil (Ken Hornstein)
+Date: Fri, 23 Apr 2010 12:27:11 -0400
+Subject: [Lustre-devel] Build system and portability
+Message-ID: <201004231627.o3NGRBxu029735@hedwig.cmf.nrl.navy.mil>
+
+(I wanted to start some discussions on portability.  This is one of the
+earliest things that I ran into for the MacOS X port).
+
+So, the build system was one of my earliest challenges, and I wanted to get
+some ideas from other people.
+
+Aside from the various Linux-specific autoconf tests (those are relatively
+straightforward to deal with), one big issue that has cropped up is the
+way that the build system ends up building Makefiles.
+
+Specifically, there seems to be a disconnect between Makefile.in and
+autoMakefile.am.  Let's take lustre/obdclass as an example.
+
+The object files for the kernel module for Linux are listed in Makefile.in
+(they're in the variables obdclass-linux-objs and obdclass-all-objs, and
+those are combined into obdclass-objs).  However, the actual definitions
+of the modules to build get set in autoMakefile.am (by setting the
+modulefs_DATA variable).
+
+For MacOS X, the kext is listed under macos_PROGRAM, and the _sources_
+are listed (instead of objects).  This all happens in autoMakefile.am
+(and is ifdef'd protected for DARWIN only); it doesn't use anything in
+Makefile.in.  The special flags needed for MacOS X module builds are
+overridden for those builds by setting obdclass_CFLAGS (or whatever is
+the appropriate name for the module you're building).
+
+This feels ... inelegant to me.  For one, if new source code files are added,
+you have to add them two places (this bit me a number of times).  And it's
+a lot of extra work to support different OS's.
+
+Now I inherited this build system and it was 90% of the way there, so I
+can't complain about it that much.  But I think we could do better.
+
+What do people think about what this current mess?  Should it be normalized?
+What's the right way to clean this up?  If it's to support module building
+similar to the way Linux kernel modules are declared in the
+Makefile/autoMakefile, then I'm okay with that.
+
+--Ken
+
+
+From andreas.dilger at oracle.com  Sat Apr 24 21:41:25 2010
+From: andreas.dilger at oracle.com (Andreas Dilger)
+Date: Sat, 24 Apr 2010 22:41:25 -0600
+Subject: [Lustre-devel] Build system and portability
+In-Reply-To: <201004231627.o3NGRBxu029735@hedwig.cmf.nrl.navy.mil>
+References: <201004231627.o3NGRBxu029735@hedwig.cmf.nrl.navy.mil>
+Message-ID: <06A66EC3-497E-4651-B0B1-DDAF3BF64E49@oracle.com>
+
+I'm the first one to admit that our build system is crufty. Brian  
+Murrell is probably going to be the second, and he is the lucky one  
+that knows the most about it.
+
+The legacy is that it had to be complex in order to allow building  
+against both 2.4 and 2.6 kernels, but that need is long gone but we  
+still have the complexity left behind.
+
+I would be thrilled to have someone interested/knowledgable enough to  
+update it to be more normal, since you want it to be portable to Macos  
+and we want it to be portable to solaris and windows.
+
+Is this something you are interested to invest some time on fixing, or  
+is it more a question of curiosity as to how we got into this Rube  
+Goldberg build system?
+
+Cheers, Andreas
+
+On 2010-04-23, at 10:27, Ken Hornstein <kenh at cmf.nrl.navy.mil> wrote:
+
+> (I wanted to start some discussions on portability.  This is one of  
+> the
+> earliest things that I ran into for the MacOS X port).
+>
+> So, the build system was one of my earliest challenges, and I wanted  
+> to get
+> some ideas from other people.
+>
+> Aside from the various Linux-specific autoconf tests (those are  
+> relatively
+> straightforward to deal with), one big issue that has cropped up is  
+> the
+> way that the build system ends up building Makefiles.
+>
+> Specifically, there seems to be a disconnect between Makefile.in and
+> autoMakefile.am.  Let's take lustre/obdclass as an example.
+>
+> The object files for the kernel module for Linux are listed in  
+> Makefile.in
+> (they're in the variables obdclass-linux-objs and obdclass-all-objs,  
+> and
+> those are combined into obdclass-objs).  However, the actual  
+> definitions
+> of the modules to build get set in autoMakefile.am (by setting the
+> modulefs_DATA variable).
+>
+> For MacOS X, the kext is listed under macos_PROGRAM, and the _sources_
+> are listed (instead of objects).  This all happens in autoMakefile.am
+> (and is ifdef'd protected for DARWIN only); it doesn't use anything in
+> Makefile.in.  The special flags needed for MacOS X module builds are
+> overridden for those builds by setting obdclass_CFLAGS (or whatever is
+> the appropriate name for the module you're building).
+>
+> This feels ... inelegant to me.  For one, if new source code files  
+> are added,
+> you have to add them two places (this bit me a number of times).   
+> And it's
+> a lot of extra work to support different OS's.
+>
+> Now I inherited this build system and it was 90% of the way there,  
+> so I
+> can't complain about it that much.  But I think we could do better.
+>
+> What do people think about what this current mess?  Should it be  
+> normalized?
+> What's the right way to clean this up? If it's to support module  
+> building
+> similar to the way Linux kernel modules are declared in the
+> Makefile/autoMakefile, then I'm okay with that.
+>
+> --Ken
+> _______________________________________________
+> Lustre-devel mailing list
+> Lustre-devel at lists.lustre.org
+> http://lists.lustre.org/mailman/listinfo/lustre-devel
+
+
+From kenh at cmf.nrl.navy.mil  Sun Apr 25 16:32:58 2010
+From: kenh at cmf.nrl.navy.mil (Ken Hornstein)
+Date: Sun, 25 Apr 2010 19:32:58 -0400
+Subject: [Lustre-devel] Build system and portability
+In-Reply-To: <06A66EC3-497E-4651-B0B1-DDAF3BF64E49@oracle.com>
+Message-ID: <201004252333.o3PNWxxw019025@hedwig.cmf.nrl.navy.mil>
+
+>Is this something you are interested to invest some time on fixing, or  
+>is it more a question of curiosity as to how we got into this Rube  
+>Goldberg build system?
+
+I am definitely interested in helping to clean up the current build
+system.  Obviously history is helpful to understand how things ended
+up where they are now, and I'm not that experienced on how to
+configure a build system to create Linux kernel modules so the goal of
+my note was to just start the ball rolling.
+
+I think it's obvious that the autoconf system needs some work as well;
+no one disagrees, do they?
+
+I guess the first thing that comes to mind is ... what's the deal with
+Makefile.in and autoMakefile.am?  Why not just one Makefile.am?
+
+--Ken
+
+
+From Brian.Murrell at Oracle.COM  Mon Apr 26 06:56:07 2010
+From: Brian.Murrell at Oracle.COM (Brian J. Murrell)
+Date: Mon, 26 Apr 2010 09:56:07 -0400
+Subject: [Lustre-devel] Build system and portability
+In-Reply-To: <201004252333.o3PNWxxw019025@hedwig.cmf.nrl.navy.mil>
+References: <201004252333.o3PNWxxw019025@hedwig.cmf.nrl.navy.mil>
+Message-ID: <1272290167.19510.102.camel@pc.interlinx.bc.ca>
+
+On Sun, 2010-04-25 at 19:32 -0400, Ken Hornstein wrote: 
+> 
+> I think it's obvious that the autoconf system needs some work as well;
+> no one disagrees, do they?
+
+The autoconf portion is not terribly bad, I think.  It could probably
+use a bit of macro reorganization, and some more reasonable defaults for
+things like kernel, etc. but I am working on the latter currently.  It
+seemed a real mess to me at first, but the more I worked with it, the
+more I understood the organization of it.
+
+> I guess the first thing that comes to mind is ... what's the deal with
+> Makefile.in and autoMakefile.am?  Why not just one Makefile.am?
+
+I have not really delved terribly deeply into the organization of an
+external (linux) kernel module source tree, but I am at least familiar
+with it.
+
+My (self-attained, admittedly, so take it with a grain of salt)
+understanding of the reason for both Makefiles and autoMakefiles is that
+the Makefiles are what the kernel build system uses to build the kernel
+modules portion of lustre and the autoMakefiles are for everything else.
+
+Why we cannot/didn't just put the modules into it's own tree with kernel
+build system Makefiles and keep everything in a separate tree with their
+own non-kernel build system Makefiles... I am not sure, but as Andreas
+mentioned, is likely just due to the history and the baggage that has
+not been shed when support for historical systems was dropped.
+
+b.
+
+-------------- next part --------------
+A non-text attachment was scrubbed...
+Name: not available
+Type: application/pgp-signature
+Size: 197 bytes
+Desc: This is a digitally signed message part
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20100426/82b83503/attachment.pgp>
+
+From kenh at cmf.nrl.navy.mil  Mon Apr 26 11:15:32 2010
+From: kenh at cmf.nrl.navy.mil (Ken Hornstein)
+Date: Mon, 26 Apr 2010 14:15:32 -0400
+Subject: [Lustre-devel] Build system and portability
+In-Reply-To: <1272290167.19510.102.camel@pc.interlinx.bc.ca>
+Message-ID: <201004261815.o3QIFW55029195@hedwig.cmf.nrl.navy.mil>
+
+>The autoconf portion is not terribly bad, I think.  It could probably
+>use a bit of macro reorganization, and some more reasonable defaults for
+>things like kernel, etc. but I am working on the latter currently.  It
+>seemed a real mess to me at first, but the more I worked with it, the
+>more I understood the organization of it.
+
+Forgive me for implying otherwise; it's really more a bunch of
+portability cleanup issues.  Like not doing Linux kernel feature tests
+on non-Linux systems, that sort of thing (I guess those don't technically
+harm anything, but there were a few things that would fail and those needed
+to be system-dependent).
+
+>Why we cannot/didn't just put the modules into it's own tree with kernel
+>build system Makefiles and keep everything in a separate tree with their
+>own non-kernel build system Makefiles... I am not sure, but as Andreas
+>mentioned, is likely just due to the history and the baggage that has
+>not been shed when support for historical systems was dropped.
+
+Again, I'm not the expert on how kernel module building works ... but
+there seems to be some interdependency in the current Lustre setup (the
+Makefiles include Rules, which includes autoMakefile).  I would just be
+happy if we could get down to one Makefile; is that possible, given the
+way that Linux kernel module builds work?
+
+Oh, as long as we're on the subject ... when I file portability bugs
+using bugzilla, I am never happy with the component I have to pick to
+file the bug under (I end up with something like "integration").  Can
+we get a Bugzilla component titled "portability"?  Or if people are
+happy with "integration" (or would rather I use something else), I
+guess that's okay as well.
+
+--Ken
+
+
+From Brian.Murrell at oracle.com  Mon Apr 26 14:08:16 2010
+From: Brian.Murrell at oracle.com (Brian J. Murrell)
+Date: Mon, 26 Apr 2010 17:08:16 -0400
+Subject: [Lustre-devel] Build system and portability
+In-Reply-To: <201004261815.o3QIFW55029195@hedwig.cmf.nrl.navy.mil>
+References: <201004261815.o3QIFW55029195@hedwig.cmf.nrl.navy.mil>
+Message-ID: <1272316096.19510.146.camel@pc.interlinx.bc.ca>
+
+On Mon, 2010-04-26 at 14:15 -0400, Ken Hornstein wrote: 
+> 
+> Forgive me for implying otherwise;
+
+No worries.  I totally understand where you are at with all of that.
+
+> it's really more a bunch of
+> portability cleanup issues.
+
+Indeed.  More or less what I was saying.
+
+> Like not doing Linux kernel feature tests
+> on non-Linux systems,
+
+Right.  The closer you look, you will notice there is an intention to
+group macros that are O/S specific into their own files and macro
+calling groups, but I would not at all be surprised to learn that there
+is some (or even a lot of) leakage, as the reality is that we don't
+really build on anything but Linux at this time and therefore we don't
+really have an opportunity to catch that leakage.
+
+I suspect as we get deeper into Solaris, a lot of this will get weeded
+out.  Or as you contribute your patches, equally so.
+
+> Again, I'm not the expert on how kernel module building works ...
+
+Me neither.  :-)  I have a basic understanding, but that's it.
+
+> but
+> there seems to be some interdependency in the current Lustre setup (the
+> Makefiles include Rules, which includes autoMakefile).
+
+Yes, indeed.
+
+> I would just be
+> happy if we could get down to one Makefile; is that possible, given the
+> way that Linux kernel module builds work?
+
+Hrm.  Just given the existing relationship between Makefiles, the Rules
+file and autoMakefiles, it seems probably not, without a lot of
+duplication (and the ongoing maintenance nightmare) throughout
+Makefiles.  I am happy to be proven wrong though.
+
+I think the problem is that ultimately the code that is in the tree
+needs to build for multiple platforms, including both traditional (Linux
+kernel) lustre and liblustre.  So it's not just a case of separate bits
+of code exclusive to the linux kernel and other separate bits exclusive
+to userspace, but that a large part of the code that can be built into
+linux modules (with it's particular Makefile requirements) is also used
+to build liblustre.
+
+I would think that MacOS/X has it's own kernel module build sequences
+such that the Makefiles that are engineered for the Linux kernel build
+tree are not suitable.  Or are the Linux module Makefiles also working
+for the MacOS/X kernel?  That would add a third variant, I guess.  I
+know zilch about building MacOS/X modules, so I can't really judge.
+
+> Oh, as long as we're on the subject ... when I file portability bugs
+> using bugzilla, I am never happy with the component I have to pick to
+> file the bug under (I end up with something like "integration").  Can
+> we get a Bugzilla component titled "portability"?  Or if people are
+> happy with "integration" (or would rather I use something else), I
+> guess that's okay as well.
+
+Well, do as well as you can with the component, but indeed, there are a
+lot of cases that are simply not a clear case of choosing one of those
+components so choose something "close".  For this sort of Makefile stuff
+you are doing, I think there is a component for "build system" or some
+such.  That would likely be appropriate.
+
+b.
+
+-------------- next part --------------
+A non-text attachment was scrubbed...
+Name: not available
+Type: application/pgp-signature
+Size: 197 bytes
+Desc: This is a digitally signed message part
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20100426/c877fb18/attachment.pgp>
+
+From andreas.dilger at oracle.com  Mon Apr 26 16:20:39 2010
+From: andreas.dilger at oracle.com (Andreas Dilger)
+Date: Mon, 26 Apr 2010 17:20:39 -0600
+Subject: [Lustre-devel] Build system and portability
+In-Reply-To: <1272316096.19510.146.camel@pc.interlinx.bc.ca>
+References: <201004261815.o3QIFW55029195@hedwig.cmf.nrl.navy.mil>
+	<1272316096.19510.146.camel@pc.interlinx.bc.ca>
+Message-ID: <0C946F67-6483-4781-ADB6-465F25D3B828@oracle.com>
+
+On 2010-04-26, at 15:08, Brian J. Murrell wrote:
+> On Mon, 2010-04-26 at 14:15 -0400, Ken Hornstein wrote: 
+>> it's really more a bunch of
+>> portability cleanup issues.
+> 
+> Indeed.  More or less what I was saying.
+> 
+>> Like not doing Linux kernel feature tests on non-Linux systems,
+> 
+> Right.  The closer you look, you will notice there is an intention to
+> group macros that are O/S specific into their own files and macro
+> calling groups, but I would not at all be surprised to learn that there
+> is some (or even a lot of) leakage, as the reality is that we don't
+> really build on anything but Linux at this time and therefore we don't
+> really have an opportunity to catch that leakage.
+
+Exactly what I was going to say.  I don't think there is any reason we would want to do it in a bad way, just that people weren't thinking of cross-platform portability when they added some check, and didn't put it in the right file at the time.
+
+> I suspect as we get deeper into Solaris, a lot of this will get weeded
+> out.  Or as you contribute your patches, equally so.
+
+I'm happy to see them as soon as they are ready (which seems to be on the client for MacOS, and is being done on the server for Solaris).  No point in duplicating effort.
+
+>> I would just be
+>> happy if we could get down to one Makefile; is that possible, given the
+>> way that Linux kernel module builds work?
+> 
+> Hrm.  Just given the existing relationship between Makefiles, the Rules
+> file and autoMakefiles, it seems probably not, without a lot of
+> duplication (and the ongoing maintenance nightmare) throughout
+> Makefiles.  I am happy to be proven wrong though.
+> 
+> I think the problem is that ultimately the code that is in the tree
+> needs to build for multiple platforms, including both traditional (Linux
+> kernel) lustre and liblustre.  So it's not just a case of separate bits
+> of code exclusive to the linux kernel and other separate bits exclusive
+> to userspace, but that a large part of the code that can be built into
+> linux modules (with it's particular Makefile requirements) is also used
+> to build liblustre.
+
+Actually, if we could get liblustre to become "just another client arch" (like MacOS and WinNT) I think it would do wonders for the portability as well.  As it stands today, liblustre is kind of a mismash of Linux emulation and its own thing.
+
+> I would think that MacOS/X has it's own kernel module build sequences
+> such that the Makefiles that are engineered for the Linux kernel build
+> tree are not suitable.  Or are the Linux module Makefiles also working
+> for the MacOS/X kernel?  That would add a third variant, I guess.  I
+> know zilch about building MacOS/X modules, so I can't really judge.
+
+I suspect that we might be able to get something like a "Makefile fragment" that is containing all of the build targets, that is included in an arch-specific top-level Makefile to specify exactly how those files will be built.  Sadly, I don't know anything about this area.
+
+>> Oh, as long as we're on the subject ... when I file portability bugs
+>> using bugzilla, I am never happy with the component I have to pick to
+>> file the bug under (I end up with something like "integration").  Can
+>> we get a Bugzilla component titled "portability"?  Or if people are
+>> happy with "integration" (or would rather I use something else), I
+>> guess that's okay as well.
+> 
+> Well, do as well as you can with the component, but indeed, there are a
+> lot of cases that are simply not a clear case of choosing one of those
+> components so choose something "close".  For this sort of Makefile stuff
+> you are doing, I think there is a component for "build system" or some
+> such.  That would likely be appropriate.
+
+
+The intention of "component" is e.g. "what part of the code the defect is in (e.g. client, server, quota, etc).  I'd think most of your problems are in "Build/Release Engineering" and "OS X", though some will be "llite/mdc", "llite/vfs", and "IO/llite/lov/osc".
+
+In this light, it would be interesting to know whether you were able to re-use parts of the lustre/llite code (e.g. llite_lib.c) and it should be moved into a shared directory like lustre/lclient (which is supposed to be entirely portable).  Spending some time to incrementally move (and get upstream) parts of the llite code that are portable between linux and macos would ensure that the ongoing maintenance is reduced.  The problem with making too many changes in a port and not returning them upstream is that eventually the code diverges so much that the ongoing 
+
+Cheers, Andreas
+--
+Andreas Dilger
+Lustre Technical Lead
+Oracle Corporation Canada Inc.
+
+
+
+From kenh at cmf.nrl.navy.mil  Mon Apr 26 17:50:15 2010
+From: kenh at cmf.nrl.navy.mil (Ken Hornstein)
+Date: Mon, 26 Apr 2010 20:50:15 -0400
+Subject: [Lustre-devel] Build system and portability
+In-Reply-To: <1272316096.19510.146.camel@pc.interlinx.bc.ca>
+Message-ID: <201004270050.o3R0oGG0001302@hedwig.cmf.nrl.navy.mil>
+
+>> I would just be
+>> happy if we could get down to one Makefile; is that possible, given the
+>> way that Linux kernel module builds work?
+>
+>Hrm.  Just given the existing relationship between Makefiles, the Rules
+>file and autoMakefiles, it seems probably not, without a lot of
+>duplication (and the ongoing maintenance nightmare) throughout
+>Makefiles.  I am happy to be proven wrong though.
+
+You mean, as opposed to the duplication and maintenance nightmare
+that already exists? :-)
+
+I guess my largest issue is that the files necessary to build a
+kernel module have to be listed twice (one for the Linux kernel
+module, once for the MacOS X kernel modules); that caused a ton of
+issues that had to be tracked down and it was rather tedious.
+If we could get rid of that, then I'd mostly be happy.
+
+>I would think that MacOS/X has it's own kernel module build sequences
+>such that the Makefiles that are engineered for the Linux kernel build
+>tree are not suitable.  Or are the Linux module Makefiles also working
+>for the MacOS/X kernel?  That would add a third variant, I guess.  I
+>know zilch about building MacOS/X modules, so I can't really judge.
+
+Heh, actually, the code mostly existed and was close to working
+(well, other than plenty of files had been added in 5 years).  You
+can see it in the autoMakefiles; look for ifdef DARWIN and you'll
+see what I mean.
+
+Kernel modules on MacOS X (assuming you're not using Xcode environment,
+which I'm not) are built using the normal compilers and your own Makefiles;
+they just have different flags for compilation and linking.  The MacOS X
+kernel modules are built using relatively standard automake descriptions
+(see macos_PROGRAM).
+
+--Ken
+
+
+From kenh at cmf.nrl.navy.mil  Mon Apr 26 18:37:30 2010
+From: kenh at cmf.nrl.navy.mil (Ken Hornstein)
+Date: Mon, 26 Apr 2010 21:37:30 -0400
+Subject: [Lustre-devel] Build system and portability
+In-Reply-To: <0C946F67-6483-4781-ADB6-465F25D3B828@oracle.com>
+Message-ID: <201004270137.o3R1bUYE001797@hedwig.cmf.nrl.navy.mil>
+
+>I suspect that we might be able to get something like a "Makefile fragment"
+>that is containing all of the build targets, that is included in an
+>arch-specific top-level Makefile to specify exactly how those files will
+>be built.  Sadly, I don't know anything about this area.
+
+I am thinking along these lines as well; the wrinkle is the way that
+the Linux module building process works.
+
+>The intention of "component" is e.g. "what part of the code the defect is in
+>(e.g. client, server, quota, etc).  I'd think most of your problems are in
+>"Build/Release Engineering" and "OS X", though some will be "llite/mdc",
+>"llite/vfs", and "IO/llite/lov/osc".
+
+Well, take a look at bug 22692 as an example.  That doesn't feel like
+build/release engineering.  And it's not really MacOS X either.
+
+Another example: if I include a bunch of patches to clean up lock leaks
+in libcfs ... where should that go?  Perhaps it's not a huge deal; I can
+just take my best guess at it and go from there.
+
+(Actually, can we add MacOS X as one of the "OS" choices?).
+
+>In this light, it would be interesting to know whether you were able to
+>re-use parts of the lustre/llite code (e.g. llite_lib.c) and it should be
+>moved into a shared directory like lustre/lclient (which is supposed to be
+>entirely portable).  Spending some time to incrementally move (and get
+>upstream) parts of the llite code that are portable between linux and
+>macos would ensure that the ongoing maintenance is reduced.  The problem
+>with making too many changes in a port and not returning them upstream
+>is that eventually the code diverges so much that the ongoing 
+
+Sadly, I could not use anything from llite_lib.c (or anything from
+llite, really) at all; it's way Linux-specific.  Given the way the
+code is structured, I'm not sure there is any alternative; Linux
+is so different in terms of filesystem implementation I don't see
+very much in llite that could be made generic (I guess I could
+imagine some generic stuff, but it would probably be a mess of
+ifdefs).  It's actually even worse than that; the "generic" code
+in obdclass/mount.c is also Linux-specific (that file had to be
+split off into a Linux and Darwin version, although I think that
+could be cleaned up a fair amount; I am unclear as to why some of
+that split exists, although it might be required for the server
+support).  I did steal a few routines from lclient, but a large
+number of those routines were extrememly non-portable so I couldn't
+use those files as-is; I didn't want to have a huge mess of ifdef's
+in there so I just stole the few routines I needed.
+
+However ... I think the changes for the Mac client are pretty
+self-contained; the vast majority of the "real" magic is in libcfs
+and lvnode.  From my experience in tracking master, very few changes
+affect me.
+
+(You can look at this yourself once we get the repository stuff
+straightened out; I think we're almost there).
+
+--Ken
+
+
+From di.wang at oracle.com  Wed Apr 28 18:25:53 2010
+From: di.wang at oracle.com (di.wang)
+Date: Wed, 28 Apr 2010 21:25:53 -0400
+Subject: [Lustre-devel] (no subject)
+In-Reply-To: <000c01cae6ee$1d4693d0$57d3bb70$@barton@oracle.com>
+References: <000c01cae6ee$1d4693d0$57d3bb70$@barton@oracle.com>
+Message-ID: <4BD8E021.7050302@oracle.com>
+
+Hello, Michael
+
+There is a logfile parser script in the attachment, which was written by 
+Eric.
+
+This script is very simple, but it should help you understand how we 
+retrieve time step information from lustre debug log. On the server 
+side, if you enable rpc_trace log, whenever the request arrive/start 
+being processed/end of processing, there will be corresponding records 
+being written into the debug log. Basically, you can get all the time 
+step information from these records (actually only two of these records 
+would be enough).
+
+
+a. 
+00000100:00100000:0.0:1272313858.472660:0:31581:0:(service.c:1625:ptlrpc_server_handle_request()) 
+Handling RPC pname:cluuid+ref:pid:xid:nid:opc 
+ll_mgs_00:7d4fb15c-1b1c-295f-e466-ea7d77089b52+10:4055:x1334115493386242:12345-0 at lo:400
+
+This record means the req will being handled, so you can get the start 
+time stamp(1272313858.472660) operation type (opc: 400, ping), xid 
+(1334115493386242), client nid(12345-0 at lo) and so on.
+
+b. 
+00000100:00100000:0.0:1272313858.472687:0:31581:0:(service.c:1672:ptlrpc_server_handle_request()) 
+Handled RPC pname:cluuid+ref:pid:xid:nid:opc 
+ll_mgs_00:7d4fb15c-1b1c-295f-e466-ea7d77089b52+9:4055:x1334115493386242:12345-0 at lo:400 
+Request procesed in 45us (77us total) trans 0 rc 0/0
+
+This record means the req is already being handled, so you can get the 
+end time stamp(1272313858.472687), operation type (opc: 400, ping), xid 
+(1334115493386242), client nid(12345-0 at lo) and so no.
+
+Note: (77us total) means how long it takes from the request arriving to 
+the end of processing. so you can also get the request arriving time 
+stamp here by (1272313858 - 77 = 1272312781).
+
+
+So with these information you can draw the graph Eric mentioned in his 
+email. If you have any questions, please let me know.
+
+Thanks
+WangDi
+
+
+Eric Barton wrote:
+>
+> ------------------------------------------------------------------------
+>
+> Subject:
+> RE: Visualising Lustre RPCs
+> To:
+> "Michael Kluge" <Michael.Kluge at tu-dresden.de>, "wangdi" 
+> <Tom.Wang at Sun.COM>
+>
+> To:
+> "Michael Kluge" <Michael.Kluge at tu-dresden.de>, "wangdi" 
+> <Tom.Wang at Sun.COM>
+> CC:
+> <lustre-devel at lists.lustre.org>, "Galen M. Shipman" <gshipman at ornl.gov>
+>
+>
+> Michael,
+>
+> The previous Lustre RPC visualisation effort I mentioned at the LUG 
+> used the
+>
+> Lustre debug log entries of type D_RPCTRACE. We disabled all but these
+>
+> log messages and then used the Lustre debug daemon to collect them while
+>
+> we ran I/O tests. We then ran a simple logfile parser which used just 
+> the log entries
+>
+> for request arrival?
+>
+> , start of processing and end of processing to graph request
+>
+> queue depth (arrival->end) and the number of requests being serviced 
+> by type
+>
+> over time ? e.g?
+>
+> read3d
+>
+> ?which shows request queue depth (vertical) over time (axis labelled 
+> 20-25) by
+>
+> server (axis labelled 0-80).
+>
+> *From:* Michael Kluge [mailto:Michael.Kluge at tu-dresden.de]
+> *Sent:* 17 April 2010 6:26 AM
+> *To:* Galen M. Shipman; Eric Barton
+> *Subject:* Visualising Lustre RPCs
+>
+> Hi Galen, Eric,
+>
+> in order to get this little project started, I think what I need at 
+> first to
+>
+> write a prototype for a converter are the following things:
+>
+> A set of test traces collected on maybe a handful of clients and some 
+> servers
+>
+> is probably a good point to start with. It would be even better if we know
+>
+> what is in this traces so that we have an expectation what kind of things
+>
+> we want to see on the Vampir displays. This little program that Eric 
+> mentioned
+>
+> that can read the trace file would be very helpful as well. And as the 
+> last
+>
+> idea I have right now, a technical contact. I might come up with a couple
+>
+> of question after I have taken the first look onto the original trace 
+> data
+>
+> and before I start writing code.
+>
+> Regards, Michael
+>
+>
+> -- 
+>
+> Michael Kluge, M.Sc.
+>
+> Technische Universit?t Dresden
+> Center for Information Services and
+> High Performance Computing (ZIH)
+> D-01062 Dresden
+> Germany
+>
+> Contact:
+> Willersbau, Room WIL A 208
+> Phone: (+49) 351 463-34217
+> Fax: (+49) 351 463-37773
+> e-mail: michael.kluge at tu-dresden.de <mailto:michael.kluge at tu-dresden.de>
+> WWW: http://www.tu-dresden.de/zih
+>
+
+-------------- next part --------------
+A non-text attachment was scrubbed...
+Name: rpc_parse.tgz
+Type: application/x-compressed-tar
+Size: 30287 bytes
+Desc: not available
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20100428/e7d90469/attachment.bin>
+
+From andreas.dilger at oracle.com  Wed Apr 28 18:49:25 2010
+From: andreas.dilger at oracle.com (Andreas Dilger)
+Date: Wed, 28 Apr 2010 19:49:25 -0600
+Subject: [Lustre-devel] (no subject)
+In-Reply-To: <4BD8E021.7050302@oracle.com>
+References: <000c01cae6ee$1d4693d0$57d3bb70$@barton@oracle.com>
+	<4BD8E021.7050302@oracle.com>
+Message-ID: <D7B5B9A3-B2D9-4710-935D-24677FDE5783@oracle.com>
+
+AFAIK the Handling time is when request processing starts, not when it  
+first arrived at the server. We would need to check I'd there is an  
+RPCTRACE message from ptlrpc_handle_req_in() that we could use to  
+determine the initial request arrival time.
+
+Cheers, Andreas
+
+On 2010-04-28, at 19:25, "di.wang" <di.wang at oracle.com> wrote:
+
+> Hello, Michael
+>
+> There is a logfile parser script in the attachment, which was  
+> written by Eric.
+>
+> This script is very simple, but it should help you understand how we  
+> retrieve time step information from lustre debug log. On the server  
+> side, if you enable rpc_trace log, whenever the request arrive/start  
+> being processed/end of processing, there will be corresponding  
+> records being written into the debug log. Basically, you can get all  
+> the time step information from these records (actually only two of  
+> these records would be enough).
+>
+>
+> a. 00000100:00100000:0.0:1272313858.472660:0:31581:0:(service.c: 
+> 1625:ptlrpc_server_handle_request()) Handling RPC pname:cluuid 
+> +ref:pid:xid:nid:opc ll_mgs_00:7d4fb15c-1b1c-295f-e466- 
+> ea7d77089b52+10:4055:x1334115493386242:12345-0 at lo:400
+>
+> This record means the req will being handled, so you can get the  
+> start time stamp(1272313858.472660) operation type (opc: 400, ping),  
+> xid (1334115493386242), client nid(12345-0 at lo) and so on.
+>
+> b. 00000100:00100000:0.0:1272313858.472687:0:31581:0:(service.c: 
+> 1672:ptlrpc_server_handle_request()) Handled RPC pname:cluuid 
+> +ref:pid:xid:nid:opc ll_mgs_00:7d4fb15c-1b1c-295f-e466- 
+> ea7d77089b52+9:4055:x1334115493386242:12345-0 at lo:400 Request  
+> procesed in 45us (77us total) trans 0 rc 0/0
+>
+> This record means the req is already being handled, so you can get  
+> the end time stamp(1272313858.472687), operation type (opc: 400,  
+> ping), xid (1334115493386242), client nid(12345-0 at lo) and so no.
+>
+> Note: (77us total) means how long it takes from the request arriving  
+> to the end of processing. so you can also get the request arriving  
+> time stamp here by (1272313858 - 77 = 1272312781).
+>
+>
+> So with these information you can draw the graph Eric mentioned in  
+> his email. If you have any questions, please let me know.
+>
+> Thanks
+> WangDi
+>
+>
+> Eric Barton wrote:
+>>
+>> --- 
+>> ---------------------------------------------------------------------
+>>
+>> Subject:
+>> RE: Visualising Lustre RPCs
+>> To:
+>> "Michael Kluge" <Michael.Kluge at tu-dresden.de>, "wangdi" <Tom.Wang at Sun.COM 
+>> >
+>>
+>> To:
+>> "Michael Kluge" <Michael.Kluge at tu-dresden.de>, "wangdi" <Tom.Wang at Sun.COM 
+>> >
+>> CC:
+>> <lustre-devel at lists.lustre.org>, "Galen M. Shipman" <gshipman at ornl.gov 
+>> >
+>>
+>>
+>> Michael,
+>>
+>> The previous Lustre RPC visualisation effort I mentioned at the LUG  
+>> used the
+>>
+>> Lustre debug log entries of type D_RPCTRACE. We disabled all but  
+>> these
+>>
+>> log messages and then used the Lustre debug daemon to collect them  
+>> while
+>>
+>> we ran I/O tests. We then ran a simple logfile parser which used  
+>> just the log entries
+>>
+>> for request arrival?
+>>
+>> , start of processing and end of processing to graph request
+>>
+>> queue depth (arrival->end) and the number of requests being  
+>> serviced by type
+>>
+>> over time ? e.g?
+>>
+>> read3d
+>>
+>> ?which shows request queue depth (vertical) over time (axis labell 
+>> ed 20-25) by
+>>
+>> server (axis labelled 0-80).
+>>
+>> *From:* Michael Kluge [mailto:Michael.Kluge at tu-dresden.de]
+>> *Sent:* 17 April 2010 6:26 AM
+>> *To:* Galen M. Shipman; Eric Barton
+>> *Subject:* Visualising Lustre RPCs
+>>
+>> Hi Galen, Eric,
+>>
+>> in order to get this little project started, I think what I need at  
+>> first to
+>>
+>> write a prototype for a converter are the following things:
+>>
+>> A set of test traces collected on maybe a handful of clients and  
+>> some servers
+>>
+>> is probably a good point to start with. It would be even better if  
+>> we know
+>>
+>> what is in this traces so that we have an expectation what kind of  
+>> things
+>>
+>> we want to see on the Vampir displays. This little program that  
+>> Eric mentioned
+>>
+>> that can read the trace file would be very helpful as well. And as  
+>> the last
+>>
+>> idea I have right now, a technical contact. I might come up with a  
+>> couple
+>>
+>> of question after I have taken the first look onto the original  
+>> trace data
+>>
+>> and before I start writing code.
+>>
+>> Regards, Michael
+>>
+>>
+>> -- 
+>>
+>> Michael Kluge, M.Sc.
+>>
+>> Technische Universit?t Dresden
+>> Center for Information Services and
+>> High Performance Computing (ZIH)
+>> D-01062 Dresden
+>> Germany
+>>
+>> Contact:
+>> Willersbau, Room WIL A 208
+>> Phone: (+49) 351 463-34217
+>> Fax: (+49) 351 463-37773
+>> e-mail: michael.kluge at tu-dresden.de <mailto:michael.kluge at tu-dresden.de 
+>> >
+>> WWW: http://www.tu-dresden.de/zih
+>>
+>
+> <rpc_parse.tgz>
+> _______________________________________________
+> Lustre-devel mailing list
+> Lustre-devel at lists.lustre.org
+> http://lists.lustre.org/mailman/listinfo/lustre-devel
+
+
+From di.wang at oracle.com  Wed Apr 28 19:04:32 2010
+From: di.wang at oracle.com (di.wang)
+Date: Wed, 28 Apr 2010 22:04:32 -0400
+Subject: [Lustre-devel] (no subject)
+In-Reply-To: <D7B5B9A3-B2D9-4710-935D-24677FDE5783@oracle.com>
+References: <000c01cae6ee$1d4693d0$57d3bb70$%barton@oracle.com>
+	<4BD8E021.7050302@oracle.com>
+	<D7B5B9A3-B2D9-4710-935D-24677FDE5783@oracle.com>
+Message-ID: <4BD8E930.9020409@oracle.com>
+
+Andreas Dilger wrote:
+> AFAIK the Handling time is when request processing starts, not when it  
+> first arrived at the server. We would need to check I'd there is an  
+> RPCTRACE message from ptlrpc_handle_req_in() that we could use to  
+> determine the initial request arrival time.
+>   
+Oh, you can also get the arriving time in "Handled RPC" msg
+by Handled RPC_time - total time.
+
+Thanks
+WangDi
+> Cheers, Andreas
+>
+> On 2010-04-28, at 19:25, "di.wang" <di.wang at oracle.com> wrote:
+>
+>   
+>> Hello, Michael
+>>
+>> There is a logfile parser script in the attachment, which was  
+>> written by Eric.
+>>
+>> This script is very simple, but it should help you understand how we  
+>> retrieve time step information from lustre debug log. On the server  
+>> side, if you enable rpc_trace log, whenever the request arrive/start  
+>> being processed/end of processing, there will be corresponding  
+>> records being written into the debug log. Basically, you can get all  
+>> the time step information from these records (actually only two of  
+>> these records would be enough).
+>>
+>>
+>> a. 00000100:00100000:0.0:1272313858.472660:0:31581:0:(service.c: 
+>> 1625:ptlrpc_server_handle_request()) Handling RPC pname:cluuid 
+>> +ref:pid:xid:nid:opc ll_mgs_00:7d4fb15c-1b1c-295f-e466- 
+>> ea7d77089b52+10:4055:x1334115493386242:12345-0 at lo:400
+>>
+>> This record means the req will being handled, so you can get the  
+>> start time stamp(1272313858.472660) operation type (opc: 400, ping),  
+>> xid (1334115493386242), client nid(12345-0 at lo) and so on.
+>>
+>> b. 00000100:00100000:0.0:1272313858.472687:0:31581:0:(service.c: 
+>> 1672:ptlrpc_server_handle_request()) Handled RPC pname:cluuid 
+>> +ref:pid:xid:nid:opc ll_mgs_00:7d4fb15c-1b1c-295f-e466- 
+>> ea7d77089b52+9:4055:x1334115493386242:12345-0 at lo:400 Request  
+>> procesed in 45us (77us total) trans 0 rc 0/0
+>>
+>> This record means the req is already being handled, so you can get  
+>> the end time stamp(1272313858.472687), operation type (opc: 400,  
+>> ping), xid (1334115493386242), client nid(12345-0 at lo) and so no.
+>>
+>> Note: (77us total) means how long it takes from the request arriving  
+>> to the end of processing. so you can also get the request arriving  
+>> time stamp here by (1272313858 - 77 = 1272312781).
+>>
+>>
+>> So with these information you can draw the graph Eric mentioned in  
+>> his email. If you have any questions, please let me know.
+>>
+>> Thanks
+>> WangDi
+>>
+>>
+>> Eric Barton wrote:
+>>     
+>>> --- 
+>>> ---------------------------------------------------------------------
+>>>
+>>> Subject:
+>>> RE: Visualising Lustre RPCs
+>>> To:
+>>> "Michael Kluge" <Michael.Kluge at tu-dresden.de>, "wangdi" <Tom.Wang at Sun.COM 
+>>>       
+>>> To:
+>>> "Michael Kluge" <Michael.Kluge at tu-dresden.de>, "wangdi" <Tom.Wang at Sun.COM 
+>>>       
+>>> CC:
+>>> <lustre-devel at lists.lustre.org>, "Galen M. Shipman" <gshipman at ornl.gov 
+>>>       
+>>> Michael,
+>>>
+>>> The previous Lustre RPC visualisation effort I mentioned at the LUG  
+>>> used the
+>>>
+>>> Lustre debug log entries of type D_RPCTRACE. We disabled all but  
+>>> these
+>>>
+>>> log messages and then used the Lustre debug daemon to collect them  
+>>> while
+>>>
+>>> we ran I/O tests. We then ran a simple logfile parser which used  
+>>> just the log entries
+>>>
+>>> for request arrival?
+>>>
+>>> , start of processing and end of processing to graph request
+>>>
+>>> queue depth (arrival->end) and the number of requests being  
+>>> serviced by type
+>>>
+>>> over time ? e.g?
+>>>
+>>> read3d
+>>>
+>>> ?which shows request queue depth (vertical) over time (axis labell 
+>>> ed 20-25) by
+>>>
+>>> server (axis labelled 0-80).
+>>>
+>>> *From:* Michael Kluge [mailto:Michael.Kluge at tu-dresden.de]
+>>> *Sent:* 17 April 2010 6:26 AM
+>>> *To:* Galen M. Shipman; Eric Barton
+>>> *Subject:* Visualising Lustre RPCs
+>>>
+>>> Hi Galen, Eric,
+>>>
+>>> in order to get this little project started, I think what I need at  
+>>> first to
+>>>
+>>> write a prototype for a converter are the following things:
+>>>
+>>> A set of test traces collected on maybe a handful of clients and  
+>>> some servers
+>>>
+>>> is probably a good point to start with. It would be even better if  
+>>> we know
+>>>
+>>> what is in this traces so that we have an expectation what kind of  
+>>> things
+>>>
+>>> we want to see on the Vampir displays. This little program that  
+>>> Eric mentioned
+>>>
+>>> that can read the trace file would be very helpful as well. And as  
+>>> the last
+>>>
+>>> idea I have right now, a technical contact. I might come up with a  
+>>> couple
+>>>
+>>> of question after I have taken the first look onto the original  
+>>> trace data
+>>>
+>>> and before I start writing code.
+>>>
+>>> Regards, Michael
+>>>
+>>>
+>>> -- 
+>>>
+>>> Michael Kluge, M.Sc.
+>>>
+>>> Technische Universit?t Dresden
+>>> Center for Information Services and
+>>> High Performance Computing (ZIH)
+>>> D-01062 Dresden
+>>> Germany
+>>>
+>>> Contact:
+>>> Willersbau, Room WIL A 208
+>>> Phone: (+49) 351 463-34217
+>>> Fax: (+49) 351 463-37773
+>>> e-mail: michael.kluge at tu-dresden.de <mailto:michael.kluge at tu-dresden.de 
+>>>       
+>>> WWW: http://www.tu-dresden.de/zih
+>>>
+>>>       
+>> <rpc_parse.tgz>
+>> _______________________________________________
+>> Lustre-devel mailing list
+>> Lustre-devel at lists.lustre.org
+>> http://lists.lustre.org/mailman/listinfo/lustre-devel
+>>     
+> _______________________________________________
+> Lustre-devel mailing list
+> Lustre-devel at lists.lustre.org
+> http://lists.lustre.org/mailman/listinfo/lustre-devel
+>   
+
+
+
+From Michael.Kluge at tu-dresden.de  Wed Apr 28 21:48:57 2010
+From: Michael.Kluge at tu-dresden.de (Michael Kluge)
+Date: Thu, 29 Apr 2010 06:48:57 +0200
+Subject: [Lustre-devel] Lustre RPC visualization
+In-Reply-To: <4BD8E021.7050302@oracle.com>
+References: <000c01cae6ee$1d4693d0$57d3bb70$@barton@oracle.com>
+	<4BD8E021.7050302@oracle.com>
+Message-ID: <4BD90FB9.5030702@tu-dresden.de>
+
+Hi WangDi,
+
+OK, thanks for input. I'll go ahead and try to write a converter. Could 
+you please collect a set test traces that belong together from a couple 
+servers and clients and put them somewhere so that I can download them?
+
+
+Thanks, Michael
+
+Am 29.04.2010 03:25, schrieb di.wang:
+> Hello, Michael
+>
+> There is a logfile parser script in the attachment, which was written by
+> Eric.
+>
+> This script is very simple, but it should help you understand how we
+> retrieve time step information from lustre debug log. On the server
+> side, if you enable rpc_trace log, whenever the request arrive/start
+> being processed/end of processing, there will be corresponding records
+> being written into the debug log. Basically, you can get all the time
+> step information from these records (actually only two of these records
+> would be enough).
+>
+>
+> a.
+> 00000100:00100000:0.0:1272313858.472660:0:31581:0:(service.c:1625:ptlrpc_server_handle_request())
+> Handling RPC pname:cluuid+ref:pid:xid:nid:opc
+> ll_mgs_00:7d4fb15c-1b1c-295f-e466-ea7d77089b52+10:4055:x1334115493386242:12345-0 at lo:400
+>
+>
+> This record means the req will being handled, so you can get the start
+> time stamp(1272313858.472660) operation type (opc: 400, ping), xid
+> (1334115493386242), client nid(12345-0 at lo) and so on.
+>
+> b.
+> 00000100:00100000:0.0:1272313858.472687:0:31581:0:(service.c:1672:ptlrpc_server_handle_request())
+> Handled RPC pname:cluuid+ref:pid:xid:nid:opc
+> ll_mgs_00:7d4fb15c-1b1c-295f-e466-ea7d77089b52+9:4055:x1334115493386242:12345-0 at lo:400
+> Request procesed in 45us (77us total) trans 0 rc 0/0
+>
+> This record means the req is already being handled, so you can get the
+> end time stamp(1272313858.472687), operation type (opc: 400, ping), xid
+> (1334115493386242), client nid(12345-0 at lo) and so no.
+>
+> Note: (77us total) means how long it takes from the request arriving to
+> the end of processing. so you can also get the request arriving time
+> stamp here by (1272313858 - 77 = 1272312781).
+>
+>
+> So with these information you can draw the graph Eric mentioned in his
+> email. If you have any questions, please let me know.
+>
+> Thanks
+> WangDi
+>
+>
+> Eric Barton wrote:
+>>
+>> ------------------------------------------------------------------------
+>>
+>> Subject:
+>> RE: Visualising Lustre RPCs
+>> To:
+>> "Michael Kluge" <Michael.Kluge at tu-dresden.de>, "wangdi"
+>> <Tom.Wang at Sun.COM>
+>>
+>> To:
+>> "Michael Kluge" <Michael.Kluge at tu-dresden.de>, "wangdi"
+>> <Tom.Wang at Sun.COM>
+>> CC:
+>> <lustre-devel at lists.lustre.org>, "Galen M. Shipman" <gshipman at ornl.gov>
+>>
+>>
+>> Michael,
+>>
+>> The previous Lustre RPC visualisation effort I mentioned at the LUG
+>> used the
+>>
+>> Lustre debug log entries of type D_RPCTRACE. We disabled all but these
+>>
+>> log messages and then used the Lustre debug daemon to collect them while
+>>
+>> we ran I/O tests. We then ran a simple logfile parser which used just
+>> the log entries
+>>
+>> for request arrival?
+>>
+>> , start of processing and end of processing to graph request
+>>
+>> queue depth (arrival->end) and the number of requests being serviced
+>> by type
+>>
+>> over time ? e.g?
+>>
+>> read3d
+>>
+>> ?which shows request queue depth (vertical) over time (axis labelled
+>> 20-25) by
+>>
+>> server (axis labelled 0-80).
+>>
+>> *From:* Michael Kluge [mailto:Michael.Kluge at tu-dresden.de]
+>> *Sent:* 17 April 2010 6:26 AM
+>> *To:* Galen M. Shipman; Eric Barton
+>> *Subject:* Visualising Lustre RPCs
+>>
+>> Hi Galen, Eric,
+>>
+>> in order to get this little project started, I think what I need at
+>> first to
+>>
+>> write a prototype for a converter are the following things:
+>>
+>> A set of test traces collected on maybe a handful of clients and some
+>> servers
+>>
+>> is probably a good point to start with. It would be even better if we
+>> know
+>>
+>> what is in this traces so that we have an expectation what kind of things
+>>
+>> we want to see on the Vampir displays. This little program that Eric
+>> mentioned
+>>
+>> that can read the trace file would be very helpful as well. And as the
+>> last
+>>
+>> idea I have right now, a technical contact. I might come up with a couple
+>>
+>> of question after I have taken the first look onto the original trace
+>> data
+>>
+>> and before I start writing code.
+>>
+>> Regards, Michael
+>>
+>>
+>> --
+>>
+>> Michael Kluge, M.Sc.
+>>
+>> Technische Universit?t Dresden
+>> Center for Information Services and
+>> High Performance Computing (ZIH)
+>> D-01062 Dresden
+>> Germany
+>>
+>> Contact:
+>> Willersbau, Room WIL A 208
+>> Phone: (+49) 351 463-34217
+>> Fax: (+49) 351 463-37773
+>> e-mail: michael.kluge at tu-dresden.de <mailto:michael.kluge at tu-dresden.de>
+>> WWW: http://www.tu-dresden.de/zih
+
+
+
+From jfilizetti at sms-fed.com  Thu Apr 29 19:59:42 2010
+From: jfilizetti at sms-fed.com (Jeremy Filizetti)
+Date: Thu, 29 Apr 2010 22:59:42 -0400
+Subject: [Lustre-devel] question about ldlm_server_glimpse_ast
+Message-ID: <w2je5fcbd181004291959wb9790719ic4dc3a2bd9b64eb@mail.gmail.com>
+
+In our Lustre WAN environment a few times we've had a link drop for an
+extended period of time which causes problems on systems accessing data in
+the same directory as the remote system that becomes unavailable.  Our OSS's
+seem to be stuck in a loop of ptlrpc_queue_wait called from
+ldlm_server_glimpse_ast.  The remote site is accesed through an LNet router
+which is still available.  However the OSS resends requests every 7 seconds
+successfully to the router but squbsequently with timeout which causes it to
+loop in ptlrpc_queue_wait.
+
+Looking over the ldlm_server_blocking_ast and ldlm_server_completion_ast
+functions I see they set rq_no_resend = 1, but ldlm_server_glimpse_ast does
+not.  I'm not familiar with the locking in Lustre, is there a reason that
+ldlm_server_glimpse_ast doesn't set rq_no_resend = 1?  This would get rid of
+the loop ptlrpc_queue_wait is stuck in until the client comes back, but I'm
+not sure if it would have other unexpected consequences.
+
+Jeremy
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20100429/1d2bc58d/attachment.htm>
+
+From jhammond at ices.utexas.edu  Fri Apr 30 06:00:46 2010
+From: jhammond at ices.utexas.edu (John Hammond)
+Date: Fri, 30 Apr 2010 08:00:46 -0500
+Subject: [Lustre-devel] question about ldlm_server_glimpse_ast
+In-Reply-To: <w2je5fcbd181004291959wb9790719ic4dc3a2bd9b64eb@mail.gmail.com>
+References: <w2je5fcbd181004291959wb9790719ic4dc3a2bd9b64eb@mail.gmail.com>
+Message-ID: <4BDAD47E.401@ices.utexas.edu>
+
+On 04/29/2010 09:59 PM, Jeremy Filizetti wrote:
+> In our Lustre WAN environment a few times we've had a link drop for an
+> extended period of time which causes problems on systems accessing data
+> in the same directory as the remote system that becomes unavailable.
+> Our OSS's seem to be stuck in a loop of ptlrpc_queue_wait called from
+> ldlm_server_glimpse_ast.  The remote site is accesed through an LNet
+> router which is still available.  However the OSS resends requests every
+> 7 seconds successfully to the router but squbsequently with timeout
+> which causes it to loop in ptlrpc_queue_wait.
+>
+> Looking over the ldlm_server_blocking_ast and ldlm_server_completion_ast
+> functions I see they set rq_no_resend = 1, but ldlm_server_glimpse_ast
+> does not.  I'm not familiar with the locking in Lustre, is there a
+> reason that ldlm_server_glimpse_ast doesn't set rq_no_resend = 1?  This
+> would get rid of the loop ptlrpc_queue_wait is stuck in until the client
+> comes back, but I'm not sure if it would have other unexpected consequences.
+
+We have the same issue at TACC, and there is a bugzilla entry:
+
+https://bugzilla.lustre.org/show_bug.cgi?id=21937
+
+I tested a patch which set rq_no_resend = 0 for glimpses, and found that 
+clients only had about 6 seconds to reply before eviction.  Since 
+eviction creates the possibility for data loss, a 6 second timeout was 
+deemed too short for production.  (With the patch applied, it was easy 
+for me to create cases where data was indeed lost.)  I was also able to 
+observe some file consistency issues which lasted for a few seconds 
+after eviction, as well as a failure of the file operations on the 
+evicted client to return an error.  See also:
+
+https://bugzilla.lustre.org/show_bug.cgi?id=22360
+
+-John
+
+-- 
+John L. Hammond, Ph.D.
+ICES, The University of Texas at Austin
+jhammond at ices.utexas.edu
+(512) 471-9304
+
+
+From oleg.drokin at oracle.com  Fri Apr 30 11:44:43 2010
+From: oleg.drokin at oracle.com (Oleg Drokin)
+Date: Fri, 30 Apr 2010 14:44:43 -0400
+Subject: [Lustre-devel] question about ldlm_server_glimpse_ast
+In-Reply-To: <4BDAD47E.401@ices.utexas.edu>
+References: <w2je5fcbd181004291959wb9790719ic4dc3a2bd9b64eb@mail.gmail.com>
+	<4BDAD47E.401@ices.utexas.edu>
+Message-ID: <B1CC7901-3220-4BD6-89EE-B37C825DCB03@oracle.com>
+
+Hello!
+
+On Apr 30, 2010, at 9:00 AM, John Hammond wrote:
+> I tested a patch which set rq_no_resend = 0 for glimpses, and found that 
+> clients only had about 6 seconds to reply before eviction.  Since 
+> eviction creates the possibility for data loss, a 6 second timeout was 
+> deemed too short for production.  (With the patch applied, it was easy 
+> for me to create cases where data was indeed lost.)  I was also able to 
+
+Please note that the 6 second timeout is in fact common ldlm_timeout and it's
+not just glimpses that are bound by this value.
+any ldlm callbacks are required to reply withing this time, so if your
+network can have delays of more then this much, you need to consider
+increasing ldlm_timeout value (/proc/sys/lustre/ldlm_timeout).
+On the other hand if you have a packet loss issue, even if
+resending of glimpse ASTs would be present, we don't currently resend
+other ASTs so the situation still has a potential for evictions
+with subsequent possible data loss.
+
+Bye,
+    Oleg
+
+
+From spitzcor at cray.com  Fri Apr 30 12:25:54 2010
+From: spitzcor at cray.com (Cory Spitz)
+Date: Fri, 30 Apr 2010 14:25:54 -0500
+Subject: [Lustre-devel] question about ldlm_server_glimpse_ast
+In-Reply-To: <B1CC7901-3220-4BD6-89EE-B37C825DCB03@oracle.com>
+References: <w2je5fcbd181004291959wb9790719ic4dc3a2bd9b64eb@mail.gmail.com>	<4BDAD47E.401@ices.utexas.edu>
+	<B1CC7901-3220-4BD6-89EE-B37C825DCB03@oracle.com>
+Message-ID: <4BDB2EC2.7030104@cray.com>
+
+Hello.
+
+Increasing ldlm_timeout has no effect whatsoever if adaptive timeouts are
+enabled.  See bug 22569.  I suggest that you tune up at_min instead.
+
+Thanks,
+-Cory
+
+
+Oleg Drokin wrote:
+> Hello!
+> 
+> On Apr 30, 2010, at 9:00 AM, John Hammond wrote:
+>> I tested a patch which set rq_no_resend = 0 for glimpses, and found that 
+>> clients only had about 6 seconds to reply before eviction.  Since 
+>> eviction creates the possibility for data loss, a 6 second timeout was 
+>> deemed too short for production.  (With the patch applied, it was easy 
+>> for me to create cases where data was indeed lost.)  I was also able to 
+> 
+> Please note that the 6 second timeout is in fact common ldlm_timeout and it's
+> not just glimpses that are bound by this value.
+> any ldlm callbacks are required to reply withing this time, so if your
+> network can have delays of more then this much, you need to consider
+> increasing ldlm_timeout value (/proc/sys/lustre/ldlm_timeout).
+> On the other hand if you have a packet loss issue, even if
+> resending of glimpse ASTs would be present, we don't currently resend
+> other ASTs so the situation still has a potential for evictions
+> with subsequent possible data loss.
+> 
+> Bye,
+>     Oleg
+> _______________________________________________
+> Lustre-devel mailing list
+> Lustre-devel at lists.lustre.org
+> http://lists.lustre.org/mailman/listinfo/lustre-devel
+> 
+
+
+From jhammond at ices.utexas.edu  Fri Apr 30 14:07:42 2010
+From: jhammond at ices.utexas.edu (John Hammond)
+Date: Fri, 30 Apr 2010 16:07:42 -0500
+Subject: [Lustre-devel] question about ldlm_server_glimpse_ast
+In-Reply-To: <B1CC7901-3220-4BD6-89EE-B37C825DCB03@oracle.com>
+References: <w2je5fcbd181004291959wb9790719ic4dc3a2bd9b64eb@mail.gmail.com>
+	<4BDAD47E.401@ices.utexas.edu>
+	<B1CC7901-3220-4BD6-89EE-B37C825DCB03@oracle.com>
+Message-ID: <4BDB469E.4040005@ices.utexas.edu>
+
+On 04/30/2010 01:44 PM, Oleg Drokin wrote:
+> Hello!
+>
+> On Apr 30, 2010, at 9:00 AM, John Hammond wrote:
+>> I tested a patch which set rq_no_resend = 0 for glimpses, and found that
+>> clients only had about 6 seconds to reply before eviction.  Since
+>> eviction creates the possibility for data loss, a 6 second timeout was
+>> deemed too short for production.  (With the patch applied, it was easy
+>> for me to create cases where data was indeed lost.)  I was also able to
+>
+> Please note that the 6 second timeout is in fact common ldlm_timeout and it's
+> not just glimpses that are bound by this value.
+> any ldlm callbacks are required to reply withing this time, so if your
+> network can have delays of more then this much, you need to consider
+> increasing ldlm_timeout value (/proc/sys/lustre/ldlm_timeout).
+> On the other hand if you have a packet loss issue, even if
+> resending of glimpse ASTs would be present, we don't currently resend
+> other ASTs so the situation still has a potential for evictions
+> with subsequent possible data loss.
+
+Are there any nonobvious ramifications of changing ldlm_timeout?  I 
+noticed that it was set to 20 seconds (except for MDS's?) in 1.8.2. 
+Also there is some suspect looking logic in obd_config.c and elsewhere 
+to keep it from being set too high relative to obd_timeout:
+
+     if (ldlm_timeout >= obd_timeout)
+         ldlm_timeout = max(obd_timeout / 3, 1U);
+
+Does this mean that ldlm_timeout should not exceed 1/3 of obd_timeout?
+
+Thanks,
+
+-John
+
+-- 
+John L. Hammond, Ph.D.
+ICES, The University of Texas at Austin
+jhammond at ices.utexas.edu
+(512) 471-9304
+
+
+From oleg.drokin at oracle.com  Fri Apr 30 14:14:07 2010
+From: oleg.drokin at oracle.com (Oleg Drokin)
+Date: Fri, 30 Apr 2010 17:14:07 -0400
+Subject: [Lustre-devel] question about ldlm_server_glimpse_ast
+In-Reply-To: <4BDB469E.4040005@ices.utexas.edu>
+References: <w2je5fcbd181004291959wb9790719ic4dc3a2bd9b64eb@mail.gmail.com>
+	<4BDAD47E.401@ices.utexas.edu>
+	<B1CC7901-3220-4BD6-89EE-B37C825DCB03@oracle.com>
+	<4BDB469E.4040005@ices.utexas.edu>
+Message-ID: <EF06CB80-B231-4AAF-A11C-16CBF8BBF490@oracle.com>
+
+Hello!
+
+On Apr 30, 2010, at 5:07 PM, John Hammond wrote:
+
+> Are there any nonobvious ramifications of changing ldlm_timeout?  I noticed that it was set to 20 seconds (except for MDS's?) in 1.8.2. Also there is some suspect looking logic in obd_config.c and elsewhere to keep it from being set too high relative to obd_timeout:
+> 
+>    if (ldlm_timeout >= obd_timeout)
+>        ldlm_timeout = max(obd_timeout / 3, 1U);
+> 
+> Does this mean that ldlm_timeout should not exceed 1/3 of obd_timeout?
+
+ldlm_timeout should not be set too high, because if a client that holds a lock dies
+this is for how long nobody will be able to get a conflicting lock.
+Of course if your network might delay packets (roundtrip) for more than
+ldlm_timeout, then you need to lift the limit.
+1/3 is there so that if your network delay is potentially this big (and you do not
+use AT), there should be enough time to do some processing still and then send a reply
+to the client (obd_timeout is used for the client to determine when the reply should
+come) before the client times out that request.
+
+Also see the comment from Cory, that if you use AT it is all not controlled
+by at_min setting instead and then is dynamically adjusted as the system detects your
+network latency.
+
+Bye,
+    Oleg
+

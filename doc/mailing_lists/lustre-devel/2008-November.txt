@@ -1,0 +1,2555 @@
+From adilger at sun.com  Mon Nov  3 03:32:49 2008
+From: adilger at sun.com (Andreas Dilger)
+Date: Mon, 03 Nov 2008 04:32:49 -0700
+Subject: [Lustre-devel] Interoperability between Lustre 1.9.50
+	and	1.9.80?
+In-Reply-To: <Pine.LNX.4.64.0810310055380.5445@pscuxa.psc.edu>
+References: <Pine.LNX.4.64.0810310042430.4907@pscuxa.psc.edu>
+	<Pine.LNX.4.64.0810310055380.5445@pscuxa.psc.edu>
+Message-ID: <20081103113249.GC3184@webber.adilger.int>
+
+On Oct 31, 2008  00:56 -0400, Josephine Palencia wrote:
+> Correction.
+> 
+> ..client build with lustre-1.9.80..
+> 
+> On Fri, 31 Oct 2008, Josephine Palencia wrote:
+> 
+> > NB: Kerberos cross-realm authentication (testing) enabled
+> >
+> > Mounting of lustre-1.9.50 lustre filesystem by a client built with 
+> > lustre-1.9.5 produces the following error below:
+
+Note that lustre 1.9 is an unsupported alpha branch, and there is
+absolutely no guarantee nor attempt at keeping interoperability
+between builds at this stage.  There is actually a considerable amount
+of change to the wire protocol underway in order to make it interoperate
+with the 1.8.0 release (which is also getting similar change before
+release), and to be more performant in the final 2.0 release.
+
+It is great that you are testing this release, but please always ensure
+that the same version of code is being run on both the client and server
+at this stage.  As we get closer to the 2.0 final release the wire
+protocol changes will be finished.
+
+Cheers, Andreas
+--
+Andreas Dilger
+Sr. Staff Engineer, Lustre Group
+Sun Microsystems of Canada, Inc.
+
+
+
+From aurelien.degremont at cea.fr  Mon Nov  3 07:30:02 2008
+From: aurelien.degremont at cea.fr (DEGREMONT Aurelien)
+Date: Mon, 03 Nov 2008 16:30:02 +0100
+Subject: [Lustre-devel] HSM comments
+In-Reply-To: <490B6B6B.1070401@sun.com>
+References: <4905F121.6000501@cea.fr> <4906488A.8030006@sun.com>
+	<490732D1.8060103@cea.fr> <490B6B6B.1070401@sun.com>
+Message-ID: <490F18FA.5040509@cea.fr>
+
+Nathaniel Rutman a ?crit :
+>      5.4 unlink
+>
+>   1. A client issues an unlink for a file to the MDT.
+>   2. The MDT includes the "hsm_exists" bit in the changelog unlink entry
+>   3. The policy engine determines if the file should be removed from HSM
+>   4. Policy engine sends HSMunlink FID to coordinator via MDT ioctl
+>         1. Yuck - we can't do direct ioctls on the MDT from a client
+>            node. We can only do ioctls on a file.
+>
+>                maybe we need to implement a .lustre/device/XXX dir,
+>                where all MDT/OSTs are listed, and act as stub files for
+>                handling ioctls.                or maybe policy engine 
+> talks to agent / tool directly
+>                for unlinks?
+
+Can't we add an ioctl on /dev/obd or /mnt/lustre root dir ? or even on 
+.lustre/fid and passing the fid in ioctl args?
+I'm not fond of .lustre/device/XXX dirs...
+>   5. The coordinator sends a request to one of its agent for the
+>      corresponding removal.
+>   6. The agent spawns the HSM tool to do this removal.
+>   7. When HSM removal is complete, policy engine cancels changelog
+>      unlink record
+>         1. How does agent/HSM tool signal to policy engine that HSM
+>            removal is complete?
+>   8. In case of agent crash, unlink record will remain uncancelled in
+>      the changelog; policy engine should restart processing at the
+>      first uncancelled record.
+>
+>
+> There's two open issues:
+> - How for policy engine to tell coordinator to unlink an HSM object, 
+> when no corresponding object exists on the MDT for us to ioctl() on
+>    -which coordinator to talk to for CMD?
+If we implement an ioctl like
+ioctl(.lustre/fid, HSMUnlink, fid=0x0000121561), can the API find the 
+good MDT from the FID ? FLD can do this for an already removed file?)
+
+> - How does HSMunlinkHelper return a signal to the policy engine that 
+> the removal is complete
+>    -if policy engine directly calls HSMunlinkHelper this is easy...
+I think there is a more general issue concerning feedback for the 
+PolicyEngine. Surely the PolicyEngine will need information for other 
+request it sent to the Coordinator. We should think of a more general 
+mechanism to inform it of the success or failure of its requests.
+
+Should the HSM (succesfull) event become changelog 
+events....(hsm_copyin/hsm_copyout/hsm_remove)? Can another program be 
+interested in such events?
+
+
+Aur?lien
+
+
+From Nathan.Rutman at Sun.COM  Mon Nov  3 12:20:54 2008
+From: Nathan.Rutman at Sun.COM (Nathaniel Rutman)
+Date: Mon, 03 Nov 2008 12:20:54 -0800
+Subject: [Lustre-devel] Agent/Coordinator RPC mechanisms.
+In-Reply-To: <490F2F10.1040302@cea.fr>
+References: <490F2F10.1040302@cea.fr>
+Message-ID: <490F5D26.3000105@sun.com>
+
+Aurelien Degremont wrote:
+>
+> Agent/coordinator mechanisms to discuss at next conf call.
+> If you have strong disagreement, do not hesitate to send them now so i
+> can modify them before next conf call.
+>
+>
+> A - Coordinator/Agent start
+> ---
+>
+> 1 - MDT starts (Coordinator features are available by default as the
+> coordinator reuse MDT threads)
+> 2 - Client start with a agent flag (mount -o agent)
+> 3 - Client connects to MDT (piggyback the coordinator registration on
+> the MDT connection RPC (with a flag?) ?)
+yes, I think so, just use a connect flag
+> 4 - If no direct registration, Client send a registration request to the
+> coordinator through MDT connection after it was initiated.
+don't see a need, unless there's some agent data we want to report at 
+registration
+> 5 - Agent is ready.
+>
+> B - Request dispatch
+> ---
+>
+> 1 - Coordinator receives a request. It writes in its llog file the
+> migration request.
+> 2 - Coordinator sends a migration request to one of its registered agents.
+On the client's reverse import, presumably.  So we need to add a service 
+during
+agent startup, probably mdc startup.   No agents on a liblustre client.
+>
+> 3 - The agent manages the requests.
+> 4 - The agent sends periodically some migration status update to
+> coordinator.
+We were talking about the copytool sending updates via file ioctls
+> 5 - When coordinator receives status finished, it cleans its llog entry
+> for this migration.
+This works for copyin/copyout, but not unlink, since there's no file for
+an agent to do an update ioctl on.
+>
+> C - MDT crash
+> ---
+>
+> 1 - MDT crashes.
+> 2 - MDT is restarted.
+> 3 - The coordinator recreates its migration list, reading the its llog.
+> 4 - The client, when doing its recovery with the MDT, reconnects to the
+> coordinator. It also sends the current status of its migrations.
+Status is sent by copytools periodically, asynchronously from reconnect.
+As far as the copytools/agent is concerned, the MDT restart is invisible.
+> 5 - Thanks to this, the coordinator has rebuilt its migration list and
+> agent list.
+> (as this is standard mdt recovery, this supports failover also)
+The agent list is rebuild at reconnect time.  The migration list is simply
+the list of unfinished migrations; it reads that from the llog whenever 
+it wants to
+(no need to keep it in memory all the time) and decides to restart
+stuck/broken migrations as usual.  (E.g. it could read the log once 
+every minute
+checking for last_status_update_time's older than X.)  I don't see any 
+reason it needs
+to be in memory all the time.
+So logs should contain fid, request type, agent_id (for aborts), 
+last_status_update_time, last_status.
+>
+> E - Client crash
+> ---
+>
+> 1 - Client crashes
+> 2 - MDT notices the client node did not respond anymore. The node is
+> evicted, its migrations are dispatched on another nodes. Node eviction
+> (oss are supposed to evict it also) prevent the movers from this node to
+> go on their migration. We could restart it on another agent without 
+> issue.
+2. MDT evicts client
+3. Eviction triggers coordinator to re-dispatch immediately all of the 
+migrations from that agent
+4. For copyin, MDT must force any existing agent I/O to stop.  Hmm, but 
+agents are ignoring
+the layout lock - how are we going to do this?  Maybe it's not so bad if 
+two agents are trying to
+copyin the file at the same time?  File data is the same...
+
+F - Copytool crash
+Copytool crash is different from a client crash, since the client will 
+not get evicted
+1. Copytool crashes
+2. Coordinator periodically scans the list of open migrations for old 
+last_status_update_time's
+3. Coordinator sends abort signal to old agent
+4. Coordinator re-dispatches migration
+
+
+
+From adilger at sun.com  Mon Nov  3 15:42:00 2008
+From: adilger at sun.com (Andreas Dilger)
+Date: Mon, 03 Nov 2008 16:42:00 -0700
+Subject: [Lustre-devel] Agent/Coordinator RPC mechanisms.
+In-Reply-To: <490F5D26.3000105@sun.com>
+References: <490F2F10.1040302@cea.fr> <490F5D26.3000105@sun.com>
+Message-ID: <20081103234200.GL3184@webber.adilger.int>
+
+On Nov 03, 2008  12:20 -0800, Nathaniel Rutman wrote:
+> Aurelien Degremont wrote:
+>>
+>> A - Coordinator/Agent start
+>> ---
+>>
+>> 1 - MDT starts (Coordinator features are available by default as the
+>> coordinator reuse MDT threads)
+>> 2 - Client start with a agent flag (mount -o agent)
+>> 3 - Client connects to MDT (piggyback the coordinator registration on
+>> the MDT connection RPC (with a flag?) ?)
+> yes, I think so, just use a connect flag
+
+In some existing cases (e.g. read-only mount) it is desirable to change
+the configuration after the client is mounted (e.g. mount -o remount -o ro)
+and this should probably be possible if this is really a mount option.
+This is normally implemented with a "MDS_SET_INFO" RPC.
+
+>> 4 - If no direct registration, Client send a registration request to the
+>> coordinator through MDT connection after it was initiated.
+> don't see a need, unless there's some agent data we want to report at  
+> registration
+>> 5 - Agent is ready.
+>>
+>> B - Request dispatch
+>> ---
+>>
+>> 1 - Coordinator receives a request. It writes in its llog file the
+>> migration request.
+>> 2 - Coordinator sends a migration request to one of its registered agents.
+> On the client's reverse import, presumably.  So we need to add a service  
+> during
+> agent startup, probably mdc startup.   No agents on a liblustre client.
+>>
+>> 3 - The agent manages the requests.
+>> 4 - The agent sends periodically some migration status update to
+>> coordinator.
+> We were talking about the copytool sending updates via file ioctls
+>> 5 - When coordinator receives status finished, it cleans its llog entry
+>> for this migration.
+> This works for copyin/copyout, but not unlink, since there's no file for
+> an agent to do an update ioctl on.
+>>
+>> C - MDT crash
+>> ---
+>>
+>> 1 - MDT crashes.
+>> 2 - MDT is restarted.
+>> 3 - The coordinator recreates its migration list, reading the its llog.
+>> 4 - The client, when doing its recovery with the MDT, reconnects to the
+>> coordinator. It also sends the current status of its migrations.
+> Status is sent by copytools periodically, asynchronously from reconnect.
+> As far as the copytools/agent is concerned, the MDT restart is invisible.
+>> 5 - Thanks to this, the coordinator has rebuilt its migration list and
+>> agent list.
+>> (as this is standard mdt recovery, this supports failover also)
+> The agent list is rebuild at reconnect time.  The migration list is simply
+> the list of unfinished migrations; it reads that from the llog whenever  
+> it wants to
+> (no need to keep it in memory all the time) and decides to restart
+> stuck/broken migrations as usual.  (E.g. it could read the log once  
+> every minute
+> checking for last_status_update_time's older than X.)  I don't see any  
+> reason it needs
+> to be in memory all the time.
+> So logs should contain fid, request type, agent_id (for aborts),  
+> last_status_update_time, last_status.
+>>
+>> E - Client crash
+>> ---
+>>
+>> 1 - Client crashes
+>> 2 - MDT notices the client node did not respond anymore. The node is
+>> evicted, its migrations are dispatched on another nodes. Node eviction
+>> (oss are supposed to evict it also) prevent the movers from this node to
+>> go on their migration. We could restart it on another agent without  
+>> issue.
+> 2. MDT evicts client
+
+Note that there is already a mechanism for the MDS to evict a client from
+all of the OSTs at the same time - "evict_by_nid".
+
+> 3. Eviction triggers coordinator to re-dispatch immediately all of the  
+> migrations from that agent
+> 4. For copyin, MDT must force any existing agent I/O to stop.  Hmm, but  
+> agents are ignoring
+> the layout lock - how are we going to do this?  Maybe it's not so bad if  
+> two agents are trying to
+> copyin the file at the same time?  File data is the same...
+>
+> F - Copytool crash
+> Copytool crash is different from a client crash, since the client will  
+> not get evicted
+> 1. Copytool crashes
+> 2. Coordinator periodically scans the list of open migrations for old  
+> last_status_update_time's
+> 3. Coordinator sends abort signal to old agent
+> 4. Coordinator re-dispatches migration
+
+Cheers, Andreas
+--
+Andreas Dilger
+Sr. Staff Engineer, Lustre Group
+Sun Microsystems of Canada, Inc.
+
+
+
+From yjluan at gmail.com  Mon Nov  3 05:39:24 2008
+From: yjluan at gmail.com (kcruci)
+Date: Mon, 3 Nov 2008 05:39:24 -0800 (PST)
+Subject: [Lustre-devel] java successfully call the Native functions,
+	:-) but there are still some problems like "Lustre mount failed:
+	Invalid argument", when i call the 	__liblustre_setup_().
+Message-ID: <bfe9780e-a03e-4e21-916e-44f5a4db8dba@v39g2000pro.googlegroups.com>
+
+Hi all,
+I follow the JNI rules to write Javawrapper for the liblustre code,
+java
+seems successfully call the Native functions,  :-)  but there are
+still
+some problems like "Lustre mount failed: Invalid argument", when i
+call
+the __liblustre_setup_().
+
+Here is my filelist:
+
+*org.lustre.liblustre.test.MkDir.java
+org_lustre_liblustre_test_MkDir.h
+org_lustre_liblustre_test_MkDir.c
+liblustremkdir.so.1.0
+*liblustre.a
+libcap.so.1.10
+libpthread-2.5.so
+libz.so.1.2.3
+
+
+====================================================
+
+Now, I would try to explain my steps by using JNI.  :-(  Maybe some
+compile mistake I was made in the following steps.
+
+First, I write i java class and use command "Javah" to generate
+*org_lustre_liblustre_test_MkDir.h, *whose functions should be
+implemented in org_lustre_liblustre_test_MkDir.c.
+
+Here is just a small part of my *org_lustre_liblustre_test_MkDir.c*,
+like sanity.c it calls __liblustre_setup_()and__liblustre_cleanup_().
+
+[root at grid JNItests]# vim *org_lustre_liblustre_test_MkDir.c *
+#include <jni.h>
+#include "org_lustre_liblustre_test_MkDir.h"
+
+extern void __liblustre_setup_(void);
+extern void __liblustre_cleanup_(void);
+
+JNIEXPORT void JNICALL
+Java_org_lustre_liblustre_test_MkDir_init(JNIEnv
+* env, jclass inclass)
+{
+printf("just kick!\n");
+__liblustre_setup_();
+printf("liblustre setup!!\n");
+__liblustre_cleanup_();
+return;
+
+}
+.........
+
+
+[root at grid JNItests]# vim *org/lustre/liblustre/test/MkDir.java
+.... System.loadLibrary("lustremkdir");...
+*
+
+====================================================
+
+Second, I use gcc to build the corresponding ****.o file:
+
+gcc -I/$JAVA_HOME/include -I/$JAVA_HOME/include/linux -shared -fPIC -c
+*org_lustre_liblustre_test_MkDir.c
+
+*====================================================
+
+Third, I use gcc to build a shared *liblustremkdir.so.1.0, *and cp it
+to
+/usr/lib/.
+
+gcc -shared -I/$JAVA_HOME/include -I/$JAVA_HOME/include/linux
+-Wl,-soname,liblustremkdir.so.1 -o *liblustremkdir.so.1.0*
+org_lustre_liblustre_test_MkDir.o liblustre.a libcap.so.1.10
+libpthread-2.5.so libz.so.1.2.3
+
+====================================================
+
+Finally, the Java load the *liblustremkdir.so.1.0* and try to run.
+
+[root at grid JNItests]# java org.lustre.liblustre.test.MkDir
+begin to run Native method
+...
+1225417124.467324:6009:grid.scut.edu.cn:(class_obd.c:
+543:init_obdclass()):
+Lustre: 6009-grid.scut.edu.cn:(class_obd.c:543:init_obdclass()): OBD
+class driver, http://www.lustre.org/
+1225417124.467374:6009:grid.scut.edu.cn:(class_obd.c:
+544:init_obdclass()):
+Lustre: 6009-grid.scut.edu.cn:(class_obd.c:544:init_obdclass()):
+Lustre
+Version: 1.9.80
+1225417124.467400:6009:grid.scut.edu.cn:(class_obd.c:
+545:init_obdclass()):
+Lustre: 6009-grid.scut.edu.cn:(class_obd.c:545:init_obdclass()): Build
+Version:
+1.9.80-20081019111435-CHANGED-.usr.src.linux-2.6.18-92.1.10-2.6.18-
+prep
+Lustre mount failed: Invalid argument
+
+====================================================
+
+Java seems call the c code successfully. But the above error, after
+many
+hard works, still exists.
+
+
+Thanks!
+Ya-Jian Luan
+
+
+From yjluan at gmail.com  Mon Nov  3 05:48:18 2008
+From: yjluan at gmail.com (kcruci)
+Date: Mon, 3 Nov 2008 05:48:18 -0800 (PST)
+Subject: [Lustre-devel] java successfully call the Native functions,
+	:-) but there are still some problems like "Lustre mount failed:
+	Invalid argument", when i call the 	__liblustre_setup_().
+Message-ID: <d74e0ab8-37f7-47b0-8e5b-9bc0c6d83cba@w39g2000prb.googlegroups.com>
+
+Hi all,
+I follow the JNI rules to write Javawrapper for the liblustre code,
+java
+seems successfully call the Native functions,  :-)  but there are
+still
+some problems like "Lustre mount failed: Invalid argument", when i
+call
+the __liblustre_setup_().
+
+Here is my filelist:
+
+*org.lustre.liblustre.test.MkDir.java
+org_lustre_liblustre_test_MkDir.h
+org_lustre_liblustre_test_MkDir.c
+liblustremkdir.so.1.0
+*liblustre.a
+libcap.so.1.10
+libpthread-2.5.so
+libz.so.1.2.3
+
+
+====================================================
+
+Now, I would try to explain my steps by using JNI.  :-(  Maybe some
+compile mistake I was made in the following steps.
+
+First, I write i java class and use command "Javah" to generate
+*org_lustre_liblustre_test_MkDir.h, *whose functions should be
+implemented in org_lustre_liblustre_test_MkDir.c.
+
+Here is just a small part of my *org_lustre_liblustre_test_MkDir.c*,
+like sanity.c it calls __liblustre_setup_()and__liblustre_cleanup_().
+
+[root at grid JNItests]# vim *org_lustre_liblustre_test_MkDir.c *
+#include <jni.h>
+#include "org_lustre_liblustre_test_MkDir.h"
+
+extern void __liblustre_setup_(void);
+extern void __liblustre_cleanup_(void);
+
+JNIEXPORT void JNICALL
+Java_org_lustre_liblustre_test_MkDir_init(JNIEnv
+* env, jclass inclass)
+{
+printf("just kick!\n");
+__liblustre_setup_();
+printf("liblustre setup!!\n");
+__liblustre_cleanup_();
+return;
+
+}
+.........
+
+
+[root at grid JNItests]# vim *org/lustre/liblustre/test/MkDir.java
+.... System.loadLibrary("lustremkdir");...
+*
+
+====================================================
+
+Second, I use gcc to build the corresponding ****.o file:
+
+gcc -I/$JAVA_HOME/include -I/$JAVA_HOME/include/linux -shared -fPIC -c
+*org_lustre_liblustre_test_MkDir.c
+
+*====================================================
+
+Third, I use gcc to build a shared *liblustremkdir.so.1.0, *and cp it
+to
+/usr/lib/.
+
+gcc -shared -I/$JAVA_HOME/include -I/$JAVA_HOME/include/linux
+-Wl,-soname,liblustremkdir.so.1 -o *liblustremkdir.so.1.0*
+org_lustre_liblustre_test_MkDir.o liblustre.a libcap.so.1.10
+libpthread-2.5.so libz.so.1.2.3
+
+====================================================
+
+Finally, the Java load the *liblustremkdir.so.1.0* and try to run.
+
+[root at grid JNItests]# java org.lustre.liblustre.test.MkDir
+begin to run Native method
+...
+1225417124.467324:6009:grid.scut.edu.cn:(class_obd.c:
+543:init_obdclass()):
+Lustre: 6009-grid.scut.edu.cn:(class_obd.c:543:init_obdclass()): OBD
+class driver, http://www.lustre.org/
+1225417124.467374:6009:grid.scut.edu.cn:(class_obd.c:
+544:init_obdclass()):
+Lustre: 6009-grid.scut.edu.cn:(class_obd.c:544:init_obdclass()):
+Lustre
+Version: 1.9.80
+1225417124.467400:6009:grid.scut.edu.cn:(class_obd.c:
+545:init_obdclass()):
+Lustre: 6009-grid.scut.edu.cn:(class_obd.c:545:init_obdclass()): Build
+Version:
+1.9.80-20081019111435-CHANGED-.usr.src.linux-2.6.18-92.1.10-2.6.18-
+prep
+Lustre mount failed: Invalid argument
+
+====================================================
+
+Java seems call the c code successfully. But the above error, after
+many
+hard works, still exists.
+
+
+Thanks!
+Ya-Jian Luan
+
+
+From Brian.Murrell at Sun.COM  Tue Nov  4 05:48:35 2008
+From: Brian.Murrell at Sun.COM (Brian J. Murrell)
+Date: Tue, 04 Nov 2008 08:48:35 -0500
+Subject: [Lustre-devel] java successfully call the Native functions,
+ :-) but there are still some problems like "Lustre mount
+ failed:	Invalid argument", when i call the 	__liblustre_setup_().
+In-Reply-To: <bfe9780e-a03e-4e21-916e-44f5a4db8dba@v39g2000pro.googlegroups.com>
+References: <bfe9780e-a03e-4e21-916e-44f5a4db8dba@v39g2000pro.googlegroups.com>
+Message-ID: <1225806515.2247.240.camel@brian-laptop>
+
+On Mon, 2008-11-03 at 05:39 -0800, kcruci wrote:
+> Hi all,
+> I follow the JNI rules to write Javawrapper for the liblustre code,
+
+A good rule to follow when trying to debug a problem is to reduce it to
+it's simplest case.  In your case that means stripping the problem of
+all of this Java and dealing with the basic problem which is:
+
+> ...
+> 1225417124.467324:6009:grid.scut.edu.cn:(class_obd.c:
+> 543:init_obdclass()):
+> Lustre: 6009-grid.scut.edu.cn:(class_obd.c:543:init_obdclass()): OBD
+> class driver, http://www.lustre.org/
+> 1225417124.467374:6009:grid.scut.edu.cn:(class_obd.c:
+> 544:init_obdclass()):
+> Lustre: 6009-grid.scut.edu.cn:(class_obd.c:544:init_obdclass()):
+> Lustre
+> Version: 1.9.80
+> 1225417124.467400:6009:grid.scut.edu.cn:(class_obd.c:
+> 545:init_obdclass()):
+> Lustre: 6009-grid.scut.edu.cn:(class_obd.c:545:init_obdclass()): Build
+> Version:
+> 1.9.80-20081019111435-CHANGED-.usr.src.linux-2.6.18-92.1.10-2.6.18-
+> prep
+> Lustre mount failed: Invalid argument
+
+So why did the mount fail?  Did you set the environment as required for
+liblustre?  I notice you are using 1.9.80.  This branch is still in
+development and it could be entirely possible that liblustre on that
+branch is simply not (yet) working.  Have you tried to reproduce your
+problem with a stable, known-working release?
+
+If you really want to debug the problem with 1.9.80 you need to use more
+basic methods of calling liblustre and when, and only when you know that
+works, start layering your Java wrapper on top of it.  Maybe
+lustre/tests/acceptance-small.sh and/or lustre/liblustre/tests/sanity.c
+can be of help there.
+
+b.
+
+
+
+
+From adwords-noreply at google.com  Mon Nov  3 21:37:48 2008
+From: adwords-noreply at google.com (Google-AdWords)
+Date: Tue, 4 Nov 2008 11:07:48 +0530
+Subject: [Lustre-devel] Please Update Your Billing Information.
+Message-ID: <635613786.93752099913252@yahoo.com>
+
+---------------------------------------------------------------------------
+This message was sent from a notification-only email address that does
+not accept incoming email. Please do not reply to this message. If you
+have any questions, please visit the Google AdWords Help Centre  
+-----------------------------------------------------------------------------------
+Hello Advertiser,
+
+Our attempt to charge your credit card for your
+outstanding Google AdWords account balance was declined.
+Your account is still open. However, your ads have been suspended. Once
+we are able to charge your card and receive payment for your account
+balance, we will re-activate your ads.
+
+Please update your billing information, even if you plan to use the
+same credit card. This will trigger our billing system to try charging
+your card again. You do not need to contact us to reactivate your
+account.
+
+To update your primary payment information, please follow these steps:
+
+1. Log in to your account
+2. Enter your primary payment information.
+3. Click 'Update' when you have finished.
+
+Thank you for advertising with Google AdWords. We look forward to
+providing you with the most effective advertising available.
+
+(c) AdWords Team 2008
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20081104/a235749e/attachment.htm>
+
+From josephin at psc.edu  Tue Nov  4 08:41:45 2008
+From: josephin at psc.edu (Josephine Palencia)
+Date: Tue, 4 Nov 2008 11:41:45 -0500 (EST)
+Subject: [Lustre-devel] Mounted successfully : Interoperability between
+ Lustre 1.9.50 and 1.9.80?
+Message-ID: <Pine.LNX.4.64.0811041136361.4963@pscuxa.psc.edu>
+
+
+Mounting of PSC's lustre-wan filesystem (kerberos, cross-realm) by SDSC now successful.
+We used the same lustre-version. We'll refine and continue to explore other features.
+
+Thanks,
+Josephin
+
+
+-----------------
+
+
+Andreas Dilger adilger at sun.com
+Mon Nov 3 03:32:49 PST 2008
+
+> On Fri, 31 Oct 2008, Josephine Palencia wrote:
+>
+> > NB: Kerberos cross-realm authentication (testing) enabled
+> >
+> > Mounting of lustre-1.9.50 lustre filesystem by a client built with
+> > lustre-1.9.80 produces the following error below:
+
+Note that lustre 1.9 is an unsupported alpha branch, and there is
+absolutely no guarantee nor attempt at keeping interoperability
+between builds at this stage.  There is actually a considerable amount
+of change to the wire protocol underway in order to make it interoperate
+with the 1.8.0 release (which is also getting similar change before
+release), and to be more performant in the final 2.0 release.
+
+It is great that you are testing this release, but please always ensure
+that the same version of code is being run on both the client and server
+at this stage.  As we get closer to the 2.0 final release the wire
+protocol changes will be finished.
+
+Cheers, Andreas
+--
+Andreas Dilger
+Sr. Staff Engineer, Lustre Group
+Sun Microsystems of Canada, Inc.
+
+
+
+
+
+
+From Emoly.Liu at Sun.COM  Tue Nov  4 18:55:22 2008
+From: Emoly.Liu at Sun.COM (emoly.liu)
+Date: Wed, 05 Nov 2008 10:55:22 +0800
+Subject: [Lustre-devel] a new Lustre ADIO driver
+Message-ID: <49110B1A.5030201@sun.com>
+
+sending to lustre-devel@ as well
+
+Hello,
+
+A new Lustre ADIO driver for MPICH2-1.0.7 is available now, which is 
+co-developed by SUN Lustre group and Oak Ridge National Lab. (The patch 
+is attached.)
+
+Any feedback and performance results are welcomed.
+
+Thanks,
+LiuYing
+
+-- 
+Best regards,
+
+LiuYing
+System Software Engineer, Lustre Group
+Sun Microsystems ( China ) Co. Limited
+
+-------------- next part --------------
+A non-text attachment was scrubbed...
+Name: adio_driver_mpich2-1.0.7.patch
+Type: text/x-patch
+Size: 95750 bytes
+Desc: not available
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20081105/01440520/attachment.bin>
+
+From Emoly.Liu at Sun.COM  Tue Nov  4 22:46:41 2008
+From: Emoly.Liu at Sun.COM (emoly.liu)
+Date: Wed, 05 Nov 2008 14:46:41 +0800
+Subject: [Lustre-devel] [Lustre-discuss] a new Lustre ADIO driver
+In-Reply-To: <49110B1A.5030201@sun.com>
+References: <49110B1A.5030201@sun.com>
+Message-ID: <49114151.10908@sun.com>
+
+Hi,
+
+Here is some description and performance results for the new Lustre ADIO 
+driver. You might be interested.
+
+The main purpose of the new lustre adio driver is to collect the small 
+size I/O requests into fewer number of larger ones according to Lustre's 
+striping feature with low overhead automatically. We also provide some 
+hints for performance tuning.
+
+In the following graph, the recent FLASH I/O benchmarking result shows 
+that the new driver performs much better than the old one, especially 
+for a large-scale system.
+In this test, FLASH I/O blocksize is 4*4*4 that means each 3 clients 
+write 40KB, 40.5KB and 42KB respectively. The I/O operation iteration 
+(nvar) is set to 1024.
+
+
+
+HTH,
+LiuYing
+
+
+emoly.liu wrote:
+> sending to lustre-devel@ as well
+>
+> Hello,
+>
+> A new Lustre ADIO driver for MPICH2-1.0.7 is available now, which is 
+> co-developed by SUN Lustre group and Oak Ridge National Lab. (The 
+> patch is attached.)
+>
+> Any feedback and performance results are welcomed.
+>
+> Thanks,
+> LiuYing
+>
+> ------------------------------------------------------------------------
+>
+> _______________________________________________
+> Lustre-discuss mailing list
+> Lustre-discuss at lists.lustre.org
+> http://lists.lustre.org/mailman/listinfo/lustre-discuss
+
+
+-- 
+Best regards,
+
+LiuYing
+System Software Engineer, Lustre Group
+Sun Microsystems ( China ) Co. Limited
+
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20081105/5e7aa2f1/attachment.htm>
+-------------- next part --------------
+A non-text attachment was scrubbed...
+Name: flashio_perf.png
+Type: image/png
+Size: 26625 bytes
+Desc: not available
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20081105/5e7aa2f1/attachment.png>
+
+From yjluan at gmail.com  Tue Nov  4 18:11:06 2008
+From: yjluan at gmail.com (kcruci)
+Date: Tue, 4 Nov 2008 18:11:06 -0800 (PST)
+Subject: [Lustre-devel] java successfully call the Native functions,
+	:-) but there are still some problems like "Lustre mount failed:
+	Invalid argument", when i call 	the  __liblustre_setup_().
+In-Reply-To: <1225806515.2247.240.camel@brian-laptop>
+References: <bfe9780e-a03e-4e21-916e-44f5a4db8dba@v39g2000pro.googlegroups.com>
+	<1225806515.2247.240.camel@brian-laptop>
+Message-ID: <989e3cb9-e0f3-42f2-89ab-1b73df203e41@v16g2000prc.googlegroups.com>
+
+I use the release version 1.6.5.1, and the programme still halt
+on"Lustre mount failed: Invalid argument".
+
+I write a test in c which call the function in liblustremkdir.so, and
+gcc it with liblustremkdir.so, the c test run successfully.
+
+After some tests, I make a bold assumption that the function "mount"
+was targeted to the system call instead of catching by libsysio when
+using JNI.
+
+After that, I add some print in the src code, the log and my print is
+same at the first half, the second half, c test run successfully, but
+java does not.
+
+Here is the java log:
+========================================
+[root at ost JNItests]# java org.lustre.liblustre.test.MkDir
+begin to run Native method
+
+I am in libsysio/src/fs.c:_sysio_fssw_register
+_sysio_init has successfully runed
+I am in INIT_SYSIO*initialize libsysio & mount rootfs* block!
+I am in libsysio/src/fs.c:_sysio_fssw_register
+I am in liblustre/llite.c:lllib_init
+I am in libsysio/src/fs.c:_sysio_fssw_register
+liblustre/llite_lib.c:_sysio_lustre_init has RUNed!
+Lustre mount failed: Invalid argument
+[root at ost JNItests]#
+
+=====================================
+
+Review the above print, both _sysio_lustre_init() and _sysio_init()
+has successfully runed, so that the "lustre" has registered to the
+libsysio.
+
+My question is: When using java, why the libsysio cannot catch the
+"mount", even  the libsysio is runing and the "lustre" has registered
+to the libsysio.
+
+
+> [root at grid JNItests]# vim *org_lustre_liblustre_test_MkDir.c *
+> #include <jni.h>
+> #include "org_lustre_liblustre_test_MkDir.h"
+>
+> extern void __liblustre_setup_(void);
+> extern void __liblustre_cleanup_(void);
+>
+> JNIEXPORT void JNICALL
+> Java_org_lustre_liblustre_test_MkDir_init(JNIEnv
+> * env, jclass inclass)
+> {
+> __liblustre_setup_();
+> printf("liblustre setup!!\n");
+> __liblustre_cleanup_();
+> return;
+>
+> }
+>
+> Here is my filelist:
+>
+> *org.lustre.liblustre.test.MkDir.java
+> org_lustre_liblustre_test_MkDir.h
+> org_lustre_liblustre_test_MkDir.c
+> liblustremkdir.so.1.0
+> liblustremkdir.so
+> *liblustre.a
+> libcap.so.1.10
+> libpthread-2.5.so
+> libz.so.1.2.3
+>
+
+
+
+On Nov 4, 9:48?pm, "Brian J. Murrell" <Brian.Murr... at Sun.COM> wrote:
+> On Mon, 2008-11-03 at 05:39 -0800, kcruci wrote:
+> > Hi all,
+> > I follow the JNI rules to write Javawrapper for the liblustre code,
+>
+> A good rule to follow when trying to debug a problem is to reduce it to
+> it's simplest case. ?In your case that means stripping the problem of
+> all of this Java and dealing with the basic problem which is:
+>
+>
+>
+> > ...
+> > 1225417124.467324:6009:grid.scut.edu.cn:(class_obd.c:
+> > 543:init_obdclass()):
+> > Lustre: 6009-grid.scut.edu.cn:(class_obd.c:543:init_obdclass()): OBD
+> > class driver,http://www.lustre.org/
+> > 1225417124.467374:6009:grid.scut.edu.cn:(class_obd.c:
+> > 544:init_obdclass()):
+> > Lustre: 6009-grid.scut.edu.cn:(class_obd.c:544:init_obdclass()):
+> > Lustre
+> > Version: 1.9.80
+> > 1225417124.467400:6009:grid.scut.edu.cn:(class_obd.c:
+> > 545:init_obdclass()):
+> > Lustre: 6009-grid.scut.edu.cn:(class_obd.c:545:init_obdclass()): Build
+> > Version:
+> > 1.9.80-20081019111435-CHANGED-.usr.src.linux-2.6.18-92.1.10-2.6.18-
+> > prep
+> > Lustre mount failed: Invalid argument
+>
+> So why did the mount fail? ?Did you set the environment as required for
+> liblustre? ?I notice you are using 1.9.80. ?This branch is still in
+> development and it could be entirely possible that liblustre on that
+> branch is simply not (yet) working. ?Have you tried to reproduce your
+> problem with a stable, known-working release?
+>
+> If you really want to debug the problem with 1.9.80 you need to use more
+> basic methods of calling liblustre and when, and only when you know that
+> works, start layering your Java wrapper on top of it. ?Maybe
+> lustre/tests/acceptance-small.sh and/or lustre/liblustre/tests/sanity.c
+> can be of help there.
+>
+> b.
+>
+> _______________________________________________
+> Lustre-devel mailing list
+> Lustre-de... at lists.lustre.orghttp://lists.lustre.org/mailman/listinfo/lustre-devel
+
+
+From yjluan at gmail.com  Tue Nov  4 19:01:38 2008
+From: yjluan at gmail.com (kcruci)
+Date: Tue, 4 Nov 2008 19:01:38 -0800 (PST)
+Subject: [Lustre-devel] java successfully call the Native functions,
+	:-) but there are still some problems like "Lustre mount failed:
+	Invalid argument", when i call 	the  __liblustre_setup_().
+In-Reply-To: <1225806515.2247.240.camel@brian-laptop>
+References: <bfe9780e-a03e-4e21-916e-44f5a4db8dba@v39g2000pro.googlegroups.com>
+	<1225806515.2247.240.camel@brian-laptop>
+Message-ID: <a257968a-472f-43bd-93bf-5dfc96d3bd1f@u18g2000pro.googlegroups.com>
+
+
+I check the system environment(LIBLUSTRE_MOUNT_TARGET) and redo it
+with the reseased version 1.6.5.1, but the programme still halt at
+"Lustre mount failed: Invalid argument ".
+
+I write a test in c which call the function in liblustremkdir.so, and
+gcc it with liblustremkdir.so, the c tests run seccessfuly.
+
+So I make a bold assumption that the function "mount" was target  to
+system call instead of catching by libsysio.
+
+After that I add some print in source code, and the print is same
+between c and java tests at the first half, but java halt at  "Lustre
+mount failed: Invalid argument " and c run successfully.
+
+Here is the Java logs:
+====
+[root at ost JNItests]# java org.lustre.liblustre.test.MkDir
+begin to run Native method
+
+I am in libsysio/src/fs.c:_sysio_fssw_register
+_sysio_init has successfully runed
+I am in INIT_SYSIO*initialize libsysio & mount rootfs* block!
+I am in libsysio/src/fs.c:_sysio_fssw_register
+I am in liblustre/llite.c:lllib_init
+I am in libsysio/src/fs.c:_sysio_fssw_register
+liblustre/llite_lib.c:_sysio_lustre_init has RUNed!
+Lustre mount failed: Invalid argument
+[root at ost JNItests]#
+
+====
+
+As can be seen in the above log, the _sysio_init() and
+_sysio_lustre_init() has runed, so that the libsysio was inited and
+the "lustre" must be successfully registered to libsysio.
+
+So, my question is that why libsysio cannot catch the "mount" even the
+_sysio_init() and _sysio_lustre_init() has runed when using JNI.
+
+--
+Thanks!
+Ya-Jian.Luan
+
+
+On Nov 4, 9:48?pm, "Brian J. Murrell" <Brian.Murr... at Sun.COM> wrote:
+> On Mon, 2008-11-03 at 05:39 -0800, kcruci wrote:
+> > Hi all,
+> > I follow the JNI rules to write Javawrapper for the liblustre code,
+>
+> A good rule to follow when trying to debug a problem is to reduce it to
+> it's simplest case. ?In your case that means stripping the problem of
+> all of this Java and dealing with the basic problem which is:
+>
+>
+>
+> > ...
+> > 1225417124.467324:6009:grid.scut.edu.cn:(class_obd.c:
+> > 543:init_obdclass()):
+> > Lustre: 6009-grid.scut.edu.cn:(class_obd.c:543:init_obdclass()): OBD
+> > class driver,http://www.lustre.org/
+> > 1225417124.467374:6009:grid.scut.edu.cn:(class_obd.c:
+> > 544:init_obdclass()):
+> > Lustre: 6009-grid.scut.edu.cn:(class_obd.c:544:init_obdclass()):
+> > Lustre
+> > Version: 1.9.80
+> > 1225417124.467400:6009:grid.scut.edu.cn:(class_obd.c:
+> > 545:init_obdclass()):
+> > Lustre: 6009-grid.scut.edu.cn:(class_obd.c:545:init_obdclass()): Build
+> > Version:
+> > 1.9.80-20081019111435-CHANGED-.usr.src.linux-2.6.18-92.1.10-2.6.18-
+> > prep
+> > Lustre mount failed: Invalid argument
+>
+> So why did the mount fail? ?Did you set the environment as required for
+> liblustre? ?I notice you are using 1.9.80. ?This branch is still in
+> development and it could be entirely possible that liblustre on that
+> branch is simply not (yet) working. ?Have you tried to reproduce your
+> problem with a stable, known-working release?
+>
+> If you really want to debug the problem with 1.9.80 you need to use more
+> basic methods of calling liblustre and when, and only when you know that
+> works, start layering your Java wrapper on top of it. ?Maybe
+> lustre/tests/acceptance-small.sh and/or lustre/liblustre/tests/sanity.c
+> can be of help there.
+>
+> b.
+>
+> _______________________________________________
+> Lustre-devel mailing list
+> Lustre-de... at lists.lustre.orghttp://lists.lustre.org/mailman/listinfo/lustre-devel
+
+
+From reactivation at google.com  Wed Nov  5 06:25:46 2008
+From: reactivation at google.com (Google-AdWords)
+Date: Wed, 5 Nov 2008 14:25:46 +0000
+Subject: [Lustre-devel] Please Update Your Billing Information.
+Message-ID: <01c93f52$64561100$3e34eb5c@floridacanuk>
+
+-------------------------------------------------------------
+Dear Advertiser,
+
+Our attempt to charge your credit card for your
+outstanding Google AdWords account balance was declined.
+Your account is still open. However, your ads have been suspended. Once
+we are able to charge your card and receive payment for your account
+balance, we will re-activate your ads.
+
+Please update your billing information, even if you plan to use the
+same credit card. This will trigger our billing system to try charging
+your card again. You do not need to contact us to reactivate your
+account.
+
+To update your primary payment information, please follow these steps:
+
+1. Log in to your account
+2. Enter your primary payment information.
+3. Click 'Update' when you have finished.
+
+Thank you for advertising with Google AdWords. We look forward to
+providing you with the most effective advertising available.
+
+--------------------------------------------------------------------------------------
+This message was sent from a notification-only email address that does
+not accept incoming email. Please do not reply to this message. If you
+have any questions, please visit the Google AdWords Help Centre  
+-----------------------------------------------------------------------------------
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20081105/e876fbe1/attachment.htm>
+
+From Brian.Murrell at Sun.COM  Wed Nov  5 11:58:10 2008
+From: Brian.Murrell at Sun.COM (Brian J. Murrell)
+Date: Wed, 05 Nov 2008 14:58:10 -0500
+Subject: [Lustre-devel] java successfully call the Native functions,
+ :-) but there are still some problems like "Lustre mount
+ failed:	Invalid argument", when i call 	the  __liblustre_setup_().
+In-Reply-To: <a257968a-472f-43bd-93bf-5dfc96d3bd1f@u18g2000pro.googlegroups.com>
+References: <bfe9780e-a03e-4e21-916e-44f5a4db8dba@v39g2000pro.googlegroups.com>
+	<1225806515.2247.240.camel@brian-laptop>
+	<a257968a-472f-43bd-93bf-5dfc96d3bd1f@u18g2000pro.googlegroups.com>
+Message-ID: <1225915091.3785.57.camel@pc.interlinx.bc.ca>
+
+On Tue, 2008-11-04 at 19:01 -0800, kcruci wrote:
+> 
+> I write a test in c which call the function in liblustremkdir.so, and
+> gcc it with liblustremkdir.so, the c tests run seccessfuly.
+
+Ahhh.  Good.
+
+> So, my question is that why libsysio cannot catch the "mount" even the
+> _sysio_init() and _sysio_lustre_init() has runed when using JNI.
+
+Sorry, I have no idea.  I know nothing at all about developing in Java.
+Sounds like this is more a Java question than a Lustre question though.
+Maybe there is a different audience you can target that would know more
+about Java and external libraries than you will probably find here.
+
+b.
+
+-------------- next part --------------
+A non-text attachment was scrubbed...
+Name: not available
+Type: application/pgp-signature
+Size: 197 bytes
+Desc: This is a digitally signed message part
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20081105/b17f06a6/attachment.pgp>
+
+From aurelien.degremont at cea.fr  Thu Nov  6 07:47:23 2008
+From: aurelien.degremont at cea.fr (Aurelien Degremont)
+Date: Thu, 06 Nov 2008 16:47:23 +0100
+Subject: [Lustre-devel] [Lustre-shine-commits] SF.net SVN:
+	lustre-shine:[43]	branches/0.9-clusterdb/lib/Shine
+In-Reply-To: <E1KwzeG-0006Hy-4p@d5vjzd1.ch3.sourceforge.com>
+References: <E1KwzeG-0006Hy-4p@d5vjzd1.ch3.sourceforge.com>
+Message-ID: <4913118B.4080301@cea.fr>
+
+
+Quelques petites remarques pas m?chantes :)
+
+
+
+ > +(dans Commands/Tune.py)
+ > +            tuning = TuningModel(filename="/etc/shine/tuning.conf")
+
+Ne pas oublier que le fichier peut ?tre chang? dans shine.conf :)
+tuning = TuningModel(filename=Globals().get_tuning_file())
+
+
+
+> +    def __open_file(self):    
+> +        """
+> +        Function used to open the tuning configuration file specified in the __filename attribute
+> +        """
+> +        if self.__file != None:
+> +            # If the fil is already open raise an exception
+> +            raise Exception("File %s is already open" %(self.__filename))
+> +        else:
+> +            try:    
+> +                # Open the file
+> +                self.__file = open(self.__filename, "r")
+> +            except IOError, e:
+> +                    raise Exception("Failed to open the tuning configuration file : %s" %(str(e)))
+> +            
+
+- Fait attention ? ne pas lever des exceptions 'Exception', fait une 
+sous-classe avec un nom explicit et une petite ligne de doc.
+Sinon, un appelant ne peut pas 'catcher' cette erreur l? en particulier 
+et laisser remonter les autres. (Ne pas faire non plus 1 class par raise 
+dans le code :), certaines sont certainement du meme type :-)
+
+
+Es-tu sur d'avoir besoin d'un __open_file, __close_file alors qu'ils ne 
+sont appel? que dans __load_file ?
+Je pense que tu peux simplifier tout ca :)
+
+
+- Je me demandais, ? propos de la commande Tuning, dans quelle mesure 
+vous ?tes oblig? de coller ? la syntaxe de fichiers tuning.conf de 
+LustreUtil ?
+Ne serait-ce pas l'occasion de la rendre plus user-friendly?
+
+
+
+-- 
+Aurelien Degremont
+CEA
+
+
+From aurelien.degremont at cea.fr  Thu Nov  6 07:50:23 2008
+From: aurelien.degremont at cea.fr (Aurelien Degremont)
+Date: Thu, 06 Nov 2008 16:50:23 +0100
+Subject: [Lustre-devel] [Lustre-shine-commits] SF.net
+ SVN:	lustre-shine:[43] branches/0.9-clusterdb/lib/Shine
+In-Reply-To: <4913118B.4080301@cea.fr>
+References: <E1KwzeG-0006Hy-4p@d5vjzd1.ch3.sourceforge.com>
+	<4913118B.4080301@cea.fr>
+Message-ID: <4913123F.1040906@cea.fr>
+
+
+Sorry for my previous e-mail, this was a mistake. Please ignore it.
+
+
+
+Aurelien Degremont
+
+
+From Daire.Byrne at framestore.com  Tue Nov 11 09:03:05 2008
+From: Daire.Byrne at framestore.com (Daire Byrne)
+Date: Tue, 11 Nov 2008 17:03:05 +0000 (GMT)
+Subject: [Lustre-devel] Filesystem as a Database?
+Message-ID: <492897526.2298751226422985006.JavaMail.root@dahlback.prod.local>
+
+Hi,
+
+I'm curious if there is any interest in building a more DB-like interface into Lustre so that fast queries can be performed on the filesystem and things like file versioning could be recorded. We currently use an inhouse digital asset DB (DAB) which essentially uses a SQL database to version latest "releases" of files and record dependencies between files stored on the filesystem. Is the upcoming "Changelogs" feature a basic DB of sorts already?
+
+Our current asset DB uses special hidden dirs on the filesystem to "store" all the files and a separate SQL DB is used to record all their asset metadata and relationships - it might be nice one day to only need the filesystem. No doubt this is somewhat outside Lustre's mission statement but I thought I'd mention it! If nothing else it might be nice to be able to record simple metadata in files (e.g. EAs) and be able to search the filesystem quickly for files with certain attributes. And if OSSs could simultaneously search their own OSTs/DBs then it would be pretty scalable.
+
+Regards,
+
+Daire
+
+
+From eeb at sun.com  Tue Nov 11 14:11:41 2008
+From: eeb at sun.com (Eric Barton)
+Date: Tue, 11 Nov 2008 22:11:41 +0000
+Subject: [Lustre-devel] Filesystem as a Database?
+In-Reply-To: <492897526.2298751226422985006.JavaMail.root@dahlback.prod.local>
+References: <492897526.2298751226422985006.JavaMail.root@dahlback.prod.local>
+Message-ID: <56299F5AA95349789A097677617D95B7@ebpc>
+
+Daire,
+
+> I'm curious if there is any interest in building a more DB-like
+> interface into Lustre so that fast queries can be performed on the
+> filesystem and things like file versioning could be recorded. We
+> currently use an inhouse digital asset DB (DAB) which essentially
+> uses a SQL database to version latest "releases" of files and record
+> dependencies between files stored on the filesystem. Is the upcoming
+> "Changelogs" feature a basic DB of sorts already?
+
+Not in itself - but the changelog could be used as a feed for a database
+that tracks the filesystem, and then you could run your general purpose
+queries there.
+
+> Our current asset DB uses special hidden dirs on the filesystem to
+> "store" all the files and a separate SQL DB is used to record all
+> their asset metadata and relationships - it might be nice one day to
+> only need the filesystem. No doubt this is somewhat outside Lustre's
+> mission statement but I thought I'd mention it! If nothing else it
+> might be nice to be able to record simple metadata in files
+> (e.g. EAs) and be able to search the filesystem quickly for files
+> with certain attributes. And if OSSs could simultaneously search
+> their own OSTs/DBs then it would be pretty scalable.
+
+Indeed.  To keep with the design ideal of eliminating all scanning in
+normal operation, fast querying like this relies on being able to build
+and maintain an index on arbitrary file properties.  This is quite an
+interesting challenge if it is not to interfere with regular filesystem
+performance and makes at least the metadata server look much more like a
+general purpose database than a posix namespace.  So in that respect it
+does fall outside our current mission statement.  But as filesystems
+scale up to trillions of files, even fully parallel scans of the namespace
+will start to take unacceptably long and something like this could begin
+to become a requirement.
+
+    Cheers,
+              Eric
+
+
+
+From Brian.Murrell at Sun.COM  Tue Nov 11 14:24:13 2008
+From: Brian.Murrell at Sun.COM (Brian J. Murrell)
+Date: Tue, 11 Nov 2008 17:24:13 -0500
+Subject: [Lustre-devel] Filesystem as a Database?
+In-Reply-To: <56299F5AA95349789A097677617D95B7@ebpc>
+References: <492897526.2298751226422985006.JavaMail.root@dahlback.prod.local>
+	<56299F5AA95349789A097677617D95B7@ebpc>
+Message-ID: <1226442253.20254.14.camel@pc.interlinx.bc.ca>
+
+On Tue, 2008-11-11 at 22:11 +0000, Eric Barton wrote:
+> 
+> Not in itself - but the changelog could be used as a feed for a database
+> that tracks the filesystem, and then you could run your general purpose
+> queries there.
+...
+> Indeed.  To keep with the design ideal of eliminating all scanning in
+> normal operation, fast querying like this relies on being able to build
+> and maintain an index on arbitrary file properties.  This is quite an
+> interesting challenge if it is not to interfere with regular filesystem
+> performance and makes at least the metadata server look much more like a
+> general purpose database than a posix namespace.  So in that respect it
+> does fall outside our current mission statement.  But as filesystems
+> scale up to trillions of files, even fully parallel scans of the namespace
+> will start to take unacceptably long and something like this could begin
+> to become a requirement.
+
+Just as a datapoint, not really a suggest to use either of them, but
+this sounds an awful lot like what beagle and tracker aim to do for
+smaller scale filesystems today.  Granted those two indexers are more
+interested in content (i.e. indexing what's in files) than metadata
+(which is what I'm, perhaps incorrectly, understanding you are more
+interested in indexing) but there is nothing stopping anyone from adding
+a backend to track file metadata and query it-- if anyone was interested
+in it.  In fact beagle at least does index some metadata like file
+names, extensions, file/mime-type, etc.
+
+What is interesting is that in correlation or perhaps contrast to our
+changelogs, beagle (and probably tracker) use the Linux inotify
+interface to find out when filesystem state has changed.
+
+b.
+
+-------------- next part --------------
+A non-text attachment was scrubbed...
+Name: not available
+Type: application/pgp-signature
+Size: 197 bytes
+Desc: This is a digitally signed message part
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20081111/978db2d5/attachment.pgp>
+
+From jgl at johngroves.net  Tue Nov 11 11:23:04 2008
+From: jgl at johngroves.net (John Groves)
+Date: Tue, 11 Nov 2008 13:23:04 -0600
+Subject: [Lustre-devel] Lustre client disk cache (fscache)
+Message-ID: <b062d32b0811111123i36b84bd6lc7a197fbba81ae79@mail.gmail.com>
+
+Greetings,
+
+We (System Fabric Works) have been retained by Sun to prove concept on
+integrating the lustre client filesystem with a local disk cache
+(specifically fscache from Red Hat).
+
+Eric Barton and I discussed this several days ago, but I would appreciate
+others' feedback on the requirements and approach documented  below.  I'm
+relatively new to Lustre, so there is a very real possibility  that I "don't
+
+know what I don't know".
+
+Motivation
+
+This work is primarily motivated by the need to improve the performance
+of lustre clients as SMB servers to windows nodes.  As I understand it,
+this need is primarily for file readers.
+
+Requirements
+
+1. Enabling fscache should be a mount option, and there should be ioctl
+   support for enabling, disabling and querying a file's fscache usage.
+2. Data read into the page cache will be asynchronously copied to the
+   disk-based fscache upon arrival.
+3. If requested data is not present in the page cache, it will be retrieved
+   preferentially from the fscache.  If not present in the fscache, data
+   will be read via RPC.
+4. When pages are reclaimed due to memory pressure, they should remain in
+   the fscache.
+5. When a user writes a page (if we support fscache for non-read-only
+opens),
+   the corresponding fscache page must either be invalidated or
+   (more likely) rewritten.
+6. When a DLM lock is revoked, the entire extent of the lock must be
+   dropped from the fscache (in addition to dropping any page cache
+   resident pages) - regardless of whether any pages are currently resident
+   in the page cache.
+7. As sort-of a corollary to #6, DLM locks must not be canceled by the owner
+   as long as pages are resident in the fscache, even if memory pressure
+   reclamation has emptied the page cache for a given file.
+8. Utilities and test programs will be needed, of course.
+9. The fscache must be cleared upon mount or dismount.
+
+High Level Design Points
+
+The following is written based primarily on review of the 1.6.5.1 code.
+I'm aware that this is not the place for new development, but it was
+deemed a stable place for initial experimentation.
+
+Req.    Notes
+
+ 1.    In current Redhat distributions, fscache is included and
+    NFS includes fscache support, enabled by a mount option.
+    We don't see any problems with doing something similar.
+    A per-file ioctl to enable/disable fscache usage is also seen
+    as straightforward.
+
+ 2.     When an RPC read (into the page cache) completes, in the
+    ll_ap_completion() function, an asynchronous read to the
+    same offset in the file's fscache object will be initiated.
+    This should not materially impact access time (think dirty page
+    to fscache filesystem).
+
+ 3.     When the readpage method is invoked because a page is not
+    already resident in the page cache, the page will be read
+    first from the fscache.  This is non-blocking and (presumably)
+    fast for the non-resident case.  If available, the fscache
+    read will proceed asynchronously, after which the page will be
+    valid in the page cache.  If not available in the fscache,
+    the RPC read will proceed normally.
+
+ 4.     Page removal due to memory pressure is triggered by a call to
+    the llap_shrink_cache function.  This function should not require
+    any material change, since pages can be removed from the page
+    cache without removal from the fscache in this case.  In fact,
+    if this doesn't happen, the fscache will never be read.
+    (note: test coverage will be important here)
+
+ 5.    It may be reasonable in early code to enable fscache only
+    for read-only opens.  However, we don't see any inherent problems
+    with running an asynchronous write to the fscache concurrently
+    with a Lustre RPC write.  Note that this approach would *never*
+    have dirty pages exist only in the fscache; if it's dirty it
+    stays in the page cache until it's written via RPC (or RPC
+    AND fscache if we're writing to both places)..
+
+ 6 & 7    This is where it gets a little more tedious.  Let me revert to
+    paragraph form to address these cases below.
+
+ 8    Testing will require the following:
+    * ability to query and punch holes in the page cache (already done).
+    * ability to query and punch holes in the fscache (nearly done).
+
+ 9  I presume that all locks are canceled when a client dismounts
+    a filesystem, in which case it would never be safe to use data
+    in the fscache from a prior mount.
+
+
+Lock Revocation
+
+Please apply that "it looks to me like this is how things work" filter here;
+I am still pretty new to Lustre (thanks).  My questions are summarized
+after the the text of this section.
+
+As of 1.6.5.1, DLM locks keep a list of page-cached pages
+(lock->l_extents_list contains osc_async_page structs for all currently
+cached pages - and I think the word extent is used both for each page cached
+under a lock, and to describe a locked region...is this right?).  If a lock
+is revoked, that list is torn down and the pages are freed.  Pages are also
+removed from that list when they are freed due to memory pressure, making
+that list sparse with regard to the actual region of the lock.
+
+Adding fscache, there will be zero or more page-cache pages in the extent
+list, as well as zero or more pages in the file object in the fscache.
+The primary question, then, is whether a lock will remain valid (i.e. not be
+voluntarily released) if all of the page-cache pages are freed for
+non-lock-related reasons (see question 3 below).
+
+The way I foresee cleaning up the fscache is by looking at the overall
+extent of the lock (at release or revocation time), and punching a
+lock-extent-sized hole in the fscache object prior to looping through
+the page list (possibly in cache_remove_lock() prior to calling
+cache_remove_extents_from_lock()).
+
+However, that would require finding the inode, which (AFAICS) is not
+available in that context (ironically, unless the l_extents_list is non-
+empty, in which case the inode can be found via any of the page structs in
+the list).  I have put in a hack to solve this, but see question 6 below.
+
+Summarized questions:
+Q1: Where can I read up on the unit testing infrastructure for Lustre?
+Q2: Is stale cache already covered by existing unit tests?
+Q3: Will a DLM lock remain valid (i.e. not be canceled) even if its page
+    list is empty (i.e. all pages have been freed due to memory pressure)?
+Q4: Will there *always* be a call to cache_remove_lock() when a lock is
+    canceled or revoked?  (i.e. is this the place to punch a hole in the
+    fscache object?)
+Q5: for the purpose of punching a hole in a cache object upon lock
+    revocation, can I rely on the lock->l_req_extent structure as the
+    actual extent of the lock?
+Q6: a) is there a way to find the inode that I've missed?, and
+    b) if not what is the preferred way of giving that function a way to
+    find the inode?
+
+...
+
+FYI we have done some experimenting and we have the read path in a
+demonstrable state, including crude code to effect lock revocation on the
+fscache contents.  The NFS code modularized the fscache hooks pretty nicely,
+and we have followed that example.
+
+Thanks,
+John Groves
+John at SystemFabricWorks.com
++1-512-302-4005
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20081111/31e52478/attachment.htm>
+
+From Daire.Byrne at framestore.com  Wed Nov 12 01:55:51 2008
+From: Daire.Byrne at framestore.com (Daire Byrne)
+Date: Wed, 12 Nov 2008 09:55:51 +0000 (GMT)
+Subject: [Lustre-devel] Filesystem as a Database?
+In-Reply-To: <1226442253.20254.14.camel@pc.interlinx.bc.ca>
+Message-ID: <676021711.2342261226483751092.JavaMail.root@dahlback.prod.local>
+
+Eric/Brian,
+
+Cheers for the replies. I was really just thinking out loud while trying to get my head around the design of our new inhouse asset database. I was imagining what useful functionality there could be in mixing a filesystem and database together. Sorry for spamming the devel list!
+
+Daire
+
+----- "Brian J. Murrell" <Brian.Murrell at Sun.COM> wrote:
+
+> On Tue, 2008-11-11 at 22:11 +0000, Eric Barton wrote:
+> > 
+> > Not in itself - but the changelog could be used as a feed for a
+> database
+> > that tracks the filesystem, and then you could run your general
+> purpose
+> > queries there.
+> ...
+> > Indeed.  To keep with the design ideal of eliminating all scanning
+> in
+> > normal operation, fast querying like this relies on being able to
+> build
+> > and maintain an index on arbitrary file properties.  This is quite
+> an
+> > interesting challenge if it is not to interfere with regular
+> filesystem
+> > performance and makes at least the metadata server look much more
+> like a
+> > general purpose database than a posix namespace.  So in that respect
+> it
+> > does fall outside our current mission statement.  But as
+> filesystems
+> > scale up to trillions of files, even fully parallel scans of the
+> namespace
+> > will start to take unacceptably long and something like this could
+> begin
+> > to become a requirement.
+> 
+> Just as a datapoint, not really a suggest to use either of them, but
+> this sounds an awful lot like what beagle and tracker aim to do for
+> smaller scale filesystems today.  Granted those two indexers are more
+> interested in content (i.e. indexing what's in files) than metadata
+> (which is what I'm, perhaps incorrectly, understanding you are more
+> interested in indexing) but there is nothing stopping anyone from
+> adding
+> a backend to track file metadata and query it-- if anyone was
+> interested
+> in it.  In fact beagle at least does index some metadata like file
+> names, extensions, file/mime-type, etc.
+> 
+> What is interesting is that in correlation or perhaps contrast to our
+> changelogs, beagle (and probably tracker) use the Linux inotify
+> interface to find out when filesystem state has changed.
+> 
+> b.
+
+
+From robl at mcs.anl.gov  Wed Nov 12 09:35:48 2008
+From: robl at mcs.anl.gov (Robert Latham)
+Date: Wed, 12 Nov 2008 11:35:48 -0600
+Subject: [Lustre-devel] [Lustre-discuss] a new Lustre ADIO driver
+In-Reply-To: <49114151.10908@sun.com>
+References: <49110B1A.5030201@sun.com> <49114151.10908@sun.com>
+Message-ID: <20081112173548.GC16693@mcs.anl.gov>
+
+On Wed, Nov 05, 2008 at 02:46:41PM +0800, emoly.liu wrote:
+> Hi,
+>
+> Here is some description and performance results for the new Lustre ADIO  
+> driver. You might be interested.
+>
+> The main purpose of the new lustre adio driver is to collect the small  
+> size I/O requests into fewer number of larger ones according to Lustre's  
+> striping feature with low overhead automatically. We also provide some  
+> hints for performance tuning.
+>
+> In the following graph, the recent FLASH I/O benchmarking result shows  
+> that the new driver performs much better than the old one, especially  
+> for a large-scale system.
+> In this test, FLASH I/O blocksize is 4*4*4 that means each 3 clients  
+> write 40KB, 40.5KB and 42KB respectively. The I/O operation iteration  
+> (nvar) is set to 1024.
+
+Hi LiuYing
+
+Since this patch is for ROMIO and not really for Lustre, could you
+send this to romio-maint at mcs.anl.gov ?  It will reach more of the
+ROMIO developers that way.
+
+Thanks
+==rob
+
+-- 
+Rob Latham
+Mathematics and Computer Science Division    A215 0178 EA2D B059 8CDF
+Argonne National Lab, IL USA                 B29D F333 664A 4280 315B
+
+
+From neutronsharc at gmail.com  Tue Nov 11 20:57:43 2008
+From: neutronsharc at gmail.com (neutron)
+Date: Tue, 11 Nov 2008 23:57:43 -0500
+Subject: [Lustre-devel] hello all
+Message-ID: <7d5928b30811112057k61ae3230q7d75e6f34cfb0042@mail.gmail.com>
+
+hi all,
+
+
+I'm a beginner with lustre.  I have played with an already setup
+lustre FS for a couple of days.  Now I want to roll up my sleeves and
+do some simple works inside lustre.  For example, I want to add some
+"printk"s in lustre code, and collect some statistic information.  But
+I don't know where the lustre code is:(
+
+"uname -r" gives kernel as "2.6.9.67.0.7.EL_lustre.1.6.5.1".  I think
+the kernel is lustre-patched, but cannot see where lustre codes are.
+Where can I see the lustre sources ? and where shall I start from?
+Thanks a lot!
+
+
+-neutron
+
+
+From Daire.Byrne at framestore.com  Thu Nov 13 02:33:10 2008
+From: Daire.Byrne at framestore.com (Daire Byrne)
+Date: Thu, 13 Nov 2008 10:33:10 +0000 (GMT)
+Subject: [Lustre-devel] Lustre client disk cache (fscache)
+In-Reply-To: <b062d32b0811111123i36b84bd6lc7a197fbba81ae79@mail.gmail.com>
+Message-ID: <1186150022.2495441226572390233.JavaMail.root@dahlback.prod.local>
+
+John,
+
+Unfortunately I can't help you much with the coding but I just thought I'd drop a quick email to let you know that we are extremely interested in this feature. We have used large memory cache NFS export servers to speed up small file metadata workloads already and we are looking to use the same system to provide WLAN access. The idea being that our London renderfarm is closely coupled to the storage but yet our remote (New York and Iceland) offices can work interactively with the resulting data. The disk cache will obviously greatly increase the cache retention. We are more than willing to test this code when it gets to a working state - good luck!
+
+Daire
+
+
+----- "John Groves" <jgl at johngroves.net> wrote:
+
+> Greetings,
+> 
+> We (System Fabric Works) have been retained by Sun to prove concept on
+> integrating the lustre client filesystem with a local disk cache
+> (specifically fscache from Red Hat).
+> 
+> Eric Barton and I discussed this several days ago, but I would
+> appreciate
+> others' feedback on the requirements and approach documented below.
+> I'm
+> relatively new to Lustre, so there is a very real possibility that I
+> "don't
+> know what I don't know".
+> 
+> Motivation
+> 
+> This work is primarily motivated by the need to improve the
+> performance
+> of lustre clients as SMB servers to windows nodes. As I understand it,
+> this need is primarily for file readers.
+> 
+> Requirements
+> 
+> 1. Enabling fscache should be a mount option, and there should be
+> ioctl
+> support for enabling, disabling and querying a file's fscache usage.
+> 2. Data read into the page cache will be asynchronously copied to the
+> disk-based fscache upon arrival.
+> 3. If requested data is not present in the page cache, it will be
+> retrieved
+> preferentially from the fscache. If not present in the fscache, data
+> will be read via RPC.
+> 4. When pages are reclaimed due to memory pressure, they should remain
+> in
+> the fscache.
+> 5. When a user writes a page (if we support fscache for non-read-only
+> opens),
+> the corresponding fscache page must either be invalidated or
+> (more likely) rewritten.
+> 6. When a DLM lock is revoked, the entire extent of the lock must be
+> dropped from the fscache (in addition to dropping any page cache
+> resident pages) - regardless of whether any pages are currently
+> resident
+> in the page cache.
+> 7. As sort-of a corollary to #6, DLM locks must not be canceled by the
+> owner
+> as long as pages are resident in the fscache, even if memory pressure
+> reclamation has emptied the page cache for a given file.
+> 8. Utilities and test programs will be needed, of course.
+> 9. The fscache must be cleared upon mount or dismount.
+> 
+> High Level Design Points
+> 
+> The following is written based primarily on review of the 1.6.5.1
+> code.
+> I'm aware that this is not the place for new development, but it was
+> deemed a stable place for initial experimentation.
+> 
+> Req. Notes
+> 
+> 1. In current Redhat distributions, fscache is included and
+> NFS includes fscache support, enabled by a mount option.
+> We don't see any problems with doing something similar.
+> A per-file ioctl to enable/disable fscache usage is also seen
+> as straightforward.
+> 
+> 2. When an RPC read (into the page cache) completes, in the
+> ll_ap_completion() function, an asynchronous read to the
+> same offset in the file's fscache object will be initiated.
+> This should not materially impact access time (think dirty page
+> to fscache filesystem).
+> 
+> 3. When the readpage method is invoked because a page is not
+> already resident in the page cache, the page will be read
+> first from the fscache. This is non-blocking and (presumably)
+> fast for the non-resident case. If available, the fscache
+> read will proceed asynchronously, after which the page will be
+> valid in the page cache. If not available in the fscache,
+> the RPC read will proceed normally.
+> 
+> 4. Page removal due to memory pressure is triggered by a call to
+> the llap_shrink_cache function. This function should not require
+> any material change, since pages can be removed from the page
+> cache without removal from the fscache in this case. In fact,
+> if this doesn't happen, the fscache will never be read.
+> (note: test coverage will be important here)
+> 
+> 5. It may be reasonable in early code to enable fscache only
+> for read-only opens. However, we don't see any inherent problems
+> with running an asynchronous write to the fscache concurrently
+> with a Lustre RPC write. Note that this approach would *never*
+> have dirty pages exist only in the fscache; if it's dirty it
+> stays in the page cache until it's written via RPC (or RPC
+> AND fscache if we're writing to both places)..
+> 
+> 6 & 7 This is where it gets a little more tedious. Let me revert to
+> paragraph form to address these cases below.
+> 
+> 8 Testing will require the following:
+> * ability to query and punch holes in the page cache (already done).
+> * ability to query and punch holes in the fscache (nearly done).
+> 
+> 9 I presume that all locks are canceled when a client dismounts
+> a filesystem, in which case it would never be safe to use data
+> in the fscache from a prior mount.
+> 
+> 
+> Lock Revocation
+> 
+> Please apply that "it looks to me like this is how things work" filter
+> here;
+> I am still pretty new to Lustre (thanks). My questions are summarized
+> after the the text of this section.
+> 
+> As of 1.6.5.1 , DLM locks keep a list of page-cached pages
+> (lock->l_extents_list contains osc_async_page structs for all
+> currently
+> cached pages - and I think the word extent is used both for each page
+> cached
+> under a lock, and to describe a locked region...is this right?). If a
+> lock
+> is revoked, that list is torn down and the pages are freed. Pages are
+> also
+> removed from that list when they are freed due to memory pressure,
+> making
+> that list sparse with regard to the actual region of the lock.
+> 
+> Adding fscache, there will be zero or more page-cache pages in the
+> extent
+> list, as well as zero or more pages in the file object in the fscache.
+> The primary question, then, is whether a lock will remain valid (i.e.
+> not be
+> voluntarily released) if all of the page-cache pages are freed for
+> non-lock-related reasons (see question 3 below).
+> 
+> The way I foresee cleaning up the fscache is by looking at the overall
+> extent of the lock (at release or revocation time), and punching a
+> lock-extent-sized hole in the fscache object prior to looping through
+> the page list (possibly in cache_remove_lock() prior to calling
+> cache_remove_extents_from_lock()).
+> 
+> However, that would require finding the inode, which (AFAICS) is not
+> available in that context (ironically, unless the l_extents_list is
+> non-
+> empty, in which case the inode can be found via any of the page
+> structs in
+> the list). I have put in a hack to solve this, but see question 6
+> below.
+> 
+> Summarized questions:
+> Q1: Where can I read up on the unit testing infrastructure for Lustre?
+> Q2: Is stale cache already covered by existing unit tests?
+> Q3: Will a DLM lock remain valid (i.e. not be canceled) even if its
+> page
+> list is empty (i.e. all pages have been freed due to memory pressure)?
+> Q4: Will there *always* be a call to cache_remove_lock() when a lock
+> is
+> canceled or revoked? (i.e. is this the place to punch a hole in the
+> fscache object?)
+> Q5: for the purpose of punching a hole in a cache object upon lock
+> revocation, can I rely on the lock->l_req_extent structure as the
+> actual extent of the lock?
+> Q6: a) is there a way to find the inode that I've missed?, and
+> b) if not what is the preferred way of giving that function a way to
+> find the inode?
+> 
+> ...
+> 
+> FYI we have done some experimenting and we have the read path in a
+> demonstrable state, including crude code to effect lock revocation on
+> the
+> fscache contents. The NFS code modularized the fscache hooks pretty
+> nicely,
+> and we have followed that example.
+> 
+> Thanks,
+> John Groves
+> John at SystemFabricWorks.com
+> +1-512-302-4005 
+> _______________________________________________
+> Lustre-devel mailing list
+> Lustre-devel at lists.lustre.org
+> http://lists.lustre.org/mailman/listinfo/lustre-devel
+
+
+From Brian.Murrell at Sun.COM  Tue Nov  4 05:48:35 2008
+From: Brian.Murrell at Sun.COM (Brian J. Murrell)
+Date: Tue, 04 Nov 2008 08:48:35 -0500
+Subject: [Lustre-devel] java successfully call the Native functions,
+ :-) but there are still some problems like "Lustre mount
+ failed:	Invalid argument", when i call the 	__liblustre_setup_().
+In-Reply-To: <bfe9780e-a03e-4e21-916e-44f5a4db8dba@v39g2000pro.googlegroups.com>
+References: <bfe9780e-a03e-4e21-916e-44f5a4db8dba@v39g2000pro.googlegroups.com>
+Message-ID: <1225806515.2247.240.camel@brian-laptop>
+
+On Mon, 2008-11-03 at 05:39 -0800, kcruci wrote:
+> Hi all,
+> I follow the JNI rules to write Javawrapper for the liblustre code,
+
+A good rule to follow when trying to debug a problem is to reduce it to
+it's simplest case.  In your case that means stripping the problem of
+all of this Java and dealing with the basic problem which is:
+
+> ...
+> 1225417124.467324:6009:grid.scut.edu.cn:(class_obd.c:
+> 543:init_obdclass()):
+> Lustre: 6009-grid.scut.edu.cn:(class_obd.c:543:init_obdclass()): OBD
+> class driver, http://www.lustre.org/
+> 1225417124.467374:6009:grid.scut.edu.cn:(class_obd.c:
+> 544:init_obdclass()):
+> Lustre: 6009-grid.scut.edu.cn:(class_obd.c:544:init_obdclass()):
+> Lustre
+> Version: 1.9.80
+> 1225417124.467400:6009:grid.scut.edu.cn:(class_obd.c:
+> 545:init_obdclass()):
+> Lustre: 6009-grid.scut.edu.cn:(class_obd.c:545:init_obdclass()): Build
+> Version:
+> 1.9.80-20081019111435-CHANGED-.usr.src.linux-2.6.18-92.1.10-2.6.18-
+> prep
+> Lustre mount failed: Invalid argument
+
+So why did the mount fail?  Did you set the environment as required for
+liblustre?  I notice you are using 1.9.80.  This branch is still in
+development and it could be entirely possible that liblustre on that
+branch is simply not (yet) working.  Have you tried to reproduce your
+problem with a stable, known-working release?
+
+If you really want to debug the problem with 1.9.80 you need to use more
+basic methods of calling liblustre and when, and only when you know that
+works, start layering your Java wrapper on top of it.  Maybe
+lustre/tests/acceptance-small.sh and/or lustre/liblustre/tests/sanity.c
+can be of help there.
+
+b.
+
+
+
+
+From adilger at sun.com  Fri Nov 14 16:00:43 2008
+From: adilger at sun.com (Andreas Dilger)
+Date: Fri, 14 Nov 2008 17:00:43 -0700
+Subject: [Lustre-devel] Lustre client disk cache (fscache)
+In-Reply-To: <b062d32b0811111123i36b84bd6lc7a197fbba81ae79@mail.gmail.com>
+References: <b062d32b0811111123i36b84bd6lc7a197fbba81ae79@mail.gmail.com>
+Message-ID: <20081115000043.GE16005@webber.adilger.int>
+
+On Nov 11, 2008  13:23 -0600, John Groves wrote:
+> This work is primarily motivated by the need to improve the performance
+> of lustre clients as SMB servers to windows nodes.  As I understand it,
+> this need is primarily for file readers.
+> 
+> Requirements
+> 
+> 1. Enabling fscache should be a mount option, and there should be ioctl
+>    support for enabling, disabling and querying a file's fscache usage.
+
+For Lustre there should also be the ability to do this via /proc/fs/lustre
+tunables/stats.
+
+> 2. Data read into the page cache will be asynchronously copied to the
+>    disk-based fscache upon arrival.
+> 3. If requested data is not present in the page cache, it will be retrieved
+>    preferentially from the fscache.  If not present in the fscache, data
+>    will be read via RPC.
+> 4. When pages are reclaimed due to memory pressure, they should remain in
+>    the fscache.
+> 5. When a user writes a page (if we support fscache for non-read-only
+> opens),
+>    the corresponding fscache page must either be invalidated or
+>    (more likely) rewritten.
+> 6. When a DLM lock is revoked, the entire extent of the lock must be
+>    dropped from the fscache (in addition to dropping any page cache
+>    resident pages) - regardless of whether any pages are currently resident
+>    in the page cache.
+> 7. As sort-of a corollary to #6, DLM locks must not be canceled by the owner
+>    as long as pages are resident in the fscache, even if memory pressure
+>    reclamation has emptied the page cache for a given file.
+> 8. Utilities and test programs will be needed, of course.
+> 9. The fscache must be cleared upon mount or dismount.
+
+> High Level Design Points
+> 
+> The following is written based primarily on review of the 1.6.5.1 code.
+> I'm aware that this is not the place for new development, but it was
+> deemed a stable place for initial experimentation.
+
+Note that the client IO code was substantially re-written for the 2.0
+release.  The client IO code from 1.6.5 is still present through the
+1.8.x releases.
+
+> Req.    Notes
+> 
+>  1.    In current Redhat distributions, fscache is included and
+>     NFS includes fscache support, enabled by a mount option.
+>     We don't see any problems with doing something similar.
+>     A per-file ioctl to enable/disable fscache usage is also seen
+>     as straightforward.
+> 
+>  2.     When an RPC read (into the page cache) completes, in the
+>     ll_ap_completion() function, an asynchronous read to the
+>     same offset in the file's fscache object will be initiated.
+>     This should not materially impact access time (think dirty page
+>     to fscache filesystem).
+
+Do you mean an "asynchronous write to the ... fscache object"?
+
+>  3.     When the readpage method is invoked because a page is not
+>     already resident in the page cache, the page will be read
+>     first from the fscache.  This is non-blocking and (presumably)
+>     fast for the non-resident case.  If available, the fscache
+>     read will proceed asynchronously, after which the page will be
+>     valid in the page cache.  If not available in the fscache,
+>     the RPC read will proceed normally.
+> 
+>  4.     Page removal due to memory pressure is triggered by a call to
+>     the llap_shrink_cache function.  This function should not require
+>     any material change, since pages can be removed from the page
+>     cache without removal from the fscache in this case.  In fact,
+>     if this doesn't happen, the fscache will never be read.
+>     (note: test coverage will be important here)
+> 
+>  5.    It may be reasonable in early code to enable fscache only
+>     for read-only opens.  However, we don't see any inherent problems
+>     with running an asynchronous write to the fscache concurrently
+>     with a Lustre RPC write.  Note that this approach would *never*
+>     have dirty pages exist only in the fscache; if it's dirty it
+>     stays in the page cache until it's written via RPC (or RPC
+>     AND fscache if we're writing to both places)..
+
+This is dangerous from the point of view that the write to the fscache
+may succeed, but the RPC may fail for a number of reasons (e.g. client
+eviction) so it would seem that the write to the fscache cannot start
+until the RPC completes successfully.
+
+>  6 & 7    This is where it gets a little more tedious.  Let me revert to
+>     paragraph form to address these cases below.
+> 
+>  8    Testing will require the following:
+>     * ability to query and punch holes in the page cache (already done).
+>     * ability to query and punch holes in the fscache (nearly done).
+> 
+>  9  I presume that all locks are canceled when a client dismounts
+>     a filesystem, in which case it would never be safe to use data
+>     in the fscache from a prior mount.
+
+A potential future improvement in the second generation of this feature
+might be the ability to revalidate the files in the local disk cache by
+the MDT and OST object versions, if those are also stored in fscache.
+
+> Lock Revocation
+> 
+> Please apply that "it looks to me like this is how things work" filter here;
+> I am still pretty new to Lustre (thanks).  My questions are summarized
+> after the the text of this section.
+> 
+> As of 1.6.5.1, DLM locks keep a list of page-cached pages
+> (lock->l_extents_list contains osc_async_page structs for all currently
+> cached pages - and I think the word extent is used both for each page cached
+> under a lock, and to describe a locked region...is this right?).  If a lock
+> is revoked, that list is torn down and the pages are freed.  Pages are also
+> removed from that list when they are freed due to memory pressure, making
+> that list sparse with regard to the actual region of the lock.
+> 
+> Adding fscache, there will be zero or more page-cache pages in the extent
+> list, as well as zero or more pages in the file object in the fscache.
+> The primary question, then, is whether a lock will remain valid (i.e. not be
+> voluntarily released) if all of the page-cache pages are freed for
+> non-lock-related reasons (see question 3 below).
+
+Yes, the lock can remain valid on the client even when no pages are
+protected by the lock.  However, locks with few pages are more likely
+to be cancelled by the DLM LRU because the cost of re-fetching those
+locks is much smaller compared to locks covering lots of data.  The
+lock "weight" function would need to be enhanced to include pages that
+are in fscache instead of just those in memory.
+
+> The way I foresee cleaning up the fscache is by looking at the overall
+> extent of the lock (at release or revocation time), and punching a
+> lock-extent-sized hole in the fscache object prior to looping through
+> the page list (possibly in cache_remove_lock() prior to calling
+> cache_remove_extents_from_lock()).
+> 
+> However, that would require finding the inode, which (AFAICS) is not
+> available in that context (ironically, unless the l_extents_list is non-
+> empty, in which case the inode can be found via any of the page structs in
+> the list).  I have put in a hack to solve this, but see question 6 below.
+
+Actually, each lock has a back-pointer to the inode that is referencing
+it, in l_ast_data, so that lock_cancel->mapping->page_removal can work.
+Use ll_inode_from_lock() for this.
+
+> Summarized questions:
+> Q1: Where can I read up on the unit testing infrastructure for Lustre?
+
+There is an internal wiki page with some information on this, it should
+probably be moved to the public wiki.
+
+> Q2: Is stale cache already covered by existing unit tests?
+
+I'm not sure what you mean.  There is no such thing as stale cache in
+Lustre.
+
+> Q3: Will a DLM lock remain valid (i.e. not be canceled) even if its page
+>     list is empty (i.e. all pages have been freed due to memory pressure)?
+
+Yes, though the reverse is impossible.
+
+> Q4: Will there *always* be a call to cache_remove_lock() when a lock is
+>     canceled or revoked?  (i.e. is this the place to punch a hole in the
+>     fscache object?)
+> Q5: for the purpose of punching a hole in a cache object upon lock
+>     revocation, can I rely on the lock->l_req_extent structure as the
+>     actual extent of the lock?
+
+No, there are two different extent ranges on each lock.  The requested
+extent, and the granted extent.  The requested extent is the minimum
+extent size that the server could possibly grant to the client to finish
+the operation (e.g. large enough to handle a single read or write syscall).
+The server may decide to grant a larger lock if the resource (object) is
+not contended.
+
+In the current implementation, the DLM will always grant a full-file lock
+to the first client that requests it, because the most common application
+case is that only a single client is accessing the file.  This avoids any
+future lock requests for this file in the majority of cases.
+
+> Q6: a) is there a way to find the inode that I've missed?, and
+>     b) if not what is the preferred way of giving that function a way to
+>     find the inode?
+
+See above.
+
+> FYI we have done some experimenting and we have the read path in a
+> demonstrable state, including crude code to effect lock revocation on the
+> fscache contents.  The NFS code modularized the fscache hooks pretty nicely,
+> and we have followed that example.
+
+Cheers, Andreas
+--
+Andreas Dilger
+Sr. Staff Engineer, Lustre Group
+Sun Microsystems of Canada, Inc.
+
+
+
+From Brian.Murrell at Sun.COM  Tue Nov  4 05:48:35 2008
+From: Brian.Murrell at Sun.COM (Brian J. Murrell)
+Date: Tue, 04 Nov 2008 08:48:35 -0500
+Subject: [Lustre-devel] java successfully call the Native functions,
+ :-) but there are still some problems like "Lustre mount
+ failed:	Invalid argument", when i call the 	__liblustre_setup_().
+In-Reply-To: <bfe9780e-a03e-4e21-916e-44f5a4db8dba@v39g2000pro.googlegroups.com>
+References: <bfe9780e-a03e-4e21-916e-44f5a4db8dba@v39g2000pro.googlegroups.com>
+Message-ID: <1225806515.2247.240.camel@brian-laptop>
+
+On Mon, 2008-11-03 at 05:39 -0800, kcruci wrote:
+> Hi all,
+> I follow the JNI rules to write Javawrapper for the liblustre code,
+
+A good rule to follow when trying to debug a problem is to reduce it to
+it's simplest case.  In your case that means stripping the problem of
+all of this Java and dealing with the basic problem which is:
+
+> ...
+> 1225417124.467324:6009:grid.scut.edu.cn:(class_obd.c:
+> 543:init_obdclass()):
+> Lustre: 6009-grid.scut.edu.cn:(class_obd.c:543:init_obdclass()): OBD
+> class driver, http://www.lustre.org/
+> 1225417124.467374:6009:grid.scut.edu.cn:(class_obd.c:
+> 544:init_obdclass()):
+> Lustre: 6009-grid.scut.edu.cn:(class_obd.c:544:init_obdclass()):
+> Lustre
+> Version: 1.9.80
+> 1225417124.467400:6009:grid.scut.edu.cn:(class_obd.c:
+> 545:init_obdclass()):
+> Lustre: 6009-grid.scut.edu.cn:(class_obd.c:545:init_obdclass()): Build
+> Version:
+> 1.9.80-20081019111435-CHANGED-.usr.src.linux-2.6.18-92.1.10-2.6.18-
+> prep
+> Lustre mount failed: Invalid argument
+
+So why did the mount fail?  Did you set the environment as required for
+liblustre?  I notice you are using 1.9.80.  This branch is still in
+development and it could be entirely possible that liblustre on that
+branch is simply not (yet) working.  Have you tried to reproduce your
+problem with a stable, known-working release?
+
+If you really want to debug the problem with 1.9.80 you need to use more
+basic methods of calling liblustre and when, and only when you know that
+works, start layering your Java wrapper on top of it.  Maybe
+lustre/tests/acceptance-small.sh and/or lustre/liblustre/tests/sanity.c
+can be of help there.
+
+b.
+
+
+
+
+From adilger at sun.com  Mon Nov 24 23:37:31 2008
+From: adilger at sun.com (adilger at sun.com)
+Date: Tue, 25 Nov 2008 00:37:31 -0700
+Subject: [Lustre-devel] readahead performance improvement
+In-Reply-To: <DDA5DF6A64A9A6418661A501B3B8465201F9959A2C@msgbal514.ds.susq.com>
+References: <DDA5DF6A64A9A6418661A501B3B8465201F9959A2C@msgbal514.ds.susq.com>
+Message-ID: <20081125073731.GN3186@webber.adilger.int>
+
+On Nov 24, 2008  15:39 -0500, Wallior, Julien wrote:
+> we are using Samba servers to share our Lustre out to the Windows world.
+> We can make a few assumptions about our work load from Windows:
+>
+> - all the reads are sequential
+> - we use 1MB IOs (which gets broken up into 64k IO by CIFS)
+> - we read the whole file
+> 
+> I wrote a patch for lustre to help use get better performance. Basically,
+> I disable the readahead algorithm and replace the initialization of the
+> read-ahead window in ll_file_read by the following logic:
+>
+> If the read is aligned (to a 1MB boundary):
+>         Bead.lrr_count=1MB
+> Else
+>         Do nothing
+
+One of the problems with this change is that the first read of the file
+is at offset 0, but it should not invoke readahead.  Only later reads from
+the file will invoke the readahead, once a sequential access pattern is seen.
+The problem is that it would take another (1MB/64kB - 1) = 15 64kB reads to
+get to the next 1MB boundary.  The other problem is that this assumes the
+file striping is 1MB, but that isn't always the case.
+
+
+Looking at the existing Lustre ll_readahead code I see:
+
+        /* Enlarge the RA window to encompass the full read */
+	if (bead != NULL && ras->ras_window_start +
+	    ras->ras_window_len < bead->lrr_start + bead->lrr_count) {
+		ras->ras_window_len = bead->lrr_start + bead->lrr_count -
+			ras->ras_window_start;
+	}
+
+This is incorrect in my opinion.  The readahead window should be grown
+to the end of the first stripe boundary (usually 1MB, but it depends
+on striping), and then continue with aligned stripe sized reads (or
+multiples thereof to make full RPCs).  That can be determined by the
+readahead code correctly using the obd_extent_calc() method.
+
+It doesn't really make sense for Lustre clients to issue reads that are
+less than a full stripe and/or full RPC in size.
+
+I also see in two places the identical code:
+
+		bead.lrr_start = *ppos >> CFS_PAGE_SHIFT;
+		bead.lrr_count = (count + CFS_PAGE_SIZE - 1) >> CFS_PAGE_SHIFT;
+		ll_ra_read_in(&bead);
+
+It also makes sense that this bead initialization is done in ll_ra_read_in(),
+and it should probably be renamed ll_ra_read_init().
+
+> Therefore, when ll_readpage is called, it will prepopulate the cache
+> and the LUNs will see 1MB IOs.
+> 
+> Would you be interested in patches like that? Should I start another
+> bugzilla, or send an email to lustre-devel?
+
+I'd be interested to see the patches, and I've CC'd lustre-devel for
+further discussion.
+
+Cheers, Andreas
+--
+Andreas Dilger
+Sr. Staff Engineer, Lustre Group
+Sun Microsystems of Canada, Inc.
+
+
+
+From aik at fnal.gov  Tue Nov 25 08:59:10 2008
+From: aik at fnal.gov (Alex Kulyavtsev)
+Date: Tue, 25 Nov 2008 10:59:10 -0600
+Subject: [Lustre-devel] HSM arch wiki
+In-Reply-To: <48FD0F98.9040300@sun.com>
+References: <48EE87A1.7000003@sun.com> <48F379B4.6040209@cea.fr>
+	<48FD0F98.9040300@sun.com>
+Message-ID: <492C2EDE.70507@fnal.gov>
+
+Few questions :
+- For large existing archive of tapes (~10,000,000 files) it is 
+desirable to import file metadata to lustre fs without actually copying 
+files on disk.
+Import shall be done in reasonable time (hours rather than month) or online.
+
+- to provide bandwidth to tape it is desirable to have multiple migrator 
+nodes connected to HSM. What element of proposed design distributes 
+copy-out processes across migrator nodes to provide scalability ? Is it 
+functionality of HSM specific copy tool or does lustre agent provide it ?
+
+- a "smart" HSM system can reorder requests to optimize tape access. It 
+is common to have 2000 requests pending in queue with tens or hundreds 
+IO transfers actually served. Current limit of pending requests is about 
+30,000. We found implementing of pending requests as processes (one 
+copy-out tool process per request waiting for IO) is resource consuming 
+and is not scalable. What is the way to serve ~100,000 request waiting 
+for transfer ?
+
+- how to prestage files ? Send asynchronous request for copy-in file 
+from tape without blocking on wait. It is needed to stage large data 
+sets for future processing. Prestaging "file sets" is desirable.
+
+- what proposed scanario to handle OST down ? Suppose file is present on 
+one of OSTs and it went down (striping is one). My understanding is 
+client will wait when OST will come back (case[1]) and file will not be 
+staged from tape automatically. IF file is not present on any OST, it 
+will be staged immediately (case[2]). Is possible to stage file 
+automatically (case[1]) to another OST and mark a copy on old OST for 
+removal ?
+
+We discussed some of these questions with Peter, he suggested to ask on 
+devel list.
+
+Best regards, Alex.
+
+Nathaniel Rutman wrote:
+> High-level architecture page for the Lustre HSM project
+> http://arch.lustre.org/index.php?title=HSM_Migration
+>
+>
+> HSM core team - this is intended to be sufficient to write a full 
+> HLD/DLD from.  What is it missing?
+> _______________________________________________
+> Lustre-devel mailing list
+> Lustre-devel at lists.lustre.org
+> http://lists.lustre.org/mailman/listinfo/lustre-devel
+>   
+
+
+
+From Julien.Wallior at sig.com  Tue Nov 25 08:12:34 2008
+From: Julien.Wallior at sig.com (Wallior, Julien)
+Date: Tue, 25 Nov 2008 11:12:34 -0500
+Subject: [Lustre-devel] readahead performance improvement
+In-Reply-To: <20081125073731.GN3186@webber.adilger.int>
+References: <DDA5DF6A64A9A6418661A501B3B8465201F9959A2C@msgbal514.ds.susq.com>,
+	<20081125073731.GN3186@webber.adilger.int>
+Message-ID: <DDA5DF6A64A9A6418661A501B3B8465201F9B6304E@msgbal514.ds.susq.com>
+
+> One of the problems with this change is that the first read of the file
+> is at offset 0, but it should not invoke readahead.
+
+In our case, we can do readahead starting at offset 0 because we assume
+we'll be reading the whole file.
+
+> The other problem is that this assumes the
+> file striping is 1MB, but that isn't always the case.
+
+I'm using the PTLRPC_MAX_BRW_SIZE for 1MB.
+
+> Looking at the existing Lustre ll_readahead code I see:
+>
+>         /* Enlarge the RA window to encompass the full read */
+>         if (bead != NULL && ras->ras_window_start +
+>             ras->ras_window_len < bead->lrr_start + bead->lrr_count) {
+>                 ras->ras_window_len = bead->lrr_start + bead->lrr_count -
+>                         ras->ras_window_start;
+>         }
+>
+> This is incorrect in my opinion.  The readahead window should be grown
+> to the end of the first stripe boundary (usually 1MB, but it depends
+> on striping), and then continue with aligned stripe sized reads (or
+> multiples thereof to make full RPCs).  That can be determined by the
+> readahead code correctly using the obd_extent_calc() method.
+
+That would probably be a much better fix than mine. When we have a few
+reading thread we get only 1MB IOs on the OSS. But when we have a lot
+of thread (over 20), we see small IOs hitting the LUNs and that's what I'm
+trying to prevent.
+
+> I also see in two places the identical code:
+>
+>                 bead.lrr_start = *ppos >> CFS_PAGE_SHIFT;
+>                 bead.lrr_count = (count + CFS_PAGE_SIZE - 1) >> CFS_PAGE_SHIFT;
+>                 ll_ra_read_in(&bead);
+>
+> It also makes sense that this bead initialization is done in ll_ra_read_in(),
+> and it should probably be renamed ll_ra_read_init().
+
+That is probably a good idea. We are not using the path in ll_file_sendfile, so
+I didn't change that.
+
+> I'd be interested to see the patches, and I've CC'd lustre-devel for
+> further discussion.
+
+The patch is attached.
+
+Julien
+
+IMPORTANT: The information contained in this email and/or its attachments is confidential. If you are not the intended recipient, please notify the sender immediately by reply and immediately delete this message and all its attachments. Any review, use, reproduction, disclosure or dissemination of this message or any attachment by an unintended recipient is strictly prohibited. Neither this message nor any attachment is intended as or should be construed as an offer, solicitation or recommendation to buy or sell any security or other financial instrument. Neither the sender, his or her employer nor any of their respective affiliates makes any warranties as to the completeness or accuracy of any of the information contained herein or that this message or any of its attachments is free of viruses.
+-------------- next part --------------
+An embedded and charset-unspecified text was scrubbed...
+Name: alignedio.patch
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20081125/9edf3620/attachment.asc>
+
+From eeb at sun.com  Wed Nov 26 07:59:24 2008
+From: eeb at sun.com (Eric Barton)
+Date: Wed, 26 Nov 2008 15:59:24 +0000
+Subject: [Lustre-devel] sparse files
+Message-ID: <004701c94fdf$f4255b40$dc7011c0$@com>
+
+Question for the HSM team.
+
+Do we need to make the allocation map of a lustre file available
+to the HSM agent so it can avoid copying all the holes in sparse
+files?
+
+    Cheers,
+              Eric
+
+
+
+
+
+From Nathan.Rutman at Sun.COM  Wed Nov 26 08:29:56 2008
+From: Nathan.Rutman at Sun.COM (Nathaniel Rutman)
+Date: Wed, 26 Nov 2008 08:29:56 -0800
+Subject: [Lustre-devel] HSM arch wiki
+In-Reply-To: <492C2EDE.70507@fnal.gov>
+References: <48EE87A1.7000003@sun.com> <48F379B4.6040209@cea.fr>
+	<48FD0F98.9040300@sun.com> <492C2EDE.70507@fnal.gov>
+Message-ID: <492D7984.10708@sun.com>
+
+Alex Kulyavtsev wrote:
+> Few questions :
+> - For large existing archive of tapes (~10,000,000 files) it is 
+> desirable to import file metadata to lustre fs without actually 
+> copying files on disk.
+> Import shall be done in reasonable time (hours rather than month) or 
+> online.
+Agreed.  Probably best done via a special ioctl that would create a stub 
+file and populate the metadata.
+>
+> - to provide bandwidth to tape it is desirable to have multiple 
+> migrator nodes connected to HSM. What element of proposed design 
+> distributes copy-out processes across migrator nodes to provide 
+> scalability ? Is it functionality of HSM specific copy tool or does 
+> lustre agent provide it ?
+Lustre agents can run on multiple Lustre clients in parallel.  
+Coordinator distributes copyout jobs to different agents.
+>
+>
+> - a "smart" HSM system can reorder requests to optimize tape access. 
+> It is common to have 2000 requests pending in queue with tens or 
+> hundreds IO transfers actually served. Current limit of pending 
+> requests is about 30,000. We found implementing of pending requests as 
+> processes (one copy-out tool process per request waiting for IO) is 
+> resource consuming and is not scalable. What is the way to serve 
+> ~100,000 request waiting for transfer ?
+>
+Coordinator decides when to request copyin/out jobs, and could throttle 
+the total number of concurrent accesses.
+
+> - how to prestage files ? Send asynchronous request for copy-in file 
+> from tape without blocking on wait. It is needed to stage large data 
+> sets for future processing. Prestaging "file sets" is desirable.
+Policy engine would request copyin of files before cache miss on open.  
+Policy could define file sets.
+>
+> - what proposed scanario to handle OST down ? Suppose file is present 
+> on one of OSTs and it went down (striping is one). My understanding is 
+> client will wait when OST will come back (case[1]) and file will not 
+> be staged from tape automatically. IF file is not present on any OST, 
+> it will be staged immediately (case[2]). Is possible to stage file 
+> automatically (case[1]) to another OST and mark a copy on old OST for 
+> removal ?
+With our V2 HSM, we will have the ability to keep more detailed layouts; 
+this optimization could be part of those changes.
+>
+> We discussed some of these questions with Peter, he suggested to ask 
+> on devel list.
+We greatly appreciate it!  Please ask/suggest away.
+>
+> Best regards, Alex.
+>
+> Nathaniel Rutman wrote:
+>> High-level architecture page for the Lustre HSM project
+>> http://arch.lustre.org/index.php?title=HSM_Migration
+>>
+>>
+>> HSM core team - this is intended to be sufficient to write a full 
+>> HLD/DLD from.  What is it missing?
+>> _______________________________________________
+>> Lustre-devel mailing list
+>> Lustre-devel at lists.lustre.org
+>> http://lists.lustre.org/mailman/listinfo/lustre-devel
+>>   
+>
+
+
+
+From adilger at sun.com  Thu Nov 27 00:51:52 2008
+From: adilger at sun.com (Andreas Dilger)
+Date: Thu, 27 Nov 2008 01:51:52 -0700
+Subject: [Lustre-devel] sparse files
+In-Reply-To: <004701c94fdf$f4255b40$dc7011c0$@com>
+References: <004701c94fdf$f4255b40$dc7011c0$@com>
+Message-ID: <20081127085152.GA3186@webber.adilger.int>
+
+On Nov 26, 2008  15:59 +0000, Eric Barton wrote:
+> Question for the HSM team.
+> 
+> Do we need to make the allocation map of a lustre file available
+> to the HSM agent so it can avoid copying all the holes in sparse
+> files?
+
+There is already an ioctl for this supported by Lustre and ldiskfs
+that will allow dumping the extent maps if the HSM so chooses.  This
+ioctl is also supported in the upstream Linux kernels, so it will
+be possible to have generic tools take advantage of it as well.
+
+Cheers, Andreas
+--
+Andreas Dilger
+Sr. Staff Engineer, Lustre Group
+Sun Microsystems of Canada, Inc.
+
+
+
+From adilger at sun.com  Thu Nov 27 11:05:05 2008
+From: adilger at sun.com (Andreas Dilger)
+Date: Thu, 27 Nov 2008 12:05:05 -0700
+Subject: [Lustre-devel] HSM arch wiki
+In-Reply-To: <492C2EDE.70507@fnal.gov>
+References: <48EE87A1.7000003@sun.com> <48F379B4.6040209@cea.fr>
+	<48FD0F98.9040300@sun.com> <492C2EDE.70507@fnal.gov>
+Message-ID: <20081127190505.GH3186@webber.adilger.int>
+
+On Nov 25, 2008  10:59 -0600, Alex Kulyavtsev wrote:
+> - For large existing archive of tapes (~10,000,000 files) it is  
+> desirable to import file metadata to lustre fs without actually copying  
+> files on disk.
+> Import shall be done in reasonable time (hours rather than month) or online.
+
+Concievably this could be done with "mknod" and "setxattr" to store the
+striping information into the Lustre inode.  However, one issue will be
+how to identify this new file to the HSM.  The current plan is that the
+Lustre HSM policy engine database will contain the mapping between the
+Lustre FID (~= inode number) and the file in the archive.
+
+Since this is a new file (FID) then we would also need to add an entry to
+the policy engine database that contains the mapping from FID->archive
+file.
+
+> - a "smart" HSM system can reorder requests to optimize tape access. It  
+> is common to have 2000 requests pending in queue with tens or hundreds  
+> IO transfers actually served. Current limit of pending requests is about  
+> 30,000. We found implementing of pending requests as processes (one  
+> copy-out tool process per request waiting for IO) is resource consuming  
+> and is not scalable. What is the way to serve ~100,000 request waiting  
+> for transfer ?
+
+The Lustre HSM design has the policy engine as a mediator between the
+copyin/copyout/purge requests and the userspace agents that are specific
+to the HSM and do the actual work.
+
+The policy engine it is free to reorder all of the requests as it sees
+fit.  CEA is supplying their existing policy engine as a starting point
+for Lustre HSM+HPSS, and I this could be made available to interested
+parties sooner rather than later.
+
+> - what proposed scanario to handle OST down ? Suppose file is present on  
+> one of OSTs and it went down (striping is one). My understanding is  
+> client will wait when OST will come back (case[1]) and file will not be  
+> staged from tape automatically. IF file is not present on any OST, it  
+> will be staged immediately (case[2]). Is possible to stage file  
+> automatically (case[1]) to another OST and mark a copy on old OST for  
+> removal ?
+
+Since the OST objects will be removed when the file is purged there is
+no requirement to store the file on a particular OST during copyin.
+The HSM will store the striping attributes (probably only if they do
+not match the filesystem defaults) to ensure that wide striped files
+retain this property when returned to the filesystem.
+
+In addition to not saving the striping for files that match the default
+layout, we may also consider to save the layout of files with
+"stripe_count == target_count" as having a stripe_count = -1 (stripe over
+all OSTs) so that if there are more OSTs available when the file is
+restored it takes advantage of the additional bandwidth.  We might also
+consider having a (policy engine?) tunable that files with > N stripes
+are restriped over all OSTs when restored.
+
+Cheers, Andreas
+--
+Andreas Dilger
+Sr. Staff Engineer, Lustre Group
+Sun Microsystems of Canada, Inc.
+
+
+
+From Emoly.Liu at Sun.COM  Thu Nov 27 19:48:43 2008
+From: Emoly.Liu at Sun.COM (emoly.liu)
+Date: Fri, 28 Nov 2008 11:48:43 +0800
+Subject: [Lustre-devel] [Lustre-discuss]   a new Lustre ADIO driver
+In-Reply-To: <20081112173548.GC16693@mcs.anl.gov>
+References: <49110B1A.5030201@sun.com> <49114151.10908@sun.com>
+	<20081112173548.GC16693@mcs.anl.gov>
+Message-ID: <492F6A1B.8020309@sun.com>
+
+Hi Robert,
+
+Robert Latham wrote:
+>
+> Hi LiuYing
+>
+> Since this patch is for ROMIO and not really for Lustre, could you
+> send this to romio-maint at mcs.anl.gov ?  It will reach more of the
+> ROMIO developers that way.
+>
+> Thanks
+> ==rob
+>
+>   
+Thanks for your advice. I will send it soon.
+
+-LiuYing
+
+-- 
+Best regards,
+
+LiuYing
+System Software Engineer, Lustre Group
+Sun Microsystems ( China ) Co. Limited
+
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20081128/f9097ded/attachment.htm>
+

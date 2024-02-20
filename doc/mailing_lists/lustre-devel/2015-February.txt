@@ -1,0 +1,400 @@
+From andreas.dilger at intel.com  Fri Feb  6 15:33:29 2015
+From: andreas.dilger at intel.com (Dilger, Andreas)
+Date: Fri, 6 Feb 2015 23:33:29 +0000
+Subject: [Lustre-devel] Removal of SOM code
+Message-ID: <D0FA9D65.DA3FB%andreas.dilger@intel.com>
+
+The Size on MDT (SOM) feature has been in a prototype state for several
+years, with no signs of moving beyond this prototype stage.
+
+Several problems exist in the code today, primarily that recovery is not
+really implemented, yet the existing code adds complexity on the clients
+and servers. Without proper recovery, the current code risks file data
+loss if the SOM data isn't updated on the MDS consistently with data
+writes to the OST.
+
+
+We're planning to remove the SOM code from the master branch as a result,
+tracked under https://jira.hpdd.intel.com/browse/LU-6047:
+- http://review.whamcloud.com/13126
+- http://review.whamcloud.com/13169
+- http://review.whamcloud.com/13442
+- http://review.whamcloud.com/13443
+
+Some of the performance improvements of SOM have been implemented by
+statahead.
+
+I think a case could be made for a very stripped down SOM to be
+implemented in the future, that only deals with single-client writers and
+synchronously invalidates the file size on open-for-write, which isn't so
+bad with flash storage for the MDT as is typical today.  The size of files
+that do not get set at initial write or are invalidated by an open can be
+updated asynchronously by LFSCK doing a periodic scan in the background.
+Since this stripped-down implementation would have very little to do with
+the current implementation, there isn't much benefit to even trying to fix
+the current code in place.
+
+I definitely prefer presenting about new features going into Lustre, but I
+also think it is important that people are aware when a semi-feature like
+this is being removed.  I don't believe that anyone is actually using this
+feature today, and the reduction in code maintenance and complexity will
+help both ongoing maintenance and bug fixing, as well as make it a that
+much easier for new developers to understand the code.
+
+Cheers, Andreas
+-- 
+Andreas Dilger
+
+Lustre Software Architect
+Intel High Performance Data Division
+
+
+
+
+From andreas.dilger at intel.com  Sat Feb  7 17:56:18 2015
+From: andreas.dilger at intel.com (Dilger, Andreas)
+Date: Sun, 8 Feb 2015 01:56:18 +0000
+Subject: [Lustre-devel] [HPDD-discuss] Removal of SOM code
+In-Reply-To: <CAC_cOcKVa=5XGcA81yimZHJ81H+5YQ24UXtQrdYBC9bsN1ihRw@mail.gmail.com>
+References: <D0FA9D65.DA3FB%andreas.dilger@intel.com>
+	<CAC_cOcKVa=5XGcA81yimZHJ81H+5YQ24UXtQrdYBC9bsN1ihRw@mail.gmail.com>
+Message-ID: <D0FC0E5D.DA6C4%andreas.dilger@intel.com>
+
+On 2015/02/06, 5:08 PM, "Meghan McClelland"
+<meghan.mcclelland at seagate.com> wrote:
+
+>Oh no! I had just been talking about using this feature :(
+>
+>Even in it's current form which I agree isn't ideal, I think it could
+>be helpful for a project like fssstats. Fsstats was an open effort to
+>gather and collect filesystems data (see
+>http://www.pdsi-scidac.org/fsstats/). It has unfortunately somewhat
+>died off due to loss of funding, but I think was a good idea that
+>helped the community, especially researchers.
+
+Meghan, I am also a fan of fsstats, though I'm not sure how that is
+related to this change, unless you had some mechanism to fetch the stats
+directly from the MDT?
+
+>I'd really like to try and revive the open data initiative, and saw
+>som as a possible avenue to start collecting the data.
+
+Ah, so you would fetch the stats directly from the MDT?
+
+> I don't think statahead will provide the information needed but haven't
+>had a chance to look at it.
+
+It would be possible to store a "lazy size on the MDS", which is updated
+on a best-effort basis (and could be repaired in the background by LFSCK).
+ This would be sufficient for most operations like filesystem stats, purge
+policies, etc. since it won't matter one way or the other in a histogram
+if the size of some files is off by a few KB, but that matters a great
+deal for reading the data.
+
+Implementing a "lazy size on MDS" would be pretty straight forward I think
+- the client just sends its current file size at close time, and the MDS
+picks the largest one (as it does with atimes).  If there is a truncate
+the MDS will get an RPC for this also, so the only risk is during a crash
+and that can be fixed up by LFSCK.
+
+The main difference with the current SOM code is that it wouldn't have any
+complexity during recovery, and it doesn't need to care too much if the
+client crashed or was later evicted by an OST before it wrote all the data
+to disk.
+
+Cheers, Andreas
+
+
+>On Fri, Feb 6, 2015 at 3:33 PM, Dilger, Andreas
+><andreas.dilger at intel.com> wrote:
+>> The Size on MDT (SOM) feature has been in a prototype state for several
+>> years, with no signs of moving beyond this prototype stage.
+>>
+>> Several problems exist in the code today, primarily that recovery is not
+>> really implemented, yet the existing code adds complexity on the clients
+>> and servers. Without proper recovery, the current code risks file data
+>> loss if the SOM data isn't updated on the MDS consistently with data
+>> writes to the OST.
+>>
+>>
+>> We're planning to remove the SOM code from the master branch as a
+>>result,
+>> tracked under 
+>>https://urldefense.proofpoint.com/v2/url?u=https-3A__jira.hpdd.intel.com_
+>>browse_LU-2D6047-3A&d=AwICAg&c=IGDlg0lD0b-nebmJJ0Kp8A&r=VKuhI1_CodqTbWyBg
+>>Nk0Z5da-Cpzi6WFMl6RJ0M1EeM&m=J0jMwPGPIPnotoqE8FhyhDf07Rh6V4BAMet6Wfh-bqM&
+>>s=TzuY05kGc01qUMWZZluqhikn49_0zzLDVoT8e7igolQ&e=
+>> - 
+>>https://urldefense.proofpoint.com/v2/url?u=http-3A__review.whamcloud.com_
+>>13126&d=AwICAg&c=IGDlg0lD0b-nebmJJ0Kp8A&r=VKuhI1_CodqTbWyBgNk0Z5da-Cpzi6W
+>>FMl6RJ0M1EeM&m=J0jMwPGPIPnotoqE8FhyhDf07Rh6V4BAMet6Wfh-bqM&s=sc9FrYH8KyW_
+>>9Un3Z-E_HXPRv5DPicF-Mc92PbET6hc&e=
+>> - 
+>>https://urldefense.proofpoint.com/v2/url?u=http-3A__review.whamcloud.com_
+>>13169&d=AwICAg&c=IGDlg0lD0b-nebmJJ0Kp8A&r=VKuhI1_CodqTbWyBgNk0Z5da-Cpzi6W
+>>FMl6RJ0M1EeM&m=J0jMwPGPIPnotoqE8FhyhDf07Rh6V4BAMet6Wfh-bqM&s=Qf7HJzAInFeG
+>>IR7l4VRWc7OEgUX77nhkrptHRFS8Q04&e=
+>> - 
+>>https://urldefense.proofpoint.com/v2/url?u=http-3A__review.whamcloud.com_
+>>13442&d=AwICAg&c=IGDlg0lD0b-nebmJJ0Kp8A&r=VKuhI1_CodqTbWyBgNk0Z5da-Cpzi6W
+>>FMl6RJ0M1EeM&m=J0jMwPGPIPnotoqE8FhyhDf07Rh6V4BAMet6Wfh-bqM&s=v0_uCOoz-ipW
+>>11UJPZlvLk-REnsF_T1P3KPvKMzQ_lE&e=
+>> - 
+>>https://urldefense.proofpoint.com/v2/url?u=http-3A__review.whamcloud.com_
+>>13443&d=AwICAg&c=IGDlg0lD0b-nebmJJ0Kp8A&r=VKuhI1_CodqTbWyBgNk0Z5da-Cpzi6W
+>>FMl6RJ0M1EeM&m=J0jMwPGPIPnotoqE8FhyhDf07Rh6V4BAMet6Wfh-bqM&s=MhKEsBRfdjlw
+>>rxCQhqhW51tqRDhWMPk5OkfiKD8vOFM&e=
+>>
+>> Some of the performance improvements of SOM have been implemented by
+>> statahead.
+>>
+>> I think a case could be made for a very stripped down SOM to be
+>> implemented in the future, that only deals with single-client writers
+>>and
+>> synchronously invalidates the file size on open-for-write, which isn't
+>>so
+>> bad with flash storage for the MDT as is typical today.  The size of
+>>files
+>> that do not get set at initial write or are invalidated by an open can
+>>be
+>> updated asynchronously by LFSCK doing a periodic scan in the background.
+>> Since this stripped-down implementation would have very little to do
+>>with
+>> the current implementation, there isn't much benefit to even trying to
+>>fix
+>> the current code in place.
+>>
+>> I definitely prefer presenting about new features going into Lustre,
+>>but I
+>> also think it is important that people are aware when a semi-feature
+>>like
+>> this is being removed.  I don't believe that anyone is actually using
+>>this
+>> feature today, and the reduction in code maintenance and complexity will
+>> help both ongoing maintenance and bug fixing, as well as make it a that
+>> much easier for new developers to understand the code.
+>>
+>> Cheers, Andreas
+>> --
+>> Andreas Dilger
+>>
+>> Lustre Software Architect
+>> Intel High Performance Data Division
+>>
+>>
+>> _______________________________________________
+>> HPDD-discuss mailing list
+>> HPDD-discuss at lists.01.org
+>> 
+>>https://urldefense.proofpoint.com/v2/url?u=https-3A__lists.01.org_mailman
+>>_listinfo_hpdd-2Ddiscuss&d=AwICAg&c=IGDlg0lD0b-nebmJJ0Kp8A&r=VKuhI1_CodqT
+>>bWyBgNk0Z5da-Cpzi6WFMl6RJ0M1EeM&m=J0jMwPGPIPnotoqE8FhyhDf07Rh6V4BAMet6Wfh
+>>-bqM&s=Sr4-fH-6Rrr9PkCrgC4vhb7ZL-gRj1qm_uDFiT8AV3w&e=
+>
+>
+>
+>-- 
+>Meghan McClelland ? Senior Product Manager
+>Seagate Technology, LLC
+>mobile: +1 (505) 695 0065
+>www.seagate.com
+>
+
+
+Cheers, Andreas
+-- 
+Andreas Dilger
+
+Lustre Software Architect
+Intel High Performance Data Division
+
+
+
+
+From andreas.dilger at intel.com  Tue Feb 10 13:47:18 2015
+From: andreas.dilger at intel.com (Dilger, Andreas)
+Date: Tue, 10 Feb 2015 21:47:18 +0000
+Subject: [Lustre-devel] [HPDD-discuss] Removal of SOM code
+In-Reply-To: <CAB_j=MdDBW8o67ysrrjFL8xTtp4MEQ0gdcQnTwXoe3xgkbJ96Q@mail.gmail.com>
+References: <D0FA9D65.DA3FB%andreas.dilger@intel.com>
+	<CAC_cOcKVa=5XGcA81yimZHJ81H+5YQ24UXtQrdYBC9bsN1ihRw@mail.gmail.com>
+	<D0FC0E5D.DA6C4%andreas.dilger@intel.com>
+	<CAB_j=MdDBW8o67ysrrjFL8xTtp4MEQ0gdcQnTwXoe3xgkbJ96Q@mail.gmail.com>
+Message-ID: <D0FFC8F1.DAF5B%andreas.dilger@intel.com>
+
+I think the "lazy" size is what would be stored directly in the MDS inodes (possibly in struct som_attrs to avoid confusing i_size on the on-disk inode as happened with 1.8).
+
+The lazy size would be available via tools like e2scan, lester (https://github.com/ORNL-TechInt/lester), and other specialized tools (possibly "lfs find"), but not exposed directly as the file size to applications via stat, read, write-append.
+
+Cheers, Andreas
+--
+Andreas Dilger
+Lustre Software Architect
+Intel High Performance Data Division
+
+On 2015/02/09, 3:16 PM, "Nathan Rutman" <nathan.rutman at seagate.com<mailto:nathan.rutman at seagate.com>> wrote:
+
+I think "best effort" would be sufficient in 99% of cases, but when not how would you ask for the "real" vs the "lazy" size?
+
+
+--
+Nathan Rutman ? Principal Systems Architect
+Seagate Technology ? +1 503 877-9507 ? PST
+
+On Sat, Feb 7, 2015 at 5:56 PM, Dilger, Andreas <andreas.dilger at intel.com<mailto:andreas.dilger at intel.com>> wrote:
+On 2015/02/06, 5:08 PM, "Meghan McClelland"
+<meghan.mcclelland at seagate.com<mailto:meghan.mcclelland at seagate.com>> wrote:
+
+>Oh no! I had just been talking about using this feature :(
+>
+>Even in it's current form which I agree isn't ideal, I think it could
+>be helpful for a project like fssstats. Fsstats was an open effort to
+>gather and collect filesystems data (see
+>https://urldefense.proofpoint.com/v2/url?u=http-3A__www.pdsi-2Dscidac.org_fsstats_&d=AwIFAw&c=IGDlg0lD0b-nebmJJ0Kp8A&r=DMt7Lenz8pKzikBAXiZHPR9svLyt_fCSHKCEMGO1wuQ&m=3nnnri6gcyf5QXlmXliYSqhfg_bK5oBpOaxzPtEodvc&s=y1ilHERZjqGR6LPW-5or8wiNk0o0zGTIEUMToDuLGHg&e= ). It has unfortunately somewhat
+>died off due to loss of funding, but I think was a good idea that
+>helped the community, especially researchers.
+
+Meghan, I am also a fan of fsstats, though I'm not sure how that is
+related to this change, unless you had some mechanism to fetch the stats
+directly from the MDT?
+
+>I'd really like to try and revive the open data initiative, and saw
+>som as a possible avenue to start collecting the data.
+
+Ah, so you would fetch the stats directly from the MDT?
+
+> I don't think statahead will provide the information needed but haven't
+>had a chance to look at it.
+
+It would be possible to store a "lazy size on the MDS", which is updated
+on a best-effort basis (and could be repaired in the background by LFSCK).
+ This would be sufficient for most operations like filesystem stats, purge
+policies, etc. since it won't matter one way or the other in a histogram
+if the size of some files is off by a few KB, but that matters a great
+deal for reading the data.
+
+Implementing a "lazy size on MDS" would be pretty straight forward I think
+- the client just sends its current file size at close time, and the MDS
+picks the largest one (as it does with atimes).  If there is a truncate
+the MDS will get an RPC for this also, so the only risk is during a crash
+and that can be fixed up by LFSCK.
+
+The main difference with the current SOM code is that it wouldn't have any
+complexity during recovery, and it doesn't need to care too much if the
+client crashed or was later evicted by an OST before it wrote all the data
+to disk.
+
+Cheers, Andreas
+
+
+>On Fri, Feb 6, 2015 at 3:33 PM, Dilger, Andreas
+><andreas.dilger at intel.com<mailto:andreas.dilger at intel.com>> wrote:
+>> The Size on MDT (SOM) feature has been in a prototype state for several
+>> years, with no signs of moving beyond this prototype stage.
+>>
+>> Several problems exist in the code today, primarily that recovery is not
+>> really implemented, yet the existing code adds complexity on the clients
+>> and servers. Without proper recovery, the current code risks file data
+>> loss if the SOM data isn't updated on the MDS consistently with data
+>> writes to the OST.
+>>
+>>
+>> We're planning to remove the SOM code from the master branch as a
+>>result,
+>> tracked under
+>>https://urldefense.proofpoint.com/v2/url?u=https-3A__jira.hpdd.intel.com_
+>>browse_LU-2D6047-3A&d=AwICAg&c=IGDlg0lD0b-nebmJJ0Kp8A&r=VKuhI1_CodqTbWyBg
+>>Nk0Z5da-Cpzi6WFMl6RJ0M1EeM&m=J0jMwPGPIPnotoqE8FhyhDf07Rh6V4BAMet6Wfh-bqM&
+>>s=TzuY05kGc01qUMWZZluqhikn49_0zzLDVoT8e7igolQ&e=
+>> -
+>>https://urldefense.proofpoint.com/v2/url?u=http-3A__review.whamcloud.com_
+>>13126&d=AwICAg&c=IGDlg0lD0b-nebmJJ0Kp8A&r=VKuhI1_CodqTbWyBgNk0Z5da-Cpzi6W
+>>FMl6RJ0M1EeM&m=J0jMwPGPIPnotoqE8FhyhDf07Rh6V4BAMet6Wfh-bqM&s=sc9FrYH8KyW_
+>>9Un3Z-E_HXPRv5DPicF-Mc92PbET6hc&e=
+>> -
+>>https://urldefense.proofpoint.com/v2/url?u=http-3A__review.whamcloud.com_
+>>13169&d=AwICAg&c=IGDlg0lD0b-nebmJJ0Kp8A&r=VKuhI1_CodqTbWyBgNk0Z5da-Cpzi6W
+>>FMl6RJ0M1EeM&m=J0jMwPGPIPnotoqE8FhyhDf07Rh6V4BAMet6Wfh-bqM&s=Qf7HJzAInFeG
+>>IR7l4VRWc7OEgUX77nhkrptHRFS8Q04&e=
+>> -
+>>https://urldefense.proofpoint.com/v2/url?u=http-3A__review.whamcloud.com_
+>>13442&d=AwICAg&c=IGDlg0lD0b-nebmJJ0Kp8A&r=VKuhI1_CodqTbWyBgNk0Z5da-Cpzi6W
+>>FMl6RJ0M1EeM&m=J0jMwPGPIPnotoqE8FhyhDf07Rh6V4BAMet6Wfh-bqM&s=v0_uCOoz-ipW
+>>11UJPZlvLk-REnsF_T1P3KPvKMzQ_lE&e=
+>> -
+>>https://urldefense.proofpoint.com/v2/url?u=http-3A__review.whamcloud.com_
+>>13443&d=AwICAg&c=IGDlg0lD0b-nebmJJ0Kp8A&r=VKuhI1_CodqTbWyBgNk0Z5da-Cpzi6W
+>>FMl6RJ0M1EeM&m=J0jMwPGPIPnotoqE8FhyhDf07Rh6V4BAMet6Wfh-bqM&s=MhKEsBRfdjlw
+>>rxCQhqhW51tqRDhWMPk5OkfiKD8vOFM&e=
+>>
+>> Some of the performance improvements of SOM have been implemented by
+>> statahead.
+>>
+>> I think a case could be made for a very stripped down SOM to be
+>> implemented in the future, that only deals with single-client writers
+>>and
+>> synchronously invalidates the file size on open-for-write, which isn't
+>>so
+>> bad with flash storage for the MDT as is typical today.  The size of
+>>files
+>> that do not get set at initial write or are invalidated by an open can
+>>be
+>> updated asynchronously by LFSCK doing a periodic scan in the background.
+>> Since this stripped-down implementation would have very little to do
+>>with
+>> the current implementation, there isn't much benefit to even trying to
+>>fix
+>> the current code in place.
+>>
+>> I definitely prefer presenting about new features going into Lustre,
+>>but I
+>> also think it is important that people are aware when a semi-feature
+>>like
+>> this is being removed.  I don't believe that anyone is actually using
+>>this
+>> feature today, and the reduction in code maintenance and complexity will
+>> help both ongoing maintenance and bug fixing, as well as make it a that
+>> much easier for new developers to understand the code.
+>>
+>> Cheers, Andreas
+>> --
+>> Andreas Dilger
+>>
+>> Lustre Software Architect
+>> Intel High Performance Data Division
+>>
+>>
+>> _______________________________________________
+>> HPDD-discuss mailing list
+>> HPDD-discuss at lists.01.org<mailto:HPDD-discuss at lists.01.org>
+>>
+>>https://urldefense.proofpoint.com/v2/url?u=https-3A__lists.01.org_mailman
+>>_listinfo_hpdd-2Ddiscuss&d=AwICAg&c=IGDlg0lD0b-nebmJJ0Kp8A&r=VKuhI1_CodqT
+>>bWyBgNk0Z5da-Cpzi6WFMl6RJ0M1EeM&m=J0jMwPGPIPnotoqE8FhyhDf07Rh6V4BAMet6Wfh
+>>-bqM&s=Sr4-fH-6Rrr9PkCrgC4vhb7ZL-gRj1qm_uDFiT8AV3w&e=
+>
+>
+>
+>--
+>Meghan McClelland ? Senior Product Manager
+>Seagate Technology, LLC
+>mobile: +1 (505) 695 0065
+>www.seagate.com<http://www.seagate.com>
+>
+
+
+Cheers, Andreas
+--
+Andreas Dilger
+
+Lustre Software Architect
+Intel High Performance Data Division
+
+
+_______________________________________________
+Lustre-devel mailing list
+Lustre-devel at lists.lustre.org<mailto:Lustre-devel at lists.lustre.org>
+https://urldefense.proofpoint.com/v2/url?u=http-3A__lists.lustre.org_mailman_listinfo_lustre-2Ddevel&d=AwIFAw&c=IGDlg0lD0b-nebmJJ0Kp8A&r=DMt7Lenz8pKzikBAXiZHPR9svLyt_fCSHKCEMGO1wuQ&m=3nnnri6gcyf5QXlmXliYSqhfg_bK5oBpOaxzPtEodvc&s=nc5Ab1Q46xs_6dHlZh2aWAVW8l7dABA63WfVyO6NXBE&e=
+
+
+

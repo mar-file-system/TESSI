@@ -1,0 +1,3783 @@
+From adilger at whamcloud.com  Wed Apr  3 12:45:21 2019
+From: adilger at whamcloud.com (Andreas Dilger)
+Date: Wed, 3 Apr 2019 19:45:21 +0000
+Subject: [lustre-devel] [PATCH 11/28] lustre: handles: discard h_owner
+ in favour of h_ops
+In-Reply-To: <155168109847.31333.10992261955260144819.stgit@noble.brown>
+References: <155168107971.31333.14345309795939467246.stgit@noble.brown>
+ <155168109847.31333.10992261955260144819.stgit@noble.brown>
+Message-ID: <DD40EE3E-859B-4842-85C8-D6DA4721D624@whamcloud.com>
+
+On Mar 3, 2019, at 23:31, NeilBrown <neilb at suse.com> wrote:
+> 
+> lustre_handles  assigned a  64bit  unique identifier  (a 'cookie')  to
+> objects of  various types and  stored them  in a hash  table, allowing
+> them to be accessed by the cookie.
+> 
+> The is a facility for type checking by recording an 'owner' for each
+> object, and checking the owner on lookup.  Unfortunately this is not
+> used - owner is always zero.
+> 
+> Eahc object also contains an h_ops pointer which can be used to
+> reliably identify an owner.
+> 
+> So discard h_owner, pass and 'ops' pointer to class_handle2object(),
+> and only return objects for which the h_ops matches.
+> 
+> Signed-off-by: NeilBrown <neilb at suse.com>
+
+Probably a bit late to the party here, but it would be useful to add a
+portability note here, that the pointer to "struct mdt_export_data"
+that is currently stored in h_owner should move to "struct mdt_file_data"
+in the server code.
+
+Reviewed-by: Andreas Dilger <adilger at whamcloud.com>
+
+> ---
+> .../staging/lustre/lustre/include/lustre_handles.h |    7 +++----
+> drivers/staging/lustre/lustre/ldlm/ldlm_lock.c     |    2 +-
+> drivers/staging/lustre/lustre/obdclass/genops.c    |    3 ++-
+> .../lustre/lustre/obdclass/lustre_handles.c        |    6 +++---
+> 4 files changed, 9 insertions(+), 9 deletions(-)
+> 
+> diff --git a/drivers/staging/lustre/lustre/include/lustre_handles.h b/drivers/staging/lustre/lustre/include/lustre_handles.h
+> index 683680891e4c..9a4b1a821e7b 100644
+> --- a/drivers/staging/lustre/lustre/include/lustre_handles.h
+> +++ b/drivers/staging/lustre/lustre/include/lustre_handles.h
+> @@ -65,8 +65,7 @@ struct portals_handle_ops {
+> struct portals_handle {
+> 	struct list_head		h_link;
+> 	u64				h_cookie;
+> -	const void			*h_owner;
+> -	struct portals_handle_ops	*h_ops;
+> +	const struct portals_handle_ops	*h_ops;
+> 
+> 	/* newly added fields to handle the RCU issue. -jxiong */
+> 	struct rcu_head			h_rcu;
+> @@ -79,9 +78,9 @@ struct portals_handle {
+> 
+> /* Add a handle to the hash table */
+> void class_handle_hash(struct portals_handle *,
+> -		       struct portals_handle_ops *ops);
+> +		       const struct portals_handle_ops *ops);
+> void class_handle_unhash(struct portals_handle *);
+> -void *class_handle2object(u64 cookie, const void *owner);
+> +void *class_handle2object(u64 cookie, const struct portals_handle_ops *ops);
+> void class_handle_free_cb(struct rcu_head *rcu);
+> int class_handle_init(void);
+> void class_handle_cleanup(void);
+> diff --git a/drivers/staging/lustre/lustre/ldlm/ldlm_lock.c b/drivers/staging/lustre/lustre/ldlm/ldlm_lock.c
+> index 7ec5fc900da8..768cccc1fa82 100644
+> --- a/drivers/staging/lustre/lustre/ldlm/ldlm_lock.c
+> +++ b/drivers/staging/lustre/lustre/ldlm/ldlm_lock.c
+> @@ -515,7 +515,7 @@ struct ldlm_lock *__ldlm_handle2lock(const struct lustre_handle *handle,
+> 
+> 	LASSERT(handle);
+> 
+> -	lock = class_handle2object(handle->cookie, NULL);
+> +	lock = class_handle2object(handle->cookie, &lock_handle_ops);
+> 	if (!lock)
+> 		return NULL;
+> 
+> diff --git a/drivers/staging/lustre/lustre/obdclass/genops.c b/drivers/staging/lustre/lustre/obdclass/genops.c
+> index e206bb401fe3..42859fbca330 100644
+> --- a/drivers/staging/lustre/lustre/obdclass/genops.c
+> +++ b/drivers/staging/lustre/lustre/obdclass/genops.c
+> @@ -708,6 +708,7 @@ int obd_init_caches(void)
+> 	return -ENOMEM;
+> }
+> 
+> +static struct portals_handle_ops export_handle_ops;
+> /* map connection to client */
+> struct obd_export *class_conn2export(struct lustre_handle *conn)
+> {
+> @@ -724,7 +725,7 @@ struct obd_export *class_conn2export(struct lustre_handle *conn)
+> 	}
+> 
+> 	CDEBUG(D_INFO, "looking for export cookie %#llx\n", conn->cookie);
+> -	export = class_handle2object(conn->cookie, NULL);
+> +	export = class_handle2object(conn->cookie, &export_handle_ops);
+> 	return export;
+> }
+> EXPORT_SYMBOL(class_conn2export);
+> diff --git a/drivers/staging/lustre/lustre/obdclass/lustre_handles.c b/drivers/staging/lustre/lustre/obdclass/lustre_handles.c
+> index 0674afb0059f..32b70d613f71 100644
+> --- a/drivers/staging/lustre/lustre/obdclass/lustre_handles.c
+> +++ b/drivers/staging/lustre/lustre/obdclass/lustre_handles.c
+> @@ -59,7 +59,7 @@ static struct handle_bucket {
+>  * global (per-node) hash-table.
+>  */
+> void class_handle_hash(struct portals_handle *h,
+> -		       struct portals_handle_ops *ops)
+> +		       const struct portals_handle_ops *ops)
+> {
+> 	struct handle_bucket *bucket;
+> 
+> @@ -132,7 +132,7 @@ void class_handle_unhash(struct portals_handle *h)
+> }
+> EXPORT_SYMBOL(class_handle_unhash);
+> 
+> -void *class_handle2object(u64 cookie, const void *owner)
+> +void *class_handle2object(u64 cookie, const struct portals_handle_ops *ops)
+> {
+> 	struct handle_bucket *bucket;
+> 	struct portals_handle *h;
+> @@ -147,7 +147,7 @@ void *class_handle2object(u64 cookie, const void *owner)
+> 
+> 	rcu_read_lock();
+> 	list_for_each_entry_rcu(h, &bucket->head, h_link) {
+> -		if (h->h_cookie != cookie || h->h_owner != owner)
+> +		if (h->h_cookie != cookie || h->h_ops != ops)
+> 			continue;
+> 
+> 		spin_lock(&h->h_lock);
+> 
+> 
+
+Cheers, Andreas
+---
+Andreas Dilger
+CTO Whamcloud
+
+
+
+
+
+From adilger at whamcloud.com  Wed Apr  3 12:48:03 2019
+From: adilger at whamcloud.com (Andreas Dilger)
+Date: Wed, 3 Apr 2019 19:48:03 +0000
+Subject: [lustre-devel] [PATCH 12/28] lustre: handle: move refcount into
+ the lustre_handle.
+In-Reply-To: <155168109851.31333.6431391375778532740.stgit@noble.brown>
+References: <155168107971.31333.14345309795939467246.stgit@noble.brown>
+ <155168109851.31333.6431391375778532740.stgit@noble.brown>
+Message-ID: <A4E82040-AB2F-4E54-B7AA-0C3352269C63@whamcloud.com>
+
+On Mar 3, 2019, at 23:31, NeilBrown <neilb at suse.com> wrote:
+> 
+> Every object with a lustre_handle has (and must have) a refcount.
+> The lustre_handles code needs a call-out to increment this.
+> To simplify things, move the refcount into the lustre_handle
+> and discard the call-out.
+> 
+> In order to preserve the same debug messages, we store and object type
+> name in the portals_handle_ops, and use that in a CDEBUG() when
+> incrementing the ref count.
+> 
+> Signed-off-by: NeilBrown <neilb at suse.com>
+
+Reviewed-by: Andreas Dilger <adilger at whamcloud.com>
+
+> ---
+> drivers/staging/lustre/lustre/include/lustre_dlm.h |    6 --
+> .../staging/lustre/lustre/include/lustre_export.h  |    1 
+> .../staging/lustre/lustre/include/lustre_handles.h |    4 +-
+> .../staging/lustre/lustre/include/lustre_import.h  |    2 -
+> drivers/staging/lustre/lustre/ldlm/ldlm_lock.c     |   36 ++++++--------
+> drivers/staging/lustre/lustre/obdclass/genops.c    |   50 ++++++++------------
+> .../lustre/lustre/obdclass/lustre_handles.c        |    5 ++
+> .../staging/lustre/lustre/obdecho/echo_client.c    |    2 -
+> drivers/staging/lustre/lustre/ptlrpc/service.c     |    4 +-
+> 9 files changed, 45 insertions(+), 65 deletions(-)
+> 
+> diff --git a/drivers/staging/lustre/lustre/include/lustre_dlm.h b/drivers/staging/lustre/lustre/include/lustre_dlm.h
+> index 1bd511906f69..fd9b0f870c93 100644
+> --- a/drivers/staging/lustre/lustre/include/lustre_dlm.h
+> +++ b/drivers/staging/lustre/lustre/include/lustre_dlm.h
+> @@ -590,12 +590,6 @@ struct ldlm_lock {
+> 	 * Must be first in the structure.
+> 	 */
+> 	struct portals_handle		l_handle;
+> -	/**
+> -	 * Lock reference count.
+> -	 * This is how many users have pointers to actual structure, so that
+> -	 * we do not accidentally free lock structure that is in use.
+> -	 */
+> -	atomic_t			l_refc;
+> 	/**
+> 	 * Internal spinlock protects l_resource.  We should hold this lock
+> 	 * first before taking res_lock.
+> diff --git a/drivers/staging/lustre/lustre/include/lustre_export.h b/drivers/staging/lustre/lustre/include/lustre_export.h
+> index fb34e0b7de35..d05323313f55 100644
+> --- a/drivers/staging/lustre/lustre/include/lustre_export.h
+> +++ b/drivers/staging/lustre/lustre/include/lustre_export.h
+> @@ -67,7 +67,6 @@ struct obd_export {
+> 	 * what export they are talking to.
+> 	 */
+> 	struct portals_handle		exp_handle;
+> -	refcount_t			exp_refcount;
+> 	/**
+> 	 * Set of counters below is to track where export references are
+> 	 * kept. The exp_rpc_count is used for reconnect handling also,
+> diff --git a/drivers/staging/lustre/lustre/include/lustre_handles.h b/drivers/staging/lustre/lustre/include/lustre_handles.h
+> index 9a4b1a821e7b..be5d41b1a398 100644
+> --- a/drivers/staging/lustre/lustre/include/lustre_handles.h
+> +++ b/drivers/staging/lustre/lustre/include/lustre_handles.h
+> @@ -46,8 +46,9 @@
+> #include <linux/types.h>
+> 
+> struct portals_handle_ops {
+> -	void (*hop_addref)(void *object);
+> 	void (*hop_free)(void *object, int size);
+> +	/* hop_type is used for some debugging messages */
+> +	char *hop_type;
+> };
+> 
+> /* These handles are most easily used by having them appear at the very top of
+> @@ -66,6 +67,7 @@ struct portals_handle {
+> 	struct list_head		h_link;
+> 	u64				h_cookie;
+> 	const struct portals_handle_ops	*h_ops;
+> +	refcount_t			h_ref;
+> 
+> 	/* newly added fields to handle the RCU issue. -jxiong */
+> 	struct rcu_head			h_rcu;
+> diff --git a/drivers/staging/lustre/lustre/include/lustre_import.h b/drivers/staging/lustre/lustre/include/lustre_import.h
+> index fc1f87cc1172..6c830da797c1 100644
+> --- a/drivers/staging/lustre/lustre/include/lustre_import.h
+> +++ b/drivers/staging/lustre/lustre/include/lustre_import.h
+> @@ -154,8 +154,6 @@ struct import_state_hist {
+> struct obd_import {
+> 	/** Local handle (== id) for this import. */
+> 	struct portals_handle		imp_handle;
+> -	/** Reference counter */
+> -	atomic_t			imp_refcount;
+> 	struct lustre_handle		imp_dlm_handle; /* client's ldlm export */
+> 	/** Currently active connection */
+> 	struct ptlrpc_connection       *imp_connection;
+> diff --git a/drivers/staging/lustre/lustre/ldlm/ldlm_lock.c b/drivers/staging/lustre/lustre/ldlm/ldlm_lock.c
+> index 768cccc1fa82..ecd3f4a93e8d 100644
+> --- a/drivers/staging/lustre/lustre/ldlm/ldlm_lock.c
+> +++ b/drivers/staging/lustre/lustre/ldlm/ldlm_lock.c
+> @@ -148,7 +148,7 @@ EXPORT_SYMBOL(ldlm_it2str);
+>  */
+> struct ldlm_lock *ldlm_lock_get(struct ldlm_lock *lock)
+> {
+> -	atomic_inc(&lock->l_refc);
+> +	refcount_inc(&lock->l_handle.h_ref);
+> 	return lock;
+> }
+> EXPORT_SYMBOL(ldlm_lock_get);
+> @@ -161,8 +161,8 @@ EXPORT_SYMBOL(ldlm_lock_get);
+> void ldlm_lock_put(struct ldlm_lock *lock)
+> {
+> 	LASSERT(lock->l_resource != LP_POISON);
+> -	LASSERT(atomic_read(&lock->l_refc) > 0);
+> -	if (atomic_dec_and_test(&lock->l_refc)) {
+> +	LASSERT(refcount_read(&lock->l_handle.h_ref) > 0);
+> +	if (refcount_dec_and_test(&lock->l_handle.h_ref)) {
+> 		struct ldlm_resource *res;
+> 
+> 		LDLM_DEBUG(lock,
+> @@ -356,12 +356,6 @@ void ldlm_lock_destroy_nolock(struct ldlm_lock *lock)
+> 	}
+> }
+> 
+> -/* this is called by portals_handle2object with the handle lock taken */
+> -static void lock_handle_addref(void *lock)
+> -{
+> -	LDLM_LOCK_GET((struct ldlm_lock *)lock);
+> -}
+> -
+> static void lock_handle_free(void *lock, int size)
+> {
+> 	LASSERT(size == sizeof(struct ldlm_lock));
+> @@ -369,8 +363,8 @@ static void lock_handle_free(void *lock, int size)
+> }
+> 
+> static struct portals_handle_ops lock_handle_ops = {
+> -	.hop_addref = lock_handle_addref,
+> 	.hop_free   = lock_handle_free,
+> +	.hop_type   = "ldlm",
+> };
+> 
+> /**
+> @@ -395,7 +389,7 @@ static struct ldlm_lock *ldlm_lock_new(struct ldlm_resource *resource)
+> 	lock->l_resource = resource;
+> 	lu_ref_add(&resource->lr_reference, "lock", lock);
+> 
+> -	atomic_set(&lock->l_refc, 2);
+> +	refcount_set(&lock->l_handle.h_ref, 2);
+> 	INIT_LIST_HEAD(&lock->l_res_link);
+> 	INIT_LIST_HEAD(&lock->l_lru);
+> 	INIT_LIST_HEAD(&lock->l_pending_chain);
+> @@ -1996,13 +1990,13 @@ void _ldlm_lock_debug(struct ldlm_lock *lock,
+> 				 &vaf,
+> 				 lock,
+> 				 lock->l_handle.h_cookie,
+> -				 atomic_read(&lock->l_refc),
+> +				 refcount_read(&lock->l_handle.h_ref),
+> 				 lock->l_readers, lock->l_writers,
+> 				 ldlm_lockname[lock->l_granted_mode],
+> 				 ldlm_lockname[lock->l_req_mode],
+> 				 lock->l_flags, nid,
+> 				 lock->l_remote_handle.cookie,
+> -				 exp ? refcount_read(&exp->exp_refcount) : -99,
+> +				 exp ? refcount_read(&exp->exp_handle.h_ref) : -99,
+> 				 lock->l_pid, lock->l_callback_timeout,
+> 				 lock->l_lvb_type);
+> 		va_end(args);
+> @@ -2016,7 +2010,7 @@ void _ldlm_lock_debug(struct ldlm_lock *lock,
+> 				 &vaf,
+> 				 ldlm_lock_to_ns_name(lock), lock,
+> 				 lock->l_handle.h_cookie,
+> -				 atomic_read(&lock->l_refc),
+> +				 refcount_read(&lock->l_handle.h_ref),
+> 				 lock->l_readers, lock->l_writers,
+> 				 ldlm_lockname[lock->l_granted_mode],
+> 				 ldlm_lockname[lock->l_req_mode],
+> @@ -2029,7 +2023,7 @@ void _ldlm_lock_debug(struct ldlm_lock *lock,
+> 				 lock->l_req_extent.end,
+> 				 lock->l_flags, nid,
+> 				 lock->l_remote_handle.cookie,
+> -				 exp ? refcount_read(&exp->exp_refcount) : -99,
+> +				 exp ? refcount_read(&exp->exp_handle.h_ref) : -99,
+> 				 lock->l_pid, lock->l_callback_timeout,
+> 				 lock->l_lvb_type);
+> 		break;
+> @@ -2040,7 +2034,7 @@ void _ldlm_lock_debug(struct ldlm_lock *lock,
+> 				 &vaf,
+> 				 ldlm_lock_to_ns_name(lock), lock,
+> 				 lock->l_handle.h_cookie,
+> -				 atomic_read(&lock->l_refc),
+> +				 refcount_read(&lock->l_handle.h_ref),
+> 				 lock->l_readers, lock->l_writers,
+> 				 ldlm_lockname[lock->l_granted_mode],
+> 				 ldlm_lockname[lock->l_req_mode],
+> @@ -2052,7 +2046,7 @@ void _ldlm_lock_debug(struct ldlm_lock *lock,
+> 				 lock->l_policy_data.l_flock.end,
+> 				 lock->l_flags, nid,
+> 				 lock->l_remote_handle.cookie,
+> -				 exp ? refcount_read(&exp->exp_refcount) : -99,
+> +				 exp ? refcount_read(&exp->exp_handle.h_ref) : -99,
+> 				 lock->l_pid, lock->l_callback_timeout);
+> 		break;
+> 
+> @@ -2062,7 +2056,7 @@ void _ldlm_lock_debug(struct ldlm_lock *lock,
+> 				 &vaf,
+> 				 ldlm_lock_to_ns_name(lock),
+> 				 lock, lock->l_handle.h_cookie,
+> -				 atomic_read(&lock->l_refc),
+> +				 refcount_read(&lock->l_handle.h_ref),
+> 				 lock->l_readers, lock->l_writers,
+> 				 ldlm_lockname[lock->l_granted_mode],
+> 				 ldlm_lockname[lock->l_req_mode],
+> @@ -2072,7 +2066,7 @@ void _ldlm_lock_debug(struct ldlm_lock *lock,
+> 				 ldlm_typename[resource->lr_type],
+> 				 lock->l_flags, nid,
+> 				 lock->l_remote_handle.cookie,
+> -				 exp ? refcount_read(&exp->exp_refcount) : -99,
+> +				 exp ? refcount_read(&exp->exp_handle.h_ref) : -99,
+> 				 lock->l_pid, lock->l_callback_timeout,
+> 				 lock->l_lvb_type);
+> 		break;
+> @@ -2083,7 +2077,7 @@ void _ldlm_lock_debug(struct ldlm_lock *lock,
+> 				 &vaf,
+> 				 ldlm_lock_to_ns_name(lock),
+> 				 lock, lock->l_handle.h_cookie,
+> -				 atomic_read(&lock->l_refc),
+> +				 refcount_read(&lock->l_handle.h_ref),
+> 				 lock->l_readers, lock->l_writers,
+> 				 ldlm_lockname[lock->l_granted_mode],
+> 				 ldlm_lockname[lock->l_req_mode],
+> @@ -2092,7 +2086,7 @@ void _ldlm_lock_debug(struct ldlm_lock *lock,
+> 				 ldlm_typename[resource->lr_type],
+> 				 lock->l_flags, nid,
+> 				 lock->l_remote_handle.cookie,
+> -				 exp ? refcount_read(&exp->exp_refcount) : -99,
+> +				 exp ? refcount_read(&exp->exp_handle.h_ref) : -99,
+> 				 lock->l_pid, lock->l_callback_timeout,
+> 				 lock->l_lvb_type);
+> 		break;
+> diff --git a/drivers/staging/lustre/lustre/obdclass/genops.c b/drivers/staging/lustre/lustre/obdclass/genops.c
+> index 42859fbca330..c6a5e6569c88 100644
+> --- a/drivers/staging/lustre/lustre/obdclass/genops.c
+> +++ b/drivers/staging/lustre/lustre/obdclass/genops.c
+> @@ -753,7 +753,7 @@ static void class_export_destroy(struct obd_export *exp)
+> {
+> 	struct obd_device *obd = exp->exp_obd;
+> 
+> -	LASSERT(refcount_read(&exp->exp_refcount) == 0);
+> +	LASSERT(refcount_read(&exp->exp_handle.h_ref) == 0);
+> 	LASSERT(obd);
+> 
+> 	CDEBUG(D_IOCTL, "destroying export %p/%s for %s\n", exp,
+> @@ -777,33 +777,28 @@ static void class_export_destroy(struct obd_export *exp)
+> 	OBD_FREE_RCU(exp, sizeof(*exp), &exp->exp_handle);
+> }
+> 
+> -static void export_handle_addref(void *export)
+> -{
+> -	class_export_get(export);
+> -}
+> -
+> static struct portals_handle_ops export_handle_ops = {
+> -	.hop_addref	= export_handle_addref,
+> 	.hop_free	= NULL,
+> +	.hop_type	= "export",
+> };
+> 
+> struct obd_export *class_export_get(struct obd_export *exp)
+> {
+> -	refcount_inc(&exp->exp_refcount);
+> -	CDEBUG(D_INFO, "GETting export %p : new refcount %d\n", exp,
+> -	       refcount_read(&exp->exp_refcount));
+> +	refcount_inc(&exp->exp_handle.h_ref);
+> +	CDEBUG(D_INFO, "GET export %p refcount=%d\n", exp,
+> +	       refcount_read(&exp->exp_handle.h_ref));
+> 	return exp;
+> }
+> EXPORT_SYMBOL(class_export_get);
+> 
+> void class_export_put(struct obd_export *exp)
+> {
+> -	LASSERT(refcount_read(&exp->exp_refcount) >  0);
+> -	LASSERT(refcount_read(&exp->exp_refcount) < LI_POISON);
+> +	LASSERT(refcount_read(&exp->exp_handle.h_ref) >  0);
+> +	LASSERT(refcount_read(&exp->exp_handle.h_ref) < LI_POISON);
+> 	CDEBUG(D_INFO, "PUTting export %p : new refcount %d\n", exp,
+> -	       refcount_read(&exp->exp_refcount) - 1);
+> +	       refcount_read(&exp->exp_handle.h_ref) - 1);
+> 
+> -	if (refcount_dec_and_test(&exp->exp_refcount)) {
+> +	if (refcount_dec_and_test(&exp->exp_handle.h_ref)) {
+> 		struct obd_device *obd = exp->exp_obd;
+> 
+> 		CDEBUG(D_IOCTL, "final put %p/%s\n",
+> @@ -853,7 +848,7 @@ static struct obd_export *__class_new_export(struct obd_device *obd,
+> 
+> 	export->exp_conn_cnt = 0;
+> 	/* 2 = class_handle_hash + last */
+> -	refcount_set(&export->exp_refcount, 2);
+> +	refcount_set(&export->exp_handle.h_ref, 2);
+> 	atomic_set(&export->exp_rpc_count, 0);
+> 	atomic_set(&export->exp_cb_count, 0);
+> 	atomic_set(&export->exp_locks_count, 0);
+> @@ -956,7 +951,7 @@ static void class_import_destroy(struct obd_import *imp)
+> 	CDEBUG(D_IOCTL, "destroying import %p for %s\n", imp,
+> 	       imp->imp_obd->obd_name);
+> 
+> -	LASSERT_ATOMIC_ZERO(&imp->imp_refcount);
+> +	LASSERT(refcount_read(&imp->imp_handle.h_ref) == 0);
+> 
+> 	ptlrpc_put_connection_superhack(imp->imp_connection);
+> 
+> @@ -973,21 +968,16 @@ static void class_import_destroy(struct obd_import *imp)
+> 	OBD_FREE_RCU(imp, sizeof(*imp), &imp->imp_handle);
+> }
+> 
+> -static void import_handle_addref(void *import)
+> -{
+> -	class_import_get(import);
+> -}
+> -
+> static struct portals_handle_ops import_handle_ops = {
+> -	.hop_addref	= import_handle_addref,
+> 	.hop_free	= NULL,
+> +	.hop_type	= "import",
+> };
+> 
+> struct obd_import *class_import_get(struct obd_import *import)
+> {
+> -	atomic_inc(&import->imp_refcount);
+> -	CDEBUG(D_INFO, "import %p refcount=%d obd=%s\n", import,
+> -	       atomic_read(&import->imp_refcount),
+> +	refcount_inc(&import->imp_handle.h_ref);
+> +	CDEBUG(D_INFO, "GET import %p refcount=%d obd=%s\n", import,
+> +	       refcount_read(&import->imp_handle.h_ref),
+> 	       import->imp_obd->obd_name);
+> 	return import;
+> }
+> @@ -995,19 +985,19 @@ EXPORT_SYMBOL(class_import_get);
+> 
+> void class_import_put(struct obd_import *imp)
+> {
+> -	LASSERT_ATOMIC_GT_LT(&imp->imp_refcount, 0, LI_POISON);
+> +	LASSERT(refcount_read(&imp->imp_handle.h_ref) > 0);
+> 
+> 	CDEBUG(D_INFO, "import %p refcount=%d obd=%s\n", imp,
+> -	       atomic_read(&imp->imp_refcount) - 1,
+> +	       refcount_read(&imp->imp_handle.h_ref) - 1,
+> 	       imp->imp_obd->obd_name);
+> 
+> -	if (atomic_dec_and_test(&imp->imp_refcount)) {
+> +	if (refcount_dec_and_test(&imp->imp_handle.h_ref)) {
+> 		CDEBUG(D_INFO, "final put import %p\n", imp);
+> 		obd_zombie_import_add(imp);
+> 	}
+> 
+> 	/* catch possible import put race */
+> -	LASSERT_ATOMIC_GE_LT(&imp->imp_refcount, 0, LI_POISON);
+> +	LASSERT(refcount_read(&imp->imp_handle.h_ref) >= 0);
+> }
+> EXPORT_SYMBOL(class_import_put);
+> 
+> @@ -1057,7 +1047,7 @@ struct obd_import *class_new_import(struct obd_device *obd)
+> 	init_waitqueue_head(&imp->imp_recovery_waitq);
+> 	INIT_WORK(&imp->imp_zombie_work, obd_zombie_imp_cull);
+> 
+> -	atomic_set(&imp->imp_refcount, 2);
+> +	refcount_set(&imp->imp_handle.h_ref, 2);
+> 	atomic_set(&imp->imp_unregistering, 0);
+> 	atomic_set(&imp->imp_inflight, 0);
+> 	atomic_set(&imp->imp_replay_inflight, 0);
+> diff --git a/drivers/staging/lustre/lustre/obdclass/lustre_handles.c b/drivers/staging/lustre/lustre/obdclass/lustre_handles.c
+> index 32b70d613f71..32cd6aedd5f6 100644
+> --- a/drivers/staging/lustre/lustre/obdclass/lustre_handles.c
+> +++ b/drivers/staging/lustre/lustre/obdclass/lustre_handles.c
+> @@ -152,7 +152,10 @@ void *class_handle2object(u64 cookie, const struct portals_handle_ops *ops)
+> 
+> 		spin_lock(&h->h_lock);
+> 		if (likely(h->h_in != 0)) {
+> -			h->h_ops->hop_addref(h);
+> +			refcount_inc(&h->h_ref);
+> +			CDEBUG(D_INFO, "GET %s %p refcount=%d\n",
+> +			       h->h_ops->hop_type, h,
+> +			       refcount_read(&h->h_ref));
+> 			retval = h;
+> 		}
+> 		spin_unlock(&h->h_lock);
+> diff --git a/drivers/staging/lustre/lustre/obdecho/echo_client.c b/drivers/staging/lustre/lustre/obdecho/echo_client.c
+> index baf34c85c4b5..6f00eee6170a 100644
+> --- a/drivers/staging/lustre/lustre/obdecho/echo_client.c
+> +++ b/drivers/staging/lustre/lustre/obdecho/echo_client.c
+> @@ -1638,7 +1638,7 @@ static int echo_client_cleanup(struct obd_device *obddev)
+> 		return -EBUSY;
+> 	}
+> 
+> -	LASSERT(refcount_read(&ec->ec_exp->exp_refcount) > 0);
+> +	LASSERT(refcount_read(&ec->ec_exp->exp_handle.h_ref) > 0);
+> 	rc = obd_disconnect(ec->ec_exp);
+> 	if (rc != 0)
+> 		CERROR("fail to disconnect device: %d\n", rc);
+> diff --git a/drivers/staging/lustre/lustre/ptlrpc/service.c b/drivers/staging/lustre/lustre/ptlrpc/service.c
+> index 5a7e9fa6e5c8..5e541ca0dc00 100644
+> --- a/drivers/staging/lustre/lustre/ptlrpc/service.c
+> +++ b/drivers/staging/lustre/lustre/ptlrpc/service.c
+> @@ -1697,7 +1697,7 @@ ptlrpc_server_handle_request(struct ptlrpc_service_part *svcpt,
+> 	       (request->rq_export ?
+> 		(char *)request->rq_export->exp_client_uuid.uuid : "0"),
+> 	       (request->rq_export ?
+> -		refcount_read(&request->rq_export->exp_refcount) : -99),
+> +		refcount_read(&request->rq_export->exp_handle.h_ref) : -99),
+> 	       lustre_msg_get_status(request->rq_reqmsg), request->rq_xid,
+> 	       libcfs_id2str(request->rq_peer),
+> 	       lustre_msg_get_opc(request->rq_reqmsg));
+> @@ -1741,7 +1741,7 @@ ptlrpc_server_handle_request(struct ptlrpc_service_part *svcpt,
+> 	       (request->rq_export ?
+> 		(char *)request->rq_export->exp_client_uuid.uuid : "0"),
+> 	       (request->rq_export ?
+> -		refcount_read(&request->rq_export->exp_refcount) : -99),
+> +		refcount_read(&request->rq_export->exp_handle.h_ref) : -99),
+> 	       lustre_msg_get_status(request->rq_reqmsg),
+> 	       request->rq_xid,
+> 	       libcfs_id2str(request->rq_peer),
+> 
+> 
+
+Cheers, Andreas
+---
+Andreas Dilger
+Principal Lustre Architect
+Whamcloud
+
+
+
+
+
+
+
+
+From adilger at whamcloud.com  Wed Apr  3 12:50:11 2019
+From: adilger at whamcloud.com (Andreas Dilger)
+Date: Wed, 3 Apr 2019 19:50:11 +0000
+Subject: [lustre-devel] [PATCH 14/28] lustre: portals_handle: rename ops
+ to owner
+In-Reply-To: <155168109858.31333.13224172304059470846.stgit@noble.brown>
+References: <155168107971.31333.14345309795939467246.stgit@noble.brown>
+ <155168109858.31333.13224172304059470846.stgit@noble.brown>
+Message-ID: <4ED59F3E-7C66-460F-9FAC-A9B50A83E25D@whamcloud.com>
+
+On Mar 3, 2019, at 23:31, NeilBrown <neilb at suse.com> wrote:
+> 
+> Now the portals_handle_ops contains only a char*,
+> it is functioning primarily to identify the owner of each handle.
+> So change the name to h_owner, and the type to char*.
+> 
+> Signed-off-by: NeilBrown <neilb at suse.com>
+
+Reviewed-by: Andreas Dilger <adilger at whamcloud.com>
+
+> ---
+> .../staging/lustre/lustre/include/lustre_handles.h |   12 +++---------
+> drivers/staging/lustre/lustre/ldlm/ldlm_lock.c     |    8 +++-----
+> drivers/staging/lustre/lustre/obdclass/genops.c    |   17 ++++++-----------
+> .../lustre/lustre/obdclass/lustre_handles.c        |   15 +++++++--------
+> 4 files changed, 19 insertions(+), 33 deletions(-)
+> 
+> diff --git a/drivers/staging/lustre/lustre/include/lustre_handles.h b/drivers/staging/lustre/lustre/include/lustre_handles.h
+> index 8fb42851f6d1..ebbbb01710e7 100644
+> --- a/drivers/staging/lustre/lustre/include/lustre_handles.h
+> +++ b/drivers/staging/lustre/lustre/include/lustre_handles.h
+> @@ -45,11 +45,6 @@
+> #include <linux/spinlock.h>
+> #include <linux/types.h>
+> 
+> -struct portals_handle_ops {
+> -	/* hop_type is used for some debugging messages */
+> -	char *hop_type;
+> -};
+> -
+> /* These handles are most easily used by having them appear at the very top of
+>  * whatever object that you want to make handles for.  ie:
+>  *
+> @@ -65,7 +60,7 @@ struct portals_handle_ops {
+> struct portals_handle {
+> 	struct list_head		h_link;
+> 	u64				h_cookie;
+> -	const struct portals_handle_ops	*h_ops;
+> +	char				*h_owner;
+> 	refcount_t			h_ref;
+> 
+> 	/* newly added fields to handle the RCU issue. -jxiong */
+> @@ -77,10 +72,9 @@ struct portals_handle {
+> /* handles.c */
+> 
+> /* Add a handle to the hash table */
+> -void class_handle_hash(struct portals_handle *,
+> -		       const struct portals_handle_ops *ops);
+> +void class_handle_hash(struct portals_handle *, char *owner);
+> void class_handle_unhash(struct portals_handle *);
+> -void *class_handle2object(u64 cookie, const struct portals_handle_ops *ops);
+> +void *class_handle2object(u64 cookie, char *owner);
+> int class_handle_init(void);
+> void class_handle_cleanup(void);
+> 
+> diff --git a/drivers/staging/lustre/lustre/ldlm/ldlm_lock.c b/drivers/staging/lustre/lustre/ldlm/ldlm_lock.c
+> index 18f018d27936..56a2d1dcd663 100644
+> --- a/drivers/staging/lustre/lustre/ldlm/ldlm_lock.c
+> +++ b/drivers/staging/lustre/lustre/ldlm/ldlm_lock.c
+> @@ -363,9 +363,7 @@ void ldlm_lock_destroy_nolock(struct ldlm_lock *lock)
+> 	}
+> }
+> 
+> -static struct portals_handle_ops lock_handle_ops = {
+> -	.hop_type   = "ldlm",
+> -};
+> +static const char lock_handle_owner[] = "ldlm";
+> 
+> /**
+>  *
+> @@ -405,7 +403,7 @@ static struct ldlm_lock *ldlm_lock_new(struct ldlm_resource *resource)
+> 	lprocfs_counter_incr(ldlm_res_to_ns(resource)->ns_stats,
+> 			     LDLM_NSS_LOCKS);
+> 	INIT_LIST_HEAD(&lock->l_handle.h_link);
+> -	class_handle_hash(&lock->l_handle, &lock_handle_ops);
+> +	class_handle_hash(&lock->l_handle, lock_handle_owner);
+> 
+> 	lu_ref_init(&lock->l_reference);
+> 	lu_ref_add(&lock->l_reference, "hash", lock);
+> @@ -509,7 +507,7 @@ struct ldlm_lock *__ldlm_handle2lock(const struct lustre_handle *handle,
+> 
+> 	LASSERT(handle);
+> 
+> -	lock = class_handle2object(handle->cookie, &lock_handle_ops);
+> +	lock = class_handle2object(handle->cookie, lock_handle_owner);
+> 	if (!lock)
+> 		return NULL;
+> 
+> diff --git a/drivers/staging/lustre/lustre/obdclass/genops.c b/drivers/staging/lustre/lustre/obdclass/genops.c
+> index ed306bbfbfb8..e0da46e7d355 100644
+> --- a/drivers/staging/lustre/lustre/obdclass/genops.c
+> +++ b/drivers/staging/lustre/lustre/obdclass/genops.c
+> @@ -708,7 +708,8 @@ int obd_init_caches(void)
+> 	return -ENOMEM;
+> }
+> 
+> -static struct portals_handle_ops export_handle_ops;
+> +static const char export_handle_owner[] = "export";
+> +
+> /* map connection to client */
+> struct obd_export *class_conn2export(struct lustre_handle *conn)
+> {
+> @@ -725,7 +726,7 @@ struct obd_export *class_conn2export(struct lustre_handle *conn)
+> 	}
+> 
+> 	CDEBUG(D_INFO, "looking for export cookie %#llx\n", conn->cookie);
+> -	export = class_handle2object(conn->cookie, &export_handle_ops);
+> +	export = class_handle2object(conn->cookie, export_handle_owner);
+> 	return export;
+> }
+> EXPORT_SYMBOL(class_conn2export);
+> @@ -777,10 +778,6 @@ static void class_export_destroy(struct obd_export *exp)
+> 	kfree_rcu(exp, exp_handle.h_rcu);
+> }
+> 
+> -static struct portals_handle_ops export_handle_ops = {
+> -	.hop_type	= "export",
+> -};
+> -
+> struct obd_export *class_export_get(struct obd_export *exp)
+> {
+> 	refcount_inc(&exp->exp_handle.h_ref);
+> @@ -863,7 +860,7 @@ static struct obd_export *__class_new_export(struct obd_device *obd,
+> 	INIT_LIST_HEAD(&export->exp_req_replay_queue);
+> 	INIT_LIST_HEAD(&export->exp_handle.h_link);
+> 	INIT_LIST_HEAD(&export->exp_hp_rpcs);
+> -	class_handle_hash(&export->exp_handle, &export_handle_ops);
+> +	class_handle_hash(&export->exp_handle, export_handle_owner);
+> 	spin_lock_init(&export->exp_lock);
+> 	spin_lock_init(&export->exp_rpc_lock);
+> 	spin_lock_init(&export->exp_bl_list_lock);
+> @@ -967,9 +964,7 @@ static void class_import_destroy(struct obd_import *imp)
+> 	kfree_rcu(imp, imp_handle.h_rcu);
+> }
+> 
+> -static struct portals_handle_ops import_handle_ops = {
+> -	.hop_type	= "import",
+> -};
+> +static const char import_handle_owner[] = "import";
+> 
+> struct obd_import *class_import_get(struct obd_import *import)
+> {
+> @@ -1052,7 +1047,7 @@ struct obd_import *class_new_import(struct obd_device *obd)
+> 	atomic_set(&imp->imp_inval_count, 0);
+> 	INIT_LIST_HEAD(&imp->imp_conn_list);
+> 	INIT_LIST_HEAD(&imp->imp_handle.h_link);
+> -	class_handle_hash(&imp->imp_handle, &import_handle_ops);
+> +	class_handle_hash(&imp->imp_handle, import_handle_owner);
+> 	init_imp_at(&imp->imp_at);
+> 
+> 	/* the default magic is V2, will be used in connect RPC, and
+> diff --git a/drivers/staging/lustre/lustre/obdclass/lustre_handles.c b/drivers/staging/lustre/lustre/obdclass/lustre_handles.c
+> index 8aece57ec8c9..f41558ccdfcf 100644
+> --- a/drivers/staging/lustre/lustre/obdclass/lustre_handles.c
+> +++ b/drivers/staging/lustre/lustre/obdclass/lustre_handles.c
+> @@ -58,8 +58,7 @@ static struct handle_bucket {
+>  * Generate a unique 64bit cookie (hash) for a handle and insert it into
+>  * global (per-node) hash-table.
+>  */
+> -void class_handle_hash(struct portals_handle *h,
+> -		       const struct portals_handle_ops *ops)
+> +void class_handle_hash(struct portals_handle *h, char *owner)
+> {
+> 	struct handle_bucket *bucket;
+> 
+> @@ -85,7 +84,7 @@ void class_handle_hash(struct portals_handle *h,
+> 	h->h_cookie = handle_base;
+> 	spin_unlock(&handle_base_lock);
+> 
+> -	h->h_ops = ops;
+> +	h->h_owner = owner;
+> 	spin_lock_init(&h->h_lock);
+> 
+> 	bucket = &handle_hash[h->h_cookie & HANDLE_HASH_MASK];
+> @@ -132,7 +131,7 @@ void class_handle_unhash(struct portals_handle *h)
+> }
+> EXPORT_SYMBOL(class_handle_unhash);
+> 
+> -void *class_handle2object(u64 cookie, const struct portals_handle_ops *ops)
+> +void *class_handle2object(u64 cookie, char *owner)
+> {
+> 	struct handle_bucket *bucket;
+> 	struct portals_handle *h;
+> @@ -147,14 +146,14 @@ void *class_handle2object(u64 cookie, const struct portals_handle_ops *ops)
+> 
+> 	rcu_read_lock();
+> 	list_for_each_entry_rcu(h, &bucket->head, h_link) {
+> -		if (h->h_cookie != cookie || h->h_ops != ops)
+> +		if (h->h_cookie != cookie || h->h_owner != owner)
+> 			continue;
+> 
+> 		spin_lock(&h->h_lock);
+> 		if (likely(h->h_in != 0)) {
+> 			refcount_inc(&h->h_ref);
+> 			CDEBUG(D_INFO, "GET %s %p refcount=%d\n",
+> -			       h->h_ops->hop_type, h,
+> +			       h->h_owner, h,
+> 			       refcount_read(&h->h_ref));
+> 			retval = h;
+> 		}
+> @@ -201,8 +200,8 @@ static int cleanup_all_handles(void)
+> 
+> 		spin_lock(&handle_hash[i].lock);
+> 		list_for_each_entry_rcu(h, &handle_hash[i].head, h_link) {
+> -			CERROR("force clean handle %#llx addr %p ops %p\n",
+> -			       h->h_cookie, h, h->h_ops);
+> +			CERROR("force clean handle %#llx addr %p owner %p\n",
+> +			       h->h_cookie, h, h->h_owner);
+> 
+> 			class_handle_unhash_nolock(h);
+> 			rc++;
+> 
+> 
+
+Cheers, Andreas
+---
+Andreas Dilger
+Principal Lustre Architect
+Whamcloud
+
+
+
+
+
+
+
+
+From adilger at whamcloud.com  Wed Apr  3 12:52:24 2019
+From: adilger at whamcloud.com (Andreas Dilger)
+Date: Wed, 3 Apr 2019 19:52:24 +0000
+Subject: [lustre-devel] [PATCH 16/28] lustre: portals_handle: use hlist
+ for hash lists.
+In-Reply-To: <155168109865.31333.6317453468559898261.stgit@noble.brown>
+References: <155168107971.31333.14345309795939467246.stgit@noble.brown>
+ <155168109865.31333.6317453468559898261.stgit@noble.brown>
+Message-ID: <2B0C5EE1-53F9-4DE2-B885-2E64E50D6369@whamcloud.com>
+
+On Mar 3, 2019, at 23:31, NeilBrown <neilb at suse.com> wrote:
+> 
+> hlist_head/hlist_node is the preferred data structure
+> for hash tables. Not only does it make the 'head' smaller,
+> but is also provides hlist_unhashed() which can be used to
+> check if an object is in the list.  This means that
+> we don't need h_in any more.
+> 
+> Signed-off-by: NeilBrown <neilb at suse.com>
+
+Reviewed-by: Andreas Dilger <adilger at whamcloud.com>
+
+> ---
+> .../staging/lustre/lustre/include/lustre_handles.h |    3 +--
+> drivers/staging/lustre/lustre/ldlm/ldlm_lock.c     |    2 +-
+> drivers/staging/lustre/lustre/obdclass/genops.c    |    4 ++--
+> .../lustre/lustre/obdclass/lustre_handles.c        |   20 +++++++++-----------
+> 4 files changed, 13 insertions(+), 16 deletions(-)
+> 
+> diff --git a/drivers/staging/lustre/lustre/include/lustre_handles.h b/drivers/staging/lustre/lustre/include/lustre_handles.h
+> index ebbbb01710e7..cc433f48d367 100644
+> --- a/drivers/staging/lustre/lustre/include/lustre_handles.h
+> +++ b/drivers/staging/lustre/lustre/include/lustre_handles.h
+> @@ -58,7 +58,7 @@
+>  * to compute the start of the structure based on the handle field.
+>  */
+> struct portals_handle {
+> -	struct list_head		h_link;
+> +	struct hlist_node		h_link;
+> 	u64				h_cookie;
+> 	char				*h_owner;
+> 	refcount_t			h_ref;
+> @@ -66,7 +66,6 @@ struct portals_handle {
+> 	/* newly added fields to handle the RCU issue. -jxiong */
+> 	struct rcu_head			h_rcu;
+> 	spinlock_t			h_lock;
+> -	unsigned int			h_in:1;
+> };
+> 
+> /* handles.c */
+> diff --git a/drivers/staging/lustre/lustre/ldlm/ldlm_lock.c b/drivers/staging/lustre/lustre/ldlm/ldlm_lock.c
+> index 56a2d1dcd663..5ac77238e5f2 100644
+> --- a/drivers/staging/lustre/lustre/ldlm/ldlm_lock.c
+> +++ b/drivers/staging/lustre/lustre/ldlm/ldlm_lock.c
+> @@ -402,7 +402,7 @@ static struct ldlm_lock *ldlm_lock_new(struct ldlm_resource *resource)
+> 
+> 	lprocfs_counter_incr(ldlm_res_to_ns(resource)->ns_stats,
+> 			     LDLM_NSS_LOCKS);
+> -	INIT_LIST_HEAD(&lock->l_handle.h_link);
+> +	INIT_HLIST_NODE(&lock->l_handle.h_link);
+> 	class_handle_hash(&lock->l_handle, lock_handle_owner);
+> 
+> 	lu_ref_init(&lock->l_reference);
+> diff --git a/drivers/staging/lustre/lustre/obdclass/genops.c b/drivers/staging/lustre/lustre/obdclass/genops.c
+> index e0da46e7d355..562e8a9f35c9 100644
+> --- a/drivers/staging/lustre/lustre/obdclass/genops.c
+> +++ b/drivers/staging/lustre/lustre/obdclass/genops.c
+> @@ -858,7 +858,7 @@ static struct obd_export *__class_new_export(struct obd_device *obd,
+> 	spin_lock_init(&export->exp_uncommitted_replies_lock);
+> 	INIT_LIST_HEAD(&export->exp_uncommitted_replies);
+> 	INIT_LIST_HEAD(&export->exp_req_replay_queue);
+> -	INIT_LIST_HEAD(&export->exp_handle.h_link);
+> +	INIT_HLIST_NODE(&export->exp_handle.h_link);
+> 	INIT_LIST_HEAD(&export->exp_hp_rpcs);
+> 	class_handle_hash(&export->exp_handle, export_handle_owner);
+> 	spin_lock_init(&export->exp_lock);
+> @@ -1046,7 +1046,7 @@ struct obd_import *class_new_import(struct obd_device *obd)
+> 	atomic_set(&imp->imp_replay_inflight, 0);
+> 	atomic_set(&imp->imp_inval_count, 0);
+> 	INIT_LIST_HEAD(&imp->imp_conn_list);
+> -	INIT_LIST_HEAD(&imp->imp_handle.h_link);
+> +	INIT_HLIST_NODE(&imp->imp_handle.h_link);
+> 	class_handle_hash(&imp->imp_handle, import_handle_owner);
+> 	init_imp_at(&imp->imp_at);
+> 
+> diff --git a/drivers/staging/lustre/lustre/obdclass/lustre_handles.c b/drivers/staging/lustre/lustre/obdclass/lustre_handles.c
+> index 45e5eac47292..72de668c879b 100644
+> --- a/drivers/staging/lustre/lustre/obdclass/lustre_handles.c
+> +++ b/drivers/staging/lustre/lustre/obdclass/lustre_handles.c
+> @@ -48,7 +48,7 @@ static spinlock_t handle_base_lock;
+> 
+> static struct handle_bucket {
+> 	spinlock_t		lock;
+> -	struct list_head	head;
+> +	struct hlist_head	head;
+> } *handle_hash;
+> 
+> #define HANDLE_HASH_SIZE (1 << 16)
+> @@ -63,7 +63,7 @@ void class_handle_hash(struct portals_handle *h, char *owner)
+> 	struct handle_bucket *bucket;
+> 
+> 	LASSERT(h);
+> -	LASSERT(list_empty(&h->h_link));
+> +	LASSERT(hlist_unhashed(&h->h_link));
+> 
+> 	/*
+> 	 * This is fast, but simplistic cookie generation algorithm, it will
+> @@ -89,8 +89,7 @@ void class_handle_hash(struct portals_handle *h, char *owner)
+> 
+> 	bucket = &handle_hash[h->h_cookie & HANDLE_HASH_MASK];
+> 	spin_lock(&bucket->lock);
+> -	list_add_rcu(&h->h_link, &bucket->head);
+> -	h->h_in = 1;
+> +	hlist_add_head_rcu(&h->h_link, &bucket->head);
+> 	spin_unlock(&bucket->lock);
+> 
+> 	CDEBUG(D_INFO, "added object %p with handle %#llx to hash\n",
+> @@ -100,7 +99,7 @@ EXPORT_SYMBOL(class_handle_hash);
+> 
+> static void class_handle_unhash_nolock(struct portals_handle *h)
+> {
+> -	if (list_empty(&h->h_link)) {
+> +	if (hlist_unhashed(&h->h_link)) {
+> 		CERROR("removing an already-removed handle (%#llx)\n",
+> 		       h->h_cookie);
+> 		return;
+> @@ -110,13 +109,12 @@ static void class_handle_unhash_nolock(struct portals_handle *h)
+> 	       h, h->h_cookie);
+> 
+> 	spin_lock(&h->h_lock);
+> -	if (h->h_in == 0) {
+> +	if (hlist_unhashed(&h->h_link)) {
+> 		spin_unlock(&h->h_lock);
+> 		return;
+> 	}
+> -	h->h_in = 0;
+> +	hlist_del_init_rcu(&h->h_link);
+> 	spin_unlock(&h->h_lock);
+> -	list_del_rcu(&h->h_link);
+> }
+> 
+> void class_handle_unhash(struct portals_handle *h)
+> @@ -145,7 +143,7 @@ void *class_handle2object(u64 cookie, char *owner)
+> 	bucket = handle_hash + (cookie & HANDLE_HASH_MASK);
+> 
+> 	rcu_read_lock();
+> -	list_for_each_entry_rcu(h, &bucket->head, h_link) {
+> +	hlist_for_each_entry_rcu(h, &bucket->head, h_link) {
+> 		if (h->h_cookie != cookie || h->h_owner != owner)
+> 			continue;
+> 
+> @@ -176,7 +174,7 @@ int class_handle_init(void)
+> 	spin_lock_init(&handle_base_lock);
+> 	for (bucket = handle_hash + HANDLE_HASH_SIZE - 1; bucket >= handle_hash;
+> 	     bucket--) {
+> -		INIT_LIST_HEAD(&bucket->head);
+> +		INIT_HLIST_HEAD(&bucket->head);
+> 		spin_lock_init(&bucket->lock);
+> 	}
+> 
+> @@ -195,7 +193,7 @@ static int cleanup_all_handles(void)
+> 		struct portals_handle *h;
+> 
+> 		spin_lock(&handle_hash[i].lock);
+> -		list_for_each_entry_rcu(h, &handle_hash[i].head, h_link) {
+> +		hlist_for_each_entry_rcu(h, &handle_hash[i].head, h_link) {
+> 			CERROR("force clean handle %#llx addr %p owner %p\n",
+> 			       h->h_cookie, h, h->h_owner);
+> 
+> 
+> 
+
+Cheers, Andreas
+---
+Andreas Dilger
+Principal Lustre Architect
+Whamcloud
+
+
+
+
+
+
+
+
+From adilger at whamcloud.com  Wed Apr  3 12:59:28 2019
+From: adilger at whamcloud.com (Andreas Dilger)
+Date: Wed, 3 Apr 2019 19:59:28 +0000
+Subject: [lustre-devel] [PATCH 18/28] lustre: remove unused fields from
+ struct obd_device
+In-Reply-To: <155168109872.31333.16031201138302253309.stgit@noble.brown>
+References: <155168107971.31333.14345309795939467246.stgit@noble.brown>
+ <155168109872.31333.16031201138302253309.stgit@noble.brown>
+Message-ID: <57CCEFAA-C92E-496A-93E8-A3FA2E28A3A3@whamcloud.com>
+
+On Mar 3, 2019, at 23:31, NeilBrown <neilb at suse.com> wrote:
+> 
+> One field is set but never access.
+> Another is accessed but never set.
+> Other are never mentioned at all.
+
+Well, not on the client at least...
+
+> Also remove the comment
+> 	/* use separate field as it is set in interrupt to don't mess with
+> 	 * protection of other bits using _bh lock
+> 	 */
+> 
+> This is not correct - were it used, obd_recovery_expired would be part
+> of the same 'unsigned long' as the other fields.
+
+It probably should have been just an "unsigned long" rather than a bitfield.
+In any case, it is no longer updated in interrupt context so it is irrelevant.
+
+> Signed-off-by: NeilBrown <neilb at suse.com>
+
+Reviewed-by: Andreas Dilger <adilger at whamcloud.com>
+
+> ---
+> drivers/staging/lustre/lustre/include/obd.h        |   33 +++++++-------------
+> drivers/staging/lustre/lustre/mgc/mgc_request.c    |    4 +-
+> drivers/staging/lustre/lustre/obdclass/class_obd.c |    1 -
+> .../staging/lustre/lustre/obdclass/obd_config.c    |    1 -
+> 4 files changed, 14 insertions(+), 25 deletions(-)
+> 
+> diff --git a/drivers/staging/lustre/lustre/include/obd.h b/drivers/staging/lustre/lustre/include/obd.h
+> index 3bdde312e4a6..93a47cf0ef68 100644
+> --- a/drivers/staging/lustre/lustre/include/obd.h
+> +++ b/drivers/staging/lustre/lustre/include/obd.h
+> @@ -539,27 +539,18 @@ struct obd_device {
+> 	char			 obd_name[MAX_OBD_NAME];
+> 
+> 	/* bitfield modification is protected by obd_dev_lock */
+> -	unsigned long obd_attached:1,      /* finished attach */
+> -		      obd_set_up:1,	/* finished setup */
+> -		      obd_version_recov:1, /* obd uses version checking */
+> -		      obd_replayable:1,/* recovery is enabled; inform clients */
+> -		      obd_no_transno:1,  /* no committed-transno notification */
+> -		      obd_no_recov:1,      /* fail instead of retry messages */
+> -		      obd_stopping:1,      /* started cleanup */
+> -		      obd_starting:1,      /* started setup */
+> -		      obd_force:1,	 /* cleanup with > 0 obd refcount */
+> -		      obd_fail:1,	 /* cleanup with failover */
+> -		      obd_no_conn:1,       /* deny new connections */
+> -		      obd_inactive:1,      /* device active/inactive
+> -					    * (for sysfs status only!!)
+> -					    */
+> -		      obd_no_ir:1,	 /* no imperative recovery. */
+> -		      obd_process_conf:1,  /* device is processing mgs config */
+> -		      obd_checksum_dump:1; /* dump pages upon cksum error */
+> -	/* use separate field as it is set in interrupt to don't mess with
+> -	 * protection of other bits using _bh lock
+> -	 */
+> -	unsigned long obd_recovery_expired:1;
+> +	unsigned long obd_attached:1,	  /* finished attach */
+> +		      obd_set_up:1,	  /* finished setup */
+> +		      obd_no_recov:1,	  /* fail instead of retry messages */
+> +		      obd_stopping:1,	  /* started cleanup */
+> +		      obd_starting:1,	  /* started setup */
+> +		      obd_force:1,	  /* cleanup with > 0 obd refcount */
+> +		      obd_fail:1,	  /* cleanup with failover */
+> +		      obd_inactive:1,	  /* device active/inactive
+> +					   * (for sysfs status only!!)
+> +					   */
+> +		      obd_process_conf:1;/* device is processing mgs config */
+> +
+> 	/* uuid-export hash body */
+> 	struct rhashtable	 obd_uuid_hash;
+> 	wait_queue_head_t	 obd_refcount_waitq;
+> diff --git a/drivers/staging/lustre/lustre/mgc/mgc_request.c b/drivers/staging/lustre/lustre/mgc/mgc_request.c
+> index 5ce49e708287..6daadf24b894 100644
+> --- a/drivers/staging/lustre/lustre/mgc/mgc_request.c
+> +++ b/drivers/staging/lustre/lustre/mgc/mgc_request.c
+> @@ -991,10 +991,10 @@ static int mgc_set_info_async(const struct lu_env *env, struct obd_export *exp,
+> 		if (vallen != sizeof(int))
+> 			return -EINVAL;
+> 		value = *(int *)val;
+> -		CDEBUG(D_MGC, "InitRecov %s %d/d%d:i%d:r%d:or%d:%s\n",
+> +		CDEBUG(D_MGC, "InitRecov %s %d/d%d:i%d:r%d:%s\n",
+> 		       imp->imp_obd->obd_name, value,
+> 		       imp->imp_deactive, imp->imp_invalid,
+> -		       imp->imp_replayable, imp->imp_obd->obd_replayable,
+> +		       imp->imp_replayable,
+> 		       ptlrpc_import_state_name(imp->imp_state));
+> 		/* Resurrect if we previously died */
+> 		if ((imp->imp_state != LUSTRE_IMP_FULL &&
+> diff --git a/drivers/staging/lustre/lustre/obdclass/class_obd.c b/drivers/staging/lustre/lustre/obdclass/class_obd.c
+> index b8fc74044fe3..1fcbda128a58 100644
+> --- a/drivers/staging/lustre/lustre/obdclass/class_obd.c
+> +++ b/drivers/staging/lustre/lustre/obdclass/class_obd.c
+> @@ -525,7 +525,6 @@ int class_handle_ioctl(unsigned int cmd, unsigned long arg)
+> 		}
+> 		CDEBUG(D_HA, "%s: disabling committed-transno notification\n",
+> 		       obd->obd_name);
+> -		obd->obd_no_transno = 1;
+> 		err = 0;
+> 		break;
+> 
+> diff --git a/drivers/staging/lustre/lustre/obdclass/obd_config.c b/drivers/staging/lustre/lustre/obdclass/obd_config.c
+> index 0cdadea4e63c..7b10206d6e52 100644
+> --- a/drivers/staging/lustre/lustre/obdclass/obd_config.c
+> +++ b/drivers/staging/lustre/lustre/obdclass/obd_config.c
+> @@ -487,7 +487,6 @@ static int class_cleanup(struct obd_device *obd, struct lustre_cfg *lcfg)
+> 				LCONSOLE_WARN("Failing over %s\n",
+> 					      obd->obd_name);
+> 				obd->obd_fail = 1;
+> -				obd->obd_no_transno = 1;
+> 				obd->obd_no_recov = 1;
+> 				if (OBP(obd, iocontrol)) {
+> 					obd_iocontrol(OBD_IOC_SYNC,
+> 
+> 
+
+Cheers, Andreas
+---
+Andreas Dilger
+Principal Lustre Architect
+Whamcloud
+
+
+
+
+
+
+
+
+From adilger at whamcloud.com  Wed Apr  3 13:26:12 2019
+From: adilger at whamcloud.com (Andreas Dilger)
+Date: Wed, 3 Apr 2019 20:26:12 +0000
+Subject: [lustre-devel] [PATCH 23/32] lustre: ptlrpc: make
+ ptlrpc_last_xid an atomic64_t
+In-Reply-To: <155252231106.26912.1651233909473573691.stgit@noble.brown>
+References: <155252182126.26912.1842463462595601611.stgit@noble.brown>
+ <155252231106.26912.1651233909473573691.stgit@noble.brown>
+Message-ID: <D98CA13E-14C3-4EA4-A7D0-F632C52858F3@whamcloud.com>
+
+On Mar 13, 2019, at 18:11, NeilBrown <neilb at suse.com> wrote:
+> 
+> This variable is treated like ant atomic64_t,
+> so change it's type and simplify the code.
+> 
+> Signed-off-by: NeilBrown <neilb at suse.com>
+
+I can't comment on all the LNet changes, but this looks reasonable.
+
+Reviewed-by: Andreas Dilger <adilger at whamcloud.com>
+
+> ---
+> drivers/staging/lustre/lustre/ptlrpc/client.c |   39 ++++++-------------------
+> 1 file changed, 10 insertions(+), 29 deletions(-)
+> 
+> diff --git a/drivers/staging/lustre/lustre/ptlrpc/client.c b/drivers/staging/lustre/lustre/ptlrpc/client.c
+> index 2514a142e799..ddf44c854200 100644
+> --- a/drivers/staging/lustre/lustre/ptlrpc/client.c
+> +++ b/drivers/staging/lustre/lustre/ptlrpc/client.c
+> @@ -2999,8 +2999,7 @@ void ptlrpc_abort_set(struct ptlrpc_request_set *set)
+> 	}
+> }
+> 
+> -static u64 ptlrpc_last_xid;
+> -static spinlock_t ptlrpc_last_xid_lock;
+> +static atomic64_t ptlrpc_last_xid;
+> 
+> /**
+>  * Initialize the XID for the node.  This is common among all requests on
+> @@ -3021,19 +3020,20 @@ static spinlock_t ptlrpc_last_xid_lock;
+> void ptlrpc_init_xid(void)
+> {
+> 	time64_t now = ktime_get_real_seconds();
+> +	u64 xid;
+> 
+> -	spin_lock_init(&ptlrpc_last_xid_lock);
+> 	if (now < YEAR_2004) {
+> -		get_random_bytes(&ptlrpc_last_xid, sizeof(ptlrpc_last_xid));
+> -		ptlrpc_last_xid >>= 2;
+> -		ptlrpc_last_xid |= (1ULL << 61);
+> +		get_random_bytes(&xid, sizeof(xid));
+> +		xid >>= 2;
+> +		xid |= (1ULL << 61);
+> 	} else {
+> -		ptlrpc_last_xid = (u64)now << 20;
+> +		xid = (u64)now << 20;
+> 	}
+> 
+> 	/* Always need to be aligned to a power-of-two for multi-bulk BRW */
+> 	BUILD_BUG_ON(((PTLRPC_BULK_OPS_COUNT - 1) & PTLRPC_BULK_OPS_COUNT) != 0);
+> -	ptlrpc_last_xid &= PTLRPC_BULK_OPS_MASK;
+> +	xid &= PTLRPC_BULK_OPS_MASK;
+> +	atomic64_set(&ptlrpc_last_xid, xid);
+> }
+> 
+> /**
+> @@ -3050,14 +3050,7 @@ void ptlrpc_init_xid(void)
+>  */
+> u64 ptlrpc_next_xid(void)
+> {
+> -	u64 next;
+> -
+> -	spin_lock(&ptlrpc_last_xid_lock);
+> -	next = ptlrpc_last_xid + PTLRPC_BULK_OPS_COUNT;
+> -	ptlrpc_last_xid = next;
+> -	spin_unlock(&ptlrpc_last_xid_lock);
+> -
+> -	return next;
+> +	return atomic64_add_return(PTLRPC_BULK_OPS_COUNT, &ptlrpc_last_xid);
+> }
+> 
+> /**
+> @@ -3131,19 +3124,7 @@ void ptlrpc_set_bulk_mbits(struct ptlrpc_request *req)
+>  */
+> u64 ptlrpc_sample_next_xid(void)
+> {
+> -#if BITS_PER_LONG == 32
+> -	/* need to avoid possible word tearing on 32-bit systems */
+> -	u64 next;
+> -
+> -	spin_lock(&ptlrpc_last_xid_lock);
+> -	next = ptlrpc_last_xid + PTLRPC_BULK_OPS_COUNT;
+> -	spin_unlock(&ptlrpc_last_xid_lock);
+> -
+> -	return next;
+> -#else
+> -	/* No need to lock, since returned value is racy anyways */
+> -	return ptlrpc_last_xid + PTLRPC_BULK_OPS_COUNT;
+> -#endif
+> +	return atomic64_read(&ptlrpc_last_xid) + PTLRPC_BULK_OPS_COUNT;
+> }
+> EXPORT_SYMBOL(ptlrpc_sample_next_xid);
+> 
+> 
+> 
+
+Cheers, Andreas
+---
+Andreas Dilger
+Principal Lustre Architect
+Whamcloud
+
+
+
+
+
+
+
+
+From adilger at whamcloud.com  Wed Apr  3 13:30:06 2019
+From: adilger at whamcloud.com (Andreas Dilger)
+Date: Wed, 3 Apr 2019 20:30:06 +0000
+Subject: [lustre-devel] [PATCH 27/32] lustre: don't call
+ unshare_fs_struct()
+In-Reply-To: <155252231148.26912.899667623955916563.stgit@noble.brown>
+References: <155252182126.26912.1842463462595601611.stgit@noble.brown>
+ <155252231148.26912.899667623955916563.stgit@noble.brown>
+Message-ID: <54670010-3CDE-45F3-AF8D-FAC8D74F69D5@whamcloud.com>
+
+On Mar 13, 2019, at 18:11, NeilBrown <neilb at suse.com> wrote:
+> 
+> A kthread runs with the same fs_struct as init.
+> It is only helpful to unshare this if the thread
+> will change one of the fields in the fs_struct:
+> root directory
+> current working directory
+> umask.
+> 
+> No lustre kthread changes any of these, so there is
+> no need to call unshare_fs_struct().
+> 
+> Signed-off-by: NeilBrown <neilb at suse.com>
+
+I recall one of the issues ages ago is that when the kthreads are
+started in the context of "mount" that they would use the same
+CWD as the mount process, which may be undesirable (e.g. it will
+prevent unmounting that filesystem).
+
+It is entirely possible that things have changed since this was
+written, but worthwhile to mention.
+
+> ---
+> drivers/staging/lustre/lustre/obdclass/llog.c  |    3 ---
+> drivers/staging/lustre/lustre/ptlrpc/import.c  |    3 ---
+> drivers/staging/lustre/lustre/ptlrpc/ptlrpcd.c |    2 --
+> drivers/staging/lustre/lustre/ptlrpc/service.c |    4 ----
+> 4 files changed, 12 deletions(-)
+> 
+> diff --git a/drivers/staging/lustre/lustre/obdclass/llog.c b/drivers/staging/lustre/lustre/obdclass/llog.c
+> index a34b1a7108b7..ebb6c03ef038 100644
+> --- a/drivers/staging/lustre/lustre/obdclass/llog.c
+> +++ b/drivers/staging/lustre/lustre/obdclass/llog.c
+> @@ -45,7 +45,6 @@
+> #define DEBUG_SUBSYSTEM S_LOG
+> 
+> #include <linux/kthread.h>
+> -#include <linux/fs_struct.h>
+> #include <llog_swab.h>
+> #include <lustre_log.h>
+> #include <obd_class.h>
+> @@ -399,8 +398,6 @@ static int llog_process_thread_daemonize(void *arg)
+> 	struct lu_env env;
+> 	int rc;
+> 
+> -	unshare_fs_struct();
+> -
+> 	/* client env has no keys, tags is just 0 */
+> 	rc = lu_env_init(&env, LCT_LOCAL | LCT_MG_THREAD);
+> 	if (rc)
+> diff --git a/drivers/staging/lustre/lustre/ptlrpc/import.c b/drivers/staging/lustre/lustre/ptlrpc/import.c
+> index 26a976865fbd..b2a57d2bdde7 100644
+> --- a/drivers/staging/lustre/lustre/ptlrpc/import.c
+> +++ b/drivers/staging/lustre/lustre/ptlrpc/import.c
+> @@ -38,7 +38,6 @@
+> #define DEBUG_SUBSYSTEM S_RPC
+> 
+> #include <linux/kthread.h>
+> -#include <linux/fs_struct.h>
+> #include <obd_support.h>
+> #include <lustre_ha.h>
+> #include <lustre_net.h>
+> @@ -1328,8 +1327,6 @@ static int ptlrpc_invalidate_import_thread(void *data)
+> {
+> 	struct obd_import *imp = data;
+> 
+> -	unshare_fs_struct();
+> -
+> 	CDEBUG(D_HA, "thread invalidate import %s to %s@%s\n",
+> 	       imp->imp_obd->obd_name, obd2cli_tgt(imp->imp_obd),
+> 	       imp->imp_connection->c_remote_uuid.uuid);
+> diff --git a/drivers/staging/lustre/lustre/ptlrpc/ptlrpcd.c b/drivers/staging/lustre/lustre/ptlrpc/ptlrpcd.c
+> index c295e9943bf7..b02e6c50bae1 100644
+> --- a/drivers/staging/lustre/lustre/ptlrpc/ptlrpcd.c
+> +++ b/drivers/staging/lustre/lustre/ptlrpc/ptlrpcd.c
+> @@ -53,7 +53,6 @@
+> #define DEBUG_SUBSYSTEM S_RPC
+> 
+> #include <linux/kthread.h>
+> -#include <linux/fs_struct.h>
+> #include <linux/libcfs/libcfs.h>
+> #include <linux/libcfs/libcfs_cpu.h>
+> #include <linux/libcfs/libcfs_string.h>
+> @@ -389,7 +388,6 @@ static int ptlrpcd(void *arg)
+> 	int rc = 0;
+> 	int exit = 0;
+> 
+> -	unshare_fs_struct();
+> 	if (cfs_cpt_bind(cfs_cpt_tab, pc->pc_cpt) != 0)
+> 		CWARN("Failed to bind %s on CPT %d\n", pc->pc_name, pc->pc_cpt);
+> 
+> diff --git a/drivers/staging/lustre/lustre/ptlrpc/service.c b/drivers/staging/lustre/lustre/ptlrpc/service.c
+> index c6b95c721167..571f0455e7b0 100644
+> --- a/drivers/staging/lustre/lustre/ptlrpc/service.c
+> +++ b/drivers/staging/lustre/lustre/ptlrpc/service.c
+> @@ -34,7 +34,6 @@
+> #define DEBUG_SUBSYSTEM S_RPC
+> 
+> #include <linux/kthread.h>
+> -#include <linux/fs_struct.h>
+> #include <obd_support.h>
+> #include <obd_class.h>
+> #include <lustre_net.h>
+> @@ -2029,7 +2028,6 @@ static int ptlrpc_main(void *arg)
+> 	int counter = 0, rc = 0;
+> 
+> 	thread->t_pid = current->pid;
+> -	unshare_fs_struct();
+> 
+> 	/* NB: we will call cfs_cpt_bind() for all threads, because we
+> 	 * might want to run lustre server only on a subset of system CPUs,
+> @@ -2230,8 +2228,6 @@ static int ptlrpc_hr_main(void *arg)
+> 	LIST_HEAD(replies);
+> 	int rc;
+> 
+> -	unshare_fs_struct();
+> -
+> 	rc = cfs_cpt_bind(ptlrpc_hr.hr_cpt_table, hrp->hrp_cpt);
+> 	if (rc != 0) {
+> 		char threadname[20];
+> 
+> 
+
+Cheers, Andreas
+---
+Andreas Dilger
+CTO Whamcloud
+
+
+
+
+
+From adilger at whamcloud.com  Wed Apr  3 13:43:38 2019
+From: adilger at whamcloud.com (Andreas Dilger)
+Date: Wed, 3 Apr 2019 20:43:38 +0000
+Subject: [lustre-devel] [PATCH 28/32] lustre: don't declare extern
+ variables in C files.
+In-Reply-To: <155252231164.26912.14871078632567032600.stgit@noble.brown>
+References: <155252182126.26912.1842463462595601611.stgit@noble.brown>
+ <155252231164.26912.14871078632567032600.stgit@noble.brown>
+Message-ID: <E8286834-9920-48A2-895B-8B6365388920@whamcloud.com>
+
+On Mar 13, 2019, at 18:11, NeilBrown <neilb at suse.com> wrote:
+> 
+> 'extern' declarations should only appear in .h files.
+> All these names are declared in .h files as needed,
+> and these duplicate declarations in .c files can
+> be removed.
+> 
+> Signed-off-by: NeilBrown <neilb at suse.com>
+
+Totally agree on this.  It can be a source of hard-to-find bugs.
+
+Reviewed-by: Andreas Dilger <adilger at whamcloud.com>
+
+
+> ---
+> drivers/staging/lustre/lustre/ldlm/ldlm_resource.c |    2 --
+> drivers/staging/lustre/lustre/ptlrpc/import.c      |    1 -
+> .../staging/lustre/lustre/ptlrpc/ptlrpc_module.c   |    5 -----
+> 3 files changed, 8 deletions(-)
+> 
+> diff --git a/drivers/staging/lustre/lustre/ldlm/ldlm_resource.c b/drivers/staging/lustre/lustre/ldlm/ldlm_resource.c
+> index d79f70d17220..82ec936a6e80 100644
+> --- a/drivers/staging/lustre/lustre/ldlm/ldlm_resource.c
+> +++ b/drivers/staging/lustre/lustre/ldlm/ldlm_resource.c
+> @@ -681,8 +681,6 @@ struct ldlm_namespace *ldlm_namespace_new(struct obd_device *obd, char *name,
+> }
+> EXPORT_SYMBOL(ldlm_namespace_new);
+> 
+> -extern struct ldlm_lock *ldlm_lock_get(struct ldlm_lock *lock);
+> -
+> /**
+>  * Cancel and destroy all locks on a resource.
+>  *
+> diff --git a/drivers/staging/lustre/lustre/ptlrpc/import.c b/drivers/staging/lustre/lustre/ptlrpc/import.c
+> index b2a57d2bdde7..a6f15429eda2 100644
+> --- a/drivers/staging/lustre/lustre/ptlrpc/import.c
+> +++ b/drivers/staging/lustre/lustre/ptlrpc/import.c
+> @@ -1558,7 +1558,6 @@ int ptlrpc_disconnect_import(struct obd_import *imp, int noclose)
+> EXPORT_SYMBOL(ptlrpc_disconnect_import);
+> 
+> /* Adaptive Timeout utils */
+> -extern unsigned int at_min, at_max, at_history;
+> 
+> /*
+>  *Update at_current with the specified value (bounded by at_min and at_max),
+> diff --git a/drivers/staging/lustre/lustre/ptlrpc/ptlrpc_module.c b/drivers/staging/lustre/lustre/ptlrpc/ptlrpc_module.c
+> index 5c32b657b3b5..76018805f0ce 100644
+> --- a/drivers/staging/lustre/lustre/ptlrpc/ptlrpc_module.c
+> +++ b/drivers/staging/lustre/lustre/ptlrpc/ptlrpc_module.c
+> @@ -40,11 +40,6 @@
+> 
+> #include "ptlrpc_internal.h"
+> 
+> -extern spinlock_t ptlrpc_last_xid_lock;
+> -#if RS_DEBUG
+> -extern spinlock_t ptlrpc_rs_debug_lock;
+> -#endif
+> -
+> DEFINE_MUTEX(ptlrpc_startup);
+> static int ptlrpc_active = 0;
+> 
+> 
+> 
+
+Cheers, Andreas
+---
+Andreas Dilger
+Principal Lustre Architect
+Whamcloud
+
+
+
+
+
+
+
+
+From adilger at whamcloud.com  Wed Apr  3 13:44:38 2019
+From: adilger at whamcloud.com (Andreas Dilger)
+Date: Wed, 3 Apr 2019 20:44:38 +0000
+Subject: [lustre-devel] [PATCH 29/32] lustre: introduce
+ CONFIG_LUSTRE_FS_POSIX_ACL
+In-Reply-To: <155252231193.26912.14536836197493170469.stgit@noble.brown>
+References: <155252182126.26912.1842463462595601611.stgit@noble.brown>
+ <155252231193.26912.14536836197493170469.stgit@noble.brown>
+Message-ID: <6D368D71-3975-4CD4-8A16-657CAEFD2C72@whamcloud.com>
+
+On Mar 13, 2019, at 18:11, NeilBrown <neilb at suse.com> wrote:
+> 
+> Lustre (or any file system) should not conditionally
+> compile code based on CONFIG_FS_POSIX_ACL.  This config
+> option enables library support.
+> A file system can define it's own config option,
+> which then selects CONFIG_FS_POSIX_ACL (if needed).  It should
+> act on its own option, not the library one.
+> 
+> This patch makes that change.
+> 
+> Signed-off-by: NeilBrown <neilb at suse.com>
+
+Reviewed-by: Andreas Dilger <adilger at whamcloud.com>
+
+> ---
+> drivers/staging/lustre/lustre/Kconfig              |   11 +++++++++++
+> drivers/staging/lustre/lustre/include/lustre_acl.h |    6 +++---
+> drivers/staging/lustre/lustre/include/obd.h        |    2 +-
+> drivers/staging/lustre/lustre/llite/Makefile       |    2 +-
+> .../staging/lustre/lustre/llite/llite_internal.h   |    4 ++--
+> drivers/staging/lustre/lustre/llite/llite_lib.c    |   10 +++++-----
+> drivers/staging/lustre/lustre/llite/xattr.c        |    4 ++--
+> drivers/staging/lustre/lustre/mdc/mdc_request.c    |    6 +++---
+> 8 files changed, 28 insertions(+), 17 deletions(-)
+> 
+> diff --git a/drivers/staging/lustre/lustre/Kconfig b/drivers/staging/lustre/lustre/Kconfig
+> index ccb78a945995..2ea3f2456b0f 100644
+> --- a/drivers/staging/lustre/lustre/Kconfig
+> +++ b/drivers/staging/lustre/lustre/Kconfig
+> @@ -30,6 +30,17 @@ config LUSTRE_FS
+> 
+> 	  See also http://wiki.lustre.org/
+> 
+> +config LUSTRE_FS_POSIX_ACL
+> +	bool "Lustre POSIX Access Control Lists"
+> +	depends on LUSTRE_FS
+> +	select FS_POSIX_ACL
+> +	help
+> +	  POSIX Access Control Lists (ACLs) support permissions for users and
+> +	  groups beyond the owner/group/world scheme.
+> +	  Lustre can support these ACLs.
+> +
+> +	  In in doubt, say Y.
+> +
+> config LUSTRE_DEBUG_EXPENSIVE_CHECK
+> 	bool "Enable Lustre DEBUG checks"
+> 	depends on LUSTRE_FS
+> diff --git a/drivers/staging/lustre/lustre/include/lustre_acl.h b/drivers/staging/lustre/lustre/include/lustre_acl.h
+> index e7575a172b5f..e1f373d2e6cb 100644
+> --- a/drivers/staging/lustre/lustre/include/lustre_acl.h
+> +++ b/drivers/staging/lustre/lustre/include/lustre_acl.h
+> @@ -36,7 +36,7 @@
+> 
+> #include <linux/fs.h>
+> #include <linux/dcache.h>
+> -#ifdef CONFIG_FS_POSIX_ACL
+> +#ifdef CONFIG_LUSTRE_FS_POSIX_ACL
+> #include <linux/posix_acl_xattr.h>
+> 
+> #define LUSTRE_POSIX_ACL_MAX_ENTRIES	32
+> @@ -44,8 +44,8 @@
+> 	(sizeof(struct posix_acl_xattr_header) +				\
+> 	 LUSTRE_POSIX_ACL_MAX_ENTRIES * sizeof(struct posix_acl_xattr_entry))
+> 
+> -#else /* ! CONFIG_FS_POSIX_ACL */
+> +#else /* ! CONFIG_LUSTRE_FS_POSIX_ACL */
+> #define LUSTRE_POSIX_ACL_MAX_SIZE_OLD 0
+> -#endif /* CONFIG_FS_POSIX_ACL */
+> +#endif /* CONFIG_LUSTRE_FS_POSIX_ACL */
+> 
+> #endif
+> diff --git a/drivers/staging/lustre/lustre/include/obd.h b/drivers/staging/lustre/lustre/include/obd.h
+> index faf2ea623a09..6c984732d9c2 100644
+> --- a/drivers/staging/lustre/lustre/include/obd.h
+> +++ b/drivers/staging/lustre/lustre/include/obd.h
+> @@ -872,7 +872,7 @@ struct lustre_md {
+> 	struct mdt_body			*body;
+> 	struct lu_buf			 layout;
+> 	struct lmv_stripe_md		*lmv;
+> -#ifdef CONFIG_FS_POSIX_ACL
+> +#ifdef CONFIG_LUSTRE_FS_POSIX_ACL
+> 	struct posix_acl		*posix_acl;
+> #endif
+> 	struct mdt_remote_perm		*remote_perm;
+> diff --git a/drivers/staging/lustre/lustre/llite/Makefile b/drivers/staging/lustre/lustre/llite/Makefile
+> index 7d0225476362..b6698af044f6 100644
+> --- a/drivers/staging/lustre/lustre/llite/Makefile
+> +++ b/drivers/staging/lustre/lustre/llite/Makefile
+> @@ -10,4 +10,4 @@ lustre-y := dcache.o dir.o file.o llite_lib.o llite_nfs.o \
+> 	    vvp_dev.o vvp_page.o vvp_lock.o vvp_io.o vvp_object.o \
+> 	    lproc_llite.o
+> 
+> -lustre-$(CONFIG_FS_POSIX_ACL) += acl.o
+> +lustre-$(CONFIG_LUSTRE_FS_POSIX_ACL) += acl.o
+> diff --git a/drivers/staging/lustre/lustre/llite/llite_internal.h b/drivers/staging/lustre/lustre/llite/llite_internal.h
+> index c8860904bdd4..83053459f9c7 100644
+> --- a/drivers/staging/lustre/lustre/llite/llite_internal.h
+> +++ b/drivers/staging/lustre/lustre/llite/llite_internal.h
+> @@ -814,13 +814,13 @@ int ll_release_openhandle(struct inode *inode, struct lookup_intent *it);
+> int ll_md_real_close(struct inode *inode, fmode_t fmode);
+> int ll_getattr(const struct path *path, struct kstat *stat,
+> 	       u32 request_mask, unsigned int flags);
+> -#ifdef CONFIG_FS_POSIX_ACL
+> +#ifdef CONFIG_LUSTRE_FS_POSIX_ACL
+> struct posix_acl *ll_get_acl(struct inode *inode, int type);
+> int ll_set_acl(struct inode *inode, struct posix_acl *acl, int type);
+> #else
+> #define ll_get_acl NULL
+> #define ll_set_acl NULL
+> -#endif /* CONFIG_FS_POSIX_ACL */
+> +#endif /* CONFIG_LUSTRE_FS_POSIX_ACL */
+> 
+> int ll_migrate(struct inode *parent, struct file *file, int mdtidx,
+> 	       const char *name, int namelen);
+> diff --git a/drivers/staging/lustre/lustre/llite/llite_lib.c b/drivers/staging/lustre/lustre/llite/llite_lib.c
+> index cfe8105fe138..e55a4e0f68bf 100644
+> --- a/drivers/staging/lustre/lustre/llite/llite_lib.c
+> +++ b/drivers/staging/lustre/lustre/llite/llite_lib.c
+> @@ -209,7 +209,7 @@ static int client_common_fill_super(struct super_block *sb, char *md, char *dt)
+> 
+> 	if (sbi->ll_flags & LL_SBI_LRU_RESIZE)
+> 		data->ocd_connect_flags |= OBD_CONNECT_LRU_RESIZE;
+> -#ifdef CONFIG_FS_POSIX_ACL
+> +#ifdef CONFIG_LUSTRE_FS_POSIX_ACL
+> 	data->ocd_connect_flags |= OBD_CONNECT_ACL | OBD_CONNECT_UMASK |
+> 				   OBD_CONNECT_LARGE_ACL;
+> #endif
+> @@ -512,7 +512,7 @@ static int client_common_fill_super(struct super_block *sb, char *md, char *dt)
+> 	ptlrpc_req_finished(request);
+> 
+> 	if (IS_ERR(root)) {
+> -#ifdef CONFIG_FS_POSIX_ACL
+> +#ifdef CONFIG_LUSTRE_FS_POSIX_ACL
+> 		if (lmd.posix_acl) {
+> 			posix_acl_release(lmd.posix_acl);
+> 			lmd.posix_acl = NULL;
+> @@ -1394,7 +1394,7 @@ void ll_clear_inode(struct inode *inode)
+> 
+> 	ll_xattr_cache_destroy(inode);
+> 
+> -#ifdef CONFIG_FS_POSIX_ACL
+> +#ifdef CONFIG_LUSTRE_FS_POSIX_ACL
+> 	forget_all_cached_acls(inode);
+> 	if (lli->lli_posix_acl) {
+> 		posix_acl_release(lli->lli_posix_acl);
+> @@ -1825,7 +1825,7 @@ int ll_update_inode(struct inode *inode, struct lustre_md *md)
+> 			return rc;
+> 	}
+> 
+> -#ifdef CONFIG_FS_POSIX_ACL
+> +#ifdef CONFIG_LUSTRE_FS_POSIX_ACL
+> 	if (body->mbo_valid & OBD_MD_FLACL) {
+> 		spin_lock(&lli->lli_lock);
+> 		if (lli->lli_posix_acl)
+> @@ -2239,7 +2239,7 @@ int ll_prep_inode(struct inode **inode, struct ptlrpc_request *req,
+> 					     sbi->ll_flags & LL_SBI_32BIT_API),
+> 				 &md);
+> 		if (IS_ERR(*inode)) {
+> -#ifdef CONFIG_FS_POSIX_ACL
+> +#ifdef CONFIG_LUSTRE_FS_POSIX_ACL
+> 			if (md.posix_acl) {
+> 				posix_acl_release(md.posix_acl);
+> 				md.posix_acl = NULL;
+> diff --git a/drivers/staging/lustre/lustre/llite/xattr.c b/drivers/staging/lustre/lustre/llite/xattr.c
+> index a1d27061ac19..c1f6c38350d7 100644
+> --- a/drivers/staging/lustre/lustre/llite/xattr.c
+> +++ b/drivers/staging/lustre/lustre/llite/xattr.c
+> @@ -433,7 +433,7 @@ static int ll_xattr_get_common(const struct xattr_handler *handler,
+> 	    !strcmp(name, "selinux"))
+> 		return -EOPNOTSUPP;
+> 
+> -#ifdef CONFIG_FS_POSIX_ACL
+> +#ifdef CONFIG_LUSTRE_FS_POSIX_ACL
+> 	/* posix acl is under protection of LOOKUP lock. when calling to this,
+> 	 * we just have path resolution to the target inode, so we have great
+> 	 * chance that cached ACL is uptodate.
+> @@ -676,7 +676,7 @@ const struct xattr_handler *ll_xattr_handlers[] = {
+> 	&ll_user_xattr_handler,
+> 	&ll_trusted_xattr_handler,
+> 	&ll_security_xattr_handler,
+> -#ifdef CONFIG_FS_POSIX_ACL
+> +#ifdef CONFIG_LUSTRE_FS_POSIX_ACL
+> 	&ll_acl_access_xattr_handler,
+> 	&ll_acl_default_xattr_handler,
+> #endif
+> diff --git a/drivers/staging/lustre/lustre/mdc/mdc_request.c b/drivers/staging/lustre/lustre/mdc/mdc_request.c
+> index 451e6c94c7e8..b54c5f1418ae 100644
+> --- a/drivers/staging/lustre/lustre/mdc/mdc_request.c
+> +++ b/drivers/staging/lustre/lustre/mdc/mdc_request.c
+> @@ -408,7 +408,7 @@ static int mdc_getxattr(struct obd_export *exp, const struct lu_fid *fid,
+> 				req);
+> }
+> 
+> -#ifdef CONFIG_FS_POSIX_ACL
+> +#ifdef CONFIG_LUSTRE_FS_POSIX_ACL
+> static int mdc_unpack_acl(struct ptlrpc_request *req, struct lustre_md *md)
+> {
+> 	struct req_capsule *pill = &req->rq_pill;
+> @@ -535,7 +535,7 @@ static int mdc_get_lustre_md(struct obd_export *exp,
+> 			rc = mdc_unpack_acl(req, md);
+> 			if (rc)
+> 				goto out;
+> -#ifdef CONFIG_FS_POSIX_ACL
+> +#ifdef CONFIG_LUSTRE_FS_POSIX_ACL
+> 		} else {
+> 			md->posix_acl = NULL;
+> #endif
+> @@ -544,7 +544,7 @@ static int mdc_get_lustre_md(struct obd_export *exp,
+> 
+> out:
+> 	if (rc) {
+> -#ifdef CONFIG_FS_POSIX_ACL
+> +#ifdef CONFIG_LUSTRE_FS_POSIX_ACL
+> 		posix_acl_release(md->posix_acl);
+> #endif
+> 	}
+> 
+> 
+
+Cheers, Andreas
+---
+Andreas Dilger
+CTO Whamcloud
+
+
+
+
+
+From adilger at whamcloud.com  Wed Apr  3 13:45:43 2019
+From: adilger at whamcloud.com (Andreas Dilger)
+Date: Wed, 3 Apr 2019 20:45:43 +0000
+Subject: [lustre-devel] [PATCH 30/32] lustre: remove some "#ifdef
+ CONFIG*" from .c files.
+In-Reply-To: <155252231208.26912.7799074082457334373.stgit@noble.brown>
+References: <155252182126.26912.1842463462595601611.stgit@noble.brown>
+ <155252231208.26912.7799074082457334373.stgit@noble.brown>
+Message-ID: <C9943C38-92A3-4AB7-8C14-FF4CB621BF6D@whamcloud.com>
+
+On Mar 13, 2019, at 18:11, NeilBrown <neilb at suse.com> wrote:
+> 
+> It is Linux policy to avoid #ifdef in C files where
+> convenient - .h files are OK.
+> 
+> This patch defines a few inline functions which differ
+> depending on CONFIG_LUSTRE_FS_POSIX_ACL, and removes
+> some #ifdefs from .c files.
+> 
+> Signed-off-by: NeilBrown <neilb at suse.com>
+
+Reviewed-by: Andreas Dilger <adilger at whamcloud.com>
+
+> ---
+> drivers/staging/lustre/lustre/include/obd.h        |   21 +++++++++++
+> .../staging/lustre/lustre/llite/llite_internal.h   |   29 +++++++++++++++
+> drivers/staging/lustre/lustre/llite/llite_lib.c    |   39 ++++----------------
+> drivers/staging/lustre/lustre/mdc/mdc_request.c    |    8 ++--
+> 4 files changed, 61 insertions(+), 36 deletions(-)
+> 
+> diff --git a/drivers/staging/lustre/lustre/include/obd.h b/drivers/staging/lustre/lustre/include/obd.h
+> index 6c984732d9c2..354f7d64e08a 100644
+> --- a/drivers/staging/lustre/lustre/include/obd.h
+> +++ b/drivers/staging/lustre/lustre/include/obd.h
+> @@ -37,6 +37,8 @@
+> #include <linux/kobject.h>
+> #include <linux/spinlock.h>
+> #include <linux/sysfs.h>
+> +#include <linux/fs.h>
+> +#include <linux/posix_acl.h>
+> 
+> #include <uapi/linux/lustre/lustre_idl.h>
+> #include <lustre_lib.h>
+> @@ -878,6 +880,25 @@ struct lustre_md {
+> 	struct mdt_remote_perm		*remote_perm;
+> };
+> 
+> +#ifdef CONFIG_LUSTRE_FS_POSIX_ACL
+> +static inline void lmd_clear_acl(struct lustre_md *md)
+> +{
+> +	if (md->posix_acl) {
+> +		posix_acl_release(md->posix_acl);
+> +		md->posix_acl = NULL;
+> +	}
+> +}
+> +
+> +#define OBD_CONNECT_ACL_FLAGS	\
+> +	(OBD_CONNECT_ACL | OBD_CONNECT_UMASK | OBD_CONNECT_LARGE_ACL)
+> +#else
+> +static inline void lmd_clear_acl(struct lustre_md *md)
+> +{
+> +}
+> +
+> +#define OBD_CONNECT_ACL_FLAGS	(0)
+> +#endif
+> +
+> struct md_open_data {
+> 	struct obd_client_handle	*mod_och;
+> 	struct ptlrpc_request		*mod_open_req;
+> diff --git a/drivers/staging/lustre/lustre/llite/llite_internal.h b/drivers/staging/lustre/lustre/llite/llite_internal.h
+> index 83053459f9c7..95ec46779c41 100644
+> --- a/drivers/staging/lustre/lustre/llite/llite_internal.h
+> +++ b/drivers/staging/lustre/lustre/llite/llite_internal.h
+> @@ -246,6 +246,35 @@ struct ll_inode_info {
+> 	struct list_head		lli_xattrs;/* ll_xattr_entry->xe_list */
+> };
+> 
+> +#ifdef CONFIG_LUSTRE_FS_POSIX_ACL
+> +static inline void lli_clear_acl(struct ll_inode_info *lli)
+> +{
+> +	if (lli->lli_posix_acl) {
+> +		posix_acl_release(lli->lli_posix_acl);
+> +		lli->lli_posix_acl = NULL;
+> +	}
+> +}
+> +
+> +static inline void lli_replace_acl(struct ll_inode_info *lli,
+> +				   struct lustre_md *md)
+> +{
+> +	spin_lock(&lli->lli_lock);
+> +	if (lli->lli_posix_acl)
+> +		posix_acl_release(lli->lli_posix_acl);
+> +	lli->lli_posix_acl = md->posix_acl;
+> +	spin_unlock(&lli->lli_lock);
+> +}
+> +#else
+> +static inline void lli_clear_acl(struct ll_inode_info *lli)
+> +{
+> +}
+> +
+> +static inline void lli_replace_acl(struct ll_inode_info *lli,
+> +				   struct lustre_md *md)
+> +{
+> +}
+> +#endif
+> +
+> static inline u32 ll_layout_version_get(struct ll_inode_info *lli)
+> {
+> 	u32 gen;
+> diff --git a/drivers/staging/lustre/lustre/llite/llite_lib.c b/drivers/staging/lustre/lustre/llite/llite_lib.c
+> index e55a4e0f68bf..d4325b49b924 100644
+> --- a/drivers/staging/lustre/lustre/llite/llite_lib.c
+> +++ b/drivers/staging/lustre/lustre/llite/llite_lib.c
+> @@ -209,10 +209,8 @@ static int client_common_fill_super(struct super_block *sb, char *md, char *dt)
+> 
+> 	if (sbi->ll_flags & LL_SBI_LRU_RESIZE)
+> 		data->ocd_connect_flags |= OBD_CONNECT_LRU_RESIZE;
+> -#ifdef CONFIG_LUSTRE_FS_POSIX_ACL
+> -	data->ocd_connect_flags |= OBD_CONNECT_ACL | OBD_CONNECT_UMASK |
+> -				   OBD_CONNECT_LARGE_ACL;
+> -#endif
+> +
+> +	data->ocd_connect_flags |= OBD_CONNECT_ACL_FLAGS;
+> 
+> 	if (OBD_FAIL_CHECK(OBD_FAIL_MDC_LIGHTWEIGHT))
+> 		/* flag mdc connection as lightweight, only used for test
+> @@ -512,12 +510,7 @@ static int client_common_fill_super(struct super_block *sb, char *md, char *dt)
+> 	ptlrpc_req_finished(request);
+> 
+> 	if (IS_ERR(root)) {
+> -#ifdef CONFIG_LUSTRE_FS_POSIX_ACL
+> -		if (lmd.posix_acl) {
+> -			posix_acl_release(lmd.posix_acl);
+> -			lmd.posix_acl = NULL;
+> -		}
+> -#endif
+> +		lmd_clear_acl(&lmd);
+> 		err = -EBADF;
+> 		CERROR("lustre_lite: bad iget4 for root\n");
+> 		goto out_root;
+> @@ -1394,13 +1387,8 @@ void ll_clear_inode(struct inode *inode)
+> 
+> 	ll_xattr_cache_destroy(inode);
+> 
+> -#ifdef CONFIG_LUSTRE_FS_POSIX_ACL
+> 	forget_all_cached_acls(inode);
+> -	if (lli->lli_posix_acl) {
+> -		posix_acl_release(lli->lli_posix_acl);
+> -		lli->lli_posix_acl = NULL;
+> -	}
+> -#endif
+> +	lli_clear_acl(lli);
+> 	lli->lli_inode_magic = LLI_INODE_DEAD;
+> 
+> 	if (S_ISDIR(inode->i_mode))
+> @@ -1825,15 +1813,9 @@ int ll_update_inode(struct inode *inode, struct lustre_md *md)
+> 			return rc;
+> 	}
+> 
+> -#ifdef CONFIG_LUSTRE_FS_POSIX_ACL
+> -	if (body->mbo_valid & OBD_MD_FLACL) {
+> -		spin_lock(&lli->lli_lock);
+> -		if (lli->lli_posix_acl)
+> -			posix_acl_release(lli->lli_posix_acl);
+> -		lli->lli_posix_acl = md->posix_acl;
+> -		spin_unlock(&lli->lli_lock);
+> -	}
+> -#endif
+> +	if (body->mbo_valid & OBD_MD_FLACL)
+> +		lli_replace_acl(lli, md);
+> +
+> 	inode->i_ino = cl_fid_build_ino(&body->mbo_fid1,
+> 					sbi->ll_flags & LL_SBI_32BIT_API);
+> 	inode->i_generation = cl_fid_build_gen(&body->mbo_fid1);
+> @@ -2239,12 +2221,7 @@ int ll_prep_inode(struct inode **inode, struct ptlrpc_request *req,
+> 					     sbi->ll_flags & LL_SBI_32BIT_API),
+> 				 &md);
+> 		if (IS_ERR(*inode)) {
+> -#ifdef CONFIG_LUSTRE_FS_POSIX_ACL
+> -			if (md.posix_acl) {
+> -				posix_acl_release(md.posix_acl);
+> -				md.posix_acl = NULL;
+> -			}
+> -#endif
+> +			lmd_clear_acl(&md);
+> 			rc = PTR_ERR(*inode);
+> 			CERROR("new_inode -fatal: rc %d\n", rc);
+> 			goto out;
+> diff --git a/drivers/staging/lustre/lustre/mdc/mdc_request.c b/drivers/staging/lustre/lustre/mdc/mdc_request.c
+> index b54c5f1418ae..a0b74244f295 100644
+> --- a/drivers/staging/lustre/lustre/mdc/mdc_request.c
+> +++ b/drivers/staging/lustre/lustre/mdc/mdc_request.c
+> @@ -543,11 +543,9 @@ static int mdc_get_lustre_md(struct obd_export *exp,
+> 	}
+> 
+> out:
+> -	if (rc) {
+> -#ifdef CONFIG_LUSTRE_FS_POSIX_ACL
+> -		posix_acl_release(md->posix_acl);
+> -#endif
+> -	}
+> +	if (rc)
+> +		lmd_clear_acl(md);
+> +
+> 	return rc;
+> }
+> 
+> 
+> 
+
+Cheers, Andreas
+---
+Andreas Dilger
+Principal Lustre Architect
+Whamcloud
+
+
+
+
+
+
+
+
+From adilger at whamcloud.com  Wed Apr  3 13:47:15 2019
+From: adilger at whamcloud.com (Andreas Dilger)
+Date: Wed, 3 Apr 2019 20:47:15 +0000
+Subject: [lustre-devel] [PATCH 31/32] lustre: mdc: create mdc_acl.c
+In-Reply-To: <155252231217.26912.1851699923338684554.stgit@noble.brown>
+References: <155252182126.26912.1842463462595601611.stgit@noble.brown>
+ <155252231217.26912.1851699923338684554.stgit@noble.brown>
+Message-ID: <C7E3D55D-531A-4F6E-AB4D-3D1BFE9F50F5@whamcloud.com>
+
+On Mar 13, 2019, at 18:11, NeilBrown <neilb at suse.com> wrote:
+> 
+> This new C file contains acl related code so it can be
+> conditionally compiled.
+> 
+> The only use of CONFIG_LUSTRE_FS_POSIX_ACL in a C file is
+> now in xattr.c which is not convenient to avoid.
+> 
+> Signed-off-by: NeilBrown <neilb at suse.com>
+
+Reviewed-by: Andreas Dilger <adilger at whamcloud.com>
+
+> ---
+> drivers/staging/lustre/lustre/mdc/Makefile       |    1 
+> drivers/staging/lustre/lustre/mdc/mdc_acl.c      |   48 +++++++++++++++++++
+> drivers/staging/lustre/lustre/mdc/mdc_internal.h |   10 ++++
+> drivers/staging/lustre/lustre/mdc/mdc_request.c  |   57 +---------------------
+> 4 files changed, 61 insertions(+), 55 deletions(-)
+> create mode 100644 drivers/staging/lustre/lustre/mdc/mdc_acl.c
+> 
+> diff --git a/drivers/staging/lustre/lustre/mdc/Makefile b/drivers/staging/lustre/lustre/mdc/Makefile
+> index 5f48e91b9839..137a4413c268 100644
+> --- a/drivers/staging/lustre/lustre/mdc/Makefile
+> +++ b/drivers/staging/lustre/lustre/mdc/Makefile
+> @@ -3,3 +3,4 @@ ccflags-y += -I$(srctree)/drivers/staging/lustre/lustre/include
+> 
+> obj-$(CONFIG_LUSTRE_FS) += mdc.o
+> mdc-y := mdc_changelog.o mdc_request.o mdc_reint.o mdc_lib.o mdc_locks.o lproc_mdc.o
+> +mdc-$(CONFIG_LUSTRE_FS_POSIX_ACL) += mdc_acl.o
+> diff --git a/drivers/staging/lustre/lustre/mdc/mdc_acl.c b/drivers/staging/lustre/lustre/mdc/mdc_acl.c
+> new file mode 100644
+> index 000000000000..045235ad703a
+> --- /dev/null
+> +++ b/drivers/staging/lustre/lustre/mdc/mdc_acl.c
+> @@ -0,0 +1,48 @@
+> +// SPDX-License-Identifier: GPL-2.0
+> +
+> +#include <lustre_acl.h>
+> +
+> +#include "mdc_internal.h"
+> +
+> +int mdc_unpack_acl(struct ptlrpc_request *req, struct lustre_md *md)
+> +{
+> +	struct req_capsule *pill = &req->rq_pill;
+> +	struct mdt_body	*body = md->body;
+> +	struct posix_acl *acl;
+> +	void *buf;
+> +	int rc;
+> +
+> +	/* for ACL, it's possible that FLACL is set but aclsize is zero.
+> +	 * only when aclsize != 0 there's an actual segment for ACL
+> +	 * in reply buffer.
+> +	 */
+> +	if (!body->mbo_aclsize) {
+> +		md->posix_acl = NULL;
+> +		return 0;
+> +	}
+> +
+> +	buf = req_capsule_server_sized_get(pill, &RMF_ACL, body->mbo_aclsize);
+> +
+> +	if (!buf)
+> +		return -EPROTO;
+> +
+> +	acl = posix_acl_from_xattr(&init_user_ns, buf, body->mbo_aclsize);
+> +	if (!acl)
+> +		return 0;
+> +
+> +	if (IS_ERR(acl)) {
+> +		rc = PTR_ERR(acl);
+> +		CERROR("convert xattr to acl: %d\n", rc);
+> +		return rc;
+> +	}
+> +
+> +	rc = posix_acl_valid(&init_user_ns, acl);
+> +	if (rc) {
+> +		CERROR("validate acl: %d\n", rc);
+> +		posix_acl_release(acl);
+> +		return rc;
+> +	}
+> +
+> +	md->posix_acl = acl;
+> +	return 0;
+> +}
+> diff --git a/drivers/staging/lustre/lustre/mdc/mdc_internal.h b/drivers/staging/lustre/lustre/mdc/mdc_internal.h
+> index 2b849e8166b2..20beff384add 100644
+> --- a/drivers/staging/lustre/lustre/mdc/mdc_internal.h
+> +++ b/drivers/staging/lustre/lustre/mdc/mdc_internal.h
+> @@ -141,6 +141,16 @@ static inline int mdc_prep_elc_req(struct obd_export *exp,
+> 				 count);
+> }
+> 
+> +#ifdef CONFIG_LUSTRE_FS_POSIX_ACL
+> +int mdc_unpack_acl(struct ptlrpc_request *req, struct lustre_md *md);
+> +#else
+> +static inline
+> +int mdc_unpack_acl(struct ptlrpc_request *req, struct lustre_md *md)
+> +{
+> +	return 0;
+> +}
+> +#endif
+> +
+> static inline unsigned long hash_x_index(u64 hash, int hash64)
+> {
+> 	if (BITS_PER_LONG == 32 && hash64)
+> diff --git a/drivers/staging/lustre/lustre/mdc/mdc_request.c b/drivers/staging/lustre/lustre/mdc/mdc_request.c
+> index a0b74244f295..7d4450ef8740 100644
+> --- a/drivers/staging/lustre/lustre/mdc/mdc_request.c
+> +++ b/drivers/staging/lustre/lustre/mdc/mdc_request.c
+> @@ -408,46 +408,6 @@ static int mdc_getxattr(struct obd_export *exp, const struct lu_fid *fid,
+> 				req);
+> }
+> 
+> -#ifdef CONFIG_LUSTRE_FS_POSIX_ACL
+> -static int mdc_unpack_acl(struct ptlrpc_request *req, struct lustre_md *md)
+> -{
+> -	struct req_capsule *pill = &req->rq_pill;
+> -	struct mdt_body	*body = md->body;
+> -	struct posix_acl *acl;
+> -	void *buf;
+> -	int rc;
+> -
+> -	if (!body->mbo_aclsize)
+> -		return 0;
+> -
+> -	buf = req_capsule_server_sized_get(pill, &RMF_ACL, body->mbo_aclsize);
+> -
+> -	if (!buf)
+> -		return -EPROTO;
+> -
+> -	acl = posix_acl_from_xattr(&init_user_ns, buf, body->mbo_aclsize);
+> -	if (!acl)
+> -		return 0;
+> -
+> -	if (IS_ERR(acl)) {
+> -		rc = PTR_ERR(acl);
+> -		CERROR("convert xattr to acl: %d\n", rc);
+> -		return rc;
+> -	}
+> -
+> -	rc = posix_acl_valid(&init_user_ns, acl);
+> -	if (rc) {
+> -		CERROR("validate acl: %d\n", rc);
+> -		posix_acl_release(acl);
+> -		return rc;
+> -	}
+> -
+> -	md->posix_acl = acl;
+> -	return 0;
+> -}
+> -#else
+> -#define mdc_unpack_acl(req, md) 0
+> -#endif
+> 
+> static int mdc_get_lustre_md(struct obd_export *exp,
+> 			     struct ptlrpc_request *req,
+> @@ -526,21 +486,8 @@ static int mdc_get_lustre_md(struct obd_export *exp,
+> 	}
+> 	rc = 0;
+> 
+> -	if (md->body->mbo_valid & OBD_MD_FLACL) {
+> -		/* for ACL, it's possible that FLACL is set but aclsize is zero.
+> -		 * only when aclsize != 0 there's an actual segment for ACL
+> -		 * in reply buffer.
+> -		 */
+> -		if (md->body->mbo_aclsize) {
+> -			rc = mdc_unpack_acl(req, md);
+> -			if (rc)
+> -				goto out;
+> -#ifdef CONFIG_LUSTRE_FS_POSIX_ACL
+> -		} else {
+> -			md->posix_acl = NULL;
+> -#endif
+> -		}
+> -	}
+> +	if (md->body->mbo_valid & OBD_MD_FLACL)
+> +		rc = mdc_unpack_acl(req, md);
+> 
+> out:
+> 	if (rc)
+> 
+> 
+
+Cheers, Andreas
+---
+Andreas Dilger
+Principal Lustre Architect
+Whamcloud
+
+
+
+
+
+
+
+
+From adilger at whamcloud.com  Wed Apr  3 13:47:47 2019
+From: adilger at whamcloud.com (Andreas Dilger)
+Date: Wed, 3 Apr 2019 20:47:47 +0000
+Subject: [lustre-devel] [PATCH 32/32] lustre: mgc: remove
+ llog_process_lock
+In-Reply-To: <155252231224.26912.7309623617839627723.stgit@noble.brown>
+References: <155252182126.26912.1842463462595601611.stgit@noble.brown>
+ <155252231224.26912.7309623617839627723.stgit@noble.brown>
+Message-ID: <E7F71FD4-B36B-4091-A769-B64EA6F3EC93@whamcloud.com>
+
+On Mar 13, 2019, at 18:11, NeilBrown <neilb at suse.com> wrote:
+> 
+> This mutex is never used, so remove it.
+> 
+> Signed-off-by: NeilBrown <neilb at suse.com>
+
+Reviewed-by: Andreas Dilger <adilger at whamcloud.com>
+
+> ---
+> drivers/staging/lustre/lustre/mgc/mgc_request.c |    6 +-----
+> 1 file changed, 1 insertion(+), 5 deletions(-)
+> 
+> diff --git a/drivers/staging/lustre/lustre/mgc/mgc_request.c b/drivers/staging/lustre/lustre/mgc/mgc_request.c
+> index a805705f357e..b2b20b41ed25 100644
+> --- a/drivers/staging/lustre/lustre/mgc/mgc_request.c
+> +++ b/drivers/staging/lustre/lustre/mgc/mgc_request.c
+> @@ -383,8 +383,6 @@ config_log_add(struct obd_device *obd, char *logname,
+> 	return ERR_PTR(rc);
+> }
+> 
+> -static DEFINE_MUTEX(llog_process_lock);
+> -
+> static inline void config_mark_cld_stop(struct config_llog_data *cld)
+> {
+> 	if (!cld)
+> @@ -1535,9 +1533,7 @@ static int mgc_process_cfg_log(struct obd_device *mgc,
+> 	__llog_ctxt_put(env, ctxt);
+> 
+> 	/*
+> -	 * update settings on existing OBDs. doing it inside
+> -	 * of llog_process_lock so no device is attaching/detaching
+> -	 * in parallel.
+> +	 * update settings on existing OBDs.
+> 	 * the logname must be <fsname>-sptlrpc
+> 	 */
+> 	if (sptlrpc_started) {
+> 
+> 
+
+Cheers, Andreas
+---
+Andreas Dilger
+Principal Lustre Architect
+Whamcloud
+
+
+
+
+
+
+
+
+From adilger at whamcloud.com  Wed Apr  3 13:49:21 2019
+From: adilger at whamcloud.com (Andreas Dilger)
+Date: Wed, 3 Apr 2019 20:49:21 +0000
+Subject: [lustre-devel] [PATCH 25/32] lustre: incorporate BUILD_BUG_ON
+ into ptlrpc_req_async_args()
+In-Reply-To: <155252231128.26912.13060548976707885497.stgit@noble.brown>
+References: <155252182126.26912.1842463462595601611.stgit@noble.brown>
+ <155252231128.26912.13060548976707885497.stgit@noble.brown>
+Message-ID: <F61CA891-E75D-4A07-998B-EE38E75ED841@whamcloud.com>
+
+On Mar 13, 2019, at 18:11, NeilBrown <neilb at suse.com> wrote:
+> 
+> Every call to ptlrpc_req_async_args() should be preceded by a
+> BUILD_BUG_ON(), though two aren't.
+> 
+> To improve maintainability, include the BUILD_BUG_ON into the
+> ptlrpc_req_async_args() macro.
+> 
+> Signed-off-by: NeilBrown <neilb at suse.com>
+
+Reviewed-by: Andreas Dilger <adilger at whamcloud.com>
+
+> ---
+> drivers/staging/lustre/lustre/include/lustre_net.h |    7 +++--
+> drivers/staging/lustre/lustre/ldlm/ldlm_request.c  |    3 +-
+> drivers/staging/lustre/lustre/mdc/mdc_locks.c      |    7 ++---
+> drivers/staging/lustre/lustre/osc/osc_io.c         |    3 +-
+> drivers/staging/lustre/lustre/osc/osc_request.c    |   29 +++++++-------------
+> drivers/staging/lustre/lustre/ptlrpc/client.c      |    6 +---
+> drivers/staging/lustre/lustre/ptlrpc/import.c      |    3 +-
+> 7 files changed, 23 insertions(+), 35 deletions(-)
+> 
+> diff --git a/drivers/staging/lustre/lustre/include/lustre_net.h b/drivers/staging/lustre/lustre/include/lustre_net.h
+> index 8c61b02a0ae5..f1326a0286ba 100644
+> --- a/drivers/staging/lustre/lustre/include/lustre_net.h
+> +++ b/drivers/staging/lustre/lustre/include/lustre_net.h
+> @@ -277,8 +277,11 @@
+>  */
+> #define OST_MAXREQSIZE		(16 * 1024)
+> 
+> -/* Macro to hide a typecast. */
+> -#define ptlrpc_req_async_args(req) ((void *)&req->rq_async_args)
+> +/* Macro to hide a typecast and BUILD_BUG. */
+> +#define ptlrpc_req_async_args(_var, req) ({				\
+> +		BUILD_BUG_ON(sizeof(*_var) > sizeof(req->rq_async_args)); \
+> +		(typeof(_var))&req->rq_async_args;			\
+> +	})
+> 
+> struct ptlrpc_replay_async_args {
+> 	int		praa_old_state;
+> diff --git a/drivers/staging/lustre/lustre/ldlm/ldlm_request.c b/drivers/staging/lustre/lustre/ldlm/ldlm_request.c
+> index fbb12f540dbd..a1e86a495076 100644
+> --- a/drivers/staging/lustre/lustre/ldlm/ldlm_request.c
+> +++ b/drivers/staging/lustre/lustre/ldlm/ldlm_request.c
+> @@ -1986,8 +1986,7 @@ static int replay_one_lock(struct obd_import *imp, struct ldlm_lock *lock)
+> 	LDLM_DEBUG(lock, "replaying lock:");
+> 
+> 	atomic_inc(&req->rq_import->imp_replay_inflight);
+> -	BUILD_BUG_ON(sizeof(*aa) > sizeof(req->rq_async_args));
+> -	aa = ptlrpc_req_async_args(req);
+> +	aa = ptlrpc_req_async_args(aa, req);
+> 	aa->lock_handle = body->lock_handle[0];
+> 	req->rq_interpret_reply = (ptlrpc_interpterer_t)replay_lock_interpret;
+> 	ptlrpcd_add_req(req);
+> diff --git a/drivers/staging/lustre/lustre/mdc/mdc_locks.c b/drivers/staging/lustre/lustre/mdc/mdc_locks.c
+> index 430c422ed627..9c3f4e9d7a34 100644
+> --- a/drivers/staging/lustre/lustre/mdc/mdc_locks.c
+> +++ b/drivers/staging/lustre/lustre/mdc/mdc_locks.c
+> @@ -48,8 +48,8 @@
+> #include "mdc_internal.h"
+> 
+> struct mdc_getattr_args {
+> -	struct obd_export	   *ga_exp;
+> -	struct md_enqueue_info      *ga_minfo;
+> +	struct obd_export	*ga_exp;
+> +	struct md_enqueue_info	*ga_minfo;
+> };
+> 
+> int it_open_error(int phase, struct lookup_intent *it)
+> @@ -1266,8 +1266,7 @@ int mdc_intent_getattr_async(struct obd_export *exp,
+> 		return rc;
+> 	}
+> 
+> -	BUILD_BUG_ON(sizeof(*ga) > sizeof(req->rq_async_args));
+> -	ga = ptlrpc_req_async_args(req);
+> +	ga = ptlrpc_req_async_args(ga, req);
+> 	ga->ga_exp = exp;
+> 	ga->ga_minfo = minfo;
+> 
+> diff --git a/drivers/staging/lustre/lustre/osc/osc_io.c b/drivers/staging/lustre/lustre/osc/osc_io.c
+> index 0b9ed01658e6..efeb94b7dc15 100644
+> --- a/drivers/staging/lustre/lustre/osc/osc_io.c
+> +++ b/drivers/staging/lustre/lustre/osc/osc_io.c
+> @@ -696,8 +696,7 @@ static int osc_io_data_version_start(const struct lu_env *env,
+> 
+> 	ptlrpc_request_set_replen(req);
+> 	req->rq_interpret_reply = osc_data_version_interpret;
+> -	BUILD_BUG_ON(sizeof(*dva) > sizeof(req->rq_async_args));
+> -	dva = ptlrpc_req_async_args(req);
+> +	dva = ptlrpc_req_async_args(dva, req);
+> 	dva->dva_oio = oio;
+> 
+> 	ptlrpcd_add_req(req);
+> diff --git a/drivers/staging/lustre/lustre/osc/osc_request.c b/drivers/staging/lustre/lustre/osc/osc_request.c
+> index 88302ff795ae..72437da1d892 100644
+> --- a/drivers/staging/lustre/lustre/osc/osc_request.c
+> +++ b/drivers/staging/lustre/lustre/osc/osc_request.c
+> @@ -259,8 +259,7 @@ int osc_setattr_async(struct obd_export *exp, struct obdo *oa,
+> 		req->rq_interpret_reply =
+> 			(ptlrpc_interpterer_t)osc_setattr_interpret;
+> 
+> -		BUILD_BUG_ON(sizeof(*sa) > sizeof(req->rq_async_args));
+> -		sa = ptlrpc_req_async_args(req);
+> +		sa = ptlrpc_req_async_args(sa, req);
+> 		sa->sa_oa = oa;
+> 		sa->sa_upcall = upcall;
+> 		sa->sa_cookie = cookie;
+> @@ -344,8 +343,7 @@ int osc_ladvise_base(struct obd_export *exp, struct obdo *oa,
+> 	}
+> 
+> 	req->rq_interpret_reply = osc_ladvise_interpret;
+> -	BUILD_BUG_ON(sizeof(*la) > sizeof(req->rq_async_args));
+> -	la = ptlrpc_req_async_args(req);
+> +	la = ptlrpc_req_async_args(la, req);
+> 	la->la_oa = oa;
+> 	la->la_upcall = upcall;
+> 	la->la_cookie = cookie;
+> @@ -438,8 +436,7 @@ int osc_punch_base(struct obd_export *exp, struct obdo *oa,
+> 	ptlrpc_request_set_replen(req);
+> 
+> 	req->rq_interpret_reply = (ptlrpc_interpterer_t)osc_setattr_interpret;
+> -	BUILD_BUG_ON(sizeof(*sa) > sizeof(req->rq_async_args));
+> -	sa = ptlrpc_req_async_args(req);
+> +	sa = ptlrpc_req_async_args(sa, req);
+> 	sa->sa_oa = oa;
+> 	sa->sa_upcall = upcall;
+> 	sa->sa_cookie = cookie;
+> @@ -516,8 +513,7 @@ int osc_sync_base(struct osc_object *obj, struct obdo *oa,
+> 	ptlrpc_request_set_replen(req);
+> 	req->rq_interpret_reply = osc_sync_interpret;
+> 
+> -	BUILD_BUG_ON(sizeof(*fa) > sizeof(req->rq_async_args));
+> -	fa = ptlrpc_req_async_args(req);
+> +	fa = ptlrpc_req_async_args(fa, req);
+> 	fa->fa_obj = obj;
+> 	fa->fa_oa = oa;
+> 	fa->fa_upcall = upcall;
+> @@ -1302,8 +1298,7 @@ static int osc_brw_prep_request(int cmd, struct client_obd *cli,
+> 	}
+> 	ptlrpc_request_set_replen(req);
+> 
+> -	BUILD_BUG_ON(sizeof(*aa) > sizeof(req->rq_async_args));
+> -	aa = ptlrpc_req_async_args(req);
+> +	aa = ptlrpc_req_async_args(aa, req);
+> 	aa->aa_oa = oa;
+> 	aa->aa_requested_nob = requested_nob;
+> 	aa->aa_nio_count = niocount;
+> @@ -1650,7 +1645,7 @@ static int osc_brw_redo_request(struct ptlrpc_request *request,
+> 	new_req->rq_generation_set = 1;
+> 	new_req->rq_import_generation = request->rq_import_generation;
+> 
+> -	new_aa = ptlrpc_req_async_args(new_req);
+> +	new_aa = ptlrpc_req_async_args(new_aa, new_req);
+> 
+> 	INIT_LIST_HEAD(&new_aa->aa_oaps);
+> 	list_splice_init(&aa->aa_oaps, &new_aa->aa_oaps);
+> @@ -1973,8 +1968,7 @@ int osc_build_rpc(const struct lu_env *env, struct client_obd *cli,
+> 	cl_req_attr_set(env, osc2cl(obj), crattr);
+> 	lustre_msg_set_jobid(req->rq_reqmsg, crattr->cra_jobid);
+> 
+> -	BUILD_BUG_ON(sizeof(*aa) > sizeof(req->rq_async_args));
+> -	aa = ptlrpc_req_async_args(req);
+> +	aa = ptlrpc_req_async_args(aa, req);
+> 	INIT_LIST_HEAD(&aa->aa_oaps);
+> 	list_splice_init(&rpc_list, &aa->aa_oaps);
+> 	INIT_LIST_HEAD(&aa->aa_exts);
+> @@ -2251,8 +2245,7 @@ int osc_enqueue_base(struct obd_export *exp, struct ldlm_res_id *res_id,
+> 		if (!rc) {
+> 			struct osc_enqueue_args *aa;
+> 
+> -			BUILD_BUG_ON(sizeof(*aa) > sizeof(req->rq_async_args));
+> -			aa = ptlrpc_req_async_args(req);
+> +			aa = ptlrpc_req_async_args(aa, req);
+> 			aa->oa_exp = exp;
+> 			aa->oa_mode = einfo->ei_mode;
+> 			aa->oa_type = einfo->ei_type;
+> @@ -2405,8 +2398,7 @@ static int osc_statfs_async(struct obd_export *exp,
+> 	}
+> 
+> 	req->rq_interpret_reply = (ptlrpc_interpterer_t)osc_statfs_interpret;
+> -	BUILD_BUG_ON(sizeof(*aa) > sizeof(req->rq_async_args));
+> -	aa = ptlrpc_req_async_args(req);
+> +	aa = ptlrpc_req_async_args(aa, req);
+> 	aa->aa_oi = oinfo;
+> 
+> 	ptlrpc_set_add_req(rqset, req);
+> @@ -2610,8 +2602,7 @@ static int osc_set_info_async(const struct lu_env *env, struct obd_export *exp,
+> 		struct osc_brw_async_args *aa;
+> 		struct obdo *oa;
+> 
+> -		BUILD_BUG_ON(sizeof(*aa) > sizeof(req->rq_async_args));
+> -		aa = ptlrpc_req_async_args(req);
+> +		aa = ptlrpc_req_async_args(aa, req);
+> 		oa = kmem_cache_zalloc(obdo_cachep, GFP_NOFS);
+> 		if (!oa) {
+> 			ptlrpc_req_finished(req);
+> diff --git a/drivers/staging/lustre/lustre/ptlrpc/client.c b/drivers/staging/lustre/lustre/ptlrpc/client.c
+> index 1ee1ad4ca088..476435633694 100644
+> --- a/drivers/staging/lustre/lustre/ptlrpc/client.c
+> +++ b/drivers/staging/lustre/lustre/ptlrpc/client.c
+> @@ -2878,8 +2878,7 @@ int ptlrpc_replay_req(struct ptlrpc_request *req)
+> 
+> 	LASSERT(req->rq_import->imp_state == LUSTRE_IMP_REPLAY);
+> 
+> -	LASSERT(sizeof(*aa) <= sizeof(req->rq_async_args));
+> -	aa = ptlrpc_req_async_args(req);
+> +	aa = ptlrpc_req_async_args(aa, req);
+> 	memset(aa, 0, sizeof(*aa));
+> 
+> 	/* Prepare request to be resent with ptlrpcd */
+> @@ -3209,8 +3208,7 @@ void *ptlrpcd_alloc_work(struct obd_import *imp,
+> 	req->rq_no_resend = 1;
+> 	req->rq_pill.rc_fmt = (void *)&worker_format;
+> 
+> -	BUILD_BUG_ON(sizeof(*args) > sizeof(req->rq_async_args));
+> -	args = ptlrpc_req_async_args(req);
+> +	args = ptlrpc_req_async_args(args, req);
+> 	args->cb = cb;
+> 	args->cbdata = cbdata;
+> 
+> diff --git a/drivers/staging/lustre/lustre/ptlrpc/import.c b/drivers/staging/lustre/lustre/ptlrpc/import.c
+> index a68b870faad2..db4ed6dbf362 100644
+> --- a/drivers/staging/lustre/lustre/ptlrpc/import.c
+> +++ b/drivers/staging/lustre/lustre/ptlrpc/import.c
+> @@ -690,8 +690,7 @@ int ptlrpc_connect_import(struct obd_import *imp)
+> 	ptlrpc_request_set_replen(request);
+> 	request->rq_interpret_reply = ptlrpc_connect_interpret;
+> 
+> -	BUILD_BUG_ON(sizeof(*aa) > sizeof(request->rq_async_args));
+> -	aa = ptlrpc_req_async_args(request);
+> +	aa = ptlrpc_req_async_args(aa, request);
+> 	memset(aa, 0, sizeof(*aa));
+> 
+> 	aa->pcaa_peer_committed = committed_before_reconnect;
+> 
+> 
+
+Cheers, Andreas
+---
+Andreas Dilger
+Principal Lustre Architect
+Whamcloud
+
+
+
+
+
+
+
+
+From adilger at whamcloud.com  Wed Apr  3 13:53:39 2019
+From: adilger at whamcloud.com (Andreas Dilger)
+Date: Wed, 3 Apr 2019 20:53:39 +0000
+Subject: [lustre-devel] [PATCH 24/32] lustre: ptlrpc: discard cb_list
+ and ptlrpc_set_cbdata; 
+In-Reply-To: <155252231117.26912.1607797445240466639.stgit@noble.brown>
+References: <155252182126.26912.1842463462595601611.stgit@noble.brown>
+ <155252231117.26912.1607797445240466639.stgit@noble.brown>
+Message-ID: <7C00EAAF-30E3-463D-94CB-BC814F4BE194@whamcloud.com>
+
+On Mar 13, 2019, at 18:11, NeilBrown <neilb at suse.com> wrote:
+> 
+> This field is never set, and no objects of the struct
+> are ever created, so both can be discarded.
+> 
+> Signed-off-by: NeilBrown <neilb at suse.com>
+
+Reviewed-by: Andreas Dilger <adilger at whamcloud.com>
+
+> ---
+> drivers/staging/lustre/lustre/include/lustre_net.h |   18 ------------------
+> drivers/staging/lustre/lustre/ptlrpc/client.c      |   13 -------------
+> 2 files changed, 31 deletions(-)
+> 
+> diff --git a/drivers/staging/lustre/lustre/include/lustre_net.h b/drivers/staging/lustre/lustre/include/lustre_net.h
+> index 73d50fe39501..8c61b02a0ae5 100644
+> --- a/drivers/staging/lustre/lustre/include/lustre_net.h
+> +++ b/drivers/staging/lustre/lustre/include/lustre_net.h
+> @@ -356,12 +356,6 @@ struct ptlrpc_request_set {
+> 	wait_queue_head_t	*set_wakeup_ptr;
+> 	/** List of requests in the set */
+> 	struct list_head	set_requests;
+> -	/**
+> -	 * List of completion callbacks to be called when the set is completed
+> -	 * This is only used if @set_interpret is NULL.
+> -	 * Links struct ptlrpc_set_cbdata.
+> -	 */
+> -	struct list_head	set_cblist;
+> 	/** Completion callback, if only one. */
+> 	set_interpreter_func	set_interpret;
+> 	/** opaq argument passed to completion @set_interpret callback. */
+> @@ -386,18 +380,6 @@ struct ptlrpc_request_set {
+> 	void			*set_producer_arg;
+> };
+> 
+> -/**
+> - * Description of a single ptrlrpc_set callback
+> - */
+> -struct ptlrpc_set_cbdata {
+> -	/** List linkage item */
+> -	struct list_head	psc_item;
+> -	/** Pointer to interpreting function */
+> -	set_interpreter_func    psc_interpret;
+> -	/** Opaq argument to pass to the callback */
+> -	void			*psc_data;
+> -};
+> -
+> struct ptlrpc_bulk_desc;
+> struct ptlrpc_service_part;
+> struct ptlrpc_service;
+> diff --git a/drivers/staging/lustre/lustre/ptlrpc/client.c b/drivers/staging/lustre/lustre/ptlrpc/client.c
+> index ddf44c854200..1ee1ad4ca088 100644
+> --- a/drivers/staging/lustre/lustre/ptlrpc/client.c
+> +++ b/drivers/staging/lustre/lustre/ptlrpc/client.c
+> @@ -932,7 +932,6 @@ struct ptlrpc_request_set *ptlrpc_prep_set(void)
+> 	atomic_set(&set->set_remaining, 0);
+> 	spin_lock_init(&set->set_new_req_lock);
+> 	INIT_LIST_HEAD(&set->set_new_requests);
+> -	INIT_LIST_HEAD(&set->set_cblist);
+> 	set->set_max_inflight = UINT_MAX;
+> 	set->set_producer = NULL;
+> 	set->set_producer_arg = NULL;
+> @@ -2297,18 +2296,6 @@ int ptlrpc_set_wait(struct ptlrpc_request_set *set)
+> 		int (*interpreter)(struct ptlrpc_request_set *set, void *, int) =
+> 			set->set_interpret;
+> 		rc = interpreter(set, set->set_arg, rc);
+> -	} else {
+> -		struct ptlrpc_set_cbdata *cbdata, *n;
+> -		int err;
+> -
+> -		list_for_each_entry_safe(cbdata, n,
+> -					 &set->set_cblist, psc_item) {
+> -			list_del_init(&cbdata->psc_item);
+> -			err = cbdata->psc_interpret(set, cbdata->psc_data, rc);
+> -			if (err && !rc)
+> -				rc = err;
+> -			kfree(cbdata);
+> -		}
+> 	}
+> 
+> 	return rc;
+> 
+> 
+
+Cheers, Andreas
+---
+Andreas Dilger
+Principal Lustre Architect
+Whamcloud
+
+
+
+
+
+
+
+
+From neilb at suse.com  Wed Apr  3 16:37:23 2019
+From: neilb at suse.com (NeilBrown)
+Date: Thu, 04 Apr 2019 10:37:23 +1100
+Subject: [lustre-devel] [PATCH 11/28] lustre: handles: discard h_owner
+ in favour of h_ops
+In-Reply-To: <DD40EE3E-859B-4842-85C8-D6DA4721D624@whamcloud.com>
+References: <155168107971.31333.14345309795939467246.stgit@noble.brown>
+ <155168109847.31333.10992261955260144819.stgit@noble.brown>
+ <DD40EE3E-859B-4842-85C8-D6DA4721D624@whamcloud.com>
+Message-ID: <87a7h61wzw.fsf@notabene.neil.brown.name>
+
+On Wed, Apr 03 2019, Andreas Dilger wrote:
+
+> On Mar 3, 2019, at 23:31, NeilBrown <neilb at suse.com> wrote:
+>> 
+>> lustre_handles  assigned a  64bit  unique identifier  (a 'cookie')  to
+>> objects of  various types and  stored them  in a hash  table, allowing
+>> them to be accessed by the cookie.
+>> 
+>> The is a facility for type checking by recording an 'owner' for each
+>> object, and checking the owner on lookup.  Unfortunately this is not
+>> used - owner is always zero.
+>> 
+>> Eahc object also contains an h_ops pointer which can be used to
+>> reliably identify an owner.
+>> 
+>> So discard h_owner, pass and 'ops' pointer to class_handle2object(),
+>> and only return objects for which the h_ops matches.
+>> 
+>> Signed-off-by: NeilBrown <neilb at suse.com>
+>
+> Probably a bit late to the party here, but it would be useful to add a
+> portability note here, that the pointer to "struct mdt_export_data"
+> that is currently stored in h_owner should move to "struct mdt_file_data"
+> in the server code.
+
+It is never to late to provide review!
+The tricky think with notes it putting them somewhere that they'll
+be read at the write time.
+I've put this note in the commit message
+
+    Note that server code uses h_owner slightly differently - it
+    identifies not only the type but also the "struct mdt_export_data"
+    that the cookie is associated with.
+    This can be changed to store the mdt_export_data  pointer in
+    the mdt_file_data, and  check it to validate the candidate returned by
+    class_handle2object() finds a candidate.
+
+Hopefully when someone (me?) ports the server code, they'll notice that
+they cannot use h_owner the same way, check the commit which changed
+things, and find this.
+
+>
+> Reviewed-by: Andreas Dilger <adilger at whamcloud.com>
+
+Thanks!
+
+NeilBrown
+
+>
+>> ---
+>> .../staging/lustre/lustre/include/lustre_handles.h |    7 +++----
+>> drivers/staging/lustre/lustre/ldlm/ldlm_lock.c     |    2 +-
+>> drivers/staging/lustre/lustre/obdclass/genops.c    |    3 ++-
+>> .../lustre/lustre/obdclass/lustre_handles.c        |    6 +++---
+>> 4 files changed, 9 insertions(+), 9 deletions(-)
+>> 
+>> diff --git a/drivers/staging/lustre/lustre/include/lustre_handles.h b/drivers/staging/lustre/lustre/include/lustre_handles.h
+>> index 683680891e4c..9a4b1a821e7b 100644
+>> --- a/drivers/staging/lustre/lustre/include/lustre_handles.h
+>> +++ b/drivers/staging/lustre/lustre/include/lustre_handles.h
+>> @@ -65,8 +65,7 @@ struct portals_handle_ops {
+>> struct portals_handle {
+>> 	struct list_head		h_link;
+>> 	u64				h_cookie;
+>> -	const void			*h_owner;
+>> -	struct portals_handle_ops	*h_ops;
+>> +	const struct portals_handle_ops	*h_ops;
+>> 
+>> 	/* newly added fields to handle the RCU issue. -jxiong */
+>> 	struct rcu_head			h_rcu;
+>> @@ -79,9 +78,9 @@ struct portals_handle {
+>> 
+>> /* Add a handle to the hash table */
+>> void class_handle_hash(struct portals_handle *,
+>> -		       struct portals_handle_ops *ops);
+>> +		       const struct portals_handle_ops *ops);
+>> void class_handle_unhash(struct portals_handle *);
+>> -void *class_handle2object(u64 cookie, const void *owner);
+>> +void *class_handle2object(u64 cookie, const struct portals_handle_ops *ops);
+>> void class_handle_free_cb(struct rcu_head *rcu);
+>> int class_handle_init(void);
+>> void class_handle_cleanup(void);
+>> diff --git a/drivers/staging/lustre/lustre/ldlm/ldlm_lock.c b/drivers/staging/lustre/lustre/ldlm/ldlm_lock.c
+>> index 7ec5fc900da8..768cccc1fa82 100644
+>> --- a/drivers/staging/lustre/lustre/ldlm/ldlm_lock.c
+>> +++ b/drivers/staging/lustre/lustre/ldlm/ldlm_lock.c
+>> @@ -515,7 +515,7 @@ struct ldlm_lock *__ldlm_handle2lock(const struct lustre_handle *handle,
+>> 
+>> 	LASSERT(handle);
+>> 
+>> -	lock = class_handle2object(handle->cookie, NULL);
+>> +	lock = class_handle2object(handle->cookie, &lock_handle_ops);
+>> 	if (!lock)
+>> 		return NULL;
+>> 
+>> diff --git a/drivers/staging/lustre/lustre/obdclass/genops.c b/drivers/staging/lustre/lustre/obdclass/genops.c
+>> index e206bb401fe3..42859fbca330 100644
+>> --- a/drivers/staging/lustre/lustre/obdclass/genops.c
+>> +++ b/drivers/staging/lustre/lustre/obdclass/genops.c
+>> @@ -708,6 +708,7 @@ int obd_init_caches(void)
+>> 	return -ENOMEM;
+>> }
+>> 
+>> +static struct portals_handle_ops export_handle_ops;
+>> /* map connection to client */
+>> struct obd_export *class_conn2export(struct lustre_handle *conn)
+>> {
+>> @@ -724,7 +725,7 @@ struct obd_export *class_conn2export(struct lustre_handle *conn)
+>> 	}
+>> 
+>> 	CDEBUG(D_INFO, "looking for export cookie %#llx\n", conn->cookie);
+>> -	export = class_handle2object(conn->cookie, NULL);
+>> +	export = class_handle2object(conn->cookie, &export_handle_ops);
+>> 	return export;
+>> }
+>> EXPORT_SYMBOL(class_conn2export);
+>> diff --git a/drivers/staging/lustre/lustre/obdclass/lustre_handles.c b/drivers/staging/lustre/lustre/obdclass/lustre_handles.c
+>> index 0674afb0059f..32b70d613f71 100644
+>> --- a/drivers/staging/lustre/lustre/obdclass/lustre_handles.c
+>> +++ b/drivers/staging/lustre/lustre/obdclass/lustre_handles.c
+>> @@ -59,7 +59,7 @@ static struct handle_bucket {
+>>  * global (per-node) hash-table.
+>>  */
+>> void class_handle_hash(struct portals_handle *h,
+>> -		       struct portals_handle_ops *ops)
+>> +		       const struct portals_handle_ops *ops)
+>> {
+>> 	struct handle_bucket *bucket;
+>> 
+>> @@ -132,7 +132,7 @@ void class_handle_unhash(struct portals_handle *h)
+>> }
+>> EXPORT_SYMBOL(class_handle_unhash);
+>> 
+>> -void *class_handle2object(u64 cookie, const void *owner)
+>> +void *class_handle2object(u64 cookie, const struct portals_handle_ops *ops)
+>> {
+>> 	struct handle_bucket *bucket;
+>> 	struct portals_handle *h;
+>> @@ -147,7 +147,7 @@ void *class_handle2object(u64 cookie, const void *owner)
+>> 
+>> 	rcu_read_lock();
+>> 	list_for_each_entry_rcu(h, &bucket->head, h_link) {
+>> -		if (h->h_cookie != cookie || h->h_owner != owner)
+>> +		if (h->h_cookie != cookie || h->h_ops != ops)
+>> 			continue;
+>> 
+>> 		spin_lock(&h->h_lock);
+>> 
+>> 
+>
+> Cheers, Andreas
+> ---
+> Andreas Dilger
+> CTO Whamcloud
+-------------- next part --------------
+A non-text attachment was scrubbed...
+Name: signature.asc
+Type: application/pgp-signature
+Size: 832 bytes
+Desc: not available
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20190404/2cfa7a12/attachment.sig>
+
+From neilb at suse.com  Wed Apr  3 16:39:48 2019
+From: neilb at suse.com (NeilBrown)
+Date: Thu, 04 Apr 2019 10:39:48 +1100
+Subject: [lustre-devel] [PATCH 14/28] lustre: portals_handle: rename ops
+ to owner
+In-Reply-To: <4ED59F3E-7C66-460F-9FAC-A9B50A83E25D@whamcloud.com>
+References: <155168107971.31333.14345309795939467246.stgit@noble.brown>
+ <155168109858.31333.13224172304059470846.stgit@noble.brown>
+ <4ED59F3E-7C66-460F-9FAC-A9B50A83E25D@whamcloud.com>
+Message-ID: <877eca1wvv.fsf@notabene.neil.brown.name>
+
+On Wed, Apr 03 2019, Andreas Dilger wrote:
+
+> On Mar 3, 2019, at 23:31, NeilBrown <neilb at suse.com> wrote:
+>> 
+>> Now the portals_handle_ops contains only a char*,
+>> it is functioning primarily to identify the owner of each handle.
+>> So change the name to h_owner, and the type to char*.
+>> 
+>> Signed-off-by: NeilBrown <neilb at suse.com>
+>
+> Reviewed-by: Andreas Dilger <adilger at whamcloud.com>
+
+Thanks.
+I've also added a note here:
+
+    Note: this h_owner is now quiet different from the similar h_owner
+    in the server code.  When server code it merged the
+    "med" pointer should be stored in the "mfd" and validated separately.
+
+NeilBrown
+
+>
+>> ---
+>> .../staging/lustre/lustre/include/lustre_handles.h |   12 +++---------
+>> drivers/staging/lustre/lustre/ldlm/ldlm_lock.c     |    8 +++-----
+>> drivers/staging/lustre/lustre/obdclass/genops.c    |   17 ++++++-----------
+>> .../lustre/lustre/obdclass/lustre_handles.c        |   15 +++++++--------
+>> 4 files changed, 19 insertions(+), 33 deletions(-)
+>> 
+>> diff --git a/drivers/staging/lustre/lustre/include/lustre_handles.h b/drivers/staging/lustre/lustre/include/lustre_handles.h
+>> index 8fb42851f6d1..ebbbb01710e7 100644
+>> --- a/drivers/staging/lustre/lustre/include/lustre_handles.h
+>> +++ b/drivers/staging/lustre/lustre/include/lustre_handles.h
+>> @@ -45,11 +45,6 @@
+>> #include <linux/spinlock.h>
+>> #include <linux/types.h>
+>> 
+>> -struct portals_handle_ops {
+>> -	/* hop_type is used for some debugging messages */
+>> -	char *hop_type;
+>> -};
+>> -
+>> /* These handles are most easily used by having them appear at the very top of
+>>  * whatever object that you want to make handles for.  ie:
+>>  *
+>> @@ -65,7 +60,7 @@ struct portals_handle_ops {
+>> struct portals_handle {
+>> 	struct list_head		h_link;
+>> 	u64				h_cookie;
+>> -	const struct portals_handle_ops	*h_ops;
+>> +	char				*h_owner;
+>> 	refcount_t			h_ref;
+>> 
+>> 	/* newly added fields to handle the RCU issue. -jxiong */
+>> @@ -77,10 +72,9 @@ struct portals_handle {
+>> /* handles.c */
+>> 
+>> /* Add a handle to the hash table */
+>> -void class_handle_hash(struct portals_handle *,
+>> -		       const struct portals_handle_ops *ops);
+>> +void class_handle_hash(struct portals_handle *, char *owner);
+>> void class_handle_unhash(struct portals_handle *);
+>> -void *class_handle2object(u64 cookie, const struct portals_handle_ops *ops);
+>> +void *class_handle2object(u64 cookie, char *owner);
+>> int class_handle_init(void);
+>> void class_handle_cleanup(void);
+>> 
+>> diff --git a/drivers/staging/lustre/lustre/ldlm/ldlm_lock.c b/drivers/staging/lustre/lustre/ldlm/ldlm_lock.c
+>> index 18f018d27936..56a2d1dcd663 100644
+>> --- a/drivers/staging/lustre/lustre/ldlm/ldlm_lock.c
+>> +++ b/drivers/staging/lustre/lustre/ldlm/ldlm_lock.c
+>> @@ -363,9 +363,7 @@ void ldlm_lock_destroy_nolock(struct ldlm_lock *lock)
+>> 	}
+>> }
+>> 
+>> -static struct portals_handle_ops lock_handle_ops = {
+>> -	.hop_type   = "ldlm",
+>> -};
+>> +static const char lock_handle_owner[] = "ldlm";
+>> 
+>> /**
+>>  *
+>> @@ -405,7 +403,7 @@ static struct ldlm_lock *ldlm_lock_new(struct ldlm_resource *resource)
+>> 	lprocfs_counter_incr(ldlm_res_to_ns(resource)->ns_stats,
+>> 			     LDLM_NSS_LOCKS);
+>> 	INIT_LIST_HEAD(&lock->l_handle.h_link);
+>> -	class_handle_hash(&lock->l_handle, &lock_handle_ops);
+>> +	class_handle_hash(&lock->l_handle, lock_handle_owner);
+>> 
+>> 	lu_ref_init(&lock->l_reference);
+>> 	lu_ref_add(&lock->l_reference, "hash", lock);
+>> @@ -509,7 +507,7 @@ struct ldlm_lock *__ldlm_handle2lock(const struct lustre_handle *handle,
+>> 
+>> 	LASSERT(handle);
+>> 
+>> -	lock = class_handle2object(handle->cookie, &lock_handle_ops);
+>> +	lock = class_handle2object(handle->cookie, lock_handle_owner);
+>> 	if (!lock)
+>> 		return NULL;
+>> 
+>> diff --git a/drivers/staging/lustre/lustre/obdclass/genops.c b/drivers/staging/lustre/lustre/obdclass/genops.c
+>> index ed306bbfbfb8..e0da46e7d355 100644
+>> --- a/drivers/staging/lustre/lustre/obdclass/genops.c
+>> +++ b/drivers/staging/lustre/lustre/obdclass/genops.c
+>> @@ -708,7 +708,8 @@ int obd_init_caches(void)
+>> 	return -ENOMEM;
+>> }
+>> 
+>> -static struct portals_handle_ops export_handle_ops;
+>> +static const char export_handle_owner[] = "export";
+>> +
+>> /* map connection to client */
+>> struct obd_export *class_conn2export(struct lustre_handle *conn)
+>> {
+>> @@ -725,7 +726,7 @@ struct obd_export *class_conn2export(struct lustre_handle *conn)
+>> 	}
+>> 
+>> 	CDEBUG(D_INFO, "looking for export cookie %#llx\n", conn->cookie);
+>> -	export = class_handle2object(conn->cookie, &export_handle_ops);
+>> +	export = class_handle2object(conn->cookie, export_handle_owner);
+>> 	return export;
+>> }
+>> EXPORT_SYMBOL(class_conn2export);
+>> @@ -777,10 +778,6 @@ static void class_export_destroy(struct obd_export *exp)
+>> 	kfree_rcu(exp, exp_handle.h_rcu);
+>> }
+>> 
+>> -static struct portals_handle_ops export_handle_ops = {
+>> -	.hop_type	= "export",
+>> -};
+>> -
+>> struct obd_export *class_export_get(struct obd_export *exp)
+>> {
+>> 	refcount_inc(&exp->exp_handle.h_ref);
+>> @@ -863,7 +860,7 @@ static struct obd_export *__class_new_export(struct obd_device *obd,
+>> 	INIT_LIST_HEAD(&export->exp_req_replay_queue);
+>> 	INIT_LIST_HEAD(&export->exp_handle.h_link);
+>> 	INIT_LIST_HEAD(&export->exp_hp_rpcs);
+>> -	class_handle_hash(&export->exp_handle, &export_handle_ops);
+>> +	class_handle_hash(&export->exp_handle, export_handle_owner);
+>> 	spin_lock_init(&export->exp_lock);
+>> 	spin_lock_init(&export->exp_rpc_lock);
+>> 	spin_lock_init(&export->exp_bl_list_lock);
+>> @@ -967,9 +964,7 @@ static void class_import_destroy(struct obd_import *imp)
+>> 	kfree_rcu(imp, imp_handle.h_rcu);
+>> }
+>> 
+>> -static struct portals_handle_ops import_handle_ops = {
+>> -	.hop_type	= "import",
+>> -};
+>> +static const char import_handle_owner[] = "import";
+>> 
+>> struct obd_import *class_import_get(struct obd_import *import)
+>> {
+>> @@ -1052,7 +1047,7 @@ struct obd_import *class_new_import(struct obd_device *obd)
+>> 	atomic_set(&imp->imp_inval_count, 0);
+>> 	INIT_LIST_HEAD(&imp->imp_conn_list);
+>> 	INIT_LIST_HEAD(&imp->imp_handle.h_link);
+>> -	class_handle_hash(&imp->imp_handle, &import_handle_ops);
+>> +	class_handle_hash(&imp->imp_handle, import_handle_owner);
+>> 	init_imp_at(&imp->imp_at);
+>> 
+>> 	/* the default magic is V2, will be used in connect RPC, and
+>> diff --git a/drivers/staging/lustre/lustre/obdclass/lustre_handles.c b/drivers/staging/lustre/lustre/obdclass/lustre_handles.c
+>> index 8aece57ec8c9..f41558ccdfcf 100644
+>> --- a/drivers/staging/lustre/lustre/obdclass/lustre_handles.c
+>> +++ b/drivers/staging/lustre/lustre/obdclass/lustre_handles.c
+>> @@ -58,8 +58,7 @@ static struct handle_bucket {
+>>  * Generate a unique 64bit cookie (hash) for a handle and insert it into
+>>  * global (per-node) hash-table.
+>>  */
+>> -void class_handle_hash(struct portals_handle *h,
+>> -		       const struct portals_handle_ops *ops)
+>> +void class_handle_hash(struct portals_handle *h, char *owner)
+>> {
+>> 	struct handle_bucket *bucket;
+>> 
+>> @@ -85,7 +84,7 @@ void class_handle_hash(struct portals_handle *h,
+>> 	h->h_cookie = handle_base;
+>> 	spin_unlock(&handle_base_lock);
+>> 
+>> -	h->h_ops = ops;
+>> +	h->h_owner = owner;
+>> 	spin_lock_init(&h->h_lock);
+>> 
+>> 	bucket = &handle_hash[h->h_cookie & HANDLE_HASH_MASK];
+>> @@ -132,7 +131,7 @@ void class_handle_unhash(struct portals_handle *h)
+>> }
+>> EXPORT_SYMBOL(class_handle_unhash);
+>> 
+>> -void *class_handle2object(u64 cookie, const struct portals_handle_ops *ops)
+>> +void *class_handle2object(u64 cookie, char *owner)
+>> {
+>> 	struct handle_bucket *bucket;
+>> 	struct portals_handle *h;
+>> @@ -147,14 +146,14 @@ void *class_handle2object(u64 cookie, const struct portals_handle_ops *ops)
+>> 
+>> 	rcu_read_lock();
+>> 	list_for_each_entry_rcu(h, &bucket->head, h_link) {
+>> -		if (h->h_cookie != cookie || h->h_ops != ops)
+>> +		if (h->h_cookie != cookie || h->h_owner != owner)
+>> 			continue;
+>> 
+>> 		spin_lock(&h->h_lock);
+>> 		if (likely(h->h_in != 0)) {
+>> 			refcount_inc(&h->h_ref);
+>> 			CDEBUG(D_INFO, "GET %s %p refcount=%d\n",
+>> -			       h->h_ops->hop_type, h,
+>> +			       h->h_owner, h,
+>> 			       refcount_read(&h->h_ref));
+>> 			retval = h;
+>> 		}
+>> @@ -201,8 +200,8 @@ static int cleanup_all_handles(void)
+>> 
+>> 		spin_lock(&handle_hash[i].lock);
+>> 		list_for_each_entry_rcu(h, &handle_hash[i].head, h_link) {
+>> -			CERROR("force clean handle %#llx addr %p ops %p\n",
+>> -			       h->h_cookie, h, h->h_ops);
+>> +			CERROR("force clean handle %#llx addr %p owner %p\n",
+>> +			       h->h_cookie, h, h->h_owner);
+>> 
+>> 			class_handle_unhash_nolock(h);
+>> 			rc++;
+>> 
+>> 
+>
+> Cheers, Andreas
+> ---
+> Andreas Dilger
+> Principal Lustre Architect
+> Whamcloud
+-------------- next part --------------
+A non-text attachment was scrubbed...
+Name: signature.asc
+Type: application/pgp-signature
+Size: 832 bytes
+Desc: not available
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20190404/bdd8c89c/attachment.sig>
+
+From neilb at suse.com  Wed Apr  3 16:44:18 2019
+From: neilb at suse.com (NeilBrown)
+Date: Thu, 04 Apr 2019 10:44:18 +1100
+Subject: [lustre-devel] [PATCH 18/28] lustre: remove unused fields from
+ struct obd_device
+In-Reply-To: <57CCEFAA-C92E-496A-93E8-A3FA2E28A3A3@whamcloud.com>
+References: <155168107971.31333.14345309795939467246.stgit@noble.brown>
+ <155168109872.31333.16031201138302253309.stgit@noble.brown>
+ <57CCEFAA-C92E-496A-93E8-A3FA2E28A3A3@whamcloud.com>
+Message-ID: <874l7e1wod.fsf@notabene.neil.brown.name>
+
+On Wed, Apr 03 2019, Andreas Dilger wrote:
+
+> On Mar 3, 2019, at 23:31, NeilBrown <neilb at suse.com> wrote:
+>> 
+>> One field is set but never access.
+>> Another is accessed but never set.
+>> Other are never mentioned at all.
+>
+> Well, not on the client at least...
+
+Yes ... there will be lots to (review and) put back when we add the
+server.
+
+>
+>> Also remove the comment
+>> 	/* use separate field as it is set in interrupt to don't mess with
+>> 	 * protection of other bits using _bh lock
+>> 	 */
+>> 
+>> This is not correct - were it used, obd_recovery_expired would be part
+>> of the same 'unsigned long' as the other fields.
+>
+> It probably should have been just an "unsigned long" rather than a bitfield.
+> In any case, it is no longer updated in interrupt context so it is irrelevant.
+>
+>> Signed-off-by: NeilBrown <neilb at suse.com>
+>
+> Reviewed-by: Andreas Dilger <adilger at whamcloud.com>
+
+Thanks,
+NeilBrown
+
+>
+>> ---
+>> drivers/staging/lustre/lustre/include/obd.h        |   33 +++++++-------------
+>> drivers/staging/lustre/lustre/mgc/mgc_request.c    |    4 +-
+>> drivers/staging/lustre/lustre/obdclass/class_obd.c |    1 -
+>> .../staging/lustre/lustre/obdclass/obd_config.c    |    1 -
+>> 4 files changed, 14 insertions(+), 25 deletions(-)
+>> 
+>> diff --git a/drivers/staging/lustre/lustre/include/obd.h b/drivers/staging/lustre/lustre/include/obd.h
+>> index 3bdde312e4a6..93a47cf0ef68 100644
+>> --- a/drivers/staging/lustre/lustre/include/obd.h
+>> +++ b/drivers/staging/lustre/lustre/include/obd.h
+>> @@ -539,27 +539,18 @@ struct obd_device {
+>> 	char			 obd_name[MAX_OBD_NAME];
+>> 
+>> 	/* bitfield modification is protected by obd_dev_lock */
+>> -	unsigned long obd_attached:1,      /* finished attach */
+>> -		      obd_set_up:1,	/* finished setup */
+>> -		      obd_version_recov:1, /* obd uses version checking */
+>> -		      obd_replayable:1,/* recovery is enabled; inform clients */
+>> -		      obd_no_transno:1,  /* no committed-transno notification */
+>> -		      obd_no_recov:1,      /* fail instead of retry messages */
+>> -		      obd_stopping:1,      /* started cleanup */
+>> -		      obd_starting:1,      /* started setup */
+>> -		      obd_force:1,	 /* cleanup with > 0 obd refcount */
+>> -		      obd_fail:1,	 /* cleanup with failover */
+>> -		      obd_no_conn:1,       /* deny new connections */
+>> -		      obd_inactive:1,      /* device active/inactive
+>> -					    * (for sysfs status only!!)
+>> -					    */
+>> -		      obd_no_ir:1,	 /* no imperative recovery. */
+>> -		      obd_process_conf:1,  /* device is processing mgs config */
+>> -		      obd_checksum_dump:1; /* dump pages upon cksum error */
+>> -	/* use separate field as it is set in interrupt to don't mess with
+>> -	 * protection of other bits using _bh lock
+>> -	 */
+>> -	unsigned long obd_recovery_expired:1;
+>> +	unsigned long obd_attached:1,	  /* finished attach */
+>> +		      obd_set_up:1,	  /* finished setup */
+>> +		      obd_no_recov:1,	  /* fail instead of retry messages */
+>> +		      obd_stopping:1,	  /* started cleanup */
+>> +		      obd_starting:1,	  /* started setup */
+>> +		      obd_force:1,	  /* cleanup with > 0 obd refcount */
+>> +		      obd_fail:1,	  /* cleanup with failover */
+>> +		      obd_inactive:1,	  /* device active/inactive
+>> +					   * (for sysfs status only!!)
+>> +					   */
+>> +		      obd_process_conf:1;/* device is processing mgs config */
+>> +
+>> 	/* uuid-export hash body */
+>> 	struct rhashtable	 obd_uuid_hash;
+>> 	wait_queue_head_t	 obd_refcount_waitq;
+>> diff --git a/drivers/staging/lustre/lustre/mgc/mgc_request.c b/drivers/staging/lustre/lustre/mgc/mgc_request.c
+>> index 5ce49e708287..6daadf24b894 100644
+>> --- a/drivers/staging/lustre/lustre/mgc/mgc_request.c
+>> +++ b/drivers/staging/lustre/lustre/mgc/mgc_request.c
+>> @@ -991,10 +991,10 @@ static int mgc_set_info_async(const struct lu_env *env, struct obd_export *exp,
+>> 		if (vallen != sizeof(int))
+>> 			return -EINVAL;
+>> 		value = *(int *)val;
+>> -		CDEBUG(D_MGC, "InitRecov %s %d/d%d:i%d:r%d:or%d:%s\n",
+>> +		CDEBUG(D_MGC, "InitRecov %s %d/d%d:i%d:r%d:%s\n",
+>> 		       imp->imp_obd->obd_name, value,
+>> 		       imp->imp_deactive, imp->imp_invalid,
+>> -		       imp->imp_replayable, imp->imp_obd->obd_replayable,
+>> +		       imp->imp_replayable,
+>> 		       ptlrpc_import_state_name(imp->imp_state));
+>> 		/* Resurrect if we previously died */
+>> 		if ((imp->imp_state != LUSTRE_IMP_FULL &&
+>> diff --git a/drivers/staging/lustre/lustre/obdclass/class_obd.c b/drivers/staging/lustre/lustre/obdclass/class_obd.c
+>> index b8fc74044fe3..1fcbda128a58 100644
+>> --- a/drivers/staging/lustre/lustre/obdclass/class_obd.c
+>> +++ b/drivers/staging/lustre/lustre/obdclass/class_obd.c
+>> @@ -525,7 +525,6 @@ int class_handle_ioctl(unsigned int cmd, unsigned long arg)
+>> 		}
+>> 		CDEBUG(D_HA, "%s: disabling committed-transno notification\n",
+>> 		       obd->obd_name);
+>> -		obd->obd_no_transno = 1;
+>> 		err = 0;
+>> 		break;
+>> 
+>> diff --git a/drivers/staging/lustre/lustre/obdclass/obd_config.c b/drivers/staging/lustre/lustre/obdclass/obd_config.c
+>> index 0cdadea4e63c..7b10206d6e52 100644
+>> --- a/drivers/staging/lustre/lustre/obdclass/obd_config.c
+>> +++ b/drivers/staging/lustre/lustre/obdclass/obd_config.c
+>> @@ -487,7 +487,6 @@ static int class_cleanup(struct obd_device *obd, struct lustre_cfg *lcfg)
+>> 				LCONSOLE_WARN("Failing over %s\n",
+>> 					      obd->obd_name);
+>> 				obd->obd_fail = 1;
+>> -				obd->obd_no_transno = 1;
+>> 				obd->obd_no_recov = 1;
+>> 				if (OBP(obd, iocontrol)) {
+>> 					obd_iocontrol(OBD_IOC_SYNC,
+>> 
+>> 
+>
+> Cheers, Andreas
+> ---
+> Andreas Dilger
+> Principal Lustre Architect
+> Whamcloud
+-------------- next part --------------
+A non-text attachment was scrubbed...
+Name: signature.asc
+Type: application/pgp-signature
+Size: 832 bytes
+Desc: not available
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20190404/542ffcc4/attachment-0001.sig>
+
+From neilb at suse.com  Wed Apr  3 16:46:44 2019
+From: neilb at suse.com (NeilBrown)
+Date: Thu, 04 Apr 2019 10:46:44 +1100
+Subject: [lustre-devel] [PATCH 23/32] lustre: ptlrpc: make
+ ptlrpc_last_xid an atomic64_t
+In-Reply-To: <D98CA13E-14C3-4EA4-A7D0-F632C52858F3@whamcloud.com>
+References: <155252182126.26912.1842463462595601611.stgit@noble.brown>
+ <155252231106.26912.1651233909473573691.stgit@noble.brown>
+ <D98CA13E-14C3-4EA4-A7D0-F632C52858F3@whamcloud.com>
+Message-ID: <871s2i1wkb.fsf@notabene.neil.brown.name>
+
+On Wed, Apr 03 2019, Andreas Dilger wrote:
+
+> On Mar 13, 2019, at 18:11, NeilBrown <neilb at suse.com> wrote:
+>> 
+>> This variable is treated like ant atomic64_t,
+>> so change it's type and simplify the code.
+>> 
+>> Signed-off-by: NeilBrown <neilb at suse.com>
+>
+> I can't comment on all the LNet changes, but this looks reasonable.
+
+Who should I ask to review the LNet changes?  I have quite a few more
+pending (though some I'm not really happy with yet).
+
+>
+> Reviewed-by: Andreas Dilger <adilger at whamcloud.com>
+
+Thanks,
+NeilBrown
+
+>
+>> ---
+>> drivers/staging/lustre/lustre/ptlrpc/client.c |   39 ++++++-------------------
+>> 1 file changed, 10 insertions(+), 29 deletions(-)
+>> 
+>> diff --git a/drivers/staging/lustre/lustre/ptlrpc/client.c b/drivers/staging/lustre/lustre/ptlrpc/client.c
+>> index 2514a142e799..ddf44c854200 100644
+>> --- a/drivers/staging/lustre/lustre/ptlrpc/client.c
+>> +++ b/drivers/staging/lustre/lustre/ptlrpc/client.c
+>> @@ -2999,8 +2999,7 @@ void ptlrpc_abort_set(struct ptlrpc_request_set *set)
+>> 	}
+>> }
+>> 
+>> -static u64 ptlrpc_last_xid;
+>> -static spinlock_t ptlrpc_last_xid_lock;
+>> +static atomic64_t ptlrpc_last_xid;
+>> 
+>> /**
+>>  * Initialize the XID for the node.  This is common among all requests on
+>> @@ -3021,19 +3020,20 @@ static spinlock_t ptlrpc_last_xid_lock;
+>> void ptlrpc_init_xid(void)
+>> {
+>> 	time64_t now = ktime_get_real_seconds();
+>> +	u64 xid;
+>> 
+>> -	spin_lock_init(&ptlrpc_last_xid_lock);
+>> 	if (now < YEAR_2004) {
+>> -		get_random_bytes(&ptlrpc_last_xid, sizeof(ptlrpc_last_xid));
+>> -		ptlrpc_last_xid >>= 2;
+>> -		ptlrpc_last_xid |= (1ULL << 61);
+>> +		get_random_bytes(&xid, sizeof(xid));
+>> +		xid >>= 2;
+>> +		xid |= (1ULL << 61);
+>> 	} else {
+>> -		ptlrpc_last_xid = (u64)now << 20;
+>> +		xid = (u64)now << 20;
+>> 	}
+>> 
+>> 	/* Always need to be aligned to a power-of-two for multi-bulk BRW */
+>> 	BUILD_BUG_ON(((PTLRPC_BULK_OPS_COUNT - 1) & PTLRPC_BULK_OPS_COUNT) != 0);
+>> -	ptlrpc_last_xid &= PTLRPC_BULK_OPS_MASK;
+>> +	xid &= PTLRPC_BULK_OPS_MASK;
+>> +	atomic64_set(&ptlrpc_last_xid, xid);
+>> }
+>> 
+>> /**
+>> @@ -3050,14 +3050,7 @@ void ptlrpc_init_xid(void)
+>>  */
+>> u64 ptlrpc_next_xid(void)
+>> {
+>> -	u64 next;
+>> -
+>> -	spin_lock(&ptlrpc_last_xid_lock);
+>> -	next = ptlrpc_last_xid + PTLRPC_BULK_OPS_COUNT;
+>> -	ptlrpc_last_xid = next;
+>> -	spin_unlock(&ptlrpc_last_xid_lock);
+>> -
+>> -	return next;
+>> +	return atomic64_add_return(PTLRPC_BULK_OPS_COUNT, &ptlrpc_last_xid);
+>> }
+>> 
+>> /**
+>> @@ -3131,19 +3124,7 @@ void ptlrpc_set_bulk_mbits(struct ptlrpc_request *req)
+>>  */
+>> u64 ptlrpc_sample_next_xid(void)
+>> {
+>> -#if BITS_PER_LONG == 32
+>> -	/* need to avoid possible word tearing on 32-bit systems */
+>> -	u64 next;
+>> -
+>> -	spin_lock(&ptlrpc_last_xid_lock);
+>> -	next = ptlrpc_last_xid + PTLRPC_BULK_OPS_COUNT;
+>> -	spin_unlock(&ptlrpc_last_xid_lock);
+>> -
+>> -	return next;
+>> -#else
+>> -	/* No need to lock, since returned value is racy anyways */
+>> -	return ptlrpc_last_xid + PTLRPC_BULK_OPS_COUNT;
+>> -#endif
+>> +	return atomic64_read(&ptlrpc_last_xid) + PTLRPC_BULK_OPS_COUNT;
+>> }
+>> EXPORT_SYMBOL(ptlrpc_sample_next_xid);
+>> 
+>> 
+>> 
+>
+> Cheers, Andreas
+> ---
+> Andreas Dilger
+> Principal Lustre Architect
+> Whamcloud
+-------------- next part --------------
+A non-text attachment was scrubbed...
+Name: signature.asc
+Type: application/pgp-signature
+Size: 832 bytes
+Desc: not available
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20190404/737e6bb0/attachment.sig>
+
+From neilb at suse.com  Wed Apr  3 16:56:12 2019
+From: neilb at suse.com (NeilBrown)
+Date: Thu, 04 Apr 2019 10:56:12 +1100
+Subject: [lustre-devel] [PATCH 27/32] lustre: don't call
+ unshare_fs_struct()
+In-Reply-To: <54670010-3CDE-45F3-AF8D-FAC8D74F69D5@whamcloud.com>
+References: <155252182126.26912.1842463462595601611.stgit@noble.brown>
+ <155252231148.26912.899667623955916563.stgit@noble.brown>
+ <54670010-3CDE-45F3-AF8D-FAC8D74F69D5@whamcloud.com>
+Message-ID: <87y34qzlr7.fsf@notabene.neil.brown.name>
+
+On Wed, Apr 03 2019, Andreas Dilger wrote:
+
+> On Mar 13, 2019, at 18:11, NeilBrown <neilb at suse.com> wrote:
+>> 
+>> A kthread runs with the same fs_struct as init.
+>> It is only helpful to unshare this if the thread
+>> will change one of the fields in the fs_struct:
+>> root directory
+>> current working directory
+>> umask.
+>> 
+>> No lustre kthread changes any of these, so there is
+>> no need to call unshare_fs_struct().
+>> 
+>> Signed-off-by: NeilBrown <neilb at suse.com>
+>
+> I recall one of the issues ages ago is that when the kthreads are
+> started in the context of "mount" that they would use the same
+> CWD as the mount process, which may be undesirable (e.g. it will
+> prevent unmounting that filesystem).
+>
+> It is entirely possible that things have changed since this was
+> written, but worthwhile to mention.
+
+That sounds familiar .....
+We used to have a function "daemonize()" which would disconnect a kernel
+thread from anything it had inherited.  That was dropped in 3.8.
+New kthreads are always forked from kthreadd, which is pid 2 (on my
+desktop).  They cannot inherit anything from the thread that requested
+them except what is explicitly passed.
+
+So yes, it used to be as you say (though there were "kthreads" back
+then), but it hasn't been that way for a while.
+
+Thanks,
+NeilBrown
+
+>
+>> ---
+>> drivers/staging/lustre/lustre/obdclass/llog.c  |    3 ---
+>> drivers/staging/lustre/lustre/ptlrpc/import.c  |    3 ---
+>> drivers/staging/lustre/lustre/ptlrpc/ptlrpcd.c |    2 --
+>> drivers/staging/lustre/lustre/ptlrpc/service.c |    4 ----
+>> 4 files changed, 12 deletions(-)
+>> 
+>> diff --git a/drivers/staging/lustre/lustre/obdclass/llog.c b/drivers/staging/lustre/lustre/obdclass/llog.c
+>> index a34b1a7108b7..ebb6c03ef038 100644
+>> --- a/drivers/staging/lustre/lustre/obdclass/llog.c
+>> +++ b/drivers/staging/lustre/lustre/obdclass/llog.c
+>> @@ -45,7 +45,6 @@
+>> #define DEBUG_SUBSYSTEM S_LOG
+>> 
+>> #include <linux/kthread.h>
+>> -#include <linux/fs_struct.h>
+>> #include <llog_swab.h>
+>> #include <lustre_log.h>
+>> #include <obd_class.h>
+>> @@ -399,8 +398,6 @@ static int llog_process_thread_daemonize(void *arg)
+>> 	struct lu_env env;
+>> 	int rc;
+>> 
+>> -	unshare_fs_struct();
+>> -
+>> 	/* client env has no keys, tags is just 0 */
+>> 	rc = lu_env_init(&env, LCT_LOCAL | LCT_MG_THREAD);
+>> 	if (rc)
+>> diff --git a/drivers/staging/lustre/lustre/ptlrpc/import.c b/drivers/staging/lustre/lustre/ptlrpc/import.c
+>> index 26a976865fbd..b2a57d2bdde7 100644
+>> --- a/drivers/staging/lustre/lustre/ptlrpc/import.c
+>> +++ b/drivers/staging/lustre/lustre/ptlrpc/import.c
+>> @@ -38,7 +38,6 @@
+>> #define DEBUG_SUBSYSTEM S_RPC
+>> 
+>> #include <linux/kthread.h>
+>> -#include <linux/fs_struct.h>
+>> #include <obd_support.h>
+>> #include <lustre_ha.h>
+>> #include <lustre_net.h>
+>> @@ -1328,8 +1327,6 @@ static int ptlrpc_invalidate_import_thread(void *data)
+>> {
+>> 	struct obd_import *imp = data;
+>> 
+>> -	unshare_fs_struct();
+>> -
+>> 	CDEBUG(D_HA, "thread invalidate import %s to %s@%s\n",
+>> 	       imp->imp_obd->obd_name, obd2cli_tgt(imp->imp_obd),
+>> 	       imp->imp_connection->c_remote_uuid.uuid);
+>> diff --git a/drivers/staging/lustre/lustre/ptlrpc/ptlrpcd.c b/drivers/staging/lustre/lustre/ptlrpc/ptlrpcd.c
+>> index c295e9943bf7..b02e6c50bae1 100644
+>> --- a/drivers/staging/lustre/lustre/ptlrpc/ptlrpcd.c
+>> +++ b/drivers/staging/lustre/lustre/ptlrpc/ptlrpcd.c
+>> @@ -53,7 +53,6 @@
+>> #define DEBUG_SUBSYSTEM S_RPC
+>> 
+>> #include <linux/kthread.h>
+>> -#include <linux/fs_struct.h>
+>> #include <linux/libcfs/libcfs.h>
+>> #include <linux/libcfs/libcfs_cpu.h>
+>> #include <linux/libcfs/libcfs_string.h>
+>> @@ -389,7 +388,6 @@ static int ptlrpcd(void *arg)
+>> 	int rc = 0;
+>> 	int exit = 0;
+>> 
+>> -	unshare_fs_struct();
+>> 	if (cfs_cpt_bind(cfs_cpt_tab, pc->pc_cpt) != 0)
+>> 		CWARN("Failed to bind %s on CPT %d\n", pc->pc_name, pc->pc_cpt);
+>> 
+>> diff --git a/drivers/staging/lustre/lustre/ptlrpc/service.c b/drivers/staging/lustre/lustre/ptlrpc/service.c
+>> index c6b95c721167..571f0455e7b0 100644
+>> --- a/drivers/staging/lustre/lustre/ptlrpc/service.c
+>> +++ b/drivers/staging/lustre/lustre/ptlrpc/service.c
+>> @@ -34,7 +34,6 @@
+>> #define DEBUG_SUBSYSTEM S_RPC
+>> 
+>> #include <linux/kthread.h>
+>> -#include <linux/fs_struct.h>
+>> #include <obd_support.h>
+>> #include <obd_class.h>
+>> #include <lustre_net.h>
+>> @@ -2029,7 +2028,6 @@ static int ptlrpc_main(void *arg)
+>> 	int counter = 0, rc = 0;
+>> 
+>> 	thread->t_pid = current->pid;
+>> -	unshare_fs_struct();
+>> 
+>> 	/* NB: we will call cfs_cpt_bind() for all threads, because we
+>> 	 * might want to run lustre server only on a subset of system CPUs,
+>> @@ -2230,8 +2228,6 @@ static int ptlrpc_hr_main(void *arg)
+>> 	LIST_HEAD(replies);
+>> 	int rc;
+>> 
+>> -	unshare_fs_struct();
+>> -
+>> 	rc = cfs_cpt_bind(ptlrpc_hr.hr_cpt_table, hrp->hrp_cpt);
+>> 	if (rc != 0) {
+>> 		char threadname[20];
+>> 
+>> 
+>
+> Cheers, Andreas
+> ---
+> Andreas Dilger
+> CTO Whamcloud
+-------------- next part --------------
+A non-text attachment was scrubbed...
+Name: signature.asc
+Type: application/pgp-signature
+Size: 832 bytes
+Desc: not available
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20190404/8d50d395/attachment.sig>
+
+From charlie at whamcloud.com  Thu Apr 18 14:32:34 2019
+From: charlie at whamcloud.com (Charlie Olmstead)
+Date: Thu, 18 Apr 2019 21:32:34 +0000
+Subject: [lustre-devel] review-ldiskfs-arm session to be enforced
+Message-ID: <AF5B560F-FF85-4D97-954A-1AE5620BAAB9@ddn.com>
+
+On Saturday April 20th, the review-ldiskfs-arm test session will become an enforcing test session.
+
+Charlie
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20190418/ff852b15/attachment.html>
+
+From neilb at suse.com  Tue Apr 23 19:17:26 2019
+From: neilb at suse.com (NeilBrown)
+Date: Wed, 24 Apr 2019 12:17:26 +1000
+Subject: [lustre-devel] [PATCH 0/4] Update lustre in drivers/staging to
+ 5.1-rc1
+Message-ID: <155607223991.16863.3231709121984405156.stgit@noble.brown>
+
+I updated my tree to 5.1 some time ago, but didn't test it properly.
+I've now tested and hunted down some obscure issues.
+These 4 patches are needed to resolve issues caused by
+the update.
+
+The last two are most interesting.  selinux_is_enabled() is gone.  I
+think the replacement code is correct, but I'm no expert on selinux.
+More significantly, VM_FAULT_RETRY is no longer a #define, so
+we are redefining it to zero, which is bad.
+
+NeilBrown
+
+---
+
+NeilBrown (4):
+      lustre: stop using deprecated wrappers.
+      lustre: update for SO_RCVTIMEO SO_SNDTIMEO changes.
+      lustre: remove use of selinux_is_enabled().
+      lustre: don't define VM_FAULT_RETRY or FMODE_EXEC
+
+
+ .../staging/lustre/lnet/klnds/o2iblnd/o2iblnd.h    |    4 ++--
+ drivers/staging/lustre/lnet/libcfs/tracefile.c     |    2 +-
+ drivers/staging/lustre/lnet/lnet/lib-socket.c      |   14 ++++++++++----
+ .../staging/lustre/lustre/llite/llite_internal.h   |    8 --------
+ drivers/staging/lustre/lustre/llite/xattr.c        |   11 -----------
+ .../staging/lustre/lustre/llite/xattr_security.c   |   16 +++++++++-------
+ 6 files changed, 22 insertions(+), 33 deletions(-)
+
+--
+Signature
+
+
+From neilb at suse.com  Tue Apr 23 19:17:26 2019
+From: neilb at suse.com (NeilBrown)
+Date: Wed, 24 Apr 2019 12:17:26 +1000
+Subject: [lustre-devel] [PATCH 1/4] lustre: stop using deprecated wrappers.
+In-Reply-To: <155607223991.16863.3231709121984405156.stgit@noble.brown>
+References: <155607223991.16863.3231709121984405156.stgit@noble.brown>
+Message-ID: <155607224614.16863.4989845798565604514.stgit@noble.brown>
+
+ib_sg_dma_address(), ib_sg_dma_len(), and get_ds()
+were simple wrappers that are no longer provided, so
+replace them with the code they were wrapping.
+
+Signed-off-by: NeilBrown <neilb at suse.com>
+---
+ .../staging/lustre/lnet/klnds/o2iblnd/o2iblnd.h    |    4 ++--
+ drivers/staging/lustre/lnet/libcfs/tracefile.c     |    2 +-
+ 2 files changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/staging/lustre/lnet/klnds/o2iblnd/o2iblnd.h b/drivers/staging/lustre/lnet/klnds/o2iblnd/o2iblnd.h
+index 852ada838a1c..3f28c5b7d74e 100644
+--- a/drivers/staging/lustre/lnet/klnds/o2iblnd/o2iblnd.h
++++ b/drivers/staging/lustre/lnet/klnds/o2iblnd/o2iblnd.h
+@@ -951,13 +951,13 @@ static inline void kiblnd_dma_unmap_sg(struct ib_device *dev,
+ static inline u64 kiblnd_sg_dma_address(struct ib_device *dev,
+ 					  struct scatterlist *sg)
+ {
+-	return ib_sg_dma_address(dev, sg);
++	return sg_dma_address(sg);
+ }
+ 
+ static inline unsigned int kiblnd_sg_dma_len(struct ib_device *dev,
+ 					     struct scatterlist *sg)
+ {
+-	return ib_sg_dma_len(dev, sg);
++	return sg_dma_len(sg);
+ }
+ 
+ /* XXX We use KIBLND_CONN_PARAM(e) as writable buffer, it's not strictly */
+diff --git a/drivers/staging/lustre/lnet/libcfs/tracefile.c b/drivers/staging/lustre/lnet/libcfs/tracefile.c
+index 45da892cf276..d634e2281c58 100644
+--- a/drivers/staging/lustre/lnet/libcfs/tracefile.c
++++ b/drivers/staging/lustre/lnet/libcfs/tracefile.c
+@@ -829,7 +829,7 @@ int cfs_tracefile_dump_all_pages(char *filename)
+ 		goto close;
+ 	}
+ 	__oldfs = get_fs();
+-	set_fs(get_ds());
++	set_fs(KERNEL_DS);
+ 
+ 	/* ok, for now, just write the pages.  in the future we'll be building
+ 	 * iobufs with the pages and calling generic_direct_IO
+
+
+
+From neilb at suse.com  Tue Apr 23 19:17:26 2019
+From: neilb at suse.com (NeilBrown)
+Date: Wed, 24 Apr 2019 12:17:26 +1000
+Subject: [lustre-devel] [PATCH 2/4] lustre: update for SO_RCVTIMEO
+ SO_SNDTIMEO changes.
+In-Reply-To: <155607223991.16863.3231709121984405156.stgit@noble.brown>
+References: <155607223991.16863.3231709121984405156.stgit@noble.brown>
+Message-ID: <155607224617.16863.14802160542309003623.stgit@noble.brown>
+
+These socket options have been changed to be Y2K038 compliant.
+So we need to use the _NEW versions and use the correct
+data structure.
+
+Signed-off-by: NeilBrown <neilb at suse.com>
+---
+ drivers/staging/lustre/lnet/lnet/lib-socket.c |   14 ++++++++++----
+ 1 file changed, 10 insertions(+), 4 deletions(-)
+
+diff --git a/drivers/staging/lustre/lnet/lnet/lib-socket.c b/drivers/staging/lustre/lnet/lnet/lib-socket.c
+index 095f9f5e5ea1..6ea8f3f904d0 100644
+--- a/drivers/staging/lustre/lnet/lnet/lib-socket.c
++++ b/drivers/staging/lustre/lnet/lnet/lib-socket.c
+@@ -50,6 +50,7 @@ lnet_sock_write(struct socket *sock, void *buffer, int nob, int timeout)
+ 	long jiffies_left = timeout * msecs_to_jiffies(MSEC_PER_SEC);
+ 	unsigned long then;
+ 	struct timeval tv;
++	struct __kernel_sock_timeval ktv;
+ 	struct kvec iov = {
+ 		.iov_base = buffer,
+ 		.iov_len = nob
+@@ -67,8 +68,10 @@ lnet_sock_write(struct socket *sock, void *buffer, int nob, int timeout)
+ 		if (timeout) {
+ 			/* Set send timeout to remaining time */
+ 			jiffies_to_timeval(jiffies_left, &tv);
+-			rc = kernel_setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO,
+-					       (char *)&tv, sizeof(tv));
++			ktv.tv_sec = tv.tv_sec;
++			ktv.tv_usec = tv.tv_usec;
++			rc = kernel_setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO_NEW,
++					       (char *)&ktv, sizeof(ktv));
+ 			if (rc) {
+ 				CERROR("Can't set socket send timeout %ld.%06d: %d\n",
+ 				       (long)tv.tv_sec, (int)tv.tv_usec, rc);
+@@ -105,6 +108,7 @@ lnet_sock_read(struct socket *sock, void *buffer, int nob, int timeout)
+ 	long jiffies_left = timeout * msecs_to_jiffies(MSEC_PER_SEC);
+ 	unsigned long then;
+ 	struct timeval tv;
++	struct __kernel_sock_timeval ktv;
+ 	struct kvec iov = {
+ 		.iov_base = buffer,
+ 		.iov_len = nob
+@@ -121,8 +125,10 @@ lnet_sock_read(struct socket *sock, void *buffer, int nob, int timeout)
+ 	for (;;) {
+ 		/* Set receive timeout to remaining time */
+ 		jiffies_to_timeval(jiffies_left, &tv);
+-		rc = kernel_setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO,
+-				       (char *)&tv, sizeof(tv));
++		ktv.tv_sec = tv.tv_sec;
++		ktv.tv_usec = tv.tv_usec;
++		rc = kernel_setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO_NEW,
++				       (char *)&ktv, sizeof(ktv));
+ 		if (rc) {
+ 			CERROR("Can't set socket recv timeout %ld.%06d: %d\n",
+ 			       (long)tv.tv_sec, (int)tv.tv_usec, rc);
+
+
+
+From neilb at suse.com  Tue Apr 23 19:17:26 2019
+From: neilb at suse.com (NeilBrown)
+Date: Wed, 24 Apr 2019 12:17:26 +1000
+Subject: [lustre-devel] [PATCH 3/4] lustre: remove use of
+ selinux_is_enabled().
+In-Reply-To: <155607223991.16863.3231709121984405156.stgit@noble.brown>
+References: <155607223991.16863.3231709121984405156.stgit@noble.brown>
+Message-ID: <155607224621.16863.13502209812654413995.stgit@noble.brown>
+
+selinux_is_enabled() no longer exists.  Instead we depend on
+relevant functions returning -EOPNOTSUPP.
+
+Signed-off-by: NeilBrown <neilb at suse.com>
+---
+ drivers/staging/lustre/lustre/llite/xattr.c        |   11 -----------
+ .../staging/lustre/lustre/llite/xattr_security.c   |   16 +++++++++-------
+ 2 files changed, 9 insertions(+), 18 deletions(-)
+
+diff --git a/drivers/staging/lustre/lustre/llite/xattr.c b/drivers/staging/lustre/lustre/llite/xattr.c
+index a1d27061ac19..d604c5bc1abe 100644
+--- a/drivers/staging/lustre/lustre/llite/xattr.c
++++ b/drivers/staging/lustre/lustre/llite/xattr.c
+@@ -35,7 +35,6 @@
+ #include <linux/sched.h>
+ #include <linux/mm.h>
+ #include <linux/xattr.h>
+-#include <linux/selinux.h>
+ 
+ #define DEBUG_SUBSYSTEM S_LLITE
+ 
+@@ -121,11 +120,6 @@ static int ll_xattr_set_common(const struct xattr_handler *handler,
+ 	     (handler->flags == XATTR_LUSTRE_T && !strcmp(name, "lov"))))
+ 		return 0;
+ 
+-	/* LU-549:  Disable security.selinux when selinux is disabled */
+-	if (handler->flags == XATTR_SECURITY_T && !selinux_is_enabled() &&
+-	    strcmp(name, "selinux") == 0)
+-		return -EOPNOTSUPP;
+-
+ 	/*FIXME: enable IMA when the conditions are ready */
+ 	if (handler->flags == XATTR_SECURITY_T &&
+ 	    (!strcmp(name, "ima") || !strcmp(name, "evm")))
+@@ -428,11 +422,6 @@ static int ll_xattr_get_common(const struct xattr_handler *handler,
+ 	if (rc)
+ 		return rc;
+ 
+-	/* LU-549:  Disable security.selinux when selinux is disabled */
+-	if (handler->flags == XATTR_SECURITY_T && !selinux_is_enabled() &&
+-	    !strcmp(name, "selinux"))
+-		return -EOPNOTSUPP;
+-
+ #ifdef CONFIG_FS_POSIX_ACL
+ 	/* posix acl is under protection of LOOKUP lock. when calling to this,
+ 	 * we just have path resolution to the target inode, so we have great
+diff --git a/drivers/staging/lustre/lustre/llite/xattr_security.c b/drivers/staging/lustre/lustre/llite/xattr_security.c
+index f1c011eb5613..e5a52d96643b 100644
+--- a/drivers/staging/lustre/lustre/llite/xattr_security.c
++++ b/drivers/staging/lustre/lustre/llite/xattr_security.c
+@@ -32,7 +32,6 @@
+ 
+ #include <linux/types.h>
+ #include <linux/security.h>
+-#include <linux/selinux.h>
+ #include <linux/xattr.h>
+ #include "llite_internal.h"
+ 
+@@ -58,11 +57,11 @@ int ll_dentry_init_security(struct dentry *dentry, int mode, struct qstr *name,
+ 	 * calls it and assumes that if anything is returned then it must come
+ 	 * from SELinux.
+ 	 */
+-	if (!selinux_is_enabled())
+-		return 0;
+ 
+ 	rc = security_dentry_init_security(dentry, mode, name, secctx,
+ 					   secctx_size);
++	if (rc == -EOPNOTSUPP)
++		return 0;
+ 	if (rc < 0)
+ 		return rc;
+ 
+@@ -124,9 +123,12 @@ int
+ ll_inode_init_security(struct dentry *dentry, struct inode *inode,
+ 		       struct inode *dir)
+ {
+-	if (!selinux_is_enabled())
+-		return 0;
++	int err;
+ 
+-	return security_inode_init_security(inode, dir, NULL,
+-					    &ll_initxattrs, dentry);
++	err = security_inode_init_security(inode, dir, NULL,
++					   &ll_initxattrs, dentry);
++
++	if (err == -EOPNOTSUPP)
++		return 0;
++	return err;
+ }
+
+
+
+From neilb at suse.com  Tue Apr 23 19:17:26 2019
+From: neilb at suse.com (NeilBrown)
+Date: Wed, 24 Apr 2019 12:17:26 +1000
+Subject: [lustre-devel] [PATCH 4/4] lustre: don't define VM_FAULT_RETRY or
+ FMODE_EXEC
+In-Reply-To: <155607223991.16863.3231709121984405156.stgit@noble.brown>
+References: <155607223991.16863.3231709121984405156.stgit@noble.brown>
+Message-ID: <155607224624.16863.16858452975028857034.stgit@noble.brown>
+
+These defines were added long ago for back compatibility and we
+largely harmless until
+ Commit 3d3539018d2c ("mm: create the new vm_fault_t type")
+
+which changed VM_FAULT_RETRY from a #define to an enum value.
+Now "#ifndef VM_FAULT_RETRY" always finds the name isn't defined,
+so it gets redefined to 0, with unfortunate results.
+
+So remove the legacy code.
+
+Signed-off-by: NeilBrown <neilb at suse.com>
+---
+ .../staging/lustre/lustre/llite/llite_internal.h   |    8 --------
+ 1 file changed, 8 deletions(-)
+
+diff --git a/drivers/staging/lustre/lustre/llite/llite_internal.h b/drivers/staging/lustre/lustre/llite/llite_internal.h
+index c8860904bdd4..9da59b1ac1c6 100644
+--- a/drivers/staging/lustre/lustre/llite/llite_internal.h
++++ b/drivers/staging/lustre/lustre/llite/llite_internal.h
+@@ -50,14 +50,6 @@
+ #include "vvp_internal.h"
+ #include "range_lock.h"
+ 
+-#ifndef FMODE_EXEC
+-#define FMODE_EXEC 0
+-#endif
+-
+-#ifndef VM_FAULT_RETRY
+-#define VM_FAULT_RETRY 0
+-#endif
+-
+ /** Only used on client-side for indicating the tail of dir hash/offset. */
+ #define LL_DIR_END_OFF	  0x7fffffffffffffffULL
+ #define LL_DIR_END_OFF_32BIT    0x7fffffffUL
+
+
+

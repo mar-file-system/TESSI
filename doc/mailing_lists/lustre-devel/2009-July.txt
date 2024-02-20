@@ -1,0 +1,2873 @@
+From josephin at psc.edu  Thu Jul  2 10:21:34 2009
+From: josephin at psc.edu (Josephine Palencia)
+Date: Thu, 2 Jul 2009 13:21:34 -0400 (EDT)
+Subject: [Lustre-devel] Kerb cross-site-forcing back clients to null/plain
+Message-ID: <Pine.LNX.4.64.0907021313320.20445@pscuxa.psc.edu>
+
+
+OS:      Centos 5.2 x86_64
+Kernel:  2.6.18-92.1.6
+Lustre:  1.9.50
+
+
+Is there/can there be a mechanism by which kerb auth on the 
+clients both from local & different kerb realm can be forced back to
+null/plain from krb5n/a/i/p if the remote site's kerb is not
+yet ready (properly configured)?
+
+I'd rather the filesystem continues to be mounted on the client and 
+indicates it did so auto-reversing back to null/plain instead of just 
+hanging.
+
+Thanks,
+josephin
+
+
+From Nicolas.Williams at sun.com  Thu Jul  2 15:39:45 2009
+From: Nicolas.Williams at sun.com (Nicolas Williams)
+Date: Thu, 2 Jul 2009 17:39:45 -0500
+Subject: [Lustre-devel] Recovering opens by reconstruction
+Message-ID: <20090702223944.GR15302@Sun.COM>
+
+We're working on adding replay RPC signatures, so that clients may only
+replay RPCs that have been seen by the server (thus signed).
+
+Currently clients recover open file state by replaying the open RPCs.
+Because files can stay open forever this means that replay RPC
+signatures must either remain valid forever (keys never deleted) or be
+renewed.  But if we add a PTLRPC replay signature renewal feature then
+we'll be causing MDSes to do redundant work (since FID capabilities used
+in opens will also have to be renewed).
+
+Since MDSes are typically CPU-bound as it is, adding a yet another
+cryptographic burden to them seems undesirable.  Therefore a way to
+recover open state that does not depend on replaying RPCs with valid
+replay signatures is appealing.
+
+I've been researching this (and talking to Eric B. and Oleg about this).
+Several possible solutions are evident.  I'll describe the one that
+seems most elegant to me (and, I think, Oleg), namely separate open
+state recovery from transaction recovery.
+
+Server-side high-level description:
+
+ - during recovery the MDS will first process anonymous open by FID RPCs
+   from new clients (these open RPCs will not have transaction IDs
+   assigned to them as they imply no actual transactions)
+
+ - then the MDS will accept replays from all clients, new and old
+
+ - followed by lock recovery as usual
+
+Client-side high-level description:
+
+ - open processing will begin by sending an RPC as usual...,
+ 
+ - ... but on commit the md_open_data will be added to a doubly-linked
+   list of opens and the RPC will be removed from the PTLRPC replay
+   queue
+
+ - during recovery the client will begin by traversing the list of
+   md_open_data (open state), reconstruct an anonymous open by FID RPC
+   and send it to the MDS, and after that the client will replay
+   outstanding transactions' RPCs, followed by lock recovery
+
+Old clients would recover as usual.
+
+Security is provided by the capabilities used in the anonymous open by
+FID RPCs and transport security.
+
+The general principle then would be:
+
+   RPC replaying is to be used only for recovering _transactions that
+   should not be outstanding for very long.
+
+Where "very long" is relative to the replay signature crypto key
+lifecycle, which will be on the order of days.
+
+Since opens are not transactions[*] and can stay "outstanding" forever,
+opens would not be suitable for recovery by replay under that principle.
+Open state is much more similar to DLM locks than transactions.
+
+Open recovery must precede uncommitted transaction recovery so as to
+ensure that open state is re-established before unlinks can be replayed
+that would cause the file to be destroyed.
+
+There are, of course, other ways to achieve the desired effect, that is,
+to avoid having to renew replay signatures.
+
+Comments?  Advice?
+
+Nico
+
+[*] Any filesystem object creation implied by an open, such as when
+    O_CREAT is used, would be a transaction, but the open aspect of it
+    wouldn't be.  Think of an open that creates as a filesystem
+    transaction and an open that happen atomically.
+
+
+From Mikhail.Pershin at Sun.COM  Fri Jul  3 12:02:16 2009
+From: Mikhail.Pershin at Sun.COM (Mikhail Pershin)
+Date: Fri, 03 Jul 2009 23:02:16 +0400
+Subject: [Lustre-devel] Recovering opens by reconstruction
+In-Reply-To: <20090702223944.GR15302@Sun.COM>
+References: <20090702223944.GR15302@Sun.COM>
+Message-ID: <op.uwh9t2mnatmt0c@garden>
+
+On Fri, 03 Jul 2009 02:39:45 +0400, Nicolas Williams  
+<Nicolas.Williams at sun.com> wrote:
+
+> We're working on adding replay RPC signatures, so that clients may only
+> replay RPCs that have been seen by the server (thus signed).
+
+Could you explain that more? All replays have been seen by server just by  
+definition because client got reply from server, so what is purpose of  
+such signing?
+
+> I've been researching this (and talking to Eric B. and Oleg about this).
+> Several possible solutions are evident.  I'll describe the one that
+> seems most elegant to me (and, I think, Oleg), namely separate open
+> state recovery from transaction recovery.
+>
+> Server-side high-level description:
+>
+>  - during recovery the MDS will first process anonymous open by FID RPCs
+>    from new clients (these open RPCs will not have transaction IDs
+>    assigned to them as they imply no actual transactions)
+>
+>  - then the MDS will accept replays from all clients, new and old
+
+It is not clear what do 'new' and 'old' mean here? If both 'new' and 'old'  
+have requests to replay so they were active in previous server boot, so  
+what is the difference between them?
+
+>
+>  - followed by lock recovery as usual
+>
+> Client-side high-level description:
+>
+>  - open processing will begin by sending an RPC as usual...,
+> - ... but on commit the md_open_data will be added to a doubly-linked
+>    list of opens and the RPC will be removed from the PTLRPC replay
+>    queue
+>
+>  - during recovery the client will begin by traversing the list of
+>    md_open_data (open state), reconstruct an anonymous open by FID RPC
+>    and send it to the MDS, and after that the client will replay
+>    outstanding transactions' RPCs, followed by lock recovery
+
+Hmm, but currently it works exactly like this, the committed open replay  
+are sent first followed by normal replays. So you propose to separate them  
+just because they are not 'pure' replays as you described below?
+
+>
+> Old clients would recover as usual.
+>
+> Security is provided by the capabilities used in the anonymous open by
+> FID RPCs and transport security.
+>
+> The general principle then would be:
+>
+>    RPC replaying is to be used only for recovering _transactions that
+>    should not be outstanding for very long.
+>
+> Where "very long" is relative to the replay signature crypto key
+> lifecycle, which will be on the order of days.
+>
+> Since opens are not transactions[*] and can stay "outstanding" forever,
+> opens would not be suitable for recovery by replay under that principle.
+> Open state is much more similar to DLM locks than transactions.
+>
+> Open recovery must precede uncommitted transaction recovery so as to
+> ensure that open state is re-established before unlinks can be replayed
+> that would cause the file to be destroyed.
+
+That requires the server shouldn't start replays from all clients until  
+'open recovery' is finished from all of them. In fact there is another  
+solution for open-unlink problem that was implemented in 1.8. During  
+recovery the unlink replay doesn't delete file but makes it orphan even if  
+open count is 0. After recovery orphans are cleaned up already, so open  
+replay after unlink will find orphan and open it.
+
+
+-- 
+Mikhail Pershin
+Staff Engineer
+Lustre Group
+Sun Microsystems, Inc.
+
+
+From Mikhail.Pershin at Sun.COM  Sat Jul  4 00:10:41 2009
+From: Mikhail.Pershin at Sun.COM (Mikhail Pershin)
+Date: Sat, 04 Jul 2009 11:10:41 +0400
+Subject: [Lustre-devel] Recovering opens by reconstruction
+In-Reply-To: <20090703215528.GY15302@Sun.COM>
+References: <20090702223944.GR15302@Sun.COM> <op.uwh9t2mnatmt0c@garden>
+	<20090703215528.GY15302@Sun.COM>
+Message-ID: <op.uwi7j3uaatmt0c@garden>
+
+On Sat, 04 Jul 2009 01:55:28 +0400, Nicolas Williams  
+<Nicolas.Williams at sun.com> wrote:
+
+> On Fri, Jul 03, 2009 at 11:02:16PM +0400, Mikhail Pershin wrote:
+>
+> They've been seen, indeed, but when replayed not all the same
+> permissions checks may be done, so the server needs to know that the
+> replay is safe to process.  There's two ways to do that: never skip any
+> permissions checks when processing replayed RPCs, or have the server
+> sign replayable RPCs so the server can know validate any replays.  I've
+> not looked at a complete list of checks that are skipped on replays --
+> perhaps we should have such a list before we go down the replay
+> signature path.
+
+OK, so it is not about fake/malformed client only, that is interesting, is  
+there any preliminary arch/hld document describing that? I am interesting  
+in more backgrounds if any
+
+> In my proposal open state recovery for opens associated with completed
+> transactions would always be done by generating new anonymous open by
+> FID RPCs (not replayed ones).
+
+Well, I see no difference yet. Currently all open 'replays' are passed  
+right to open_by_fid(), open file and create mfd structure for it, so it  
+is the same on server side at least. Did I miss something?
+
+>> >Open recovery must precede uncommitted transaction recovery so as to
+>> >ensure that open state is re-established before unlinks can be replayed
+>> >that would cause the file to be destroyed.
+>>
+>> That requires the server shouldn't start replays from all clients until
+>> 'open recovery' is finished from all of them. In fact there is another
+>
+> Correct.
+
+That is more regression than benefit, having such kind of 'barrier' during  
+recovery leads to longer recovery with not balanced server load. There are  
+couple improvements on the way already to make recovery of each client  
+more independent from others if possible, e.g. the transaction-based  
+recovery can be replaced with version-based only. So adding new barriers  
+is not good case in this terms
+
+>> solution for open-unlink problem that was implemented in 1.8. During
+>> recovery the unlink replay doesn't delete file but makes it orphan even  
+>> if
+>> open count is 0. After recovery orphans are cleaned up already, so open
+>> replay after unlink will find orphan and open it.
+>
+> That idea did cross my mind.  The MDS would have to keep a list of such
+> unlinks so it can drop their open count if they truly aren't open.  That
+> seems like a extra work that the MDS shouldn't have to do.
+
+There is already such mechanism on MDS to handle open-unlink cases. MDS  
+keeps orphaned files while they are opened and deletes all non-reopened  
+after recovery. We can just use this mechanism during recovery moving  
+unlinked files to orphans. It work so already in 1.8 and should be even  
+simpler in 2.0 due to FIDs. There are extra checks only, no need to keep  
+extra list or so. I think this is preferable way to go because we avoid  
+'barriers' in recovery mentioned above
+
+-- 
+Mikhail Pershin
+Staff Engineer
+Lustre Group
+Sun Microsystems, Inc.
+
+
+From Mikhail.Pershin at Sun.COM  Sat Jul  4 00:14:13 2009
+From: Mikhail.Pershin at Sun.COM (Mikhail Pershin)
+Date: Sat, 04 Jul 2009 11:14:13 +0400
+Subject: [Lustre-devel] Recovering opens by reconstruction
+In-Reply-To: <20090704004850.GC15301@Sun.COM>
+References: <20090702223944.GR15302@Sun.COM> <op.uwh9t2mnatmt0c@garden>
+	<20090703215528.GY15302@Sun.COM> <20090704004850.GC15301@Sun.COM>
+Message-ID: <op.uwi7pzmkatmt0c@garden>
+
+On Sat, 04 Jul 2009 04:48:51 +0400, Nicolas Williams  
+<Nicolas.Williams at sun.com> wrote:
+
+> On Fri, Jul 03, 2009 at 04:55:28PM -0500, Nicolas Williams wrote:
+>> On Fri, Jul 03, 2009 at 11:02:16PM +0400, Mikhail Pershin wrote:
+>> > On Fri, 03 Jul 2009 02:39:45 +0400, Nicolas Williams
+>> > <Nicolas.Williams at sun.com> wrote:
+>> > >We're working on adding replay RPC signatures, so that clients may  
+>> only
+>> > >replay RPCs that have been seen by the server (thus signed).
+>> >
+>> > Could you explain that more? All replays have been seen by server  
+>> just by
+>> > definition because client got reply from server, so what is purpose of
+>> > such signing?
+>>
+>> They've been seen, indeed, but when replayed not all the same
+>> permissions checks may be done, so the server needs to know that the
+>> replay is safe to process.  There's two ways to do that: never skip any
+>> permissions checks when processing replayed RPCs, or have the server
+>> sign replayable RPCs so the server can know validate any replays.  I've
+>> not looked at a complete list of checks that are skipped on replays --
+>> perhaps we should have such a list before we go down the replay
+>> signature path.
+>
+> Oh, I forgot for a moment, but the other point of replay signatures is
+> to prevent clients from causing other clients to be evicted.
+
+Ah, I am interesting even more in some background about this idea. I  
+thought this was needed as protection from malformed clients only but it  
+looks more functional.
+
+-- 
+Mikhail Pershin
+Staff Engineer
+Lustre Group
+Sun Microsystems, Inc.
+
+
+From Nicolas.Williams at sun.com  Fri Jul  3 14:55:28 2009
+From: Nicolas.Williams at sun.com (Nicolas Williams)
+Date: Fri, 3 Jul 2009 16:55:28 -0500
+Subject: [Lustre-devel] Recovering opens by reconstruction
+In-Reply-To: <op.uwh9t2mnatmt0c@garden>
+References: <20090702223944.GR15302@Sun.COM> <op.uwh9t2mnatmt0c@garden>
+Message-ID: <20090703215528.GY15302@Sun.COM>
+
+On Fri, Jul 03, 2009 at 11:02:16PM +0400, Mikhail Pershin wrote:
+> On Fri, 03 Jul 2009 02:39:45 +0400, Nicolas Williams  
+> <Nicolas.Williams at sun.com> wrote:
+> >We're working on adding replay RPC signatures, so that clients may only
+> >replay RPCs that have been seen by the server (thus signed).
+> 
+> Could you explain that more? All replays have been seen by server just by  
+> definition because client got reply from server, so what is purpose of  
+> such signing?
+
+They've been seen, indeed, but when replayed not all the same
+permissions checks may be done, so the server needs to know that the
+replay is safe to process.  There's two ways to do that: never skip any
+permissions checks when processing replayed RPCs, or have the server
+sign replayable RPCs so the server can know validate any replays.  I've
+not looked at a complete list of checks that are skipped on replays --
+perhaps we should have such a list before we go down the replay
+signature path.
+
+> > [...]
+> > - then the MDS will accept replays from all clients, new and old
+> 
+> It is not clear what do 'new' and 'old' mean here? If both 'new' and 'old'  
+> have requests to replay so they were active in previous server boot, so  
+> what is the difference between them?
+
+Old clients would be clients that don't implement this new form of open
+state recovery (e.g., 1.6, 1.8 clients).  New clients would be clients
+that do implement this new form of open state recovery (2.x).
+
+> > - followed by lock recovery as usual
+> >
+> >Client-side high-level description:
+> >
+> > [...]
+> Hmm, but currently it works exactly like this, the committed open replay  
+> are sent first followed by normal replays. So you propose to separate them  
+> just because they are not 'pure' replays as you described below?
+
+It doesn't work as I proposed: opens are currently recovered by
+_replaying_ RPCs (which potentially had side-effects besides creating
+open state).  Or at least that's my understanding.
+
+In my proposal open state recovery for opens associated with completed
+transactions would always be done by generating new anonymous open by
+FID RPCs (not replayed ones).
+
+> >The general principle then would be:
+> >
+> >   RPC replaying is to be used only for recovering _transactions that
+> >   should not be outstanding for very long.
+> >
+> >Where "very long" is relative to the replay signature crypto key
+> >lifecycle, which will be on the order of days.
+> >
+> >Since opens are not transactions[*] and can stay "outstanding" forever,
+> >opens would not be suitable for recovery by replay under that principle.
+> >Open state is much more similar to DLM locks than transactions.
+> >
+> >Open recovery must precede uncommitted transaction recovery so as to
+> >ensure that open state is re-established before unlinks can be replayed
+> >that would cause the file to be destroyed.
+> 
+> That requires the server shouldn't start replays from all clients until  
+> 'open recovery' is finished from all of them. In fact there is another  
+
+Correct.
+
+> solution for open-unlink problem that was implemented in 1.8. During  
+> recovery the unlink replay doesn't delete file but makes it orphan even if  
+> open count is 0. After recovery orphans are cleaned up already, so open  
+> replay after unlink will find orphan and open it.
+
+That idea did cross my mind.  The MDS would have to keep a list of such
+unlinks so it can drop their open count if they truly aren't open.  That
+seems like a extra work that the MDS shouldn't have to do.
+
+Nico
+-- 
+
+
+From Nicolas.Williams at sun.com  Fri Jul  3 17:48:51 2009
+From: Nicolas.Williams at sun.com (Nicolas Williams)
+Date: Fri, 3 Jul 2009 19:48:51 -0500
+Subject: [Lustre-devel] Recovering opens by reconstruction
+In-Reply-To: <20090703215528.GY15302@Sun.COM>
+References: <20090702223944.GR15302@Sun.COM> <op.uwh9t2mnatmt0c@garden>
+	<20090703215528.GY15302@Sun.COM>
+Message-ID: <20090704004850.GC15301@Sun.COM>
+
+On Fri, Jul 03, 2009 at 04:55:28PM -0500, Nicolas Williams wrote:
+> On Fri, Jul 03, 2009 at 11:02:16PM +0400, Mikhail Pershin wrote:
+> > On Fri, 03 Jul 2009 02:39:45 +0400, Nicolas Williams  
+> > <Nicolas.Williams at sun.com> wrote:
+> > >We're working on adding replay RPC signatures, so that clients may only
+> > >replay RPCs that have been seen by the server (thus signed).
+> > 
+> > Could you explain that more? All replays have been seen by server just by  
+> > definition because client got reply from server, so what is purpose of  
+> > such signing?
+> 
+> They've been seen, indeed, but when replayed not all the same
+> permissions checks may be done, so the server needs to know that the
+> replay is safe to process.  There's two ways to do that: never skip any
+> permissions checks when processing replayed RPCs, or have the server
+> sign replayable RPCs so the server can know validate any replays.  I've
+> not looked at a complete list of checks that are skipped on replays --
+> perhaps we should have such a list before we go down the replay
+> signature path.
+
+Oh, I forgot for a moment, but the other point of replay signatures is
+to prevent clients from causing other clients to be evicted.
+
+
+From Nicolas.Williams at sun.com  Mon Jul  6 10:34:41 2009
+From: Nicolas.Williams at sun.com (Nicolas Williams)
+Date: Mon, 6 Jul 2009 12:34:41 -0500
+Subject: [Lustre-devel] Recovering opens by reconstruction
+In-Reply-To: <op.uwi7j3uaatmt0c@garden>
+References: <20090702223944.GR15302@Sun.COM> <op.uwh9t2mnatmt0c@garden>
+	<20090703215528.GY15302@Sun.COM> <op.uwi7j3uaatmt0c@garden>
+Message-ID: <20090706173441.GL15302@Sun.COM>
+
+On Sat, Jul 04, 2009 at 11:10:41AM +0400, Mikhail Pershin wrote:
+> On Sat, 04 Jul 2009 01:55:28 +0400, Nicolas Williams  
+> <Nicolas.Williams at sun.com> wrote:
+> 
+> OK, so it is not about fake/malformed client only, that is interesting, is  
+> there any preliminary arch/hld document describing that? I am interesting  
+> in more backgrounds if any
+
+See bug #18657.
+
+> >In my proposal open state recovery for opens associated with completed
+> >transactions would always be done by generating new anonymous open by
+> >FID RPCs (not replayed ones).
+> 
+> Well, I see no difference yet. Currently all open 'replays' are passed  
+> right to open_by_fid(), open file and create mfd structure for it, so it  
+> is the same on server side at least. Did I miss something?
+
+The difference is on the wire.
+
+Currently open state recovery replays RPCs.  This has a very specific
+meaning: the original RPC is sent again with a bit set in the ptlrpc
+header to indicate that it is a replay.
+
+When the transaction had already been committed this replay is processed
+on the server side as an anonymous open by FID, but on the wire the open
+may have been something other than an anon open by FID.
+
+In my proposal what would happen is that opens would only be recovered
+by _replay_ when the transaction had not yet been committed, otherwise
+the opens will be recovered by making a _new_ (non-replay) open RPC.
+
+> >>>Open recovery must precede uncommitted transaction recovery so as to
+> >>>ensure that open state is re-established before unlinks can be replayed
+> >>>that would cause the file to be destroyed.
+> >>
+> >>That requires the server shouldn't start replays from all clients until
+> >>'open recovery' is finished from all of them. In fact there is another
+> >
+> >Correct.
+> 
+> That is more regression than benefit, having such kind of 'barrier' during  
+> recovery leads to longer recovery with not balanced server load. There are  
+> couple improvements on the way already to make recovery of each client  
+> more independent from others if possible, e.g. the transaction-based  
+> recovery can be replaced with version-based only. So adding new barriers  
+> is not good case in this terms
+
+I'm not sure why a new stage would necessarily slow recovery in a
+significant way.  The new stage would not involve any writes to disk
+(though it would involve reads, reads which could then be cached and
+benefit the transaction recovery phase).
+
+There is an alternative: recover opens during transaction recovery in
+trasaction order, but for committed opens (or opens that had not
+filesystem transaction to commit, i.e., opens without O_CREAT) use new
+RPCs instead of replay RPCs.  The amount of work should be the same as
+with the proposed solution, but with better cache locality of reference.
+
+Also, recovering opens before transactions would bind us to always
+having capabilities enabled (see my other post just now).  Whereas the
+above alternative would not.
+
+> >>solution for open-unlink problem that was implemented in 1.8. During
+> >>recovery the unlink replay doesn't delete file but makes it orphan even  
+> >>if
+> >>open count is 0. After recovery orphans are cleaned up already, so open
+> >>replay after unlink will find orphan and open it.
+> >
+> >That idea did cross my mind.  The MDS would have to keep a list of such
+> >unlinks so it can drop their open count if they truly aren't open.  That
+> >seems like a extra work that the MDS shouldn't have to do.
+> 
+> There is already such mechanism on MDS to handle open-unlink cases. MDS  
+> keeps orphaned files while they are opened and deletes all non-reopened  
+> after recovery. We can just use this mechanism during recovery moving  
+> unlinked files to orphans. It work so already in 1.8 and should be even  
+> simpler in 2.0 due to FIDs. There are extra checks only, no need to keep  
+> extra list or so. I think this is preferable way to go because we avoid  
+> 'barriers' in recovery mentioned above
+
+Suppose we recovered opens after transactions: we'd still have
+additional costs for last unlinks since we'd have to put the object on
+an on-disk queue of orpahsn until all open state is recovered.  See
+above.
+
+Nico
+-- 
+
+
+From Nicolas.Williams at sun.com  Mon Jul  6 10:20:09 2009
+From: Nicolas.Williams at sun.com (Nicolas Williams)
+Date: Mon, 6 Jul 2009 12:20:09 -0500
+Subject: [Lustre-devel] Recovering opens by reconstruction
+In-Reply-To: <20090702223944.GR15302@Sun.COM>
+References: <20090702223944.GR15302@Sun.COM>
+Message-ID: <20090706172009.GK15302@Sun.COM>
+
+Note too that recovering opens by reconstruction and before outstanding
+transactions commits us to always use capabilities.  The reason is that
+an open might not be permitted prior to replaying, say, a chmod, but
+with capabilities the open would be permitted because of the capability
+issued earlier, before the MDS restarted.
+
+If we want an option to disable capabilities, then we should recover
+opens in order at RPC replay time, but the opens should still not be
+replays (unless O_CREAT is involved and that transaction hasn't
+committed).
+
+Nico
+-- 
+
+
+From Nicolas.Williams at sun.com  Mon Jul  6 15:37:37 2009
+From: Nicolas.Williams at sun.com (Nicolas Williams)
+Date: Mon, 6 Jul 2009 17:37:37 -0500
+Subject: [Lustre-devel] Recovering opens by reconstruction
+In-Reply-To: <20090706172009.GK15302@Sun.COM>
+References: <20090702223944.GR15302@Sun.COM> <20090706172009.GK15302@Sun.COM>
+Message-ID: <20090706223737.GY15302@Sun.COM>
+
+On Mon, Jul 06, 2009 at 12:20:09PM -0500, Nicolas Williams wrote:
+> Note too that recovering opens by reconstruction and before outstanding
+> transactions commits us to always use capabilities.  The reason is that
+> an open might not be permitted prior to replaying, say, a chmod, but
+> with capabilities the open would be permitted because of the capability
+> issued earlier, before the MDS restarted.
+> 
+> If we want an option to disable capabilities, then we should recover
+> opens in order at RPC replay time, but the opens should still not be
+> replays (unless O_CREAT is involved and that transaction hasn't
+> committed).
+
+The above is all wrong, fortunately :)  Oleg explained it to me.
+
+Transactions are committed linearly in time, so if a chmod that an open
+depends on has not yet committed then that open's state must be
+recovered by replay rather than by reconstruction.
+
+Nico
+-- 
+
+
+From Nicolas.Williams at sun.com  Mon Jul  6 15:42:03 2009
+From: Nicolas.Williams at sun.com (Nicolas Williams)
+Date: Mon, 6 Jul 2009 17:42:03 -0500
+Subject: [Lustre-devel] Recovering opens by reconstruction
+In-Reply-To: <20090706173441.GL15302@Sun.COM>
+References: <20090702223944.GR15302@Sun.COM> <op.uwh9t2mnatmt0c@garden>
+	<20090703215528.GY15302@Sun.COM> <op.uwi7j3uaatmt0c@garden>
+	<20090706173441.GL15302@Sun.COM>
+Message-ID: <20090706224203.GZ15302@Sun.COM>
+
+On Mon, Jul 06, 2009 at 12:34:41PM -0500, Nicolas Williams wrote:
+> On Sat, Jul 04, 2009 at 11:10:41AM +0400, Mikhail Pershin wrote:
+> > That is more regression than benefit, having such kind of 'barrier' during  
+> > recovery leads to longer recovery with not balanced server load. There are  
+> > couple improvements on the way already to make recovery of each client  
+> > more independent from others if possible, e.g. the transaction-based  
+> > recovery can be replaced with version-based only. So adding new barriers  
+> > is not good case in this terms
+> 
+> I'm not sure why a new stage would necessarily slow recovery in a
+> significant way.  The new stage would not involve any writes to disk
+> (though it would involve reads, reads which could then be cached and
+> benefit the transaction recovery phase).
+
+Also, as Oleg explained to me, most open state is for files whose opens
+committed long ago, so most open state is recovered before other
+transactions.  Which means we already have a separate open state
+recovery phase -- it just isn't explicit.  So the only thing that
+changes in my proposal is that all committed open state will be
+recovered by anonymous open by FID reconstruction instead of by replay,
+with all other transactions (including as-yet uncommitted opens) will be
+recovered by replay.
+
+There would be no new timeouts, and there should be no other negative
+impact on recovery time/performance.  Recovery performance should
+actually be improved, when replay signatures are enabled, since there
+would be no need to verify replay signatures for more open state
+recovery.
+
+Nico
+-- 
+
+
+From Alex.Zhuravlev at Sun.COM  Tue Jul  7 02:56:52 2009
+From: Alex.Zhuravlev at Sun.COM (Alex Zhuravlev)
+Date: Tue, 07 Jul 2009 13:56:52 +0400
+Subject: [Lustre-devel] Recovering opens by reconstruction
+In-Reply-To: <20090706224203.GZ15302@Sun.COM>
+References: <20090702223944.GR15302@Sun.COM> <op.uwh9t2mnatmt0c@garden>
+	<20090703215528.GY15302@Sun.COM> <op.uwi7j3uaatmt0c@garden>
+	<20090706173441.GL15302@Sun.COM> <20090706224203.GZ15302@Sun.COM>
+Message-ID: <4A531BE4.20207@sun.com>
+
+Nicolas Williams wrote:
+> Also, as Oleg explained to me, most open state is for files whose opens
+> committed long ago, so most open state is recovered before other
+> transactions.  Which means we already have a separate open state
+> recovery phase -- it just isn't explicit.  So the only thing that
+> changes in my proposal is that all committed open state will be
+> recovered by anonymous open by FID reconstruction instead of by replay,
+> with all other transactions (including as-yet uncommitted opens) will be
+> recovered by replay.
+
+I think it'd be slightly easier to introduce two notions of replay:
+
+1) on-disk replay -- we try to recover some on-disk state from client's cache
+    regular requests like mkdir, unlink, rename, setattr, etc
+
+2) in-core replay - we try to recover some in-core state from client's cache
+    ldlm locks, open files
+
+the thing is that open(2) is quite interesting in this regard because it does
+(1) *and* (2). I believe this is why we used (1) for (2).
+
+my old thougth was that instead of introducing special new open-by-fid RPC we
+should try to implement open in terms of LDLM locks because it's in-core state
+(though with specific tracking of unlinked files). given this we'd automatically
+get single mechanism for all in-core states and we'd get rid of special paths
+for open replays.
+
+thanks, Alex
+
+
+
+
+
+From Mikhail.Pershin at Sun.COM  Tue Jul  7 06:56:36 2009
+From: Mikhail.Pershin at Sun.COM (Mikhail Pershin)
+Date: Tue, 07 Jul 2009 17:56:36 +0400
+Subject: [Lustre-devel] Recovering opens by reconstruction
+In-Reply-To: <20090706173441.GL15302@Sun.COM>
+References: <20090702223944.GR15302@Sun.COM> <op.uwh9t2mnatmt0c@garden>
+	<20090703215528.GY15302@Sun.COM> <op.uwi7j3uaatmt0c@garden>
+	<20090706173441.GL15302@Sun.COM>
+Message-ID: <op.uwpaclw3atmt0c@garden>
+
+On Mon, 06 Jul 2009 21:34:41 +0400, Nicolas Williams  
+<Nicolas.Williams at sun.com> wrote:
+
+>
+> In my proposal what would happen is that opens would only be recovered
+> by _replay_ when the transaction had not yet been committed, otherwise
+> the opens will be recovered by making a _new_ (non-replay) open RPC.
+>
+
+Yes, I understood that and agree that this looks like more clean  
+implementation but I see the following problems so far:
+  - two kinds of client - new and old that should be handled somehow
+  - client code should be changed a lot
+  - server need to understand and handle this too
+
+What will we get for this? Sorry for my annoyance, but it looks for me  
+that it can be solved in simpler ways. E.g. you can add MGS_OPEN_REPLAY  
+flag to such requests, so it will be also different in wire from  
+transaction replays. Or we could re-use lock replay functionality somehow.  
+The locks are not kept as saved RPC too but enqueued as new requests. The  
+open is very close to this, I agree with idea that open handle has all  
+needed info and no need to keep original RPC in this case.
+
+I mean that proposed solution looks overcomplicated just to solve  
+signature problem though it makes sense in general. If we are going to  
+re-organize open recovery and have time for this it would be better to  
+move it from context of replay signature to separate task as it is quite  
+complex.
+
+>
+> I'm not sure why a new stage would necessarily slow recovery in a
+> significant way.  The new stage would not involve any writes to disk
+> (though it would involve reads, reads which could then be cached and
+> benefit the transaction recovery phase).
+
+Not necessarily, but it can. It is not about open stage only, it is about  
+the whole approach to do recovery by stages when all clients must wait for  
+any other at each stage before they can continue recovery. We have already  
+this in HEAD and it extends recovery window. Lustre 1.8 had only single  
+timer for recovery, Lustre 2.0 has 3 stages and timer should be re-set  
+after each one. If all clients are alive than the recovery time will be  
+mostly the same, but if clients may gone during recovery then lustre 2.0  
+recovery time can be three times longer already. Just imagine that at each  
+stage one client is gone, then at each stage all clients will wait until  
+timer expiration. And the bigger cluster we have the more clients can be  
+lost during recovery so recovery time may differ significantly.
+Also this means that server load is not well distributed over recovery  
+time. It waits then start doing all requests at once then waits again on  
+other stage, etc.
+
+Another point here is the possible using the version recovery instead of  
+transaction-based recovery. This will makes recovery based on versions of  
+object and it makes just no sense to wait all clients at each recovery  
+stage, because all dependencies should be clear from versions and clients  
+may finish recovery independently. Currently the requests can be recovered  
+by versions and there is work on lock replays using versions too.
+
+>
+> Suppose we recovered opens after transactions: we'd still have
+> additional costs for last unlinks since we'd have to put the object on
+> an on-disk queue of orpahsn until all open state is recovered.  See
+> above.
+
+There is no additional cost for pair of open-unlink because orphan is  
+needed anyway after unlink. The only exception is replay of pure unlink.  
+But we need to keep orphans after unlinks for other cases anyway, e.g.  
+delayed recovery and such overhead is nothing compared with time that can  
+be lost on waiting for everyone as described above.
+
+In fact this is already slightly out of scope original idea about open  
+replay organization. This is more related to server recovery handling,  
+version recovery, delayed recovery and can be discussed later when open  
+replay changes on client will be settled, it will be more clear in that  
+time.
+
+-- 
+Mikhail Pershin
+Staff Engineer
+Lustre Group
+Sun Microsystems, Inc.
+
+
+From adilger at sun.com  Tue Jul  7 07:38:19 2009
+From: adilger at sun.com (Andreas Dilger)
+Date: Tue, 07 Jul 2009 08:38:19 -0600
+Subject: [Lustre-devel] Recovering opens by reconstruction
+In-Reply-To: <4A531BE4.20207@sun.com>
+References: <20090702223944.GR15302@Sun.COM> <op.uwh9t2mnatmt0c@garden>
+	<20090703215528.GY15302@Sun.COM> <op.uwi7j3uaatmt0c@garden>
+	<20090706173441.GL15302@Sun.COM> <20090706224203.GZ15302@Sun.COM>
+	<4A531BE4.20207@sun.com>
+Message-ID: <20090707143819.GL5073@webber.adilger.int>
+
+On Jul 07, 2009  13:56 +0400, Alex Zhuravlev wrote:
+> Nicolas Williams wrote:
+> > Also, as Oleg explained to me, most open state is for files whose opens
+> > committed long ago, so most open state is recovered before other
+> > transactions.  Which means we already have a separate open state
+> > recovery phase -- it just isn't explicit.  So the only thing that
+> > changes in my proposal is that all committed open state will be
+> > recovered by anonymous open by FID reconstruction instead of by replay,
+> > with all other transactions (including as-yet uncommitted opens) will be
+> > recovered by replay.
+> 
+> I think it'd be slightly easier to introduce two notions of replay:
+> 
+> 1) on-disk replay -- we try to recover some on-disk state from client's cache
+>     regular requests like mkdir, unlink, rename, setattr, etc
+> 
+> 2) in-core replay - we try to recover some in-core state from client's cache
+>     ldlm locks, open files
+> 
+> the thing is that open(2) is quite interesting in this regard because it does
+> (1) *and* (2). I believe this is why we used (1) for (2).
+> 
+> my old thougth was that instead of introducing special new open-by-fid RPC
+> we should try to implement open in terms of LDLM locks because it's in-core
+> state (though with specific tracking of unlinked files). given this we'd
+> automatically get single mechanism for all in-core states and we'd get rid
+> of special paths for open replays.
+
+One problem with this is that the ordering needs to be preserved.  Opens
+that have committed need to be replayed before any other replay operations,
+because those replayed operations may depend on the file being open.
+However, "normal" lock replay should happen after (or conceivably during)
+operation replay so that the objects being locked actually exist and the
+server can (hopefully soon) verify the lock version number during recovery.
+
+Cheers, Andreas
+--
+Andreas Dilger
+Sr. Staff Engineer, Lustre Group
+Sun Microsystems of Canada, Inc.
+
+
+
+From adilger at sun.com  Tue Jul  7 08:21:05 2009
+From: adilger at sun.com (Andreas Dilger)
+Date: Tue, 07 Jul 2009 09:21:05 -0600
+Subject: [Lustre-devel] Recovering opens by reconstruction
+In-Reply-To: <op.uwpaclw3atmt0c@garden>
+References: <20090702223944.GR15302@Sun.COM> <op.uwh9t2mnatmt0c@garden>
+	<20090703215528.GY15302@Sun.COM> <op.uwi7j3uaatmt0c@garden>
+	<20090706173441.GL15302@Sun.COM> <op.uwpaclw3atmt0c@garden>
+Message-ID: <20090707152105.GM5073@webber.adilger.int>
+
+On Jul 07, 2009  17:56 +0400, Mike Pershin wrote:
+> On Mon, 06 Jul 2009 21:34:41 +0400, Nicolas Williams  
+> <Nicolas.Williams at sun.com> wrote:
+> > In my proposal what would happen is that opens would only be recovered
+> > by _replay_ when the transaction had not yet been committed, otherwise
+> > the opens will be recovered by making a _new_ (non-replay) open RPC.
+> 
+> Yes, I understood that and agree that this looks like more clean  
+> implementation but I see the following problems so far:
+>   - two kinds of client - new and old that should be handled somehow
+>   - client code should be changed a lot
+>   - server need to understand and handle this too
+> 
+> What will we get for this? Sorry for my annoyance, but it looks for me  
+> that it can be solved in simpler ways. E.g. you can add MGS_OPEN_REPLAY  
+> flag to such requests, so it will be also different in wire from  
+> transaction replays. Or we could re-use lock replay functionality somehow.  
+> The locks are not kept as saved RPC too but enqueued as new requests. The  
+> open is very close to this, I agree with idea that open handle has all  
+> needed info and no need to keep original RPC in this case.
+
+There are actually multiple benefits from this change:
+- we can remove the awkward handling of open RPCs that are saved even
+  after they have been committed to disk.  That code has had so many
+  bugs in it (and probably still has some) I will be happy when it is gone.
+- we don't have RPCs saved for replay that cannot be flushed during
+  a server upgrade.  For the Simplified Interoperability feature we
+  need to be able to clear all of the saved RPCs from memory so that
+  it is possible to change the RPC format over an upgrade.  Regenerating
+  the _new_ RPCs from the open file handles allows this to happen.
+
+> I mean that proposed solution looks overcomplicated just to solve  
+> signature problem though it makes sense in general. If we are going to  
+> re-organize open recovery and have time for this it would be better to  
+> move it from context of replay signature to separate task as it is quite  
+> complex.
+
+To my thinking, I don't know that we need to introduce a new RPC _type_
+for the open, AFAIK the old open replay RPC will already do open-by-FID.
+What is the core change here is that the open RPCs will be newly generated
+at recovery time instead of being kept in memory.
+
+This actually has a second benefit in that we don't have to keep huge
+lists of open RPCs in the replay list that will be skipped each time we
+are trying to cancel committed RPCs.  For HPCS we need to handle 100k
+opens on a single client, and cancelling RPCs from the replay list is
+an O(n^2) operation since it does a list walk to find just-committed RPCs.
+
+> > I'm not sure why a new stage would necessarily slow recovery in a
+> > significant way.  The new stage would not involve any writes to disk
+> > (though it would involve reads, reads which could then be cached and
+> > benefit the transaction recovery phase).
+> 
+> Not necessarily, but it can. It is not about open stage only, it is about  
+> the whole approach to do recovery by stages when all clients must wait for  
+> any other at each stage before they can continue recovery. We have already  
+> this in HEAD and it extends recovery window. Lustre 1.8 had only single  
+> timer for recovery, Lustre 2.0 has 3 stages and timer should be re-set  
+> after each one.
+
+Actually, the need to have separate recovery stages in HEAD is no longer
+needed.  The addition of extra replay stages was a result of fixing a bug
+in recovery where open file handles were not being replayed before another
+client unlinked the file.  However, this has to be fixed for VBR delayed
+recovery anyways, so we may as well fix this with a single mechanism
+instead of adding a separate recovery stage that requires waiting for
+all clients to join or be evicted before any recovery can start.
+
+[details for the above]
+
+INITIAL ORDER
+=============
+client 1			client 2		MDS
+--------			--------		---
+open A  (transno N)
+{use A}							***commit >= N***
+				unlink A (transno X)
+{continue to use A}
+							***crash***
+
+REPLAY ORDER
+============
+client 1			client 2		MDS
+--------			--------		---
+{slow reconnect}					***last committed < X***
+				unlink A (transno X)
+open A (transno N) = -ENOENT
+{A can no longer be used}
+
+
+The proper solution, as also needed by delayed recovery, is to move A
+to the PENDING list during replay and remove it at the end of replay.
+With 1.x we would have to also remove the inode from PENDING if some
+other node reuses that inode number, but since this extra recovery
+stage is only present in 2.0 and we will not implement delayed recovery
+for 1.x we can simply remove all unreferenced inodes from PENDING at
+the end of recovery (until delayed recovery is completed).
+
+It would be possible to flag the unlink RPCs with a special flag (maybe
+just OBD_MD_FLEASIZE/OBD_MD_FLCOOKIE) to distinguish between unlinks
+that also destroy the objects, and unlinks that cause open-unlinked files.
+For replayed unlinks that cause objects to be destroyed we know that
+there are no other clients holding the file open after that point and
+we don't have to put the inode into PENDING at all.
+
+> If all clients are alive than the recovery time will be  
+> mostly the same, but if clients may gone during recovery then lustre 2.0  
+> recovery time can be three times longer already. Just imagine that at each  
+> stage one client is gone, then at each stage all clients will wait until  
+> timer expiration. And the bigger cluster we have the more clients can be  
+> lost during recovery so recovery time may differ significantly.
+> Also this means that server load is not well distributed over recovery  
+> time. It waits then start doing all requests at once then waits again on  
+> other stage, etc.
+> 
+> Another point here is the possible using the version recovery instead of  
+> transaction-based recovery. This will makes recovery based on versions of  
+> object and it makes just no sense to wait all clients at each recovery  
+> stage, because all dependencies should be clear from versions and clients  
+> may finish recovery independently. Currently the requests can be recovered  
+> by versions and there is work on lock replays using versions too.
+
+I fully agree - it would be ideal if recovery started immediately without
+any waiting for other clients.
+
+> > Suppose we recovered opens after transactions: we'd still have
+> > additional costs for last unlinks since we'd have to put the object on
+> > an on-disk queue of orpahsn until all open state is recovered.  See
+> > above.
+> 
+> There is no additional cost for pair of open-unlink because orphan is  
+> needed anyway after unlink. The only exception is replay of pure unlink.  
+> But we need to keep orphans after unlinks for other cases anyway, e.g.  
+> delayed recovery and such overhead is nothing compared with time that can  
+> be lost on waiting for everyone as described above.
+
+Agreed.
+
+Cheers, Andreas
+--
+Andreas Dilger
+Sr. Staff Engineer, Lustre Group
+Sun Microsystems of Canada, Inc.
+
+
+
+From Mikhail.Pershin at Sun.COM  Tue Jul  7 09:42:52 2009
+From: Mikhail.Pershin at Sun.COM (Mikhail Pershin)
+Date: Tue, 07 Jul 2009 20:42:52 +0400
+Subject: [Lustre-devel] Recovering opens by reconstruction
+In-Reply-To: <20090707152105.GM5073@webber.adilger.int>
+References: <20090702223944.GR15302@Sun.COM> <op.uwh9t2mnatmt0c@garden>
+	<20090703215528.GY15302@Sun.COM> <op.uwi7j3uaatmt0c@garden>
+	<20090706173441.GL15302@Sun.COM> <op.uwpaclw3atmt0c@garden>
+	<20090707152105.GM5073@webber.adilger.int>
+Message-ID: <op.uwph1qacatmt0c@garden>
+
+On Tue, 07 Jul 2009 19:21:05 +0400, Andreas Dilger <adilger at sun.com> wrote:
+
+> This actually has a second benefit in that we don't have to keep huge
+> lists of open RPCs in the replay list that will be skipped each time we
+> are trying to cancel committed RPCs.  For HPCS we need to handle 100k
+> opens on a single client, and cancelling RPCs from the replay list is
+> an O(n^2) operation since it does a list walk to find just-committed  
+> RPCs.
+
+Absolutely, all benefits are clear and I fully agree but all of them are  
+not in reply signature context. I was just afraid that inside replay  
+signature task such big changes will defer replay signature itself. But if  
+we have time to make it in right way then it is good.
+
+> Actually, the need to have separate recovery stages in HEAD is no longer
+> needed.  The addition of extra replay stages was a result of fixing a bug
+> in recovery where open file handles were not being replayed before  
+> another client unlinked the file.  However, this has to be fixed for VBR  
+> delayed
+> recovery anyways, so we may as well fix this with a single mechanism
+> instead of adding a separate recovery stage that requires waiting for
+> all clients to join or be evicted before any recovery can start.
+>
+> The proper solution, as also needed by delayed recovery, is to move A
+> to the PENDING list during replay and remove it at the end of replay.
+> With 1.x we would have to also remove the inode from PENDING if some
+> other node reuses that inode number, but since this extra recovery
+> stage is only present in 2.0 and we will not implement delayed recovery
+> for 1.x we can simply remove all unreferenced inodes from PENDING at
+> the end of recovery (until delayed recovery is completed).
+
+Exactly, that is what I meant and that is why I don't like another strict  
+'stage'
+
+>
+> It would be possible to flag the unlink RPCs with a special flag (maybe
+> just OBD_MD_FLEASIZE/OBD_MD_FLCOOKIE) to distinguish between unlinks
+> that also destroy the objects, and unlinks that cause open-unlinked  
+> files.
+> For replayed unlinks that cause objects to be destroyed we know that
+> there are no other clients holding the file open after that point and
+> we don't have to put the inode into PENDING at all.
+
+I've just thought about the same, it is quite obvious solution here.
+
+
+-- 
+Mikhail Pershin
+Staff Engineer
+Lustre Group
+Sun Microsystems, Inc.
+
+
+From Alex.Zhuravlev at Sun.COM  Tue Jul  7 23:46:54 2009
+From: Alex.Zhuravlev at Sun.COM (Alex Zhuravlev)
+Date: Wed, 08 Jul 2009 10:46:54 +0400
+Subject: [Lustre-devel] Recovering opens by reconstruction
+In-Reply-To: <20090707143819.GL5073@webber.adilger.int>
+References: <20090702223944.GR15302@Sun.COM> <op.uwh9t2mnatmt0c@garden>
+	<20090703215528.GY15302@Sun.COM> <op.uwi7j3uaatmt0c@garden>
+	<20090706173441.GL15302@Sun.COM> <20090706224203.GZ15302@Sun.COM>
+	<4A531BE4.20207@sun.com> <20090707143819.GL5073@webber.adilger.int>
+Message-ID: <4A5440DE.7020707@sun.com>
+
+Andreas Dilger wrote:
+>> my old thougth was that instead of introducing special new open-by-fid RPC
+>> we should try to implement open in terms of LDLM locks because it's in-core
+>> state (though with specific tracking of unlinked files). given this we'd
+>> automatically get single mechanism for all in-core states and we'd get rid
+>> of special paths for open replays.
+> 
+> One problem with this is that the ordering needs to be preserved.  Opens
+> that have committed need to be replayed before any other replay operations,
+> because those replayed operations may depend on the file being open.
+> However, "normal" lock replay should happen after (or conceivably during)
+> operation replay so that the objects being locked actually exist and the
+> server can (hopefully soon) verify the lock version number during recovery.
+
+well, that ordering is already "dead" due to VBR?
+
+I think semantics of unlink is just to unlink name, everything else is up to
+MDS (when to destroy inode and objects). also notice inode destroy is a different
+transaction in general (due to possible multi-transaction truncate).
+
+if we decouple unlink and object destroy, then the following sequence should work:
+1) replay on-disk states
+    (unlink just put inode onto orphan list)
+2) replay in-core states
+    (including open locks)
+... at some point
+3) MDS goes over orphan list and destroys selected objects
+    (depending on VRB policy, etc)
+
+thanks, Alex
+
+
+
+From Nicolas.Williams at sun.com  Tue Jul  7 09:03:17 2009
+From: Nicolas.Williams at sun.com (Nicolas Williams)
+Date: Tue, 7 Jul 2009 11:03:17 -0500
+Subject: [Lustre-devel] Recovering opens by reconstruction
+In-Reply-To: <4A531BE4.20207@sun.com>
+References: <20090702223944.GR15302@Sun.COM> <op.uwh9t2mnatmt0c@garden>
+	<20090703215528.GY15302@Sun.COM> <op.uwi7j3uaatmt0c@garden>
+	<20090706173441.GL15302@Sun.COM>
+	<20090706224203.GZ15302@Sun.COM> <4A531BE4.20207@sun.com>
+Message-ID: <20090707160316.GD15302@Sun.COM>
+
+On Tue, Jul 07, 2009 at 01:56:52PM +0400, Alex Zhuravlev wrote:
+> I think it'd be slightly easier to introduce two notions of replay:
+
+As I understand it 'replay' has a very specific meaning: re-send an RPC
+with the 'replay' bit set in the ptlrpc header.
+
+> [...]
+> my old thougth was that instead of introducing special new open-by-fid
+> RPC we should try to implement open in terms of LDLM locks because
+> it's in-core state (though with specific tracking of unlinked files).
+> given this we'd automatically get single mechanism for all in-core
+> states and we'd get rid of special paths for open replays.
+
+Hmmm, but open by FID gives the MDS a chance to check capabilities.
+Yes, that's probably not terribly important as long as the OSSes also
+check capabilities.
+
+Also, there's the unlink issue to worry about.  Mikhail's proposal for
+that is to defer unlinks until after open state recovery (in this case:
+until after DLM recovery).  That would work, I think.  Also, you could
+have the kind of DLM locks used for open state tracking recovered first,
+then transactions, then all other types of locks.
+
+Here's a question: what consumes more memory on the MDS: open state or a
+DLM lock?
+
+Nico
+-- 
+
+
+From Nicolas.Williams at sun.com  Tue Jul  7 09:14:27 2009
+From: Nicolas.Williams at sun.com (Nicolas Williams)
+Date: Tue, 7 Jul 2009 11:14:27 -0500
+Subject: [Lustre-devel] Recovering opens by reconstruction
+In-Reply-To: <op.uwpaclw3atmt0c@garden>
+References: <20090702223944.GR15302@Sun.COM> <op.uwh9t2mnatmt0c@garden>
+	<20090703215528.GY15302@Sun.COM> <op.uwi7j3uaatmt0c@garden>
+	<20090706173441.GL15302@Sun.COM> <op.uwpaclw3atmt0c@garden>
+Message-ID: <20090707161427.GE15302@Sun.COM>
+
+On Tue, Jul 07, 2009 at 05:56:36PM +0400, Mikhail Pershin wrote:
+> What will we get for this? Sorry for my annoyance, but it looks for me  
+> that it can be solved in simpler ways. E.g. you can add MGS_OPEN_REPLAY  
+> flag to such requests, so it will be also different in wire from  
+> transaction replays. Or we could re-use lock replay functionality somehow.  
+
+Making the open replays look different on the wire is exactly what this
+is about.  They'll look different from other replays in that they will
+not have a replay signature.  But replay signatures are a PTLRPC layer
+feature, so how should PTLRPC know whether to allow such a replay to
+pass through?  One way is to let it pass through replays with valid
+signatures and non-replays, and then let the MDT have non-replay
+handlers only for anon open by FID during recovery.  Then the client
+might as well not bother caching open RPCs forever, just until they
+commit -- it can re-construct open RPCs from in-core state (vnode, ...)
+anytime it needs to.
+
+Using DLM locks to represent open state is interesting.  It would
+require either recovering those first or deferring final unlinks at
+transaction recover time.
+
+Another problem with using locks for open state is that establishing the
+lock atomically with an open w/ create won't be easy.  The MDT would
+have to enqueue a lock for itself atomically with the create, then the
+client would have to enquee its lock, then the MDT would have to drop
+its lock.  Would this not be much more complex that open RPC
+reconstruction?
+
+> The locks are not kept as saved RPC too but enqueued as new requests. The  
+> open is very close to this, I agree with idea that open handle has all  
+> needed info and no need to keep original RPC in this case.
+
+Yes.
+
+Nico
+-- 
+
+
+From Nicolas.Williams at sun.com  Tue Jul  7 09:50:41 2009
+From: Nicolas.Williams at sun.com (Nicolas Williams)
+Date: Tue, 7 Jul 2009 11:50:41 -0500
+Subject: [Lustre-devel] Recovering opens by reconstruction
+In-Reply-To: <op.uwph1qacatmt0c@garden>
+References: <20090702223944.GR15302@Sun.COM> <op.uwh9t2mnatmt0c@garden>
+	<20090703215528.GY15302@Sun.COM> <op.uwi7j3uaatmt0c@garden>
+	<20090706173441.GL15302@Sun.COM> <op.uwpaclw3atmt0c@garden>
+	<20090707152105.GM5073@webber.adilger.int>
+	<op.uwph1qacatmt0c@garden>
+Message-ID: <20090707165041.GG15302@Sun.COM>
+
+On Tue, Jul 07, 2009 at 08:42:52PM +0400, Mikhail Pershin wrote:
+> On Tue, 07 Jul 2009 19:21:05 +0400, Andreas Dilger <adilger at sun.com> wrote:
+> >This actually has a second benefit in that we don't have to keep huge
+> >lists of open RPCs in the replay list that will be skipped each time we
+> >are trying to cancel committed RPCs.  For HPCS we need to handle 100k
+> >opens on a single client, and cancelling RPCs from the replay list is
+> >an O(n^2) operation since it does a list walk to find just-committed  
+> >RPCs.
+
+This seems like a problem that could be solved anyways, but then, having
+to cache these RPCs forever is a waste of resources.
+
+> Absolutely, all benefits are clear and I fully agree but all of them are  
+> not in reply signature context. I was just afraid that inside replay  
+> signature task such big changes will defer replay signature itself. But if  
+> we have time to make it in right way then it is good.
+
+Adding replay signature renewal just to avoid this restructuring seems
+equally bad.  Not adding replay signature renewal and not bothering with
+rekeying is OK in the short-term, but eventually it'd become a problem.
+Given all the other benefits of doing committed open state recovery by
+reconstruction, it seems like a good idea to just do it.
+
+> >It would be possible to flag the unlink RPCs with a special flag (maybe
+> >just OBD_MD_FLEASIZE/OBD_MD_FLCOOKIE) to distinguish between unlinks
+> >that also destroy the objects, and unlinks that cause open-unlinked  
+> >files.
+> >For replayed unlinks that cause objects to be destroyed we know that
+> >there are no other clients holding the file open after that point and
+> >we don't have to put the inode into PENDING at all.
+> 
+> I've just thought about the same, it is quite obvious solution here.
+
+An excellent idea.  Replay signatures would have to cover that bit.
+I'll add that to the HLD.
+
+Nico
+-- 
+
+
+From Alex.Zhuravlev at Sun.COM  Wed Jul  8 10:15:51 2009
+From: Alex.Zhuravlev at Sun.COM (Alex Zhuravlev)
+Date: Wed, 08 Jul 2009 21:15:51 +0400
+Subject: [Lustre-devel] Recovering opens by reconstruction
+In-Reply-To: <20090707161427.GE15302@Sun.COM>
+References: <20090702223944.GR15302@Sun.COM> <op.uwh9t2mnatmt0c@garden>
+	<20090703215528.GY15302@Sun.COM> <op.uwi7j3uaatmt0c@garden>
+	<20090706173441.GL15302@Sun.COM> <op.uwpaclw3atmt0c@garden>
+	<20090707161427.GE15302@Sun.COM>
+Message-ID: <4A54D447.5090506@sun.com>
+
+Nicolas Williams wrote:
+> Another problem with using locks for open state is that establishing the
+> lock atomically with an open w/ create won't be easy.  The MDT would
+> have to enqueue a lock for itself atomically with the create, then the
+> client would have to enquee its lock, then the MDT would have to drop
+> its lock.  Would this not be much more complex that open RPC
+> reconstruction?
+
+we already have open locks which are taken in atomical manner with create.
+
+thanks, Alex
+
+
+
+From atchley at myri.com  Thu Jul 16 14:10:44 2009
+From: atchley at myri.com (Scott Atchley)
+Date: Thu, 16 Jul 2009 17:10:44 -0400
+Subject: [Lustre-devel] Testing LNET
+Message-ID: <9A79889B-CA4B-43E7-9824-79A1F7949AFE@myri.com>
+
+Hi all,
+
+I have implemented handling of hosts with different PAGE_SIZE in  
+MXLND. I am running tests to make sure that I did not accidentally  
+break something else. So far, I have been using lctl and pinging back  
+and forth as well as with obdecho (using loadgen).
+
+When running loadgen tests or lctl test_brw with loadgen's echosrv  
+running, if I kill a host (either client or server) and bring it back  
+up, LNET seems happy (MXLND reconnects normally), but loadgen does not  
+resume. When using lctl test_brw and I restart a server, the client  
+reconnects but then fails an assertion when it connects to a new  
+server with:
+
+LustreError: 6295:0:(echo_client.c:1341:echo_client_cleanup())  
+ASSERTION(eco->eco_refcount == 0) failed
+
+If this the proper way to test a LND? What other methods can you  
+suggest?
+
+Thanks,
+
+Scott
+
+
+From nic at cray.com  Thu Jul 16 14:20:25 2009
+From: nic at cray.com (Nicholas Henke)
+Date: Thu, 16 Jul 2009 16:20:25 -0500
+Subject: [Lustre-devel] Testing LNET
+In-Reply-To: <9A79889B-CA4B-43E7-9824-79A1F7949AFE@myri.com>
+References: <9A79889B-CA4B-43E7-9824-79A1F7949AFE@myri.com>
+Message-ID: <4A5F9999.2040302@cray.com>
+
+Scott Atchley wrote:
+> Hi all,
+>
+> I have implemented handling of hosts with different PAGE_SIZE in  
+> MXLND. I am running tests to make sure that I did not accidentally  
+> break something else. So far, I have been using lctl and pinging back  
+> and forth as well as with obdecho (using loadgen).
+>
+> When running loadgen tests or lctl test_brw with loadgen's echosrv  
+> running, if I kill a host (either client or server) and bring it back  
+> up, LNET seems happy (MXLND reconnects normally), but loadgen does not  
+> resume. When using lctl test_brw and I restart a server, the client  
+> reconnects but then fails an assertion when it connects to a new  
+> server with:
+>
+> LustreError: 6295:0:(echo_client.c:1341:echo_client_cleanup())  
+> ASSERTION(eco->eco_refcount == 0) failed
+>
+> If this the proper way to test a LND? What other methods can you  
+> suggest?
+>   
+
+I've been using LNet SelfTest for my LND development and testing.  It is 
+ok once you get things working - but it is painful to script around and 
+to trace LST errors back to LND transactions.
+
+Nic
+
+
+From nic at cray.com  Thu Jul 16 14:27:53 2009
+From: nic at cray.com (Nicholas Henke)
+Date: Thu, 16 Jul 2009 16:27:53 -0500
+Subject: [Lustre-devel] Testing LNET
+In-Reply-To: <4A5F9999.2040302@cray.com>
+References: <9A79889B-CA4B-43E7-9824-79A1F7949AFE@myri.com>
+	<4A5F9999.2040302@cray.com>
+Message-ID: <4A5F9B59.2080103@cray.com>
+
+Nicholas Henke wrote:
+> Scott Atchley wrote:
+>>
+>
+> I've been using LNet SelfTest for my LND development and testing.  It 
+> is ok once you get things working - but it is painful to script around 
+> and to trace LST errors back to LND transactions.
+>
+> Nic
+>
+
+FWIW: Here are scripts I've been using for LST runs. 'sim_tests.sh' runs 
+tests in serial, parallel is...
+
+The 'sim_config' is an easy way to manage different machine configs - 
+just set the CONFIG environment variable to the particular file you'd 
+like to use.
+
+The cli format is "test size loops" where:
+    - test can be 'read' 'write' or 'ping'
+    - size is anything <= 1m, i.e; '243k', '2342', '1m'
+    - loops is the number to send.
+
+There is a 'NCONN' environment variable that controls the --concurency 
+for LST tests, bascially how many RPCs to keep on the wire.
+
+YMMV,
+Nic
+-------------- next part --------------
+A non-text attachment was scrubbed...
+Name: sim_tests.sh
+Type: application/x-sh
+Size: 1143 bytes
+Desc: not available
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20090716/133019f2/attachment.sh>
+-------------- next part --------------
+An embedded and charset-unspecified text was scrubbed...
+Name: sim_config
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20090716/133019f2/attachment.asc>
+-------------- next part --------------
+A non-text attachment was scrubbed...
+Name: parallel_test.sh
+Type: application/x-sh
+Size: 1207 bytes
+Desc: not available
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20090716/133019f2/attachment-0001.sh>
+-------------- next part --------------
+A non-text attachment was scrubbed...
+Name: lnet_selftest_framework.sh
+Type: application/x-sh
+Size: 6366 bytes
+Desc: not available
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20090716/133019f2/attachment-0002.sh>
+
+From eeb at sun.com  Thu Jul 23 05:32:41 2009
+From: eeb at sun.com (Eric Barton)
+Date: Thu, 23 Jul 2009 13:32:41 +0100
+Subject: [Lustre-devel] [FWD: Re: Fast MAC algorithms?]
+In-Reply-To: <20090723054328.GX1020@Sun.COM>
+References: <20090722191511.GG1020@Sun.COM>
+	<20090722230032.GW4231@webber.adilger.int>
+	<20090723000401.GT1020@Sun.COM> <20090723054328.GX1020@Sun.COM>
+Message-ID: <00be01ca0b91$abe0a470$03a1ed50$@com>
+
+Nico,
+
+> On Wed, Jul 22, 2009 at 05:00:32PM -0600, Andreas Dilger wrote:
+> > In any case, the more important numbers are for IB where the
+> > overhead is low and the throughput is high.  We have DARPA
+> > requesting 40GB/s from a single client, and definitely MAC
+> > overhead will be noticable at that rate.
+> 
+> Also, 40GB/s is I/O, right?  There MACs come in via Secure PTLRPC.
+> Chances are that encryption will be turned off.
+
+I believe we should offer clear and simple but powerful and easy to
+administer choices so that customers can make their own performance
+v. security tradeoffs.  Obviously we want overhead to be as low as
+possible, but it's never going away - especially for high bandwidth
+bulk which is always going to on the edge of what the hardware can
+provide.  I'm not at all surprised that the mail you quoted says that
+MAC overhead becomes noticable as packets reach 1000 bytes.  Quite
+recently, you needed to be using the full 1500 byte ether frames to
+saturate 10GigE even with no additional processing just because of
+the data copying - not the TCP protocol overhead.
+
+> But MACs could still be used for replay sigs, capabilities, ...
+
+Indeed.
+
+> In the case of replay sigs we'd not want to sign _data_ anyways, so
+> if we're doing 1MB I/Os then MAC overhead should be minimal.  
+
+If the data was originally transferred encrypted or signed, then it
+surely needs to do the same during recovery.  Plus I'm not so
+concerned about performance during recovery given all the other
+waiting around at this time we've yet to eliminate.  Even if
+communications performance recovery was (a) the bottleneck and (b) 1/2
+that of normal operation, it's not going to be sustained for longer
+than a small multiple of the backend F/S sync interval - i.e. 10s of
+seconds.
+
+> Speaking of which, do RDMA transfers happen purely in the context of
+> LNET?  Does LNET have a decent CRC?
+
+Although bulk data can be checksummed in current Lustre, LNET and the
+LNDs don't do an additional integrity checking, but rely on the
+underlying transport(s).
+
+> For bulk-data transfers I think it might suffice to MAC the RPCs and
+> the CRCs of RDMA transfers where encryption is not required and very
+> weak integrity protection of data is OK.
+
+The end-to-end integrity work (i.e. integrating lustre with DMU
+checksums) should take care of this.
+
+> What about MAC overhead in meta-data ops?
+<snip>
+> I've been told that MDSes are CPU-bound, so it seems likely that
+> crypto overhead should add noticeable latency to meta-data ops.
+
+Yes probably.  We currently waste most of this CPU on spinlock
+contention and through not paying sufficient attention to CPU
+affinity.  Fixing these problems will buy us back a bunch of
+performance (anywhere between 5x and 20x?) but we'll still be CPU
+bound AFAICS.
+
+Lets just measure and then we'll have some fact to reason about.  We
+should be able to mock-up signing and/or encryption in LNET Self-Test
+and get some numbers right away.  BTW I propose LNET ST rather than
+obdecho since the SMP scaling work has been completed there, so we
+should be able to get a worst-case impact measurement.
+
+-- 
+
+        Cheers,
+                   Eric
+
+
+
+From tuve at swedisk.se  Thu Jul 23 01:00:56 2009
+From: tuve at swedisk.se (Tuve Nordius)
+Date: Thu, 23 Jul 2009 10:00:56 +0200
+Subject: [Lustre-devel] Mac OS and Windows clients
+Message-ID: <689C4F2B-8759-4B61-B2ED-39BCC194608C@swedisk.se>
+
+Hi
+
+I am looking into developing mac os and windows clients and I have  
+noticed that there have been some activities on this in the past and  
+that native clients are in the roadmap for lustre and would like to  
+get in contact with people who have been or planning to  be working on  
+this.
+
+The initial plan is to make liblustre compile on darwin and create a  
+macfuse client. For the windows plattform there is some fuse like  
+libraries, but I am unsure of the quality and status, maybe it is  
+better to concentrate the effort on  bringing the winnt port up to date?
+
+I have chosen the FreeBSD port of lustre (http://lustre.sev.net.ua/)  
+as a starting point for liblustre and the source tree also contains  
+some kind of fuse client, but i suspect this port is based on lustre  
+1.6 ?
+
+I also have some questions about the the OpenCVS, if just pulling HEAD  
+there seem to be a lot of files related to darwin and winnt missing/ 
+pruned, I have noticed that there is some tags APPLE_DEVELOP etc that  
+pulls some of the darwin related files, but there is still some  
+missing (xcode related), all of these files are present in the FreeBSD- 
+tree, so the question basically is what version should i pull?
+
+I have also noted that there is lot of documentation, which leaves me  
+with the problem of where to start?
+
+
+
+Best Regards
+
+Tuve Nordius
+
+
+From Alexey.Lyashkov at Sun.COM  Thu Jul 23 13:50:12 2009
+From: Alexey.Lyashkov at Sun.COM (Alexey Lyashkov)
+Date: Thu, 23 Jul 2009 23:50:12 +0300
+Subject: [Lustre-devel] Mac OS and Windows clients
+In-Reply-To: <689C4F2B-8759-4B61-B2ED-39BCC194608C@swedisk.se>
+References: <689C4F2B-8759-4B61-B2ED-39BCC194608C@swedisk.se>
+Message-ID: <1248382212.21455.5.camel@berloga.shadowland>
+
+Hi Tuve
+On Thu, 2009-07-23 at 10:00 +0200, Tuve Nordius wrote:
+> Hi
+> 
+
+> I have chosen the FreeBSD port of lustre (http://lustre.sev.net.ua/)  
+> as a starting point for liblustre and the source tree also contains  
+> some kind of fuse client, but i suspect this port is based on lustre  
+> 1.6 ?
+Isn't. this based on HEAD branch which checkouted ~4 month ago. When i
+will have time, i will be update to last HEAD sources. 
+Work on FreeBSD client is stoped to wait some work from CLIO and libcfs
+cleanups, which need to make Solaris port.
+
+
+-- 
+Alexey Lyashkov <Alexey.Lyashkov at Sun.COM>
+Sun Microsystems
+
+
+
+From adilger at sun.com  Thu Jul 23 16:03:40 2009
+From: adilger at sun.com (Andreas Dilger)
+Date: Thu, 23 Jul 2009 17:03:40 -0600
+Subject: [Lustre-devel] Mac OS and Windows clients
+In-Reply-To: <1248382212.21455.5.camel@berloga.shadowland>
+References: <689C4F2B-8759-4B61-B2ED-39BCC194608C@swedisk.se>
+	<1248382212.21455.5.camel@berloga.shadowland>
+Message-ID: <20090723230340.GJ4231@webber.adilger.int>
+
+On Jul 23, 2009  23:50 +0300, Alexey Lyashkov wrote:
+> On Thu, 2009-07-23 at 10:00 +0200, Tuve Nordius wrote:
+> > I have chosen the FreeBSD port of lustre (http://lustre.sev.net.ua/)  
+> > as a starting point for liblustre and the source tree also contains  
+> > some kind of fuse client, but i suspect this port is based on lustre  
+> > 1.6 ?
+>
+> Isn't. this based on HEAD branch which checkouted ~4 month ago. When i
+> will have time, i will be update to last HEAD sources. 
+> Work on FreeBSD client is stoped to wait some work from CLIO and libcfs
+> cleanups, which need to make Solaris port.
+
+Also, Stuart Midgeley (CC'd) worked on a FUSE client for OS/X.  I don't
+know the current status of that (I'm not sure if it was made available
+for wider use or not).
+
+Cheers, Andreas
+--
+Andreas Dilger
+Sr. Staff Engineer, Lustre Group
+Sun Microsystems of Canada, Inc.
+
+
+
+From Alexey.Lyashkov at Sun.COM  Thu Jul 23 21:29:29 2009
+From: Alexey.Lyashkov at Sun.COM (Alexey Lyashkov)
+Date: Fri, 24 Jul 2009 07:29:29 +0300
+Subject: [Lustre-devel] Mac OS and Windows clients
+In-Reply-To: <20090723230340.GJ4231@webber.adilger.int>
+References: <689C4F2B-8759-4B61-B2ED-39BCC194608C@swedisk.se>
+	<1248382212.21455.5.camel@berloga.shadowland>
+	<20090723230340.GJ4231@webber.adilger.int>
+Message-ID: <1248409769.21455.10.camel@berloga.shadowland>
+
+On Thu, 2009-07-23 at 17:03 -0600, Andreas Dilger wrote:
+> On Jul 23, 2009  23:50 +0300, Alexey Lyashkov wrote:
+> > On Thu, 2009-07-23 at 10:00 +0200, Tuve Nordius wrote:
+> > > I have chosen the FreeBSD port of lustre (http://lustre.sev.net.ua/)  
+> > > as a starting point for liblustre and the source tree also contains  
+> > > some kind of fuse client, but i suspect this port is based on lustre  
+> > > 1.6 ?
+> >
+> > Isn't. this based on HEAD branch which checkouted ~4 month ago. When i
+> > will have time, i will be update to last HEAD sources. 
+> > Work on FreeBSD client is stoped to wait some work from CLIO and libcfs
+> > cleanups, which need to make Solaris port.
+> 
+> Also, Stuart Midgeley (CC'd) worked on a FUSE client for OS/X.  I don't
+> know the current status of that (I'm not sure if it was made available
+> for wider use or not).
+> 
+I have patch from Robert Read, which allow HEAD branch is compile libcfs
++ libsysio (and as i remember liblustre) on Mac OS/x, but i never test
+this.
+
+
+-- 
+Alexey Lyashkov <Alexey.Lyashkov at Sun.COM>
+Sun Microsystems
+
+
+
+From sdm900 at gmail.com  Thu Jul 23 23:21:36 2009
+From: sdm900 at gmail.com (Stuart Midgley)
+Date: Fri, 24 Jul 2009 14:21:36 +0800
+Subject: [Lustre-devel] Mac OS and Windows clients
+In-Reply-To: <20090723230340.GJ4231@webber.adilger.int>
+References: <689C4F2B-8759-4B61-B2ED-39BCC194608C@swedisk.se>
+	<1248382212.21455.5.camel@berloga.shadowland>
+	<20090723230340.GJ4231@webber.adilger.int>
+Message-ID: <01F08BE9-3AE5-4A0B-9DC4-84A4BE9BD8B8@gmail.com>
+
+We started with the partial AIX port and got someway but never got a  
+working Fuse port.  If I remember correctly, it was just a matter of  
+working through the code and hooking it correctly to MacOSX which does  
+things slightly differently.
+
+Sorry
+Stu.
+
+
+-- 
+Dr Stuart Midgley
+sdm900 at gmail.com
+
+
+
+On 24/07/2009, at 7:03 AM, Andreas Dilger wrote:
+
+> On Jul 23, 2009  23:50 +0300, Alexey Lyashkov wrote:
+>> On Thu, 2009-07-23 at 10:00 +0200, Tuve Nordius wrote:
+>>> I have chosen the FreeBSD port of lustre (http://lustre.sev.net.ua/)
+>>> as a starting point for liblustre and the source tree also contains
+>>> some kind of fuse client, but i suspect this port is based on lustre
+>>> 1.6 ?
+>>
+>> Isn't. this based on HEAD branch which checkouted ~4 month ago.  
+>> When i
+>> will have time, i will be update to last HEAD sources.
+>> Work on FreeBSD client is stoped to wait some work from CLIO and  
+>> libcfs
+>> cleanups, which need to make Solaris port.
+>
+> Also, Stuart Midgeley (CC'd) worked on a FUSE client for OS/X.  I  
+> don't
+> know the current status of that (I'm not sure if it was made available
+> for wider use or not).
+>
+> Cheers, Andreas
+> --
+> Andreas Dilger
+> Sr. Staff Engineer, Lustre Group
+> Sun Microsystems of Canada, Inc.
+>
+
+
+
+From Nicolas.Williams at sun.com  Mon Jul 27 06:55:15 2009
+From: Nicolas.Williams at sun.com (Nicolas Williams)
+Date: Mon, 27 Jul 2009 08:55:15 -0500
+Subject: [Lustre-devel] Kerb cross-site-forcing back clients to
+	null/plain
+In-Reply-To: <Pine.LNX.4.64.0907021313320.20445@pscuxa.psc.edu>
+References: <Pine.LNX.4.64.0907021313320.20445@pscuxa.psc.edu>
+Message-ID: <20090727135514.GW1020@Sun.COM>
+
+On Thu, Jul 02, 2009 at 01:21:34PM -0400, Josephine Palencia wrote:
+> Is there/can there be a mechanism by which kerb auth on the 
+> clients both from local & different kerb realm can be forced back to
+> null/plain from krb5n/a/i/p if the remote site's kerb is not
+> yet ready (properly configured)?
+> 
+> I'd rather the filesystem continues to be mounted on the client and 
+> indicates it did so auto-reversing back to null/plain instead of just 
+> hanging.
+
+If a client could "force" a server to disable security features, then
+there'd be no real security :)
+
+If a server gives a client a choice then the client can pick from those
+choices, but there's no "forcing" there.
+
+So the answer would be "no".  And if the issue is that the cluster is
+misconfigured, well, I'd say that the configuration should be fixed.
+
+That said, we should support giving the client a choice of krb5* and
+null, since that is helpful during deployment.  I'll look into that,
+though it could well be that Lustre already supports that (I'm new to
+Lustre).
+
+Nico
+-- 
+
+
+From Vitaly.Fertman at Sun.COM  Tue Jul 28 13:42:01 2009
+From: Vitaly.Fertman at Sun.COM (Vitaly Fertman)
+Date: Wed, 29 Jul 2009 00:42:01 +0400
+Subject: [Lustre-devel] SOM Recovery of open files
+Message-ID: <0F955918-4B3F-4CAB-B273-3479B8F82F08@sun.com>
+
+Hi All,
+
+after our today talk on irc about SOM re-connect issues, I have tried to
+re-phrase the SOM problem in some more clear way, the result is the  
+list of
+items we need to add/care about:
+
+1. re-open files (precisely IOEpochs here) on re-connect for opened  
+files.
+MDS must be aware about opened IOEpochs in the cluster to maintain the
+SOM cache properly. If IOEpoch is closed, the dirty cache must not  
+exist in
+the cluster nor new IO is allowed [this is to be done as a part of  
+simplified
+interoperability].
+
+2. re-open IOEpochs on re-connect for truncates.
+there is a gap between md_setattr and obd_punch, and MDS must be aware
+punch has completed, md_setattr opens IOEpoch and the later  
+md_done_writing
+closes it saying the punch completed. the reasoning of re-openning  
+IOEpoch
+is similar to (1).
+
+3. block new IO rpc if there is no connection to MDS (syscalls).
+the reasoning is similar to (1), thus after eviction MDS thinks  
+IOEpoch is
+closed and let next client to re-build the SOM cache, but the evicted  
+client
+may want to write to the file. [this is to be done through LOV EA lock]
+
+4. block cached lockless IO rpc (i.e. rpc is sitting in the sending or  
+re-sending
+lists) if there is no connection to MDS.
+the reasoning is similar to (3), but there is a gap in time between  
+syscall
+happens and rpc is issued, moreover, rpc may be re-sent several times,  
+if
+the time is enough for next client to access the file and re-built the  
+cache,
+our write/truncate will destroy the cache.
+
+5. block cached enqueue rpc if there is no connection to MDS.
+the reasoning is similar to (4), the write/truncate syscall happens  
+when the
+connection existed but has been lost just before issuing the enqueue  
+rpc,
+if the time is enough for next client to rebuild the cache on MDS  
+before the
+evicted client gets the extent lock, the data put into clients cache  
+in the
+same syscall will destroy the cache once get flushed to OST.
+
+note: the existent dirty cache under extent lock is not a problem, it  
+could be
+flushed later (just before rebuilding the SOM cache) by canceling  
+extent lock;
+
+6. there is a gap between client eviction and the time when client  
+detects it
+is evicted.
+it concerns (4&5), the client is not aware about its eviction from  
+MDS, it continues
+to write to OST for some time. if the time is long enough for next  
+client to rebuild
+the SOM cache on MDS, such a later write will destroy the cache.
+
+7. there is a gap between rpc is send and obtained by OST.
+even if we cancel IO rpc from re-send queue, some previous attempt to  
+send
+it may finally succeed, if the client has been evicted and the time is  
+long
+enough for next client to rebuild the SOM cache on MDS, such a later  
+write will
+destroy the cache.
+
+note: this all concerns MDS failover and MDS upgrade as well as client  
+may
+disappear at any time.
+
+p.s. the previous email is attached, it has some more detailed  
+scenarios and
+has some attempts to resolve it, not very successful though.
+
+--
+Vitaly
+
+-------------- next part --------------
+An embedded message was scrubbed...
+From: Vitaly Fertman <Vitaly.Fertman at Sun.COM>
+Subject: Re: [Lustre-devel] SOM Recovery of open files
+Date: Fri, 13 Mar 2009 18:32:00 +0300
+Size: 11729
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20090729/c0a94f3e/attachment.eml>
+-------------- next part --------------
+
+
+From eeb at sun.com  Wed Jul 29 08:37:29 2009
+From: eeb at sun.com (Eric Barton)
+Date: Wed, 29 Jul 2009 16:37:29 +0100
+Subject: [Lustre-devel] SMP Scalability, MDS, reducing cpu pingpong
+In-Reply-To: <7580C3C1-7634-47C8-827B-C93157C1301A@Sun.COM>
+References: <7580C3C1-7634-47C8-827B-C93157C1301A@Sun.COM>
+Message-ID: <002001ca1062$7b526fc0$71f74f40$@com>
+
+Oleg,
+
+I'm replying via lustre-devel since this is of general interest.
+Comments inline...
+
+> Hello!
+> 
+> I looked into the current lnet code for smp scalability and had some
+> discussion with Liang and I think there are some topics we need to
+> cover.
+> 
+> with ofed 1.3 all interrupts arrive to single cpu, that cpu looks
+> into some data (currently - sending NID), and puts that message into
+> a processing queue for some CPU that happens to match he hash.  This
+> is already quite not ideal (even with all the boost we are
+> supposedly getting) - this means each queue lock is constantly
+> bouncing between interrupt-receiving cpu and handling CPU.  with
+> ofed 1.4 interrupts would be distributed across many cpus, which in
+> my opinion has a potential to make above case even worse, now the
+> locks would be bouncing across multiple cpus (not sure if it makes
+> for more overhead or the same).
+> 
+> Now consider that we decide to implement somewhat better cpu
+> scheduling than that for MDS (and possibly OSTs too, though that is
+> debatable and needs some measurements), we definitely want hashing
+> based on object IDs.
+
+The advantage of hashing on client NID is that we can hash
+consistently at all stack levels without layering violations.  If
+clients aren't contending for the same objects, do we get the same
+benefits with hashing on NID as we get hashing on object ID?
+
+> The idea was to offload this task to lustre-provided event callback,
+> but that seems to mean we add another cpu rescheduling point that
+> way (in addition to one described above). Liang told me that we
+> cannot avoid the first switch since interrupt handler cannot process
+> the actual message received as this involves accessing and updating
+> per-NID information (credits and stuff) and if we do it on multiple
+> CPUs (in case of ofed 1.4 and other lnds that can have multiple cpus
+> serving interrupts), that means a lot of lock contention potentially
+> when single client's requests arrive on multiple cpus.
+
+My own belief is that most if not all performance-critical use cases
+involve many more clients than there are server CPUs - i.e. we don't
+lose by trying to keep a single client's RPCs local to 1 CPU.  Note
+that this means looking through the LND protocol level into the LNET
+header as early as possible.
+
+> I wonder if this could be relieved somehow? Ability to call lustre
+> request callback from interrupt so that we do only one cpu
+> rescheduling would be great.
+
+This is not an option.  Ensuring that the only code allowed to block
+interrupts is the LND has avoided _many_ nasty real-time issues which
+will return immediately if we relax this rule.
+
+> (of course we can try to encode this information somewhere in actual
+> message header like xid now where lnet interrupt handler can access
+> it and use in its hash algorithm, but that way we give away a lot of
+> flexibility, so this is not the best solution, I would think).
+
+It would be better to add an additional "hints" field to LNET messages
+which could be used for this purpose.
+
+> Another scenario that I have not seen discussed but that is
+> potentially pretty important for MDS is ability to route expected
+> messages (the ones like rep-ack reply) to a specific cpu regardless
+> of what NID did it come from. E.g. if we did rescheduling of MDS
+> request to some CPU and this is a difficult reply, we definitely
+> want the confirmation to be processed on that same cpu that sent the
+> reply originally, since it references all the locks supposedly
+> served by that CPU, etc. This is better to happen within LNET. I
+> guess similar thing might be beneficial to clients too where a reply
+> is received on the same CPU that sent original request in hopes that
+> the cache is still valid and the processing would be so much faster
+> as a result.
+
+You could use a "hints" field in the LNET header for this.
+
+> I wonder if there are any ways to influence what CPU would receive
+> interrupt initially that we can exploit to avoid the cpu switches
+> completely if possible? Should we investigate polling after certain
+> threshold of incoming messages is met?  
+
+Layers below the LND should already be doing interrupt coalescing.
+
+Have we got any measurements to show the impact of handling the
+message on a different CPU from the initial interrupt?  If we can keep
+everything on 1 CPU once we're in thread context, is 1 switch like
+this such a big deal
+
+> Perhaps for RDMA-noncapable LNDs we can save on switches by
+> redirecting transfer straight into the buffer registered by target
+> processing CPU and signal that thread in a cheaper way than double
+> spinlock taking + wakeup, or does that becomes irrelevant due to all
+> the overhead of non-RDMA transfer?
+
+RDMA shouldn't be involved in the message handling for which we need
+to improve SMP scaling.  Since RDMA always involves an additional
+network round-trip to set up the transfer and may also require mapping
+buffers into network VM, anything "small" (<= 4K including LND and
+LNET protocol overhead) is transferred by message passing -
+i.e. received first into dedicated network buffers and then copied
+out.  This copying is done in thread context in the LND as is the
+event callback.
+
+So if we do as much as possible in request_in_callback() (e.g. initial
+unpacking - AT processing etc) we'll be running on the same CPU LNET
+used to handle the message.
+
+I've attached Liang's measurements where he changed
+request_in_callback() to enqueue incoming requests on per-CPU queues.
+The measurements were taken with a 16 core server and 40 clients using
+DDR IB.  The results show similar performance gains to those seen with
+LNET self-test when requests are always queued to the same CPU.  When
+requests are queued to a different CPU, total throughput can fall by
+as much ~60%.  However keep in mind that even with this unnecessary
+switch, the total throughput is still getting on for 10x better than
+current releases.
+
+Lustre      LNET           LND
+
+GETATTR     PUT(request)   client->server: IMMEDIATE
+            PUT(reply)     server->client: IMMEDIATE
+
+BRW WRITE   PUT(request)   client->server: IMMEDIATE
+            GET(bulk)      server->client: GET_REQ
+                           client->server: RDMA + GET_DONE
+            PUT(reply)     server->client: IMMEDIATE
+
+BRW READ    PUT(request)   client->server: IMMEDIATE
+            PUT(bulk)      server->client: PUT_REQ
+                           client->server: PUT_ACK
+                           server->client: RDMA + PUT_DONE
+            PUT(reply)     server->client: IMMEDIATE
+
+Peak getattr performance of ~630,000 RPCs/sec translates into the same
+number of LND messages per second in both directions.
+
+Peak write performance of ~990MB/s with 4K requests translates to
+253,440 write RPCs/sec and 506,880 LND messages per second in both
+directions.  
+
+Similarly ~640MB/s reads translates to 163840 read RPCs/sec, 327,680
+incoming LND messages per second and 491,520 outgoing LND messages per
+second.
+
+> Also on lustre front - something I plan to tackle, though not yet
+> completely sure how: Lustre has a concept of reserving one thread for
+> difficult replies handling + one thread for high priority messages
+> handling (if enabled). In SMP scalability branch that becomes 2x
+> num_cpus reserved threads potentially per service since naturally
+> rep_ack reply or high prio message might arrive on any cpu separately
+> now (and message queues are per cpu) - seems like huge overkill to
+> me. I see that there is a handle reply separate threads in HEAD now,
+> so perhaps this could be greatly simplified by proper usage of those.
+> the high prio seems to be harder to improve, though.
+
+These threads are required in case all normal service threads are
+blocking.  I don't suppose this can be a performance critical case, so
+voilating CPU affinity for the sake of deadlock avoidance seems OK.
+However is 1 extra thread per CPU such a big deal?  We'll have
+10s-100s of them in any case.
+
+> Do anybody else have any extra thoughts for lustre side  
+> improvements we can get off this?
+
+I think we need measurements to prove/disprove whether object affinity
+trumps client affinity.
+
+> 
+> Bye,
+>      Oleg
+
+-- 
+
+        Cheers,
+                   Eric
+-------------- next part --------------
+A non-text attachment was scrubbed...
+Name: echo_perf.pdf
+Type: application/pdf
+Size: 108069 bytes
+Desc: not available
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20090729/a3f70e67/attachment.pdf>
+
+From Oleg.Drokin at Sun.COM  Wed Jul 29 09:01:30 2009
+From: Oleg.Drokin at Sun.COM (Oleg Drokin)
+Date: Wed, 29 Jul 2009 12:01:30 -0400
+Subject: [Lustre-devel] SMP Scalability, MDS, reducing cpu pingpong
+In-Reply-To: <002001ca1062$7b526fc0$71f74f40$@com>
+References: <7580C3C1-7634-47C8-827B-C93157C1301A@Sun.COM>
+	<002001ca1062$7b526fc0$71f74f40$@com>
+Message-ID: <31A2D6F1-C723-4EB5-8515-D155FE923C9A@Sun.COM>
+
+Hello!
+
+On Jul 29, 2009, at 11:37 AM, Eric Barton wrote:
+
+>> Now consider that we decide to implement somewhat better cpu
+>> scheduling than that for MDS (and possibly OSTs too, though that is
+>> debatable and needs some measurements), we definitely want hashing
+>> based on object IDs.
+> The advantage of hashing on client NID is that we can hash
+> consistently at all stack levels without layering violations.  If
+> clients aren't contending for the same objects, do we get the same
+> benefits with hashing on NID as we get hashing on object ID?
+
+Yes. If clients are not contending, we have same benefits, but
+this never happens in the real world.
+Creates in a same dir is a contention point on the dir and there is
+no point in scheduling all clients on different cpus and let them
+serialize, where we can free those cpus for some other set of clients
+doing something else.
+I guess this is less important for OSTs, since we do not recommend
+letting multiple clients to access same objects anyway, but in the
+case where this happens the benefit of serializing still might be there
+(though for non-recommended usecase) due to reduced contention.
+
+>> The idea was to offload this task to lustre-provided event callback,
+>> but that seems to mean we add another cpu rescheduling point that
+>> way (in addition to one described above). Liang told me that we
+>> cannot avoid the first switch since interrupt handler cannot process
+>> the actual message received as this involves accessing and updating
+>> per-NID information (credits and stuff) and if we do it on multiple
+>> CPUs (in case of ofed 1.4 and other lnds that can have multiple cpus
+>> serving interrupts), that means a lot of lock contention potentially
+>> when single client's requests arrive on multiple cpus.
+> My own belief is that most if not all performance-critical use cases
+> involve many more clients than there are server CPUs - i.e. we don't
+> lose by trying to keep a single client's RPCs local to 1 CPU.  Note
+> that this means looking through the LND protocol level into the LNET
+> header as early as possible.
+
+Absolutely. I am mostly in agreeing with you on this, except for the
+above mentioned shared create (or any shared access, really) case.
+
+>> (of course we can try to encode this information somewhere in actual
+>> message header like xid now where lnet interrupt handler can access
+>> it and use in its hash algorithm, but that way we give away a lot of
+>> flexibility, so this is not the best solution, I would think).
+> It would be better to add an additional "hints" field to LNET messages
+> which could be used for this purpose.
+
+Yup. We need an API for lustre to specify those hints when passing
+a message to lnet.
+The big part here is - should we then allow lnet to actually use this
+hint? If yes - we lose a lot of flexibility (suppose we have a contended
+object1 with a big queue of request piled for this object1.
+Theoretically in the future we might have an ability to detect this
+situation and when a request arrives for another object2 whose hash  
+would
+also redistribute it to the same cpu that is now busy with working  
+through
+all the request1 accesses, we can schedule it to different cpu (and  
+remember
+that all requests for object2 should now go to that different cpu)  
+that is
+completely idle a the moment.
+
+>> Another scenario that I have not seen discussed but that is
+>> potentially pretty important for MDS is ability to route expected
+>> messages (the ones like rep-ack reply) to a specific cpu regardless
+>> of what NID did it come from. E.g. if we did rescheduling of MDS
+>> request to some CPU and this is a difficult reply, we definitely
+>> want the confirmation to be processed on that same cpu that sent the
+>> reply originally, since it references all the locks supposedly
+>> served by that CPU, etc. This is better to happen within LNET. I
+>> guess similar thing might be beneficial to clients too where a reply
+>> is received on the same CPU that sent original request in hopes that
+>> the cache is still valid and the processing would be so much faster
+>> as a result.
+> You could use a "hints" field in the LNET header for this.
+
+Actually, the big difference with above-mentioned hints is that in this
+case we need no API. Essentially lnet need to be smart enough to
+recognize a reply as something that should go to the same cpu from
+where original message was sent.
+
+>> I wonder if there are any ways to influence what CPU would receive
+>> interrupt initially that we can exploit to avoid the cpu switches
+>> completely if possible? Should we investigate polling after certain
+>> threshold of incoming messages is met?
+> Layers below the LND should already be doing interrupt coalescing.
+>
+> Have we got any measurements to show the impact of handling the
+> message on a different CPU from the initial interrupt?  If we can keep
+> everything on 1 CPU once we're in thread context, is 1 switch like
+> this such a big deal
+
+I do not have any measurements, but I remember Liang did some tests
+and each cpu switch is pretty expensive.
+And this would be second cpu switch already.
+
+>> Perhaps for RDMA-noncapable LNDs we can save on switches by
+>> redirecting transfer straight into the buffer registered by target
+>> processing CPU and signal that thread in a cheaper way than double
+>> spinlock taking + wakeup, or does that becomes irrelevant due to all
+>> the overhead of non-RDMA transfer?
+> RDMA shouldn't be involved in the message handling for which we need
+> to improve SMP scaling.  Since RDMA always involves an additional
+> network round-trip to set up the transfer and may also require mapping
+> buffers into network VM, anything "small" (<= 4K including LND and
+> LNET protocol overhead) is transferred by message passing -
+> i.e. received first into dedicated network buffers and then copied
+> out.  This copying is done in thread context in the LND as is the
+> event callback.
+
+Well, I guess I used wrong word. By RDMA I meant a process in which
+message arrives to registered buffer and then we are signalled that the
+message is there. As opposed to a scheme where first we get a signal
+that message is about to arrive and we still have a chance to decide
+where to land it.
+
+>> Also on lustre front - something I plan to tackle, though not yet
+>> completely sure how: Lustre has a concept of reserving one thread for
+>> difficult replies handling + one thread for high priority messages
+>> handling (if enabled). In SMP scalability branch that becomes 2x
+>> num_cpus reserved threads potentially per service since naturally
+>> rep_ack reply or high prio message might arrive on any cpu separately
+>> now (and message queues are per cpu) - seems like huge overkill to
+>> me. I see that there is a handle reply separate threads in HEAD now,
+>> so perhaps this could be greatly simplified by proper usage of those.
+>> the high prio seems to be harder to improve, though.
+> These threads are required in case all normal service threads are
+> blocking.  I don't suppose this can be a performance critical case, so
+> voilating CPU affinity for the sake of deadlock avoidance seems OK.
+> However is 1 extra thread per CPU such a big deal?  We'll have
+> 10s-100s of them in any case.
+
+Well, I am not sure if this is a big deal or not yet. That's why I am
+raising a question.
+
+>> Do anybody else have any extra thoughts for lustre side
+>> improvements we can get off this?
+> I think we need measurements to prove/disprove whether object affinity
+> trumps client affinity.
+
+Absolutely. And we need to make sure we measure both kind of workloads,
+shared and nonshared.
+
+Bye,
+     Oleg
+
+
+From Ricardo.M.Correia at Sun.COM  Wed Jul 29 11:55:31 2009
+From: Ricardo.M.Correia at Sun.COM (Ricardo M. Correia)
+Date: Wed, 29 Jul 2009 19:55:31 +0100
+Subject: [Lustre-devel] SMP Scalability, MDS, reducing cpu pingpong
+In-Reply-To: <31A2D6F1-C723-4EB5-8515-D155FE923C9A@Sun.COM>
+References: <7580C3C1-7634-47C8-827B-C93157C1301A@Sun.COM>
+	<002001ca1062$7b526fc0$71f74f40$@com>
+	<31A2D6F1-C723-4EB5-8515-D155FE923C9A@Sun.COM>
+Message-ID: <1248893731.4563.13.camel@localhost>
+
+On Qua, 2009-07-29 at 12:01 -0400, Oleg Drokin wrote:
+> Yes. If clients are not contending, we have same benefits, but
+> this never happens in the real world.
+> Creates in a same dir is a contention point on the dir and there is
+> no point in scheduling all clients on different cpus and let them
+> serialize, where we can free those cpus for some other set of clients
+> doing something else.
+
+Will this still be true with the DMU?
+
+I don't know which locks are involved at the Lustre level, but the DMU
+itself does leaf-level locking of ZAP structures (used for directories).
+
+Cheers,
+Ricardo
+
+
+
+
+From Oleg.Drokin at Sun.COM  Wed Jul 29 12:05:41 2009
+From: Oleg.Drokin at Sun.COM (Oleg Drokin)
+Date: Wed, 29 Jul 2009 15:05:41 -0400
+Subject: [Lustre-devel] SMP Scalability, MDS, reducing cpu pingpong
+In-Reply-To: <1248893731.4563.13.camel@localhost>
+References: <7580C3C1-7634-47C8-827B-C93157C1301A@Sun.COM>
+	<002001ca1062$7b526fc0$71f74f40$@com>
+	<31A2D6F1-C723-4EB5-8515-D155FE923C9A@Sun.COM>
+	<1248893731.4563.13.camel@localhost>
+Message-ID: <89C349D2-F60A-44C1-9678-076DC8AD0A5A@Sun.COM>
+
+Hello!
+
+On Jul 29, 2009, at 2:55 PM, Ricardo M. Correia wrote:
+
+> On Qua, 2009-07-29 at 12:01 -0400, Oleg Drokin wrote:
+>> Yes. If clients are not contending, we have same benefits, but
+>> this never happens in the real world.
+>> Creates in a same dir is a contention point on the dir and there is
+>> no point in scheduling all clients on different cpus and let them
+>> serialize, where we can free those cpus for some other set of clients
+>> doing something else.
+> Will this still be true with the DMU?
+
+To some degree.
+Even without DMU HEAD has pdirops enabled which reduces the locking  
+unit to
+certain subset of hash values only.
+Keep in mind that aside from the dir content locking there is another  
+point of
+serialization which is to lock entire directory inode to update times,  
+size
+and possibly link count (of course normally this is quite small section
+that is lost in the noise of search in the directory, but when you  
+have a lot of
+CPUs, bouncing these pages and locks around cpu caches might raise level
+of overhead significantly).
+
+> I don't know which locks are involved at the Lustre level, but the DMU
+> itself does leaf-level locking of ZAP structures (used for  
+> directories).
+
+Possibly more than one, since in order to ensure you are not inserting a
+duplicate entry (with big enough dir) you need to lock all blocks that  
+could
+contain entries in a given hash range/whatever is the way ZIL(?)  
+orders entries with
+
+Bye,
+     Oleg
+
+
+From adilger at sun.com  Wed Jul 29 18:40:12 2009
+From: adilger at sun.com (Andreas Dilger)
+Date: Wed, 29 Jul 2009 19:40:12 -0600
+Subject: [Lustre-devel] SMP Scalability, MDS, reducing cpu pingpong
+In-Reply-To: <002001ca1062$7b526fc0$71f74f40$@com>
+References: <7580C3C1-7634-47C8-827B-C93157C1301A@Sun.COM>
+	<002001ca1062$7b526fc0$71f74f40$@com>
+Message-ID: <20090730014012.GQ4231@webber.adilger.int>
+
+On Jul 29, 2009  16:37 +0100, Eric Barton wrote:
+> > Now consider that we decide to implement somewhat better cpu
+> > scheduling than that for MDS (and possibly OSTs too, though that is
+> > debatable and needs some measurements), we definitely want hashing
+> > based on object IDs.
+> 
+> The advantage of hashing on client NID is that we can hash
+> consistently at all stack levels without layering violations.  If
+> clients aren't contending for the same objects, do we get the same
+> benefits with hashing on NID as we get hashing on object ID?
+
+The problem with hashing on the NID, and only doing micro-benchmarks
+that parallelize trivially is that we are missing very important factors
+in the overall performance.  I don't at all object to optimizing the
+LNET code to be very scalable in this way, but this isn't the end goal.
+
+I can imagine that keeping the initial message handling (LND processing,
+credits, etc) on a per-NID basis to be CPU local is fine.  However,
+the amount of state and locks involved at the Lustre level will far
+exceed the connection state at the LNET level, and we need to optimize
+the place that has the most overhead.  IMHO, that means having request
+processing affinity at a FID level (parent directory, target inode,
+file offset, etc).
+
+As can be seen with the echo client graphs, sure we "lose" a lot of
+"no-op getattr" performance when we go to 100% ping-pong requests
+(i.e. no NID affinity at all), but in absolute terms we still get 250k
+RPCs/sec even with no NID affinity.  In contrast, the file read and
+write with 1MB RPCs will saturate the network with 1000-2000 RPCs/sec,
+so whether we can handle 250k or 650k RPCs/sec empty requests is totally
+meaningless.
+
+I suspect the same would hold true with the getattr tests if they had
+to actually do an inode lookup and read actual data.  If the getattr
+requests are scheduled to the CPU where the inode is cached then the
+real life performance will be maximized.  It won't be 650k RPCs/sec,
+but I don't think that is achievable in most real workloads anyway.
+
+> > The idea was to offload this task to lustre-provided event callback,
+> > but that seems to mean we add another cpu rescheduling point that
+> > way (in addition to one described above). Liang told me that we
+> > cannot avoid the first switch since interrupt handler cannot process
+> > the actual message received as this involves accessing and updating
+> > per-NID information (credits and stuff) and if we do it on multiple
+> > CPUs (in case of ofed 1.4 and other lnds that can have multiple cpus
+> > serving interrupts), that means a lot of lock contention potentially
+> > when single client's requests arrive on multiple cpus.
+> 
+> My own belief is that most if not all performance-critical use cases
+> involve many more clients than there are server CPUs - i.e. we don't
+> lose by trying to keep a single client's RPCs local to 1 CPU.  Note
+> that this means looking through the LND protocol level into the LNET
+> header as early as possible.
+
+Let us separate the initial handling of the request in the LNET/LND
+level from the hand-off of the request structure itself to the Lustre
+service thread.  If we can process the LNET-level locking/accounting
+in a NID/CPU-affine manner, and all that is cross-CPU is the request
+buffer maybe that is the lowest-cost "request context switch" that
+is possible.
+
+AFAIK, it is the OST service thread that is doing the initialization
+of the bulk buffers, and not the LNET code, so we don't have a huge
+amount of data that needs to be shipped between cores.  If we can
+also avoid lock ping-pong on the request queues as requests are
+being assigned at the Lustre level that is ideal.
+
+
+I think this would be possible by e.g. having multiple per-CPU request
+"queuelets" (batches of requests that are handled as a unit, instead of
+having per-request processing).  See the ASCII art below for reference.
+
+The IRQ handler puts incoming requests on a CPU-affine list of some sort.
+Each request is put into into a CPU-affine list by NID hash to minimize
+peer processing overhead (credits, etc).  We get a list of requests
+that need to be scheduled to a CPU based on the content of the message,
+and that scheduling has to be done outside of the IRQ context.
+
+
+The LNET code now does the receive processing (still on the same CPU)
+to call the req_in handler (CPU request scheduler, possibly the very same
+as the NRS) to determine which core will do the full Lustre processing of
+the request.  The CPU request scheduler will add these requests to one of
+$num_active_cpus() _local_ queuelets (q$cpunr.$batchnr) until it is full,
+or some deadline (possibly load related) is passed.  At that point the
+finished queuelet is moved to the target CPU's local staging area (S$cpunr).
+
+IRQ handler          LNET/req_sched           OST thread
+-----------          --------------           ----------
+[request]
+    |
+    v
+CPU-affine list(s)
+                     CPU-affine list(s)
+                     |    |    |    |
+                     v    v    v    v   
+                     q0.4 q1.3 q2.2 q3.4
+                                               S0->q0.1->Q0 (CPU 0 threads)
+                                               S0->q0.2->Q0 (CPU 0 threads)
+                     q0.3 (finished) -> S0
+                                               S0->q0.3->Q0 (CPU 0 threads)
+                                               S1->q1.0->Q0 (CPU 1 threads)
+                     q1.1 (finished) -> S1
+                                               S1->q1.1->Q0 (CPU 1 threads)
+                     q1.2 (finished) -> S1
+                                               S1->q1.2->Q0 (CPU 1 threads)
+                                               S2->q1.1->Q0 (CPU 2 threads)
+                     q2.1 (finished) -> S2
+                                               S2->q2.1->Q0 (CPU 2 threads)
+                                               S3->q3.1->Q0 (CPU 3 threads)
+                     q3.2 (finished) -> S3
+                                               S3->q3.2->Q0 (CPU 3 threads)
+                     q3.3 (finished) -> S3
+                                               S3->q3.3->Q0 (CPU 3 threads)
+
+As the service threads process requests they periodically check for new
+queuelets in their CPU-local staging area and move them to their local
+request queue (Q$cpunr).  The requests are processed one-at-a-time by
+the CPU-local service threads as they are today from their request queue Q.
+
+
+What is important is that the cross-CPU lock contention is limited
+to the handoff of a large number of requests at a time (i.e. the
+whole queuelet) instead of on a per-request basis, so the lock
+contention on the Lustre request queue is orders of magnitude lower.
+Also, since the per-CPU service threads can remove whole queuelets
+from the staging area at one time they will also not be holding this
+lock for any length of time, ensuring the LNET threads are not blocked.
+
+
+> > (of course we can try to encode this information somewhere in actual
+> > message header like xid now where lnet interrupt handler can access
+> > it and use in its hash algorithm, but that way we give away a lot of
+> > flexibility, so this is not the best solution, I would think).
+> 
+> It would be better to add an additional "hints" field to LNET messages
+> which could be used for this purpose.
+
+I'm not against this either.  I think it is a reasonable approach,
+but the hints need to be independent of whatever mechanism the
+server is using for scheduling.  That means a hint is not a CPU
+number or anything, but rather e.g. a parent FID number (MDS) or
+an (object number XOR file offset in GB).  We might want to have
+a "major" hint (e.g. parent FID, object number) and a "minor"
+hint (e.g. child hash, file offset in GB) to let the server do
+load balancing as appropriate.
+
+Consider the OSS case where a large file is being read by many
+clients.  With NID affinity, there will essentially be completely
+random cross-CPU memory accesses.  With object number + offset-in-GB
+affinity the file extent locking and memory accesses will be CPU
+affine, so minimal cross-CPU memory access.
+
+> > Another scenario that I have not seen discussed but that is
+> > potentially pretty important for MDS is ability to route expected
+> > messages (the ones like rep-ack reply) to a specific cpu regardless
+> > of what NID did it come from. E.g. if we did rescheduling of MDS
+> > request to some CPU and this is a difficult reply, we definitely
+> > want the confirmation to be processed on that same cpu that sent the
+> > reply originally, since it references all the locks supposedly
+> > served by that CPU, etc. This is better to happen within LNET. I
+> > guess similar thing might be beneficial to clients too where a reply
+> > is received on the same CPU that sent original request in hopes that
+> > the cache is still valid and the processing would be so much faster
+> > as a result.
+> 
+> You could use a "hints" field in the LNET header for this.
+
+These should really be "cookies" provided by the server, rather than
+hints generated by the client, but the mechanism could be the same.
+
+> These threads are required in case all normal service threads are
+> blocking.  I don't suppose this can be a performance critical case, so
+> voilating CPU affinity for the sake of deadlock avoidance seems OK.
+> However is 1 extra thread per CPU such a big deal?  We'll have
+> 10s-100s of them in any case.
+
+I agree.  Until this is shown to be a major issue I don't think it
+is worth the investment of any time to fix.
+
+> > Do anybody else have any extra thoughts for lustre side  
+> > improvements we can get off this?
+> 
+> I think we need measurements to prove/disprove whether object affinity
+> trumps client affinity.
+
+Yes, that is the critical question.
+
+Cheers, Andreas
+--
+Andreas Dilger
+Sr. Staff Engineer, Lustre Group
+Sun Microsystems of Canada, Inc.
+
+
+
+From Zhen.Liang at Sun.COM  Thu Jul 30 02:25:52 2009
+From: Zhen.Liang at Sun.COM (Liang Zhen)
+Date: Thu, 30 Jul 2009 17:25:52 +0800
+Subject: [Lustre-devel] SMP Scalability, MDS, reducing cpu pingpong
+In-Reply-To: <20090730014012.GQ4231@webber.adilger.int>
+References: <7580C3C1-7634-47C8-827B-C93157C1301A@Sun.COM>
+	<002001ca1062$7b526fc0$71f74f40$@com>
+	<20090730014012.GQ4231@webber.adilger.int>
+Message-ID: <4A716720.6030504@sun.com>
+
+Reply inline.....
+
+Andreas Dilger wrote:
+> Let us separate the initial handling of the request in the LNET/LND
+> level from the hand-off of the request structure itself to the Lustre
+> service thread.  If we can process the LNET-level locking/accounting
+> in a NID/CPU-affine manner, and all that is cross-CPU is the request
+> buffer maybe that is the lowest-cost "request context switch" that
+> is possible.
+>
+> AFAIK, it is the OST service thread that is doing the initialization
+> of the bulk buffers, and not the LNET code, so we don't have a huge
+> amount of data that needs to be shipped between cores.  If we can
+> also avoid lock ping-pong on the request queues as requests are
+> being assigned at the Lustre level that is ideal.
+>
+>
+> I think this would be possible by e.g. having multiple per-CPU request
+> "queuelets" (batches of requests that are handled as a unit, instead of
+> having per-request processing).  See the ASCII art below for reference.
+>
+> The IRQ handler puts incoming requests on a CPU-affine list of some sort.
+> Each request is put into into a CPU-affine list by NID hash to minimize
+> peer processing overhead (credits, etc).  We get a list of requests
+> that need to be scheduled to a CPU based on the content of the message,
+> and that scheduling has to be done outside of the IRQ context.
+>
+>
+> The LNET code now does the receive processing (still on the same CPU)
+> to call the req_in handler (CPU request scheduler, possibly the very same
+> as the NRS) to determine which core will do the full Lustre processing of
+> the request.  The CPU request scheduler will add these requests to one of
+> $num_active_cpus() _local_ queuelets (q$cpunr.$batchnr) until it is full,
+> or some deadline (possibly load related) is passed.  At that point the
+> finished queuelet is moved to the target CPU's local staging area (S$cpunr).
+>
+> IRQ handler          LNET/req_sched           OST thread
+> -----------          --------------           ----------
+> [request]
+>     |
+>     v
+> CPU-affine list(s)
+>                      CPU-affine list(s)
+>                      |    |    |    |
+>                      v    v    v    v   
+>                      q0.4 q1.3 q2.2 q3.4
+>                                                S0->q0.1->Q0 (CPU 0 threads)
+>                                                S0->q0.2->Q0 (CPU 0 threads)
+>                      q0.3 (finished) -> S0
+>                                                S0->q0.3->Q0 (CPU 0 threads)
+>                                                S1->q1.0->Q0 (CPU 1 threads)
+>                      q1.1 (finished) -> S1
+>                                                S1->q1.1->Q0 (CPU 1 threads)
+>                      q1.2 (finished) -> S1
+>                                                S1->q1.2->Q0 (CPU 1 threads)
+>                                                S2->q1.1->Q0 (CPU 2 threads)
+>                      q2.1 (finished) -> S2
+>                                                S2->q2.1->Q0 (CPU 2 threads)
+>                                                S3->q3.1->Q0 (CPU 3 threads)
+>                      q3.2 (finished) -> S3
+>                                                S3->q3.2->Q0 (CPU 3 threads)
+>                      q3.3 (finished) -> S3
+>                                                S3->q3.3->Q0 (CPU 3 threads)
+>
+> As the service threads process requests they periodically check for new
+> queuelets in their CPU-local staging area and move them to their local
+> request queue (Q$cpunr).  The requests are processed one-at-a-time by
+> the CPU-local service threads as they are today from their request queue Q.
+>   
+
+So the queuelets could be: a) popped to target CPU if local CPU got 
+enough messages for target; b) poll  by target CPU if target CPU is idle.
+for a) it's good and can reduce contention, but for b), If service 
+thread (of each CPU) make periodically poll from all other CPUs, there 
+could be a unnecessary delay (interval of poll) if those queuelets are 
+always not full at all, unless local-CPU "peek" the message queue on 
+target CPU in callback, and post message to there directly (instead of 
+queuelet of local CPU) when the queue is empty. However, there could be 
+another problem, the "peek" is not a light operation even don't need any 
+lock, target CPU is likely changing it's own request queue (exclusive 
+access), so the "peek" is already a cache syncup.
+
+
+>
+> What is important is that the cross-CPU lock contention is limited
+> to the handoff of a large number of requests at a time (i.e. the
+> whole queuelet) instead of on a per-request basis, so the lock
+> contention on the Lustre request queue is orders of magnitude lower.
+> Also, since the per-CPU service threads can remove whole queuelets
+> from the staging area at one time they will also not be holding this
+> lock for any length of time, ensuring the LNET threads are not blocked.
+>
+>
+>   
+>>> (of course we can try to encode this information somewhere in actual
+>>> message header like xid now where lnet interrupt handler can access
+>>> it and use in its hash algorithm, but that way we give away a lot of
+>>> flexibility, so this is not the best solution, I would think).
+>>>       
+>> It would be better to add an additional "hints" field to LNET messages
+>> which could be used for this purpose.
+>>     
+
+I'm quite confusing at here, I think Oleg was talking about incoming 
+request, but LNet message is totally invisible in interrupt handlers, as 
+LNet message is created by lnet_parse() which is called by LND scheduler 
+later(after woken up by interrupt handler).
+
+>
+> I'm not against this either.  I think it is a reasonable approach,
+> but the hints need to be independent of whatever mechanism the
+> server is using for scheduling.  That means a hint is not a CPU
+> number or anything, but rather e.g. a parent FID number (MDS) or
+> an (object number XOR file offset in GB).  We might want to have
+> a "major" hint (e.g. parent FID, object number) and a "minor"
+> hint (e.g. child hash, file offset in GB) to let the server do
+> load balancing as appropriate.
+>
+> Consider the OSS case where a large file is being read by many
+> clients.  With NID affinity, there will essentially be completely
+> random cross-CPU memory accesses.  With object number + offset-in-GB
+> affinity the file extent locking and memory accesses will be CPU
+> affine, so minimal cross-CPU memory access.
+>
+>   
+>>> Another scenario that I have not seen discussed but that is
+>>> potentially pretty important for MDS is ability to route expected
+>>> messages (the ones like rep-ack reply) to a specific cpu regardless
+>>> of what NID did it come from. E.g. if we did rescheduling of MDS
+>>> request to some CPU and this is a difficult reply, we definitely
+>>> want the confirmation to be processed on that same cpu that sent the
+>>> reply originally, since it references all the locks supposedly
+>>> served by that CPU, etc. This is better to happen within LNET. I
+>>> guess similar thing might be beneficial to clients too where a reply
+>>> is received on the same CPU that sent original request in hopes that
+>>> the cache is still valid and the processing would be so much faster
+>>> as a result.
+>>>       
+>> You could use a "hints" field in the LNET header for this.
+>>     
+
+That's about outgoing LNet message when sending reply, however, sending 
+a message still need go through "connection" & "peer" of LNet and LND as 
+well, and finally go out from the connection of network stack, which are 
+all bound on CPU hashed by NID (again).
+So I think unless we create connections on all CPUs for each client, 
+otherwise switch like that is unavoidable.
+Actually, I think the fact is, LNet & LND are using NID affinity for 
+connection & peer, Lustre is using object affinity, so we need switch 
+CPU. If we want to go through the stack without switching of CPU, then 
+we have to cancel NID affinity from LNet, that means we need a global 
+peer table and a global lock to serialize, then we can schedule 
+send/receive on any of CPU as we want, but "global" come back again...
+
+>
+>   
+>>>  get off this?
+>>>       
+>> I think we need measurements to prove/disprove whether object affinity
+>> trumps client affinity.
+>>     
+>
+> Yes, that is the critical question.
+>   
+
+Totally agree....
+
+Regards
+Liang
+
+
+> Cheers, Andreas
+> --
+> Andreas Dilger
+> Sr. Staff Engineer, Lustre Group
+> Sun Microsystems of Canada, Inc.
+>
+>   
+
+
+
+From Oleg.Drokin at Sun.COM  Thu Jul 30 06:35:48 2009
+From: Oleg.Drokin at Sun.COM (Oleg Drokin)
+Date: Thu, 30 Jul 2009 09:35:48 -0400
+Subject: [Lustre-devel] SMP Scalability, MDS, reducing cpu pingpong
+In-Reply-To: <4A716720.6030504@sun.com>
+References: <7580C3C1-7634-47C8-827B-C93157C1301A@Sun.COM>
+	<002001ca1062$7b526fc0$71f74f40$@com>
+	<20090730014012.GQ4231@webber.adilger.int> <4A716720.6030504@sun.com>
+Message-ID: <7CBBBA6F-3A7F-4966-B76A-AB6B214D4AC8@Sun.COM>
+
+Hello!
+
+On Jul 30, 2009, at 5:25 AM, Liang Zhen wrote:
+>>>> Another scenario that I have not seen discussed but that is
+>>>> potentially pretty important for MDS is ability to route expected
+>>>> messages (the ones like rep-ack reply) to a specific cpu regardless
+>>>> of what NID did it come from. E.g. if we did rescheduling of MDS
+>>>> request to some CPU and this is a difficult reply, we definitely
+>>>> want the confirmation to be processed on that same cpu that sent  
+>>>> the
+>>>> reply originally, since it references all the locks supposedly
+>>>> served by that CPU, etc. This is better to happen within LNET. I
+>>>> guess similar thing might be beneficial to clients too where a  
+>>>> reply
+>>>> is received on the same CPU that sent original request in hopes  
+>>>> that
+>>>> the cache is still valid and the processing would be so much faster
+>>>> as a result.
+>>> You could use a "hints" field in the LNET header for this.
+> That's about outgoing LNet message when sending reply, however,  
+> sending a message still need go through "connection" & "peer" of  
+> LNet and LND as well, and finally go out from the connection of  
+> network stack, which are all bound on CPU hashed by NID (again).
+
+Nothing prevents us from introducing extra argument for event handler,  
+thoguh?
+
+Bye,
+     Oleg
+
+
+From Zhen.Liang at Sun.COM  Thu Jul 30 06:53:10 2009
+From: Zhen.Liang at Sun.COM (Liang Zhen)
+Date: Thu, 30 Jul 2009 21:53:10 +0800
+Subject: [Lustre-devel] SMP Scalability, MDS, reducing cpu pingpong
+In-Reply-To: <7CBBBA6F-3A7F-4966-B76A-AB6B214D4AC8@Sun.COM>
+References: <7580C3C1-7634-47C8-827B-C93157C1301A@Sun.COM>
+	<002001ca1062$7b526fc0$71f74f40$@com>
+	<20090730014012.GQ4231@webber.adilger.int> <4A716720.6030504@sun.com>
+	<7CBBBA6F-3A7F-4966-B76A-AB6B214D4AC8@Sun.COM>
+Message-ID: <4A71A5C6.80806@sun.com>
+
+Oleg Drokin wrote:
+> Hello!
+>
+> On Jul 30, 2009, at 5:25 AM, Liang Zhen wrote:
+>>>>> Another scenario that I have not seen discussed but that is
+>>>>> potentially pretty important for MDS is ability to route expected
+>>>>> messages (the ones like rep-ack reply) to a specific cpu regardless
+>>>>> of what NID did it come from. E.g. if we did rescheduling of MDS
+>>>>> request to some CPU and this is a difficult reply, we definitely
+>>>>> want the confirmation to be processed on that same cpu that sent the
+>>>>> reply originally, since it references all the locks supposedly
+>>>>> served by that CPU, etc. This is better to happen within LNET. I
+>>>>> guess similar thing might be beneficial to clients too where a reply
+>>>>> is received on the same CPU that sent original request in hopes that
+>>>>> the cache is still valid and the processing would be so much faster
+>>>>> as a result.
+>>>> You could use a "hints" field in the LNET header for this.
+>> That's about outgoing LNet message when sending reply, however, 
+>> sending a message still need go through "connection" & "peer" of LNet 
+>> and LND as well, and finally go out from the connection of network 
+>> stack, which are all bound on CPU hashed by NID (again).
+>
+> Nothing prevents us from introducing extra argument for event handler, 
+> thoguh?
+
+We actually don't need  do that in my branch, when we send reply, LNet 
+would generate a cookie(MD handle) for the reply buffer which already 
+contained current CPU id, and remote peer will send back ACK with the 
+same cookie(MD handle), so the  ACK will match to the sending CPU id and 
+callback for the same CPU. So that's some work we have already done, :)
+
+Regards
+Liang
+
+
+>
+> Bye,
+>     Oleg
+
+
+
+From Nicolas.Williams at sun.com  Wed Jul 29 12:22:30 2009
+From: Nicolas.Williams at sun.com (Nicolas Williams)
+Date: Wed, 29 Jul 2009 14:22:30 -0500
+Subject: [Lustre-devel] SMP Scalability, MDS, reducing cpu pingpong
+In-Reply-To: <002001ca1062$7b526fc0$71f74f40$@com>
+References: <7580C3C1-7634-47C8-827B-C93157C1301A@Sun.COM>
+	<002001ca1062$7b526fc0$71f74f40$@com>
+Message-ID: <20090729192230.GU1020@Sun.COM>
+
+On Wed, Jul 29, 2009 at 04:37:29PM +0100, Eric Barton wrote:
+> > Also on lustre front - something I plan to tackle, though not yet
+> > completely sure how: Lustre has a concept of reserving one thread for
+> > difficult replies handling + one thread for high priority messages
+> > handling (if enabled). In SMP scalability branch that becomes 2x
+> > num_cpus reserved threads potentially per service since naturally
+> > rep_ack reply or high prio message might arrive on any cpu separately
+> > now (and message queues are per cpu) - seems like huge overkill to
+> > me. I see that there is a handle reply separate threads in HEAD now,
+> > so perhaps this could be greatly simplified by proper usage of those.
+> > the high prio seems to be harder to improve, though.
+> 
+> These threads are required in case all normal service threads are
+> blocking.  I don't suppose this can be a performance critical case, so
+> voilating CPU affinity for the sake of deadlock avoidance seems OK.
+> However is 1 extra thread per CPU such a big deal?  We'll have
+> 10s-100s of them in any case.
+
+Probably not.  You could have a single thread per-CPU if everything was
+written in async I/O, continuation passing style (CPS), blocking only in
+an event loop per-CPU.  That'd reduce context switches, but it'd
+increase the amount of context being saved and read as that one thread
+services each event/event completion.  In other words, you'd still have
+context switches!
+
+Also, the code would get insanely complicated -- CPS is for compilers,
+not humans (nor do we have Scheme-like continuations in C nor in the
+Linux kernel, and if we did that'd add quite a bit of run-time overhead
+too).  And kernels are not usually written this way either, so it may
+not even be feasible.  The thread model is just easier to code to.
+
+> > Do anybody else have any extra thoughts for lustre side  
+> > improvements we can get off this?
+> 
+> I think we need measurements to prove/disprove whether object affinity
+> trumps client affinity.
+
+If we have secure PTLRPC in the picture then client affinity is more
+likely to trump object affinity: between keys, key schedules, and
+sequence number windows may add up to enough.  (Of course, we could have
+multiple streams per-client, so that a client could be serviced by
+multiple server CPUs.)
+
+Nico
+-- 
+
+
+From adilger at sun.com  Thu Jul 30 16:19:19 2009
+From: adilger at sun.com (Andreas Dilger)
+Date: Thu, 30 Jul 2009 17:19:19 -0600
+Subject: [Lustre-devel] SMP Scalability, MDS, reducing cpu pingpong
+In-Reply-To: <4A716720.6030504@sun.com>
+References: <7580C3C1-7634-47C8-827B-C93157C1301A@Sun.COM>
+	<002001ca1062$7b526fc0$71f74f40$@com>
+	<20090730014012.GQ4231@webber.adilger.int> <4A716720.6030504@sun.com>
+Message-ID: <20090730231919.GJ4231@webber.adilger.int>
+
+On Jul 30, 2009  17:25 +0800, Liang Zhen wrote:
+> Andreas Dilger wrote:
+>> The IRQ handler puts incoming requests on a CPU-affine list of some sort.
+>> Each request is put into into a CPU-affine list by NID hash to minimize
+>> peer processing overhead (credits, etc).  We get a list of requests
+>> that need to be scheduled to a CPU based on the content of the message,
+>> and that scheduling has to be done outside of the IRQ context.
+>>
+>>
+>> The LNET code now does the receive processing (still on the same CPU)
+>> to call the req_in handler (CPU request scheduler, possibly the very same
+>> as the NRS) to determine which core will do the full Lustre processing of
+>> the request.  The CPU request scheduler will add these requests to one of
+>> $num_active_cpus() _local_ queuelets (q$cpunr.$batchnr) until it is full,
+>> or some deadline (possibly load related) is passed.  At that point the
+>> finished queuelet is moved to the target CPU's local staging area (S$cpunr).
+
+Note also that some kinds of replies (OBD_PING, for example) could be
+completed entirely by ptlrpc_server_handle_req_in() without invoking
+any context switching.
+
+>> As the service threads process requests they periodically check for new
+>> queuelets in their CPU-local staging area and move them to their local
+>> request queue (Q$cpunr).  The requests are processed one-at-a-time by
+>> the CPU-local service threads as they are today from their request queue Q.
+>
+> So the queuelets could be: a) popped to target CPU if local CPU got  
+> enough messages for target; b) poll  by target CPU if target CPU is idle.
+> for a) it's good and can reduce contention, but for b), If service  
+> thread (of each CPU) make periodically poll from all other CPUs, there  
+> could be a unnecessary delay (interval of poll) if those queuelets are  
+> always not full at all, unless local-CPU "peek" the message queue on  
+> target CPU in callback, and post message to there directly (instead of  
+> queuelet of local CPU) when the queue is empty. However, there could be  
+> another problem, the "peek" is not a light operation even don't need any  
+> lock, target CPU is likely changing it's own request queue (exclusive  
+> access), so the "peek" is already a cache syncup.
+
+I don't think ALL service threads would necessarily poll for queuelets.
+As you suggest, any polling would be lightweight.  We might not have
+polling at all, however.  The LNET code could make a decision (based
+on message arrival rate, whether there are other unhandled queuelets
+in the staging list, maximum delay (deadline).  That said, if the
+service threads are idle and there are requests to be processed then
+some lock contention is acceptable, since the system cannot be too
+busy at that time.  That wouldn't have to be polling, but rather a
+wakeup of a single thread waiting on the request queue.
+
+>>>> (of course we can try to encode this information somewhere in actual
+>>>> message header like xid now where lnet interrupt handler can access
+>>>> it and use in its hash algorithm, but that way we give away a lot of
+>>>> flexibility, so this is not the best solution, I would think).
+>>>>       
+>>> It would be better to add an additional "hints" field to LNET messages
+>>> which could be used for this purpose.
+>
+> I'm quite confusing at here, I think Oleg was talking about incoming  
+> request, but LNet message is totally invisible in interrupt handlers, as  
+> LNet message is created by lnet_parse() which is called by LND scheduler  
+> later(after woken up by interrupt handler).
+
+Would the hints have to be down at the LND-specific headers?  In any
+case, something that can be accessed as easily as the NID.
+
+Cheers, Andreas
+--
+Andreas Dilger
+Sr. Staff Engineer, Lustre Group
+Sun Microsystems of Canada, Inc.
+
+
+

@@ -1,0 +1,1615 @@
+From jsimmons at infradead.org  Mon Apr 18 17:30:58 2022
+From: jsimmons at infradead.org (James Simmons)
+Date: Mon, 18 Apr 2022 20:30:58 -0400
+Subject: [lustre-devel] [PATCH 1/7] lustre: ptlrpc: unregister reply buffer
+ on rq_err
+In-Reply-To: <1650328264-8763-1-git-send-email-jsimmons@infradead.org>
+References: <1650328264-8763-1-git-send-email-jsimmons@infradead.org>
+Message-ID: <1650328264-8763-2-git-send-email-jsimmons@infradead.org>
+
+From: Alexander Zarochentsev <alexander.zarochentsev at hpe.com>
+
+Unregister reply buffer on rq_err and prevent a late reply from
+modifying request flags in INTERPRET state.
+
+HPE-bug-id: LUS-10717
+Fixes: b06c1d17e488 ("lustre: mgc: do not ignore target registration failure")
+WC-bug-id: https://jira.whamcloud.com/browse/LU-15435
+Lustre-commit: d8012811cc6ff9c7f ("LU-15435 ptlrpc: unregister reply buffer on rq_err")
+Signed-off-by: Alexander Zarochentsev <alexander.zarochentsev at hpe.com>
+Signed-off-by: Alexey Lyashkov <alexey.lyashkov at hpe.com>
+Reviewed-on: https://review.whamcloud.com/46132
+Reviewed-by: Alexander Boyko <alexander.boyko at hpe.com>
+Reviewed-by: Oleg Drokin <green at whamcloud.com>
+Signed-off-by: James Simmons <jsimmons at infradead.org>
+---
+ fs/lustre/ptlrpc/client.c | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+diff --git a/fs/lustre/ptlrpc/client.c b/fs/lustre/ptlrpc/client.c
+index ec0cd5f..685d6e2 100644
+--- a/fs/lustre/ptlrpc/client.c
++++ b/fs/lustre/ptlrpc/client.c
+@@ -1857,6 +1857,11 @@ int ptlrpc_check_set(const struct lu_env *env, struct ptlrpc_request_set *set)
+ 		}
+ 
+ 		if (req->rq_err) {
++			if (!ptlrpc_unregister_reply(req, 1)) {
++				ptlrpc_unregister_bulk(req, 1);
++				continue;
++			}
++
+ 			spin_lock(&req->rq_lock);
+ 			req->rq_replied = 0;
+ 			spin_unlock(&req->rq_lock);
+-- 
+1.8.3.1
+
+
+From jsimmons at infradead.org  Mon Apr 18 17:31:01 2022
+From: jsimmons at infradead.org (James Simmons)
+Date: Mon, 18 Apr 2022 20:31:01 -0400
+Subject: [lustre-devel] [PATCH 4/7] lustre: lmv: change default hash back to
+ fnv_1a_64
+In-Reply-To: <1650328264-8763-1-git-send-email-jsimmons@infradead.org>
+References: <1650328264-8763-1-git-send-email-jsimmons@infradead.org>
+Message-ID: <1650328264-8763-5-git-send-email-jsimmons@infradead.org>
+
+From: Andreas Dilger <adilger at whamcloud.com>
+
+Until performance issue is resolved, change the default directory
+hash type from 'crush' back to 'fnv_1a_64'.
+
+Fixes: 92fb134e43a0 ("lustre: lmv: change default hash type to crush")
+WC-bug-id: https://jira.whamcloud.com/browse/LU-15692
+Lustre-commit: 0090b6f6f6cfd65fc ("LU-15692 lmv: change default hash back to fnv_1a_64")
+Signed-off-by: Andreas Dilger <adilger at whamcloud.com>
+Reviewed-on: https://review.whamcloud.com/46950
+Reviewed-by: Lai Siyao <lai.siyao at whamcloud.com>
+Reviewed-by: Shuichi Ihara <sihara at ddn.com>
+Reviewed-by: Oleg Drokin <green at whamcloud.com>
+Signed-off-by: James Simmons <jsimmons at infradead.org>
+---
+ include/uapi/linux/lustre/lustre_user.h | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/include/uapi/linux/lustre/lustre_user.h b/include/uapi/linux/lustre/lustre_user.h
+index 3017148..fa01c28 100644
+--- a/include/uapi/linux/lustre/lustre_user.h
++++ b/include/uapi/linux/lustre/lustre_user.h
+@@ -707,7 +707,7 @@ static __attribute__((unused)) const char *mdt_hash_name[] = {
+ 	"crush",
+ };
+ 
+-#define LMV_HASH_TYPE_DEFAULT LMV_HASH_TYPE_CRUSH
++#define LMV_HASH_TYPE_DEFAULT LMV_HASH_TYPE_FNV_1A_64
+ 
+ /* Right now only the lower part(0-16bits) of lmv_hash_type is being used,
+  * and the higher part will be the flag to indicate the status of object,
+-- 
+1.8.3.1
+
+
+From jsimmons at infradead.org  Mon Apr 18 17:31:02 2022
+From: jsimmons at infradead.org (James Simmons)
+Date: Mon, 18 Apr 2022 20:31:02 -0400
+Subject: [lustre-devel] [PATCH 5/7] lnet: only update gateway NI status on
+ discovery
+In-Reply-To: <1650328264-8763-1-git-send-email-jsimmons@infradead.org>
+References: <1650328264-8763-1-git-send-email-jsimmons@infradead.org>
+Message-ID: <1650328264-8763-6-git-send-email-jsimmons@infradead.org>
+
+From: Chris Horn <chris.horn at hpe.com>
+
+Move the NI status from DOWN to UP only when receiving
+a discovery PING. The discovery PING should be the only
+message which should update the NI status since it's used
+as the gateway NI keep alive mechanism.
+
+This is done to avoid the following scenario:
+
+The gateway itself can push its updates to the peers which
+have removed it from its routing table. The peers would
+respond to the PUSH with an ACK, the ACK will bring the
+gateway's NI status to up. Therefore other peers which have
+avoid_asym_router_failure=1 will have their route status
+remain up even though the symmetrical route is gone.
+
+Note: there is no way for the gateway to differentiate between
+a keep alive discovery and a manually triggered discovery or ping.
+However, this a narrow case which will not be handled.
+
+net_last_alive converted to use ktime_get_seconds() instead of
+ktime_get_real_seconds() since the NTP adjustment is not needed.
+
+WC-bug-id: https://jira.whamcloud.com/browse/LU-13714
+Lustre-commit: 3e3f70eb1ec95f32d ("LU-13714 lnet: only update gateway NI status on discovery")
+Signed-off-by: Amir Shehata <ashehata at whamcloud.com>
+Signed-off-by: Chris Horn <chris.horn at hpe.com>
+Reviewed-on: https://review.whamcloud.com/39176
+Reviewed-by: Serguei Smirnov <ssmirnov at whamcloud.com>
+Reviewed-by: Cyril Bordage <cbordage at whamcloud.com>
+Reviewed-by: Oleg Drokin <green at whamcloud.com>
+Signed-off-by: James Simmons <jsimmons at infradead.org>
+---
+ net/lnet/lnet/config.c      |  2 +-
+ net/lnet/lnet/lib-move.c    | 16 ++++++++++++----
+ net/lnet/lnet/router.c      |  2 +-
+ net/lnet/lnet/router_proc.c |  2 +-
+ 4 files changed, 15 insertions(+), 7 deletions(-)
+
+diff --git a/net/lnet/lnet/config.c b/net/lnet/lnet/config.c
+index f499c91..da3d20e 100644
+--- a/net/lnet/lnet/config.c
++++ b/net/lnet/lnet/config.c
+@@ -350,7 +350,7 @@ struct lnet_net *
+ 	spin_lock_init(&net->net_lock);
+ 
+ 	net->net_id = net_id;
+-	net->net_last_alive = ktime_get_real_seconds();
++	net->net_last_alive = ktime_get_seconds();
+ 
+ 	net->net_sel_priority = LNET_MAX_SELECTION_PRIORITY;
+ 
+diff --git a/net/lnet/lnet/lib-move.c b/net/lnet/lnet/lib-move.c
+index 3ad13d0..0b3986e 100644
+--- a/net/lnet/lnet/lib-move.c
++++ b/net/lnet/lnet/lib-move.c
+@@ -4250,6 +4250,7 @@ void lnet_monitor_thr_stop(void)
+ 	u32 type;
+ 	int rc = 0;
+ 	int cpt;
++	time64_t now = ktime_get_seconds();
+ 
+ 	LASSERT(!in_interrupt());
+ 
+@@ -4301,11 +4302,18 @@ void lnet_monitor_thr_stop(void)
+ 		return -EPROTO;
+ 	}
+ 
+-	if (the_lnet.ln_routing &&
+-	    ni->ni_net->net_last_alive != ktime_get_real_seconds()) {
++	/* Only update net_last_alive for incoming GETs on the reserved portal
++	 * (i.e. incoming lnet/discovery pings).
++	 * This avoids situations where the router's own traffic results in NI
++	 * status changes
++	 */
++	if (the_lnet.ln_routing && type == LNET_MSG_GET &&
++	    hdr->msg.get.ptl_index == LNET_RESERVED_PORTAL &&
++	    !lnet_islocalnid(&src_nid) &&
++	    ni->ni_net->net_last_alive != now) {
+ 		lnet_ni_lock(ni);
+ 		spin_lock(&ni->ni_net->net_lock);
+-		ni->ni_net->net_last_alive = ktime_get_real_seconds();
++		ni->ni_net->net_last_alive = now;
+ 		spin_unlock(&ni->ni_net->net_lock);
+ 		push = lnet_ni_set_status_locked(ni, LNET_NI_STATUS_UP);
+ 		lnet_ni_unlock(ni);
+@@ -4480,7 +4488,7 @@ void lnet_monitor_thr_stop(void)
+ 		}
+ 	}
+ 
+-	lpni->lpni_last_alive = ktime_get_seconds();
++	lpni->lpni_last_alive = now;
+ 
+ 	msg->msg_rxpeer = lpni;
+ 	msg->msg_rxni = ni;
+diff --git a/net/lnet/lnet/router.c b/net/lnet/lnet/router.c
+index beded3e..60ae15d 100644
+--- a/net/lnet/lnet/router.c
++++ b/net/lnet/lnet/router.c
+@@ -1044,7 +1044,7 @@ int lnet_get_rtr_pool_cfg(int cpt, struct lnet_ioctl_pool_cfg *pool_cfg)
+ 
+ 	timeout = router_ping_timeout + alive_router_check_interval;
+ 
+-	now = ktime_get_real_seconds();
++	now = ktime_get_seconds();
+ 	list_for_each_entry(net, &the_lnet.ln_nets, net_list) {
+ 		if (net->net_lnd->lnd_type == LOLND)
+ 			continue;
+diff --git a/net/lnet/lnet/router_proc.c b/net/lnet/lnet/router_proc.c
+index a53d6fa..f231da1 100644
+--- a/net/lnet/lnet/router_proc.c
++++ b/net/lnet/lnet/router_proc.c
+@@ -663,7 +663,7 @@ static int proc_lnet_nis(struct ctl_table *table, int write,
+ 		if (ni) {
+ 			struct lnet_tx_queue *tq;
+ 			char *stat;
+-			time64_t now = ktime_get_real_seconds();
++			time64_t now = ktime_get_seconds();
+ 			time64_t last_alive = -1;
+ 			int i;
+ 			int j;
+-- 
+1.8.3.1
+
+
+From jsimmons at infradead.org  Mon Apr 18 17:31:00 2022
+From: jsimmons at infradead.org (James Simmons)
+Date: Mon, 18 Apr 2022 20:31:00 -0400
+Subject: [lustre-devel] [PATCH 3/7] lustre: lov: remove lo_trunc_stripeno
+In-Reply-To: <1650328264-8763-1-git-send-email-jsimmons@infradead.org>
+References: <1650328264-8763-1-git-send-email-jsimmons@infradead.org>
+Message-ID: <1650328264-8763-4-git-send-email-jsimmons@infradead.org>
+
+From: "John L. Hammond" <jhammond at whamcloud.com>
+
+Remove the lo_trunc_stripeno member of struct lov_layout_raid0 and add
+an lis_trunc_stripe_index array to struct lov_io. This makes the
+truncate stripe index information belong to the IO and not to the
+concurrently accessed object. This is needed because we do not have
+locking that protects it from its initialization in lov_io_iter_init()
+to its use in lov_lock_sub_init(). Also remove the unused
+lo_write_lock member of struct lov_object.
+
+Fixes: d83ed47d35 ("lustre: lov: correctly set OST obj size")
+WC-bug-id: https://jira.whamcloud.com/browse/LU-15702
+Lustre-commit: 42a6d1fdb6818f1b3 ("LU-15702 lov: remove lo_trunc_stripeno")
+Signed-off-by: John L. Hammond <jhammond at whamcloud.com>
+Reviewed-on: https://review.whamcloud.com/46940
+Reviewed-by: Patrick Farrell <pfarrell at whamcloud.com>
+Reviewed-by: Bobi Jam <bobijam at hotmail.com>
+Reviewed-by: Oleg Drokin <green at whamcloud.com>
+Signed-off-by: James Simmons <jsimmons at infradead.org>
+---
+ fs/lustre/lov/lov_cl_internal.h | 17 +++++++----------
+ fs/lustre/lov/lov_io.c          | 40 ++++++++++++++++++++++++++++------------
+ fs/lustre/lov/lov_lock.c        | 35 +++++++++++++++++++----------------
+ fs/lustre/lov/lov_object.c      |  2 --
+ 4 files changed, 54 insertions(+), 40 deletions(-)
+
+diff --git a/fs/lustre/lov/lov_cl_internal.h b/fs/lustre/lov/lov_cl_internal.h
+index 42fd10a..6b96543 100644
+--- a/fs/lustre/lov/lov_cl_internal.h
++++ b/fs/lustre/lov/lov_cl_internal.h
+@@ -175,11 +175,6 @@ struct lov_comp_layout_entry_ops {
+ struct lov_layout_raid0 {
+ 	unsigned int		lo_nr;
+ 	/**
+-	 * record the stripe no before the truncate size, used for setting OST
+-	 * object size for truncate. LU-14128.
+-	 */
+-	int			lo_trunc_stripeno;
+-	/**
+ 	 * When this is true, lov_object::lo_attr contains
+ 	 * valid up to date attributes for a top-level
+ 	 * object. This field is reset to 0 when attributes of
+@@ -325,11 +320,6 @@ struct lov_object {
+ 			 */
+ 			int		lo_preferred_mirror;
+ 			/**
+-			 * For FLR: the lock to protect access to
+-			 * lo_preferred_mirror.
+-			 */
+-			spinlock_t	lo_write_lock;
+-			/**
+ 			 * For FLR: Number of (valid) mirrors.
+ 			 */
+ 			unsigned int	lo_mirror_count;
+@@ -562,6 +552,13 @@ struct lov_io {
+ 	loff_t			lis_io_endpos;
+ 
+ 	/**
++	 * Record the stripe index before the truncate size, used for setting
++	 * OST object size for truncate. LU-14128. lis_trunc_stripe_index[i]
++	 * refers to lov_object.u.composite.lo_entries[i].
++	 */
++	int *lis_trunc_stripe_index;
++
++	/**
+ 	 * starting position within a file, for the current io loop iteration
+ 	 * (stripe), used by ci_io_loop().
+ 	 */
+diff --git a/fs/lustre/lov/lov_io.c b/fs/lustre/lov/lov_io.c
+index 904bafd..38dacd35 100644
+--- a/fs/lustre/lov/lov_io.c
++++ b/fs/lustre/lov/lov_io.c
+@@ -782,6 +782,7 @@ static int lov_io_iter_init(const struct lu_env *env,
+ {
+ 	struct lov_io *lio = cl2lov_io(env, ios);
+ 	struct lov_stripe_md *lsm = lio->lis_object->lo_lsm;
++	bool is_trunc = cl_io_is_trunc(ios->cis_io);
+ 	struct lov_io_sub *sub;
+ 	struct lu_extent ext;
+ 	int rc = 0;
+@@ -790,6 +791,16 @@ static int lov_io_iter_init(const struct lu_env *env,
+ 	ext.e_start = lio->lis_pos;
+ 	ext.e_end = lio->lis_endpos;
+ 
++	if (is_trunc) {
++		int count = lio->lis_object->u.composite.lo_entry_count;
++
++		lio->lis_trunc_stripe_index = kcalloc(count,
++						      sizeof(lio->lis_trunc_stripe_index[0]),
++						      GFP_NOFS);
++		if (!lio->lis_trunc_stripe_index)
++			return -ENOMEM;
++	}
++
+ 	lov_foreach_io_layout(index, lio, &ext) {
+ 		struct lov_layout_entry *le = lov_entry(lio->lis_object, index);
+ 		struct lov_layout_raid0 *r0 = &le->lle_raid0;
+@@ -798,7 +809,8 @@ static int lov_io_iter_init(const struct lu_env *env,
+ 		u64 start;
+ 		u64 end;
+ 
+-		r0->lo_trunc_stripeno = -1;
++		if (is_trunc)
++			lio->lis_trunc_stripe_index[index] = -1;
+ 
+ 		CDEBUG(D_VFSTRACE, "component[%d] flags %#x\n",
+ 		       index, lsm->lsm_entries[index]->lsme_flags);
+@@ -832,8 +844,7 @@ static int lov_io_iter_init(const struct lu_env *env,
+ 				continue;
+ 			}
+ 
+-			if (cl_io_is_trunc(ios->cis_io) &&
+-			    !tested_trunc_stripe) {
++			if (is_trunc && !tested_trunc_stripe) {
+ 				int prev;
+ 				u64 tr_start;
+ 
+@@ -848,20 +859,22 @@ static int lov_io_iter_init(const struct lu_env *env,
+ 				if (ext.e_start <
+ 				    lsm->lsm_entries[index]->lsme_extent.e_start) {
+ 					/* need previous stripe involvement */
+-					r0->lo_trunc_stripeno = prev;
++					lio->lis_trunc_stripe_index[index] = prev;
+ 				} else {
+ 					tr_start = ext.e_start;
+ 					tr_start = lov_do_div64(tr_start,
+ 								stripe_width(lsm, index));
+ 					/* tr_start %= stripe_swidth */
+-					if (tr_start == stripe * lsm->lsm_entries[index]->lsme_stripe_size)
+-						r0->lo_trunc_stripeno = prev;
++					if (tr_start ==
++					    stripe * lsm->lsm_entries[index]->lsme_stripe_size)
++						lio->lis_trunc_stripe_index[index] = prev;
+ 				}
+ 			}
+ 
+ 			/* if the last stripe is the trunc stripeno */
+-			if (r0->lo_trunc_stripeno == stripe)
+-				r0->lo_trunc_stripeno = -1;
++			if (is_trunc &&
++			    lio->lis_trunc_stripe_index[index] == stripe)
++				lio->lis_trunc_stripe_index[index] = -1;
+ 
+ 			sub = lov_sub_get(env, lio,
+ 					  lov_comp_index(index, stripe));
+@@ -875,10 +888,10 @@ static int lov_io_iter_init(const struct lu_env *env,
+ 		if (rc != 0)
+ 			break;
+ 
+-		if (r0->lo_trunc_stripeno != -1) {
+-			stripe = r0->lo_trunc_stripeno;
++		if (is_trunc && lio->lis_trunc_stripe_index[index] != -1) {
++			stripe = lio->lis_trunc_stripe_index[index];
+ 			if (unlikely(!r0->lo_sub[stripe])) {
+-				r0->lo_trunc_stripeno = -1;
++				lio->lis_trunc_stripe_index[index] = -1;
+ 				continue;
+ 			}
+ 			sub = lov_sub_get(env, lio,
+@@ -892,7 +905,7 @@ static int lov_io_iter_init(const struct lu_env *env,
+ 			 * read get wrong kms.
+ 			 */
+ 			if (!list_empty(&sub->sub_linkage)) {
+-				r0->lo_trunc_stripeno = -1;
++				lio->lis_trunc_stripe_index[index] = -1;
+ 				continue;
+ 			}
+ 
+@@ -1091,6 +1104,9 @@ static void lov_io_iter_fini(const struct lu_env *env,
+ 	struct lov_io *lio = cl2lov_io(env, ios);
+ 	int rc;
+ 
++	kfree(lio->lis_trunc_stripe_index);
++	lio->lis_trunc_stripe_index = NULL;
++
+ 	rc = lov_io_call(env, lio, lov_io_iter_fini_wrapper);
+ 	LASSERT(rc == 0);
+ 	while (!list_empty(&lio->lis_active))
+diff --git a/fs/lustre/lov/lov_lock.c b/fs/lustre/lov/lov_lock.c
+index d137614..313c09a 100644
+--- a/fs/lustre/lov/lov_lock.c
++++ b/fs/lustre/lov/lov_lock.c
+@@ -115,6 +115,8 @@ static struct lov_lock *lov_lock_sub_init(const struct lu_env *env,
+ 					  struct cl_lock *lock)
+ {
+ 	struct lov_object *lov = cl2lov(obj);
++	struct lov_io *lio = lov_env_io(env);
++	bool is_trunc = cl_io_is_trunc(io);
+ 	struct lov_lock *lovlck;
+ 	struct lu_extent ext;
+ 	int result = 0;
+@@ -124,6 +126,8 @@ static struct lov_lock *lov_lock_sub_init(const struct lu_env *env,
+ 	u64 start;
+ 	u64 end;
+ 
++	LASSERT(ergo(is_trunc, lio->lis_trunc_stripe_index != NULL));
++
+ 	ext.e_start = cl_offset(obj, lock->cll_descr.cld_start);
+ 	if (lock->cll_descr.cld_end == CL_PAGE_EOF)
+ 		ext.e_end = OBD_OBJECT_EOF;
+@@ -131,16 +135,16 @@ static struct lov_lock *lov_lock_sub_init(const struct lu_env *env,
+ 		ext.e_end = cl_offset(obj, lock->cll_descr.cld_end + 1);
+ 
+ 	nr = 0;
+-	lov_foreach_io_layout(index, lov_env_io(env), &ext) {
++	lov_foreach_io_layout(index, lio, &ext) {
+ 		struct lov_layout_raid0 *r0 = lov_r0(lov, index);
+ 
+ 		for (i = 0; i < r0->lo_nr; i++) {
+ 			if (likely(r0->lo_sub[i])) { /* spare layout */
+-				if (lov_stripe_intersects(lov->lo_lsm, index, i,
+-							  &ext, &start, &end))
+-					nr++;
+-				else if (cl_io_is_trunc(io) &&
+-					 r0->lo_trunc_stripeno == i)
++				if (lov_stripe_intersects(lov->lo_lsm, index,
++							  i, &ext, &start,
++							  &end) ||
++				    (is_trunc &&
++				     i == lio->lis_trunc_stripe_index[index]))
+ 					nr++;
+ 			}
+ 		}
+@@ -162,24 +166,23 @@ static struct lov_lock *lov_lock_sub_init(const struct lu_env *env,
+ 		struct lov_layout_raid0 *r0 = lov_r0(lov, index);
+ 
+ 		for (i = 0; i < r0->lo_nr; ++i) {
+-			struct lov_lock_sub *lls = &lovlck->lls_sub[nr];
+-			struct cl_lock_descr *descr = &lls->sub_lock.cll_descr;
+-			bool intersect = false;
++			struct lov_lock_sub *lls;
++			struct cl_lock_descr *descr;
+ 
+ 			if (unlikely(!r0->lo_sub[i]))
+ 				continue;
+ 
+-			intersect = lov_stripe_intersects(lov->lo_lsm, index, i,
+-							  &ext, &start, &end);
+-			if (intersect)
+-				goto init_sublock;
+-
+-			if (cl_io_is_trunc(io) && i == r0->lo_trunc_stripeno)
++			if (lov_stripe_intersects(lov->lo_lsm, index, i, &ext,
++						  &start, &end) ||
++			    (is_trunc &&
++			     i == lio->lis_trunc_stripe_index[index]))
+ 				goto init_sublock;
+ 
+ 			continue;
+-
+ init_sublock:
++			LASSERT(nr < lovlck->lls_nr);
++			lls = &lovlck->lls_sub[nr];
++			descr = &lls->sub_lock.cll_descr;
+ 			LASSERT(!descr->cld_obj);
+ 			descr->cld_obj = lovsub2cl(r0->lo_sub[i]);
+ 			descr->cld_start = cl_index(descr->cld_obj, start);
+diff --git a/fs/lustre/lov/lov_object.c b/fs/lustre/lov/lov_object.c
+index ff0f7fa..d9eaf15 100644
+--- a/fs/lustre/lov/lov_object.c
++++ b/fs/lustre/lov/lov_object.c
+@@ -214,7 +214,6 @@ static int lov_init_raid0(const struct lu_env *env, struct lov_device *dev,
+ 
+ 	spin_lock_init(&r0->lo_sub_lock);
+ 	r0->lo_nr = lse->lsme_stripe_count;
+-	r0->lo_trunc_stripeno = -1;
+ 
+ 	flags = memalloc_nofs_save();
+ 	r0->lo_sub = kvmalloc_array(r0->lo_nr, sizeof(r0->lo_sub[0]),
+@@ -641,7 +640,6 @@ static int lov_init_composite(const struct lu_env *env, struct lov_device *dev,
+ 
+ 	entry_count = lsm->lsm_entry_count;
+ 
+-	spin_lock_init(&comp->lo_write_lock);
+ 	comp->lo_flags = lsm->lsm_flags;
+ 	comp->lo_mirror_count = lsm->lsm_mirror_count + 1;
+ 	comp->lo_entry_count = lsm->lsm_entry_count;
+-- 
+1.8.3.1
+
+
+From jsimmons at infradead.org  Mon Apr 18 17:31:03 2022
+From: jsimmons at infradead.org (James Simmons)
+Date: Mon, 18 Apr 2022 20:31:03 -0400
+Subject: [lustre-devel] [PATCH 6/7] lnet: ln_api_mutex deadlocks
+In-Reply-To: <1650328264-8763-1-git-send-email-jsimmons@infradead.org>
+References: <1650328264-8763-1-git-send-email-jsimmons@infradead.org>
+Message-ID: <1650328264-8763-7-git-send-email-jsimmons@infradead.org>
+
+From: Chris Horn <chris.horn at hpe.com>
+
+LNetNIFini() acquires the ln_api_mutex and holds onto it throughout
+various shutdown routines. Meanwhile, LND threads (via
+lnet_nid2peerni_locked()) or the discovery thread (via
+lnet_peer_data_present()) may need to acquire this mutex in order to
+progress.
+
+Address these potential deadlocks by setting the_lnet.ln_state to
+LNET_STATE_STOPPING earlier in LNetNIFini(), and release the mutex
+prior to any call into LND module or before any wait.
+
+LNetNIInit() is modified to return -ESHUTDOWN if it finds that there
+is a concurrent shutdown in progress.
+
+HPE-bug-id: LUS-10681
+WC-bug-id: https://jira.whamcloud.com/browse/LU-15616
+Lustre-commit: 22de0bd145b649768 ("LU-15616 lnet: ln_api_mutex deadlocks")
+Signed-off-by: Chris Horn <chris.horn at hpe.com>
+Reviewed-on: https://review.whamcloud.com/46727
+Reviewed-by: Andreas Dilger <adilger at whamcloud.com>
+Reviewed-by: Serguei Smirnov <ssmirnov at whamcloud.com>
+Reviewed-by: Oleg Drokin <green at whamcloud.com>
+Signed-off-by: James Simmons <jsimmons at infradead.org>
+---
+ net/lnet/lnet/api-ni.c   | 40 +++++++++++++++++++++++++++++++++++-----
+ net/lnet/lnet/lib-move.c |  2 ++
+ net/lnet/lnet/peer.c     | 11 ++++++++---
+ 3 files changed, 45 insertions(+), 8 deletions(-)
+
+diff --git a/net/lnet/lnet/api-ni.c b/net/lnet/lnet/api-ni.c
+index 1978905..44d5014 100644
+--- a/net/lnet/lnet/api-ni.c
++++ b/net/lnet/lnet/api-ni.c
+@@ -2244,14 +2244,16 @@ static void lnet_push_target_fini(void)
+ 		islo = ni->ni_net->net_lnd->lnd_type == LOLND;
+ 
+ 		LASSERT(!in_interrupt());
+-		/* Holding the mutex makes it safe for lnd_shutdown
++		/* Holding the LND mutex makes it safe for lnd_shutdown
+ 		 * to call module_put(). Module unload cannot finish
+ 		 * until lnet_unregister_lnd() completes, and that
+-		 * requires the mutex.
++		 * requires the LND mutex.
+ 		 */
++		mutex_unlock(&the_lnet.ln_api_mutex);
+ 		mutex_lock(&the_lnet.ln_lnd_mutex);
+ 		net->net_lnd->lnd_shutdown(ni);
+ 		mutex_unlock(&the_lnet.ln_lnd_mutex);
++		mutex_lock(&the_lnet.ln_api_mutex);
+ 
+ 		if (!islo)
+ 			CDEBUG(D_LNI, "Removed LNI %s\n",
+@@ -2323,7 +2325,8 @@ static void lnet_push_target_fini(void)
+ 	/* NB called holding the global mutex */
+ 
+ 	/* All quiet on the API front */
+-	LASSERT(the_lnet.ln_state == LNET_STATE_RUNNING);
++	LASSERT(the_lnet.ln_state == LNET_STATE_RUNNING ||
++		the_lnet.ln_state == LNET_STATE_STOPPING);
+ 	LASSERT(!the_lnet.ln_refcount);
+ 
+ 	lnet_net_lock(LNET_LOCK_EX);
+@@ -2823,6 +2826,11 @@ void lnet_lib_exit(void)
+ 
+ 	CDEBUG(D_OTHER, "refs %d\n", the_lnet.ln_refcount);
+ 
++	if (the_lnet.ln_state == LNET_STATE_STOPPING) {
++		mutex_unlock(&the_lnet.ln_api_mutex);
++		return -ESHUTDOWN;
++	}
++
+ 	if (the_lnet.ln_refcount > 0) {
+ 		rc = the_lnet.ln_refcount++;
+ 		mutex_unlock(&the_lnet.ln_api_mutex);
+@@ -2968,6 +2976,10 @@ void lnet_lib_exit(void)
+ 	} else {
+ 		LASSERT(!the_lnet.ln_niinit_self);
+ 
++		lnet_net_lock(LNET_LOCK_EX);
++		the_lnet.ln_state = LNET_STATE_STOPPING;
++		lnet_net_unlock(LNET_LOCK_EX);
++
+ 		lnet_fault_fini();
+ 		lnet_router_debugfs_fini();
+ 		lnet_monitor_thr_stop();
+@@ -3433,6 +3445,10 @@ static int lnet_handle_legacy_ip2nets(char *ip2nets,
+ 	lnet_set_tune_defaults(tun);
+ 
+ 	mutex_lock(&the_lnet.ln_api_mutex);
++	if (the_lnet.ln_state != LNET_STATE_RUNNING) {
++		rc = -ESHUTDOWN;
++		goto out;
++	}
+ 	while ((net = list_first_entry_or_null(&net_head,
+ 					       struct lnet_net,
+ 					       net_list)) != NULL) {
+@@ -3498,8 +3514,10 @@ int lnet_dyn_add_ni(struct lnet_ioctl_config_ni *conf)
+ 	lnet_set_tune_defaults(tun);
+ 
+ 	mutex_lock(&the_lnet.ln_api_mutex);
+-
+-	rc = lnet_add_net_common(net, tun);
++	if (the_lnet.ln_state != LNET_STATE_RUNNING)
++		rc = -ESHUTDOWN;
++	else
++		rc = lnet_add_net_common(net, tun);
+ 
+ 	mutex_unlock(&the_lnet.ln_api_mutex);
+ 
+@@ -3522,6 +3540,10 @@ int lnet_dyn_del_ni(struct lnet_ioctl_config_ni *conf)
+ 		return -EINVAL;
+ 
+ 	mutex_lock(&the_lnet.ln_api_mutex);
++	if (the_lnet.ln_state != LNET_STATE_RUNNING) {
++		rc = -ESHUTDOWN;
++		goto unlock_api_mutex;
++	}
+ 
+ 	lnet_net_lock(0);
+ 
+@@ -3615,6 +3637,10 @@ int lnet_dyn_del_ni(struct lnet_ioctl_config_ni *conf)
+ 		return rc == 0 ? -EINVAL : rc;
+ 
+ 	mutex_lock(&the_lnet.ln_api_mutex);
++	if (the_lnet.ln_state != LNET_STATE_RUNNING) {
++		rc = -ESHUTDOWN;
++		goto out_unlock_clean;
++	}
+ 
+ 	if (rc > 1) {
+ 		rc = -EINVAL; /* only add one network per call */
+@@ -3668,6 +3694,10 @@ int lnet_dyn_del_ni(struct lnet_ioctl_config_ni *conf)
+ 		return -EINVAL;
+ 
+ 	mutex_lock(&the_lnet.ln_api_mutex);
++	if (the_lnet.ln_state != LNET_STATE_RUNNING) {
++		rc = -ESHUTDOWN;
++		goto out;
++	}
+ 
+ 	lnet_net_lock(0);
+ 
+diff --git a/net/lnet/lnet/lib-move.c b/net/lnet/lnet/lib-move.c
+index 0b3986e..0496bf5 100644
+--- a/net/lnet/lnet/lib-move.c
++++ b/net/lnet/lnet/lib-move.c
+@@ -3872,7 +3872,9 @@ void lnet_monitor_thr_stop(void)
+ 	complete(&the_lnet.ln_mt_wait_complete);
+ 
+ 	/* block until monitor thread signals that it's done */
++	mutex_unlock(&the_lnet.ln_api_mutex);
+ 	wait_for_completion(&the_lnet.ln_mt_signal);
++	mutex_lock(&the_lnet.ln_api_mutex);
+ 	LASSERT(the_lnet.ln_mt_state == LNET_MT_STATE_SHUTDOWN);
+ 
+ 	/* perform cleanup tasks */
+diff --git a/net/lnet/lnet/peer.c b/net/lnet/lnet/peer.c
+index 98f71dd..714326a 100644
+--- a/net/lnet/lnet/peer.c
++++ b/net/lnet/lnet/peer.c
+@@ -3244,12 +3244,15 @@ static int lnet_peer_deletion(struct lnet_peer *lp)
+ 	if (lp->lp_state & LNET_PEER_MARK_DELETED)
+ 		return 0;
+ 
+-	if (the_lnet.ln_dc_state != LNET_DC_STATE_RUNNING)
+-		return -ESHUTDOWN;
+-
+ 	spin_unlock(&lp->lp_lock);
+ 
+ 	mutex_lock(&the_lnet.ln_api_mutex);
++	if (the_lnet.ln_state != LNET_STATE_RUNNING ||
++	    the_lnet.ln_dc_state != LNET_DC_STATE_RUNNING) {
++		mutex_unlock(&the_lnet.ln_api_mutex);
++		spin_lock(&lp->lp_lock);
++		return -ESHUTDOWN;
++	}
+ 
+ 	lnet_net_lock(LNET_LOCK_EX);
+ 	/* remove the peer from the discovery work
+@@ -3929,8 +3932,10 @@ void lnet_peer_discovery_stop(void)
+ 	else
+ 		wake_up(&the_lnet.ln_dc_waitq);
+ 
++	mutex_unlock(&the_lnet.ln_api_mutex);
+ 	wait_event(the_lnet.ln_dc_waitq,
+ 		   the_lnet.ln_dc_state == LNET_DC_STATE_SHUTDOWN);
++	mutex_lock(&the_lnet.ln_api_mutex);
+ 
+ 	LASSERT(list_empty(&the_lnet.ln_dc_request));
+ 	LASSERT(list_empty(&the_lnet.ln_dc_working));
+-- 
+1.8.3.1
+
+
+From jsimmons at infradead.org  Mon Apr 18 17:31:04 2022
+From: jsimmons at infradead.org (James Simmons)
+Date: Mon, 18 Apr 2022 20:31:04 -0400
+Subject: [lustre-devel] [PATCH 7/7] lustre: clio: Disable lockless for DIO
+ with O_APPEND
+In-Reply-To: <1650328264-8763-1-git-send-email-jsimmons@infradead.org>
+References: <1650328264-8763-1-git-send-email-jsimmons@infradead.org>
+Message-ID: <1650328264-8763-8-git-send-email-jsimmons@infradead.org>
+
+From: Shaun Tancheff <shaun.tancheff at hpe.com>
+
+Lockless O_DIRECT with O_APPEND can allow interleaved / racy
+appends from concurrent I/O.
+
+Disable lockless I/O when O_APPEND is set
+
+HPE-bug-id: LUS-9776
+WC-bug-id: https://jira.whamcloud.com/browse/LU-15670
+Lustre-commit: 649d638467c037579 ("LU-15670 clio: Disable lockless for DIO with O_APPEND")
+Signed-off-by: Shaun Tancheff <shaun.tancheff at hpe.com>
+Reviewed-on: https://review.whamcloud.com/46890
+Reviewed-by: Patrick Farrell <pfarrell at whamcloud.com>
+Reviewed-by: Andreas Dilger <adilger at whamcloud.com>
+Reviewed-by: Oleg Drokin <green at whamcloud.com>
+Signed-off-by: James Simmons <jsimmons at infradead.org>
+---
+ fs/lustre/llite/file.c | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/fs/lustre/llite/file.c b/fs/lustre/llite/file.c
+index 4855156..1ac3e4f 100644
+--- a/fs/lustre/llite/file.c
++++ b/fs/lustre/llite/file.c
+@@ -1673,6 +1673,8 @@ static void ll_heat_add(struct inode *inode, enum cl_io_type iot,
+ 
+ 	io = vvp_env_thread_io(env);
+ 	if (file->f_flags & O_DIRECT) {
++		if (file->f_flags & O_APPEND)
++			dio_lock = 1;
+ 		if (!is_sync_kiocb(args->u.normal.via_iocb))
+ 			is_aio = true;
+ 
+-- 
+1.8.3.1
+
+
+From jsimmons at infradead.org  Mon Apr 18 17:30:57 2022
+From: jsimmons at infradead.org (James Simmons)
+Date: Mon, 18 Apr 2022 20:30:57 -0400
+Subject: [lustre-devel] [PATCH 0/7] lustre: OpenSFS updates April 18, 2022
+Message-ID: <1650328264-8763-1-git-send-email-jsimmons@infradead.org>
+
+Backport patches from the OpenSFS tree to the native Linux client
+as of April 18, 2022.
+
+Alexander Zarochentsev (1):
+  lustre: ptlrpc: unregister reply buffer on rq_err
+
+Andreas Dilger (1):
+  lustre: lmv: change default hash back to fnv_1a_64
+
+Chris Horn (2):
+  lnet: only update gateway NI status on discovery
+  lnet: ln_api_mutex deadlocks
+
+John L. Hammond (1):
+  lustre: lov: remove lo_trunc_stripeno
+
+Patrick Farrell (1):
+  lustre: llite: Fix use of uninitialized fields
+
+Shaun Tancheff (1):
+  lustre: clio: Disable lockless for DIO with O_APPEND
+
+ fs/lustre/llite/file.c                  |  2 ++
+ fs/lustre/llite/rw.c                    | 18 ++++++++++-----
+ fs/lustre/lov/lov_cl_internal.h         | 17 ++++++--------
+ fs/lustre/lov/lov_io.c                  | 40 +++++++++++++++++++++++----------
+ fs/lustre/lov/lov_lock.c                | 35 ++++++++++++++++-------------
+ fs/lustre/lov/lov_object.c              |  2 --
+ fs/lustre/ptlrpc/client.c               |  5 +++++
+ include/uapi/linux/lustre/lustre_user.h |  2 +-
+ net/lnet/lnet/api-ni.c                  | 40 ++++++++++++++++++++++++++++-----
+ net/lnet/lnet/config.c                  |  2 +-
+ net/lnet/lnet/lib-move.c                | 18 +++++++++++----
+ net/lnet/lnet/peer.c                    | 11 ++++++---
+ net/lnet/lnet/router.c                  |  2 +-
+ net/lnet/lnet/router_proc.c             |  2 +-
+ 14 files changed, 135 insertions(+), 61 deletions(-)
+
+-- 
+1.8.3.1
+
+
+From jsimmons at infradead.org  Mon Apr 18 17:30:59 2022
+From: jsimmons at infradead.org (James Simmons)
+Date: Mon, 18 Apr 2022 20:30:59 -0400
+Subject: [lustre-devel] [PATCH 2/7] lustre: llite: Fix use of uninitialized
+ fields
+In-Reply-To: <1650328264-8763-1-git-send-email-jsimmons@infradead.org>
+References: <1650328264-8763-1-git-send-email-jsimmons@infradead.org>
+Message-ID: <1650328264-8763-3-git-send-email-jsimmons@infradead.org>
+
+From: Patrick Farrell <pfarrell at whamcloud.com>
+
+We use data from ci_rw to set io_start_index and
+io_end_index, which is a problem for mmap because mmap does
+not use ci_rw.
+
+When ci_rand_read is set or readahead is disabled, we use
+these values to decide how much data to read.
+
+ci_rw is uninitialized, and if the values are non-zero,
+we may try to read data beyond the locks we took for our
+I/O.
+
+If there is no lock (either because there was never one or
+it was cancelled), this results in an LBUG in
+osc_req_attr_set when it verifies the pages are covered by
+a lock.
+
+WC-bug-id: https://jira.whamcloud.com/browse/LU-15637
+Lustre-commit: 9884f37985c1108fb ("LU-15637 llite: Fix use of uninitialized fields")
+Signed-off-by: Patrick Farrell <pfarrell at whamcloud.com>
+Reviewed-on: https://review.whamcloud.com/46776
+Reviewed-by: Yang Sheng <ys at whamcloud.com>
+Reviewed-by: Andreas Dilger <adilger at whamcloud.com>
+Reviewed-by: Oleg Drokin <green at whamcloud.com>
+Signed-off-by: James Simmons <jsimmons at infradead.org>
+---
+ fs/lustre/llite/rw.c | 18 +++++++++++++-----
+ 1 file changed, 13 insertions(+), 5 deletions(-)
+
+diff --git a/fs/lustre/llite/rw.c b/fs/lustre/llite/rw.c
+index b8cffde..0ddd920 100644
+--- a/fs/lustre/llite/rw.c
++++ b/fs/lustre/llite/rw.c
+@@ -1627,6 +1627,8 @@ int ll_io_read_page(const struct lu_env *env, struct cl_io *io,
+ 	struct ll_readahead_state *ras = NULL;
+ 	struct cl_2queue *queue = &io->ci_queue;
+ 	struct ll_sb_info *sbi = ll_i2sbi(inode);
++	struct vvp_io *vio = vvp_env_io(env);
++	bool mmap = !vio->vui_ra_valid;
+ 	struct cl_sync_io *anchor = NULL;
+ 	pgoff_t ra_start_index = 0;
+ 	pgoff_t io_start_index;
+@@ -1644,12 +1646,11 @@ int ll_io_read_page(const struct lu_env *env, struct cl_io *io,
+ 	uptodate = vpg->vpg_defer_uptodate;
+ 
+ 	if (ll_readahead_enabled(sbi) && !vpg->vpg_ra_updated && ras) {
+-		struct vvp_io *vio = vvp_env_io(env);
+ 		enum ras_update_flags flags = 0;
+ 
+ 		if (uptodate)
+ 			flags |= LL_RAS_HIT;
+-		if (!vio->vui_ra_valid)
++		if (mmap)
+ 			flags |= LL_RAS_MMAP;
+ 		ras_update(sbi, inode, ras, vvp_index(vpg), flags, io);
+ 	}
+@@ -1667,9 +1668,16 @@ int ll_io_read_page(const struct lu_env *env, struct cl_io *io,
+ 		cl_page_list_add(&queue->c2_qin, page, true);
+ 	}
+ 
+-	io_start_index = cl_index(io->ci_obj, io->u.ci_rw.crw_pos);
+-	io_end_index = cl_index(io->ci_obj, io->u.ci_rw.crw_pos +
+-				io->u.ci_rw.crw_count - 1);
++	/* mmap does not set the ci_rw fields */
++	if (!mmap) {
++		io_start_index = cl_index(io->ci_obj, io->u.ci_rw.crw_pos);
++		io_end_index = cl_index(io->ci_obj, io->u.ci_rw.crw_pos +
++					io->u.ci_rw.crw_count - 1);
++	} else {
++		io_start_index = vvp_index(vpg);
++		io_end_index = vvp_index(vpg);
++	}
++
+ 	if (ll_readahead_enabled(sbi) && ras && !io->ci_rand_read) {
+ 		pgoff_t skip_index = 0;
+ 
+-- 
+1.8.3.1
+
+
+From kevin.zhao at linaro.org  Fri Apr 22 00:23:50 2022
+From: kevin.zhao at linaro.org (Kevin Zhao)
+Date: Fri, 22 Apr 2022 15:23:50 +0800
+Subject: [lustre-devel] The Progress of Arm64 External Tester and Builder
+Message-ID: <CACzn6-XNRn5DwANNghgEgUjOosJ1=PTzJ0TOfd0VtbVYmoZ8Mw@mail.gmail.com>
+
+Hi Lustre,
+
+Xinliang and I are from Linaro, and we?ve worked on Lustre on the Arm64 for
+several months. Now we?ve enabled the external Arm64 builder and test.
+
+The external arm64 CI architecture is like below:
+
+We?ve set up an external Jenkins to handle this. Currently, it is on an
+self-setup jenkins  <http://213.146.155.72:8080/>
+
+Now we have:
+
+   -
+
+   Lustre Build Job
+   <http://213.146.155.72:8080/job/project-lustre-build-release-master/>:
+   watch gerrit change and build Lustre packages, then move them to a self
+   setup Yum repo. Now due to easy test, we just run it once every to grab the
+   latest version. Will move to on-trigger after we get more machines.
+   -
+
+   Lustre test job
+   <http://213.146.155.72:8080/job/project-lustre-periodical-test/>:
+   Jenkins pipeline. Using Terraform to provision arm64 vms in an OpenStack
+   cluster. And then configure the test vms and run. Currently we just test
+   sanity test suites. Usually cost 4-5 hours for the whole jobs.
+
+TODO:
+
+   -
+
+   Test: Cover more tests suites, needs to provision more machines for this.
+   -
+
+   Move to Linaro Jenkins: https://ci.linaro.org  after the test becomes
+   stable.
+   -
+
+   Build more Arm64 Release and publish for experiment use.
+
+
+*And 2 things below need the community?s confirmation and help*:
+
+   -
+
+   We don?t have Maloo DB account or token, so currently we can not post
+   the data to Maloo DB for the upstream developers to see the test
+   consequence.
+   -
+
+   We have now built and maintained a yum repository for Lustre and
+   e2fsprogs at http://213.146.155.48/repo/. We plan to share the tested
+   Arm64 RPMs in case anyone wants to try Lustre on Arm quickly, can we put
+   them into the Lustre official repo
+   https://downloads.whamcloud.com/public/lustre/ as an experimental release?
+   Or if we can?t, another proposal, is it possible for the community to
+   have an entry in the https://www.lustre.org/download/ point to the
+   external Arm64 yum repo?
+
+
+Thanks in advance and look forward to hearing from you soon. Really
+appreciate the help from Lustre upstream during the last several months for
+Lustre on Arm64 bugfix and test.
+
+-- 
+*Best Regards*
+
+*Kevin Zhao*
+
+Tech Lead, LDCG Cloud Infrastructure
+
+Linaro Vertical Technologies
+
+IRC(freenode): kevinz
+
+Slack(kubernetes.slack.com): kevinz
+
+kevin.zhao at linaro.org | Mobile/Direct/Wechat:  +86 18818270915
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20220422/fb583b32/attachment.html>
+
+From xinliang.liu at linaro.org  Sun Apr 24 18:31:12 2022
+From: xinliang.liu at linaro.org (Xinliang Liu)
+Date: Mon, 25 Apr 2022 09:31:12 +0800
+Subject: [lustre-devel] The Progress of Arm64 External Tester and Builder
+In-Reply-To: <CACzn6-XNRn5DwANNghgEgUjOosJ1=PTzJ0TOfd0VtbVYmoZ8Mw@mail.gmail.com>
+References: <CACzn6-XNRn5DwANNghgEgUjOosJ1=PTzJ0TOfd0VtbVYmoZ8Mw@mail.gmail.com>
+Message-ID: <CAKoKPbwrGZ8Qq_LJbQzuk_=ewyo0AQAnsuu843cCp8zAKwvXpw@mail.gmail.com>
+
+On Fri, 22 Apr 2022 at 15:24, Kevin Zhao <kevin.zhao at linaro.org> wrote:
+
+> Hi Lustre,
+>
+> Xinliang and I are from Linaro, and we?ve worked on Lustre on the Arm64
+> for several months. Now we?ve enabled the external Arm64 builder and test.
+>
+> The external arm64 CI architecture is like below:
+>
+> We?ve set up an external Jenkins to handle this. Currently, it is on an
+> self-setup jenkins  <http://213.146.155.72:8080/>
+>
+> Now we have:
+>
+>    -
+>
+>    Lustre Build Job
+>    <http://213.146.155.72:8080/job/project-lustre-build-release-master/>:
+>    watch gerrit change and build Lustre packages, then move them to a self
+>    setup Yum repo. Now due to easy test, we just run it once every to grab the
+>    latest version. Will move to on-trigger after we get more machines.
+>    -
+>
+>    Lustre test job
+>    <http://213.146.155.72:8080/job/project-lustre-periodical-test/>:
+>    Jenkins pipeline. Using Terraform to provision arm64 vms in an OpenStack
+>    cluster. And then configure the test vms and run. Currently we just test
+>    sanity test suites. Usually cost 4-5 hours for the whole jobs.
+>
+> TODO:
+>
+>    -
+>
+>    Test: Cover more tests suites, needs to provision more machines for
+>    this.
+>    -
+>
+>    Move to Linaro Jenkins: https://ci.linaro.org  after the test becomes
+>    stable.
+>    -
+>
+>    Build more Arm64 Release and publish for experiment use.
+>
+>
+> *And 2 things below need the community?s confirmation and help*:
+>
+>    -
+>
+>    We don?t have Maloo DB account or token, so currently we can not post
+>    the data to Maloo DB for the upstream developers to see the test
+>    consequence.
+>
+>
+And I tried to upload test results to Maloo DB with my own account several
+times following the guide
+https://wiki.whamcloud.com/display/TEI/Test+results+format.
+Either with maloo_upload.sh or through the website
+https://testing.whamcloud.com/import_tasks/new. But can't see any upload in
+the upload queue
+https://testing.whamcloud.com/import_tasks?user_id=b8340029-197d-4ce0-a8f1-40f76d3bb8c7
+.
+
+
+>
+>    -
+>
+>    We have now built and maintained a yum repository for Lustre and
+>    e2fsprogs at http://213.146.155.48/repo/. We plan to share the tested
+>    Arm64 RPMs in case anyone wants to try Lustre on Arm quickly, can we
+>    put them into the Lustre official repo
+>    https://downloads.whamcloud.com/public/lustre/ as an experimental
+>    release? Or if we can?t, another proposal, is it possible for the
+>    community to have an entry in the https://www.lustre.org/download/ point
+>    to the external Arm64 yum repo?
+>
+>
+> Thanks in advance and look forward to hearing from you soon. Really
+> appreciate the help from Lustre upstream during the last several months for
+> Lustre on Arm64 bugfix and test.
+>
+> --
+> *Best Regards*
+>
+> *Kevin Zhao*
+>
+> Tech Lead, LDCG Cloud Infrastructure
+>
+> Linaro Vertical Technologies
+>
+> IRC(freenode): kevinz
+>
+> Slack(kubernetes.slack.com): kevinz
+>
+> kevin.zhao at linaro.org | Mobile/Direct/Wechat:  +86 18818270915
+>
+>
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20220425/a00022e9/attachment.html>
+
+From Thomas.LEIBOVICI at CEA.FR  Wed Apr 27 04:37:32 2022
+From: Thomas.LEIBOVICI at CEA.FR (Thomas.LEIBOVICI at CEA.FR)
+Date: Wed, 27 Apr 2022 11:37:32 +0000
+Subject: [lustre-devel] Save the date: LAD'22 in Paris again!
+Message-ID: <19870c6aa0594d319eb9802650f4d919@U-MYKONOS3.dif.dam.intra.cea.fr>
+
+LAD'22 - Lustre Administrators and Developers Workshop
+
+September 26-28, 2022
+Hybrid event, Paris, France
+
+The Lustre Administrator & Developer workshop is a great opportunity for worldwide Lustre administrators and developers to gather and exchange their experiences, developments, tools, best practices and more.
+
+After 2 years of virtual LADs, we are happy to announce that we will be able to welcome you again this year for this LAD'22 edition!
+This will be an hybrid event in Paris on the 26th and 27th of September 2022, followed by the Lustre's developer summit on September 28th.
+
+In order to limit the financial risk due to uncertainties of the number of participants who will actually travel, the number of face-to-face participants will be limited to 40.
+For those who can't attend in person, the presentations will be streamed live, and a chat will allow asking questions to the speakers.
+
+Save the date, and keep updated of the upcoming call for presentations and the opening of registrations!
+
+Best regards,
+The LAD organization team
+
+Web site:
+https://www.eofs.eu/events/lad22
+
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-devel-lustre.org/attachments/20220427/566e54fb/attachment.html>
+
+From jsimmons at infradead.org  Thu Apr 28 10:23:20 2022
+From: jsimmons at infradead.org (James Simmons)
+Date: Thu, 28 Apr 2022 13:23:20 -0400
+Subject: [lustre-devel] [PATCH] fscrypt: allow alternative bounce buffers
+Message-ID: <1651166600-21269-1-git-send-email-jsimmons@infradead.org>
+
+Currently fscrypt offers two options. One option is to use the
+internal bounce buffer allocated or perform inline encrpytion.
+Add the option to use an external bounce buffer. This change can
+be used useful for example for a network file systems which can
+pass in a page from the page cache and place the encrypted data
+into a page for a network packet to be sent. Another potential
+use is the use of GPU pages with RDMA being the final destination
+for the encrypted data.
+
+Signed-off-By: James Simmons <jsimmons at infradead.org>
+---
+ fs/crypto/crypto.c      | 34 +++++++++++++++++++---------------
+ include/linux/fscrypt.h | 34 ++++++++++++++++++++++++++++------
+ 2 files changed, 47 insertions(+), 21 deletions(-)
+
+diff --git a/fs/crypto/crypto.c b/fs/crypto/crypto.c
+index e78be66..f241c69 100644
+--- a/fs/crypto/crypto.c
++++ b/fs/crypto/crypto.c
+@@ -210,9 +210,10 @@ struct page *fscrypt_encrypt_pagecache_blocks(struct page *page,
+ EXPORT_SYMBOL(fscrypt_encrypt_pagecache_blocks);
+ 
+ /**
+- * fscrypt_encrypt_block_inplace() - Encrypt a filesystem block in-place
++ * fscrypt_encrypt_page() - Cache an encrypt filesystem block in a page
+  * @inode:     The inode to which this block belongs
+- * @page:      The page containing the block to encrypt
++ * @src:       The page containing the block to encrypt
++ * @dst:       The page which will contain the encrypted data
+  * @len:       Size of block to encrypt.  This must be a multiple of
+  *		FSCRYPT_CONTENTS_ALIGNMENT.
+  * @offs:      Byte offset within @page at which the block to encrypt begins
+@@ -223,17 +224,18 @@ struct page *fscrypt_encrypt_pagecache_blocks(struct page *page,
+  * Encrypt a possibly-compressed filesystem block that is located in an
+  * arbitrary page, not necessarily in the original pagecache page.  The @inode
+  * and @lblk_num must be specified, as they can't be determined from @page.
++ * The decrypted data will be stored in @dst.
+  *
+  * Return: 0 on success; -errno on failure
+  */
+-int fscrypt_encrypt_block_inplace(const struct inode *inode, struct page *page,
+-				  unsigned int len, unsigned int offs,
+-				  u64 lblk_num, gfp_t gfp_flags)
++int fscrypt_encrypt_page(const struct inode *inode, struct page *src,
++			 struct page *dst, unsigned int len, unsigned int offs,
++			 u64 lblk_num, gfp_t gfp_flags)
+ {
+-	return fscrypt_crypt_block(inode, FS_ENCRYPT, lblk_num, page, page,
++	return fscrypt_crypt_block(inode, FS_ENCRYPT, lblk_num, src, dst,
+ 				   len, offs, gfp_flags);
+ }
+-EXPORT_SYMBOL(fscrypt_encrypt_block_inplace);
++EXPORT_SYMBOL(fscrypt_encrypt_page);
+ 
+ /**
+  * fscrypt_decrypt_pagecache_blocks() - Decrypt filesystem blocks in a
+@@ -280,9 +282,10 @@ int fscrypt_decrypt_pagecache_blocks(struct page *page, unsigned int len,
+ EXPORT_SYMBOL(fscrypt_decrypt_pagecache_blocks);
+ 
+ /**
+- * fscrypt_decrypt_block_inplace() - Decrypt a filesystem block in-place
++ * fscrypt_decrypt_page() - Cache a decrypt a filesystem block in a page
+  * @inode:     The inode to which this block belongs
+- * @page:      The page containing the block to decrypt
++ * @src:       The page containing the block to decrypt
++ * @dst:       The page which will contain the plain data
+  * @len:       Size of block to decrypt.  This must be a multiple of
+  *		FSCRYPT_CONTENTS_ALIGNMENT.
+  * @offs:      Byte offset within @page at which the block to decrypt begins
+@@ -292,17 +295,18 @@ int fscrypt_decrypt_pagecache_blocks(struct page *page, unsigned int len,
+  * Decrypt a possibly-compressed filesystem block that is located in an
+  * arbitrary page, not necessarily in the original pagecache page.  The @inode
+  * and @lblk_num must be specified, as they can't be determined from @page.
++ * The encrypted data will be stored in @dst.
+  *
+  * Return: 0 on success; -errno on failure
+  */
+-int fscrypt_decrypt_block_inplace(const struct inode *inode, struct page *page,
+-				  unsigned int len, unsigned int offs,
+-				  u64 lblk_num)
++int fscrypt_decrypt_page(const struct inode *inode, struct page *src,
++			 struct page *dst, unsigned int len, unsigned int offs,
++			 u64 lblk_num, gfp_t gfp_flags)
+ {
+-	return fscrypt_crypt_block(inode, FS_DECRYPT, lblk_num, page, page,
+-				   len, offs, GFP_NOFS);
++	return fscrypt_crypt_block(inode, FS_DECRYPT, lblk_num, src, dst,
++				   len, offs, gfp_flags);
+ }
+-EXPORT_SYMBOL(fscrypt_decrypt_block_inplace);
++EXPORT_SYMBOL(fscrypt_decrypt_page);
+ 
+ /**
+  * fscrypt_initialize() - allocate major buffers for fs encryption.
+diff --git a/include/linux/fscrypt.h b/include/linux/fscrypt.h
+index efc7f96..c2b67d1 100644
+--- a/include/linux/fscrypt.h
++++ b/include/linux/fscrypt.h
+@@ -255,15 +255,37 @@ struct page *fscrypt_encrypt_pagecache_blocks(struct page *page,
+ 					      unsigned int len,
+ 					      unsigned int offs,
+ 					      gfp_t gfp_flags);
+-int fscrypt_encrypt_block_inplace(const struct inode *inode, struct page *page,
+-				  unsigned int len, unsigned int offs,
+-				  u64 lblk_num, gfp_t gfp_flags);
++int fscrypt_encrypt_page(const struct inode *inode, struct page *src,
++			 struct page *dst, unsigned int len,
++			 unsigned int offs, u64 lblk_num, gfp_t gfp_flags);
++
++static inline int fscrypt_encrypt_block_inplace(const struct inode *inode,
++						struct page *page,
++						unsigned int len,
++						unsigned int offs,
++						u64 lblk_num,
++						gfp_t gfp_flags)
++{
++	return fscrypt_encrypt_page(inode, page, page, len, offs, lblk_num,
++				    gfp_flags);
++}
+ 
+ int fscrypt_decrypt_pagecache_blocks(struct page *page, unsigned int len,
+ 				     unsigned int offs);
+-int fscrypt_decrypt_block_inplace(const struct inode *inode, struct page *page,
+-				  unsigned int len, unsigned int offs,
+-				  u64 lblk_num);
++
++int fscrypt_decrypt_page(const struct inode *inode, struct page *src,
++			 struct page *dst, unsigned int len,
++			 unsigned int offs, u64 lblk_num, gfp_t gfp_flags);
++
++static inline int fscrypt_decrypt_block_inplace(const struct inode *inode,
++						struct page *page,
++						unsigned int len,
++						unsigned int offs,
++						u64 lblk_num)
++{
++	return fscrypt_decrypt_page(inode, page, page, len, offs, lblk_num,
++				    GFP_NOFS);
++}
+ 
+ static inline bool fscrypt_is_bounce_page(struct page *page)
+ {
+-- 
+1.8.3.1
+
+
+From sbuisson at ddn.com  Fri Apr 29 07:44:23 2022
+From: sbuisson at ddn.com (Sebastien Buisson)
+Date: Fri, 29 Apr 2022 14:44:23 +0000
+Subject: [lustre-devel] [PATCH] fscrypt: allow alternative bounce buffers
+In-Reply-To: <1651166600-21269-1-git-send-email-jsimmons@infradead.org>
+References: <1651166600-21269-1-git-send-email-jsimmons@infradead.org>
+Message-ID: <CDDEBB3C-B3F0-43E4-9E3C-2AA83EFBD176@ddn.com>
+
+This looks good to me, thanks James.
+I have updated Lustre patch https://review.whamcloud.com/47149 to integrate this change.
+
+> Le 28 avr. 2022 ? 19:23, James Simmons <jsimmons at infradead.org> a ?crit :
+> 
+> Currently fscrypt offers two options. One option is to use the
+> internal bounce buffer allocated or perform inline encrpytion.
+> Add the option to use an external bounce buffer. This change can
+> be used useful for example for a network file systems which can
+> pass in a page from the page cache and place the encrypted data
+> into a page for a network packet to be sent. Another potential
+> use is the use of GPU pages with RDMA being the final destination
+> for the encrypted data.
+> 
+> Signed-off-By: James Simmons <jsimmons at infradead.org>
+> ---
+> fs/crypto/crypto.c      | 34 +++++++++++++++++++---------------
+> include/linux/fscrypt.h | 34 ++++++++++++++++++++++++++++------
+> 2 files changed, 47 insertions(+), 21 deletions(-)
+> 
+> diff --git a/fs/crypto/crypto.c b/fs/crypto/crypto.c
+> index e78be66..f241c69 100644
+> --- a/fs/crypto/crypto.c
+> +++ b/fs/crypto/crypto.c
+> @@ -210,9 +210,10 @@ struct page *fscrypt_encrypt_pagecache_blocks(struct page *page,
+> EXPORT_SYMBOL(fscrypt_encrypt_pagecache_blocks);
+> 
+> /**
+> - * fscrypt_encrypt_block_inplace() - Encrypt a filesystem block in-place
+> + * fscrypt_encrypt_page() - Cache an encrypt filesystem block in a page
+>  * @inode:     The inode to which this block belongs
+> - * @page:      The page containing the block to encrypt
+> + * @src:       The page containing the block to encrypt
+> + * @dst:       The page which will contain the encrypted data
+>  * @len:       Size of block to encrypt.  This must be a multiple of
+>  *		FSCRYPT_CONTENTS_ALIGNMENT.
+>  * @offs:      Byte offset within @page at which the block to encrypt begins
+> @@ -223,17 +224,18 @@ struct page *fscrypt_encrypt_pagecache_blocks(struct page *page,
+>  * Encrypt a possibly-compressed filesystem block that is located in an
+>  * arbitrary page, not necessarily in the original pagecache page.  The @inode
+>  * and @lblk_num must be specified, as they can't be determined from @page.
+> + * The decrypted data will be stored in @dst.
+>  *
+>  * Return: 0 on success; -errno on failure
+>  */
+> -int fscrypt_encrypt_block_inplace(const struct inode *inode, struct page *page,
+> -				  unsigned int len, unsigned int offs,
+> -				  u64 lblk_num, gfp_t gfp_flags)
+> +int fscrypt_encrypt_page(const struct inode *inode, struct page *src,
+> +			 struct page *dst, unsigned int len, unsigned int offs,
+> +			 u64 lblk_num, gfp_t gfp_flags)
+> {
+> -	return fscrypt_crypt_block(inode, FS_ENCRYPT, lblk_num, page, page,
+> +	return fscrypt_crypt_block(inode, FS_ENCRYPT, lblk_num, src, dst,
+> 				   len, offs, gfp_flags);
+> }
+> -EXPORT_SYMBOL(fscrypt_encrypt_block_inplace);
+> +EXPORT_SYMBOL(fscrypt_encrypt_page);
+> 
+> /**
+>  * fscrypt_decrypt_pagecache_blocks() - Decrypt filesystem blocks in a
+> @@ -280,9 +282,10 @@ int fscrypt_decrypt_pagecache_blocks(struct page *page, unsigned int len,
+> EXPORT_SYMBOL(fscrypt_decrypt_pagecache_blocks);
+> 
+> /**
+> - * fscrypt_decrypt_block_inplace() - Decrypt a filesystem block in-place
+> + * fscrypt_decrypt_page() - Cache a decrypt a filesystem block in a page
+>  * @inode:     The inode to which this block belongs
+> - * @page:      The page containing the block to decrypt
+> + * @src:       The page containing the block to decrypt
+> + * @dst:       The page which will contain the plain data
+>  * @len:       Size of block to decrypt.  This must be a multiple of
+>  *		FSCRYPT_CONTENTS_ALIGNMENT.
+>  * @offs:      Byte offset within @page at which the block to decrypt begins
+> @@ -292,17 +295,18 @@ int fscrypt_decrypt_pagecache_blocks(struct page *page, unsigned int len,
+>  * Decrypt a possibly-compressed filesystem block that is located in an
+>  * arbitrary page, not necessarily in the original pagecache page.  The @inode
+>  * and @lblk_num must be specified, as they can't be determined from @page.
+> + * The encrypted data will be stored in @dst.
+>  *
+>  * Return: 0 on success; -errno on failure
+>  */
+> -int fscrypt_decrypt_block_inplace(const struct inode *inode, struct page *page,
+> -				  unsigned int len, unsigned int offs,
+> -				  u64 lblk_num)
+> +int fscrypt_decrypt_page(const struct inode *inode, struct page *src,
+> +			 struct page *dst, unsigned int len, unsigned int offs,
+> +			 u64 lblk_num, gfp_t gfp_flags)
+> {
+> -	return fscrypt_crypt_block(inode, FS_DECRYPT, lblk_num, page, page,
+> -				   len, offs, GFP_NOFS);
+> +	return fscrypt_crypt_block(inode, FS_DECRYPT, lblk_num, src, dst,
+> +				   len, offs, gfp_flags);
+> }
+> -EXPORT_SYMBOL(fscrypt_decrypt_block_inplace);
+> +EXPORT_SYMBOL(fscrypt_decrypt_page);
+> 
+> /**
+>  * fscrypt_initialize() - allocate major buffers for fs encryption.
+> diff --git a/include/linux/fscrypt.h b/include/linux/fscrypt.h
+> index efc7f96..c2b67d1 100644
+> --- a/include/linux/fscrypt.h
+> +++ b/include/linux/fscrypt.h
+> @@ -255,15 +255,37 @@ struct page *fscrypt_encrypt_pagecache_blocks(struct page *page,
+> 					      unsigned int len,
+> 					      unsigned int offs,
+> 					      gfp_t gfp_flags);
+> -int fscrypt_encrypt_block_inplace(const struct inode *inode, struct page *page,
+> -				  unsigned int len, unsigned int offs,
+> -				  u64 lblk_num, gfp_t gfp_flags);
+> +int fscrypt_encrypt_page(const struct inode *inode, struct page *src,
+> +			 struct page *dst, unsigned int len,
+> +			 unsigned int offs, u64 lblk_num, gfp_t gfp_flags);
+> +
+> +static inline int fscrypt_encrypt_block_inplace(const struct inode *inode,
+> +						struct page *page,
+> +						unsigned int len,
+> +						unsigned int offs,
+> +						u64 lblk_num,
+> +						gfp_t gfp_flags)
+> +{
+> +	return fscrypt_encrypt_page(inode, page, page, len, offs, lblk_num,
+> +				    gfp_flags);
+> +}
+> 
+> int fscrypt_decrypt_pagecache_blocks(struct page *page, unsigned int len,
+> 				     unsigned int offs);
+> -int fscrypt_decrypt_block_inplace(const struct inode *inode, struct page *page,
+> -				  unsigned int len, unsigned int offs,
+> -				  u64 lblk_num);
+> +
+> +int fscrypt_decrypt_page(const struct inode *inode, struct page *src,
+> +			 struct page *dst, unsigned int len,
+> +			 unsigned int offs, u64 lblk_num, gfp_t gfp_flags);
+> +
+> +static inline int fscrypt_decrypt_block_inplace(const struct inode *inode,
+> +						struct page *page,
+> +						unsigned int len,
+> +						unsigned int offs,
+> +						u64 lblk_num)
+> +{
+> +	return fscrypt_decrypt_page(inode, page, page, len, offs, lblk_num,
+> +				    GFP_NOFS);
+> +}
+> 
+> static inline bool fscrypt_is_bounce_page(struct page *page)
+> {
+> -- 
+> 1.8.3.1
+> 
+
+
+From sbuisson at ddn.com  Fri Apr 29 07:57:30 2022
+From: sbuisson at ddn.com (Sebastien Buisson)
+Date: Fri, 29 Apr 2022 14:57:30 +0000
+Subject: [lustre-devel] [PATCH] fscrypt: allow alternative bounce buffers
+In-Reply-To: <CDDEBB3C-B3F0-43E4-9E3C-2AA83EFBD176@ddn.com>
+References: <1651166600-21269-1-git-send-email-jsimmons@infradead.org>
+ <CDDEBB3C-B3F0-43E4-9E3C-2AA83EFBD176@ddn.com>
+Message-ID: <6CCF4653-BA2A-42C5-AC45-0098831E1B18@ddn.com>
+
+Hmm, sorry, looking into this further, the patch is missing a 'static inline? definition for llcrypt_encrypt_page and llcrypt_decrypt_page in fscrypt.h for the case where:
+
+#else  /* !CONFIG_FS_ENCRYPTION */
+
+They just need to return -EOPNOTSUPP.
+
+> Le 29 avr. 2022 ? 16:44, Sebastien Buisson via lustre-devel <lustre-devel at lists.lustre.org> a ?crit :
+> 
+> This looks good to me, thanks James.
+> I have updated Lustre patch https://review.whamcloud.com/47149 to integrate this change.
+> 
+>> Le 28 avr. 2022 ? 19:23, James Simmons <jsimmons at infradead.org> a ?crit :
+>> 
+>> Currently fscrypt offers two options. One option is to use the
+>> internal bounce buffer allocated or perform inline encrpytion.
+>> Add the option to use an external bounce buffer. This change can
+>> be used useful for example for a network file systems which can
+>> pass in a page from the page cache and place the encrypted data
+>> into a page for a network packet to be sent. Another potential
+>> use is the use of GPU pages with RDMA being the final destination
+>> for the encrypted data.
+>> 
+>> Signed-off-By: James Simmons <jsimmons at infradead.org>
+>> ---
+>> fs/crypto/crypto.c      | 34 +++++++++++++++++++---------------
+>> include/linux/fscrypt.h | 34 ++++++++++++++++++++++++++++------
+>> 2 files changed, 47 insertions(+), 21 deletions(-)
+>> 
+>> diff --git a/fs/crypto/crypto.c b/fs/crypto/crypto.c
+>> index e78be66..f241c69 100644
+>> --- a/fs/crypto/crypto.c
+>> +++ b/fs/crypto/crypto.c
+>> @@ -210,9 +210,10 @@ struct page *fscrypt_encrypt_pagecache_blocks(struct page *page,
+>> EXPORT_SYMBOL(fscrypt_encrypt_pagecache_blocks);
+>> 
+>> /**
+>> - * fscrypt_encrypt_block_inplace() - Encrypt a filesystem block in-place
+>> + * fscrypt_encrypt_page() - Cache an encrypt filesystem block in a page
+>> * @inode:     The inode to which this block belongs
+>> - * @page:      The page containing the block to encrypt
+>> + * @src:       The page containing the block to encrypt
+>> + * @dst:       The page which will contain the encrypted data
+>> * @len:       Size of block to encrypt.  This must be a multiple of
+>> *		FSCRYPT_CONTENTS_ALIGNMENT.
+>> * @offs:      Byte offset within @page at which the block to encrypt begins
+>> @@ -223,17 +224,18 @@ struct page *fscrypt_encrypt_pagecache_blocks(struct page *page,
+>> * Encrypt a possibly-compressed filesystem block that is located in an
+>> * arbitrary page, not necessarily in the original pagecache page.  The @inode
+>> * and @lblk_num must be specified, as they can't be determined from @page.
+>> + * The decrypted data will be stored in @dst.
+>> *
+>> * Return: 0 on success; -errno on failure
+>> */
+>> -int fscrypt_encrypt_block_inplace(const struct inode *inode, struct page *page,
+>> -				  unsigned int len, unsigned int offs,
+>> -				  u64 lblk_num, gfp_t gfp_flags)
+>> +int fscrypt_encrypt_page(const struct inode *inode, struct page *src,
+>> +			 struct page *dst, unsigned int len, unsigned int offs,
+>> +			 u64 lblk_num, gfp_t gfp_flags)
+>> {
+>> -	return fscrypt_crypt_block(inode, FS_ENCRYPT, lblk_num, page, page,
+>> +	return fscrypt_crypt_block(inode, FS_ENCRYPT, lblk_num, src, dst,
+>> 				   len, offs, gfp_flags);
+>> }
+>> -EXPORT_SYMBOL(fscrypt_encrypt_block_inplace);
+>> +EXPORT_SYMBOL(fscrypt_encrypt_page);
+>> 
+>> /**
+>> * fscrypt_decrypt_pagecache_blocks() - Decrypt filesystem blocks in a
+>> @@ -280,9 +282,10 @@ int fscrypt_decrypt_pagecache_blocks(struct page *page, unsigned int len,
+>> EXPORT_SYMBOL(fscrypt_decrypt_pagecache_blocks);
+>> 
+>> /**
+>> - * fscrypt_decrypt_block_inplace() - Decrypt a filesystem block in-place
+>> + * fscrypt_decrypt_page() - Cache a decrypt a filesystem block in a page
+>> * @inode:     The inode to which this block belongs
+>> - * @page:      The page containing the block to decrypt
+>> + * @src:       The page containing the block to decrypt
+>> + * @dst:       The page which will contain the plain data
+>> * @len:       Size of block to decrypt.  This must be a multiple of
+>> *		FSCRYPT_CONTENTS_ALIGNMENT.
+>> * @offs:      Byte offset within @page at which the block to decrypt begins
+>> @@ -292,17 +295,18 @@ int fscrypt_decrypt_pagecache_blocks(struct page *page, unsigned int len,
+>> * Decrypt a possibly-compressed filesystem block that is located in an
+>> * arbitrary page, not necessarily in the original pagecache page.  The @inode
+>> * and @lblk_num must be specified, as they can't be determined from @page.
+>> + * The encrypted data will be stored in @dst.
+>> *
+>> * Return: 0 on success; -errno on failure
+>> */
+>> -int fscrypt_decrypt_block_inplace(const struct inode *inode, struct page *page,
+>> -				  unsigned int len, unsigned int offs,
+>> -				  u64 lblk_num)
+>> +int fscrypt_decrypt_page(const struct inode *inode, struct page *src,
+>> +			 struct page *dst, unsigned int len, unsigned int offs,
+>> +			 u64 lblk_num, gfp_t gfp_flags)
+>> {
+>> -	return fscrypt_crypt_block(inode, FS_DECRYPT, lblk_num, page, page,
+>> -				   len, offs, GFP_NOFS);
+>> +	return fscrypt_crypt_block(inode, FS_DECRYPT, lblk_num, src, dst,
+>> +				   len, offs, gfp_flags);
+>> }
+>> -EXPORT_SYMBOL(fscrypt_decrypt_block_inplace);
+>> +EXPORT_SYMBOL(fscrypt_decrypt_page);
+>> 
+>> /**
+>> * fscrypt_initialize() - allocate major buffers for fs encryption.
+>> diff --git a/include/linux/fscrypt.h b/include/linux/fscrypt.h
+>> index efc7f96..c2b67d1 100644
+>> --- a/include/linux/fscrypt.h
+>> +++ b/include/linux/fscrypt.h
+>> @@ -255,15 +255,37 @@ struct page *fscrypt_encrypt_pagecache_blocks(struct page *page,
+>> 					      unsigned int len,
+>> 					      unsigned int offs,
+>> 					      gfp_t gfp_flags);
+>> -int fscrypt_encrypt_block_inplace(const struct inode *inode, struct page *page,
+>> -				  unsigned int len, unsigned int offs,
+>> -				  u64 lblk_num, gfp_t gfp_flags);
+>> +int fscrypt_encrypt_page(const struct inode *inode, struct page *src,
+>> +			 struct page *dst, unsigned int len,
+>> +			 unsigned int offs, u64 lblk_num, gfp_t gfp_flags);
+>> +
+>> +static inline int fscrypt_encrypt_block_inplace(const struct inode *inode,
+>> +						struct page *page,
+>> +						unsigned int len,
+>> +						unsigned int offs,
+>> +						u64 lblk_num,
+>> +						gfp_t gfp_flags)
+>> +{
+>> +	return fscrypt_encrypt_page(inode, page, page, len, offs, lblk_num,
+>> +				    gfp_flags);
+>> +}
+>> 
+>> int fscrypt_decrypt_pagecache_blocks(struct page *page, unsigned int len,
+>> 				     unsigned int offs);
+>> -int fscrypt_decrypt_block_inplace(const struct inode *inode, struct page *page,
+>> -				  unsigned int len, unsigned int offs,
+>> -				  u64 lblk_num);
+>> +
+>> +int fscrypt_decrypt_page(const struct inode *inode, struct page *src,
+>> +			 struct page *dst, unsigned int len,
+>> +			 unsigned int offs, u64 lblk_num, gfp_t gfp_flags);
+>> +
+>> +static inline int fscrypt_decrypt_block_inplace(const struct inode *inode,
+>> +						struct page *page,
+>> +						unsigned int len,
+>> +						unsigned int offs,
+>> +						u64 lblk_num)
+>> +{
+>> +	return fscrypt_decrypt_page(inode, page, page, len, offs, lblk_num,
+>> +				    GFP_NOFS);
+>> +}
+>> 
+>> static inline bool fscrypt_is_bounce_page(struct page *page)
+>> {
+>> -- 
+>> 1.8.3.1
+>> 
+> 
+> _______________________________________________
+> lustre-devel mailing list
+> lustre-devel at lists.lustre.org
+> http://lists.lustre.org/listinfo.cgi/lustre-devel-lustre.org
+
+

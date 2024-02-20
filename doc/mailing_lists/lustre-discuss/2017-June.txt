@@ -1,0 +1,4161 @@
+From Faye.Gibbins at cirrus.com  Thu Jun  1 07:09:09 2017
+From: Faye.Gibbins at cirrus.com (Gibbins, Faye)
+Date: Thu, 1 Jun 2017 14:09:09 +0000
+Subject: [lustre-discuss] Changelog users failing to clear records in 2.8,
+	can anyone help?
+Message-ID: <aa3bb093-70a5-47de-b1fc-e627aecf8c3b@EX13.ad.cirrus.com>
+
+Hi,
+
+We have 4 file systems on our lustre cluster. All have changelog users registered for robinhood to use.
+
+We have discovered that a changelog user for one of the file systems is not catching up to its index. Manual runs of Robinhood fail to read any more records even though according to mdd/tools-MDT0000/changelog_users there are record to read!
+
+Over time the change log had filled and the file system had become sluggish. Wiping the robinhood mysql and reinitializing robin hood with a full scan didn't fix the issue and like I said above three other change logs from different file systems (on the same MSG) are ok when used from the same robinhood instance.
+
+What makes me think this is a lustre (and we are using 2.8 on ext4) problem is this (repeated) error we are getting in syslog:
+
+[Wed May 31 14:06:59 2017] Lustre: 46400:0:(llog.c:530:llog_process_thread()) invalid length -420090294 in llog record for index 372672342/61708
+[Wed May 31 14:06:59 2017] LustreError: 46400:0:(mdd_device.c:261:llog_changelog_cancel()) tools-MDD0000: cancel idx 645 of catalog 0x7:10 rc=-22
+
+Deregistering the user from the change log and starting with a new one has not changed the behaviour and we still can't use this new user to track changes to the file system.
+
+Can anyone offer any advice on how to resolve this issue in the changelog?
+If not can anyone confirm if taking the file system down for a e2fsck/lfsck will fix issues with the changelog? I'd settle for being able to clear the whole log and starting afresh if that's possible?
+
+Yours
+Faye Gibbins
+Snr SysAdmin, Unix Lead Architect
+Software Systems and Cloud Services
+Cirrus Logic | cirrus.com<http://www.cirrus.com/>  | +44 (0) 131 272 7398
+
+[cid:image002.png at 01D2CF24.9A35B8F0]
+
+This message and any attachments may contain privileged and confidential information that is intended solely for the person(s) to whom it is addressed. If you are not an intended recipient you must not: read; copy; distribute; discuss; take any action in or make any reliance upon the contents of this message; nor open or read any attachment. If you have received this message in error, please notify us as soon as possible on the following telephone number and destroy this message including any attachments. Thank you. Cirrus Logic International (UK) Ltd and Cirrus Logic International Semiconductor Ltd are companies registered in Scotland, with registered numbers SC089839 and SC495735 respectively. Our registered office is at 7B Nightingale Way, Quartermile, Edinburgh, EH3 9EG, UK. Tel: +44 (0)131 272 7000. cirrus.com
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20170601/2fd50f49/attachment-0001.htm>
+-------------- next part --------------
+A non-text attachment was scrubbed...
+Name: image001.png
+Type: image/png
+Size: 18668 bytes
+Desc: image001.png
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20170601/2fd50f49/attachment-0001.png>
+
+From bruno.faccini at intel.com  Thu Jun  1 07:55:15 2017
+From: bruno.faccini at intel.com (Faccini, Bruno)
+Date: Thu, 1 Jun 2017 14:55:15 +0000
+Subject: [lustre-discuss] Changelog users failing to clear records in
+ 2.8, can anyone help?
+In-Reply-To: <aa3bb093-70a5-47de-b1fc-e627aecf8c3b@EX13.ad.cirrus.com>
+References: <aa3bb093-70a5-47de-b1fc-e627aecf8c3b@EX13.ad.cirrus.com>
+Message-ID: <BB37C8DE-4801-4EB5-A986-6C0AEE022C64@intel.com>
+
+Hello,
+According to the error msgs, looks like there is a corrupted plain-LLOG file for the ChangeLogs of MDT0. And unfortunately, neither e2fsck nor lfsck can help to recover in this case.
+I think that to clear this situation you need to stop/umount this MDT and re-mount it as ldiskfs to move both changelog_users and changelog_catalog files to some alternate place/name (do not remove them!), umount ldiskfs, re-start/mount your MDT, re-run a RBH full-scan, re-register a ChangeLog user.
+Only side-effect doing so, can be the volume of orphan plain-LLOGs that will be kept consuming space on MDT. You should be able to identify them by running llog_reader tool over the saved/renamed old catalog file that will list you the references to all these remaining plain-LLOGs, allowing you to find+remove them during a new ldiskfs-mount session.
+
+Bruno.
+
+On Jun 1, 2017, at 4:09 PM, Gibbins, Faye <Faye.Gibbins at cirrus.com<mailto:Faye.Gibbins at cirrus.com>> wrote:
+
+Hi,
+
+We have 4 file systems on our lustre cluster. All have changelog users registered for robinhood to use.
+
+We have discovered that a changelog user for one of the file systems is not catching up to its index. Manual runs of Robinhood fail to read any more records even though according to mdd/tools-MDT0000/changelog_users there are record to read!
+
+Over time the change log had filled and the file system had become sluggish. Wiping the robinhood mysql and reinitializing robin hood with a full scan didn?t fix the issue and like I said above three other change logs from different file systems (on the same MSG) are ok when used from the same robinhood instance.
+
+What makes me think this is a lustre (and we are using 2.8 on ext4) problem is this (repeated) error we are getting in syslog:
+
+[Wed May 31 14:06:59 2017] Lustre: 46400:0:(llog.c:530:llog_process_thread()) invalid length -420090294 in llog record for index 372672342/61708
+[Wed May 31 14:06:59 2017] LustreError: 46400:0:(mdd_device.c:261:llog_changelog_cancel()) tools-MDD0000: cancel idx 645 of catalog 0x7:10 rc=-22
+
+Deregistering the user from the change log and starting with a new one has not changed the behaviour and we still can?t use this new user to track changes to the file system.
+
+Can anyone offer any advice on how to resolve this issue in the changelog?
+If not can anyone confirm if taking the file system down for a e2fsck/lfsck will fix issues with the changelog? I?d settle for being able to clear the whole log and starting afresh if that?s possible?
+
+Yours
+Faye Gibbins
+Snr SysAdmin, Unix Lead Architect
+Software Systems and Cloud Services
+Cirrus Logic | cirrus.com<http://www.cirrus.com/>  | +44 (0) 131 272 7398
+
+<image001.png>
+
+This message and any attachments may contain privileged and confidential information that is intended solely for the person(s) to whom it is addressed. If you are not an intended recipient you must not: read; copy; distribute; discuss; take any action in or make any reliance upon the contents of this message; nor open or read any attachment. If you have received this message in error, please notify us as soon as possible on the following telephone number and destroy this message including any attachments. Thank you. Cirrus Logic International (UK) Ltd and Cirrus Logic International Semiconductor Ltd are companies registered in Scotland, with registered numbers SC089839 and SC495735 respectively. Our registered office is at 7B Nightingale Way, Quartermile, Edinburgh, EH3 9EG, UK. Tel: +44 (0)131 272 7000. cirrus.com<http://cirrus.com/>_______________________________________________
+lustre-discuss mailing list
+lustre-discuss at lists.lustre.org<mailto:lustre-discuss at lists.lustre.org>
+http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org
+
+---------------------------------------------------------------------
+Intel Corporation SAS (French simplified joint stock company)
+Registered headquarters: "Les Montalets"- 2, rue de Paris, 
+92196 Meudon Cedex, France
+Registration Number:  302 456 199 R.C.S. NANTERRE
+Capital: 4,572,000 Euros
+
+This e-mail and any attachments may contain confidential material for
+the sole use of the intended recipient(s). Any review or distribution
+by others is strictly prohibited. If you are not the intended
+recipient, please contact the sender and delete all copies.
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20170601/a787c4bb/attachment.htm>
+
+From andreas.dilger at intel.com  Thu Jun  1 10:36:25 2017
+From: andreas.dilger at intel.com (Dilger, Andreas)
+Date: Thu, 1 Jun 2017 17:36:25 +0000
+Subject: [lustre-discuss] Changelog users failing to clear records in
+ 2.8, can anyone help?
+In-Reply-To: <BB37C8DE-4801-4EB5-A986-6C0AEE022C64@intel.com>
+References: <aa3bb093-70a5-47de-b1fc-e627aecf8c3b@EX13.ad.cirrus.com>
+	<BB37C8DE-4801-4EB5-A986-6C0AEE022C64@intel.com>
+Message-ID: <CDCA3C61-8A71-4D98-BCD6-60BB9EC1AE8E@intel.com>
+
+On Jun 1, 2017, at 10:55, Faccini, Bruno <bruno.faccini at intel.com> wrote:
+> 
+> Hello,
+> According to the error msgs, looks like there is a corrupted plain-LLOG file for the ChangeLogs of MDT0. And unfortunately, neither e2fsck nor lfsck can help to recover in this case.
+
+Bruno,
+is this bug fixed in newer Lustre releases, or can something be done in the ChangeLog handling so that the ChangeLog can still be cleared in this case?  I don't think we care if the record is invalid when it is being deleted...  Could you please file a ticket in Jira about this, if it isn't already fixed.
+
+Cheers, Andreas
+
+> I think that to clear this situation you need to stop/umount this MDT and re-mount it as ldiskfs to move both changelog_users and changelog_catalog files to some alternate place/name (do not remove them!), umount ldiskfs, re-start/mount your MDT, re-run a RBH full-scan, re-register a ChangeLog user.
+> Only side-effect doing so, can be the volume of orphan plain-LLOGs that will be kept consuming space on MDT. You should be able to identify them by running llog_reader tool over the saved/renamed old catalog file that will list you the references to all these remaining plain-LLOGs, allowing you to find+remove them during a new ldiskfs-mount session.
+> 
+> Bruno.
+> 
+>> On Jun 1, 2017, at 4:09 PM, Gibbins, Faye <Faye.Gibbins at cirrus.com> wrote:
+>> 
+>> Hi,
+>>  
+>> We have 4 file systems on our lustre cluster. All have changelog users registered for robinhood to use.
+>>  
+>> We have discovered that a changelog user for one of the file systems is not catching up to its index. Manual runs of Robinhood fail to read any more records even though according to mdd/tools-MDT0000/changelog_users there are record to read!
+>>  
+>> Over time the change log had filled and the file system had become sluggish. Wiping the robinhood mysql and reinitializing robin hood with a full scan didn?t fix the issue and like I said above three other change logs from different file systems (on the same MSG) are ok when used from the same robinhood instance.
+>>  
+>> What makes me think this is a lustre (and we are using 2.8 on ext4) problem is this (repeated) error we are getting in syslog:
+>>  
+>> [Wed May 31 14:06:59 2017] Lustre: 46400:0:(llog.c:530:llog_process_thread()) invalid length -420090294 in llog record for index 372672342/61708
+>> [Wed May 31 14:06:59 2017] LustreError: 46400:0:(mdd_device.c:261:llog_changelog_cancel()) tools-MDD0000: cancel idx 645 of catalog 0x7:10 rc=-22
+>>  
+>> Deregistering the user from the change log and starting with a new one has not changed the behaviour and we still can?t use this new user to track changes to the file system.
+>>  
+>> Can anyone offer any advice on how to resolve this issue in the changelog?
+>> If not can anyone confirm if taking the file system down for a e2fsck/lfsck will fix issues with the changelog? I?d settle for being able to clear the whole log and starting afresh if that?s possible?
+>>  
+>> Yours
+>> Faye Gibbins
+>> Snr SysAdmin, Unix Lead Architect
+>> Software Systems and Cloud Services
+>> Cirrus Logic | cirrus.com  | +44 (0) 131 272 7398
+>>  
+>> <image001.png>
+>>  
+>> This message and any attachments may contain privileged and confidential information that is intended solely for the person(s) to whom it is addressed. If you are not an intended recipient you must not: read; copy; distribute; discuss; take any action in or make any reliance upon the contents of this message; nor open or read any attachment. If you have received this message in error, please notify us as soon as possible on the following telephone number and destroy this message including any attachments. Thank you. Cirrus Logic International (UK) Ltd and Cirrus Logic International Semiconductor Ltd are companies registered in Scotland, with registered numbers SC089839 and SC495735 respectively. Our registered office is at 7B Nightingale Way, Quartermile, Edinburgh, EH3 9EG, UK. Tel: +44 (0)131 272 7000. cirrus.com_______________________________________________
+>> lustre-discuss mailing list
+>> lustre-discuss at lists.lustre.org
+>> http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org
+> 
+> ---------------------------------------------------------------------
+> Intel Corporation SAS (French simplified joint stock company)
+> Registered headquarters: "Les Montalets"- 2, rue de Paris, 
+> 92196 Meudon Cedex, France
+> Registration Number:  302 456 199 R.C.S. NANTERRE
+> Capital: 4,572,000 Euros
+> 
+> This e-mail and any attachments may contain confidential material for
+> the sole use of the intended recipient(s). Any review or distribution
+> by others is strictly prohibited. If you are not the intended
+> recipient, please contact the sender and delete all copies.
+> 
+> _______________________________________________
+> lustre-discuss mailing list
+> lustre-discuss at lists.lustre.org
+> http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org
+
+Cheers, Andreas
+--
+Andreas Dilger
+Lustre Principal Architect
+Intel Corporation
+
+
+
+
+
+
+
+
+From cfaber at gmail.com  Thu Jun  1 10:38:29 2017
+From: cfaber at gmail.com (Colin Faber)
+Date: Thu, 1 Jun 2017 11:38:29 -0600
+Subject: [lustre-discuss] Changelog users failing to clear records in
+ 2.8, can anyone help?
+In-Reply-To: <CDCA3C61-8A71-4D98-BCD6-60BB9EC1AE8E@intel.com>
+References: <aa3bb093-70a5-47de-b1fc-e627aecf8c3b@EX13.ad.cirrus.com>
+	<BB37C8DE-4801-4EB5-A986-6C0AEE022C64@intel.com>
+	<CDCA3C61-8A71-4D98-BCD6-60BB9EC1AE8E@intel.com>
+Message-ID: <CAJcXmBkWJEoU_jatvNtptfkWxDg0fDqMZRsXPrD_H+TB=R8hbQ@mail.gmail.com>
+
+There seems to have been a few instances of this reported here on the list
+in the last few months, I don't recall the earlier versions of lustre, but
+we have also seen this in the wild for customer systems, so very likely a
+bug which results in corruption of llog files.
+
+-cf
+
+
+On Thu, Jun 1, 2017 at 11:36 AM, Dilger, Andreas <andreas.dilger at intel.com>
+wrote:
+
+> On Jun 1, 2017, at 10:55, Faccini, Bruno <bruno.faccini at intel.com> wrote:
+> >
+> > Hello,
+> > According to the error msgs, looks like there is a corrupted plain-LLOG
+> file for the ChangeLogs of MDT0. And unfortunately, neither e2fsck nor
+> lfsck can help to recover in this case.
+>
+> Bruno,
+> is this bug fixed in newer Lustre releases, or can something be done in
+> the ChangeLog handling so that the ChangeLog can still be cleared in this
+> case?  I don't think we care if the record is invalid when it is being
+> deleted...  Could you please file a ticket in Jira about this, if it isn't
+> already fixed.
+>
+> Cheers, Andreas
+>
+> > I think that to clear this situation you need to stop/umount this MDT
+> and re-mount it as ldiskfs to move both changelog_users and
+> changelog_catalog files to some alternate place/name (do not remove them!),
+> umount ldiskfs, re-start/mount your MDT, re-run a RBH full-scan,
+> re-register a ChangeLog user.
+> > Only side-effect doing so, can be the volume of orphan plain-LLOGs that
+> will be kept consuming space on MDT. You should be able to identify them by
+> running llog_reader tool over the saved/renamed old catalog file that will
+> list you the references to all these remaining plain-LLOGs, allowing you to
+> find+remove them during a new ldiskfs-mount session.
+> >
+> > Bruno.
+> >
+> >> On Jun 1, 2017, at 4:09 PM, Gibbins, Faye <Faye.Gibbins at cirrus.com>
+> wrote:
+> >>
+> >> Hi,
+> >>
+> >> We have 4 file systems on our lustre cluster. All have changelog users
+> registered for robinhood to use.
+> >>
+> >> We have discovered that a changelog user for one of the file systems is
+> not catching up to its index. Manual runs of Robinhood fail to read any
+> more records even though according to mdd/tools-MDT0000/changelog_users
+> there are record to read!
+> >>
+> >> Over time the change log had filled and the file system had become
+> sluggish. Wiping the robinhood mysql and reinitializing robin hood with a
+> full scan didn?t fix the issue and like I said above three other change
+> logs from different file systems (on the same MSG) are ok when used from
+> the same robinhood instance.
+> >>
+> >> What makes me think this is a lustre (and we are using 2.8 on ext4)
+> problem is this (repeated) error we are getting in syslog:
+> >>
+> >> [Wed May 31 14:06:59 2017] Lustre: 46400:0:(llog.c:530:llog_process_thread())
+> invalid length -420090294 in llog record for index 372672342/61708
+> >> [Wed May 31 14:06:59 2017] LustreError: 46400:0:(mdd_device.c:261:llog_changelog_cancel())
+> tools-MDD0000: cancel idx 645 of catalog 0x7:10 rc=-22
+> >>
+> >> Deregistering the user from the change log and starting with a new one
+> has not changed the behaviour and we still can?t use this new user to track
+> changes to the file system.
+> >>
+> >> Can anyone offer any advice on how to resolve this issue in the
+> changelog?
+> >> If not can anyone confirm if taking the file system down for a
+> e2fsck/lfsck will fix issues with the changelog? I?d settle for being able
+> to clear the whole log and starting afresh if that?s possible?
+> >>
+> >> Yours
+> >> Faye Gibbins
+> >> Snr SysAdmin, Unix Lead Architect
+> >> Software Systems and Cloud Services
+> >> Cirrus Logic | cirrus.com  | +44 (0) 131 272 7398
+> >>
+> >> <image001.png>
+> >>
+> >> This message and any attachments may contain privileged and
+> confidential information that is intended solely for the person(s) to whom
+> it is addressed. If you are not an intended recipient you must not: read;
+> copy; distribute; discuss; take any action in or make any reliance upon the
+> contents of this message; nor open or read any attachment. If you have
+> received this message in error, please notify us as soon as possible on the
+> following telephone number and destroy this message including any
+> attachments. Thank you. Cirrus Logic International (UK) Ltd and Cirrus
+> Logic International Semiconductor Ltd are companies registered in Scotland,
+> with registered numbers SC089839 and SC495735 respectively. Our registered
+> office is at 7B Nightingale Way, Quartermile, Edinburgh, EH3 9EG, UK. Tel: +44
+> (0)131 272 7000. cirrus.com_______________________________________________
+> >> lustre-discuss mailing list
+> >> lustre-discuss at lists.lustre.org
+> >> http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org
+> >
+> > ---------------------------------------------------------------------
+> > Intel Corporation SAS (French simplified joint stock company)
+> > Registered headquarters: "Les Montalets"- 2, rue de Paris,
+> > 92196 Meudon Cedex, France
+> > Registration Number:  302 456 199 R.C.S. NANTERRE
+> > Capital: 4,572,000 Euros
+> >
+> > This e-mail and any attachments may contain confidential material for
+> > the sole use of the intended recipient(s). Any review or distribution
+> > by others is strictly prohibited. If you are not the intended
+> > recipient, please contact the sender and delete all copies.
+> >
+> > _______________________________________________
+> > lustre-discuss mailing list
+> > lustre-discuss at lists.lustre.org
+> > http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org
+>
+> Cheers, Andreas
+> --
+> Andreas Dilger
+> Lustre Principal Architect
+> Intel Corporation
+>
+>
+>
+>
+>
+>
+>
+> _______________________________________________
+> lustre-discuss mailing list
+> lustre-discuss at lists.lustre.org
+> http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org
+>
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20170601/bc2af070/attachment.htm>
+
+From moea at cray.com  Thu Jun  1 11:34:28 2017
+From: moea at cray.com (Andy Moe)
+Date: Thu, 1 Jun 2017 18:34:28 +0000
+Subject: [lustre-discuss] Changelog users failing to clear records in
+ 2.8, can anyone help?
+In-Reply-To: <CAJcXmBkWJEoU_jatvNtptfkWxDg0fDqMZRsXPrD_H+TB=R8hbQ@mail.gmail.com>
+References: <aa3bb093-70a5-47de-b1fc-e627aecf8c3b@EX13.ad.cirrus.com>
+	<BB37C8DE-4801-4EB5-A986-6C0AEE022C64@intel.com>
+	<CDCA3C61-8A71-4D98-BCD6-60BB9EC1AE8E@intel.com>
+	<CAJcXmBkWJEoU_jatvNtptfkWxDg0fDqMZRsXPrD_H+TB=R8hbQ@mail.gmail.com>
+Message-ID: <CY4PR1101MB2085906784FE0EB23BE361C6BAF60@CY4PR1101MB2085.namprd11.prod.outlook.com>
+
+Faye,
+
+Up to the point when you?ve experienced problems clearing records, had at any point Changelogs been consumed (read/cleared) in parallel? By you or anyone else? I?ve been doing a lot this in test (among other things), and I can somewhat consistently corrupt the Changelog catalog and users file.
+
+========================
+Andrew Moe
+Storage Test Engineer
+Cray, Inc.
+Bloomington, MN USA
+========================
+
+From: lustre-discuss [mailto:lustre-discuss-bounces at lists.lustre.org] On Behalf Of Colin Faber
+Sent: Thursday, June 01, 2017 12:38
+To: Dilger, Andreas <andreas.dilger at intel.com>
+Cc: IT Software Systems - All <it_sw_sys_all at cirrus.com>; lustre-discuss at lists.lustre.org
+Subject: Re: [lustre-discuss] Changelog users failing to clear records in 2.8, can anyone help?
+
+There seems to have been a few instances of this reported here on the list in the last few months, I don't recall the earlier versions of lustre, but we have also seen this in the wild for customer systems, so very likely a bug which results in corruption of llog files.
+
+-cf
+
+
+On Thu, Jun 1, 2017 at 11:36 AM, Dilger, Andreas <andreas.dilger at intel.com<mailto:andreas.dilger at intel.com>> wrote:
+On Jun 1, 2017, at 10:55, Faccini, Bruno <bruno.faccini at intel.com<mailto:bruno.faccini at intel.com>> wrote:
+>
+> Hello,
+> According to the error msgs, looks like there is a corrupted plain-LLOG file for the ChangeLogs of MDT0. And unfortunately, neither e2fsck nor lfsck can help to recover in this case.
+
+Bruno,
+is this bug fixed in newer Lustre releases, or can something be done in the ChangeLog handling so that the ChangeLog can still be cleared in this case?  I don't think we care if the record is invalid when it is being deleted...  Could you please file a ticket in Jira about this, if it isn't already fixed.
+
+Cheers, Andreas
+
+> I think that to clear this situation you need to stop/umount this MDT and re-mount it as ldiskfs to move both changelog_users and changelog_catalog files to some alternate place/name (do not remove them!), umount ldiskfs, re-start/mount your MDT, re-run a RBH full-scan, re-register a ChangeLog user.
+> Only side-effect doing so, can be the volume of orphan plain-LLOGs that will be kept consuming space on MDT. You should be able to identify them by running llog_reader tool over the saved/renamed old catalog file that will list you the references to all these remaining plain-LLOGs, allowing you to find+remove them during a new ldiskfs-mount session.
+>
+> Bruno.
+>
+>> On Jun 1, 2017, at 4:09 PM, Gibbins, Faye <Faye.Gibbins at cirrus.com<mailto:Faye.Gibbins at cirrus.com>> wrote:
+>>
+>> Hi,
+>>
+>> We have 4 file systems on our lustre cluster. All have changelog users registered for robinhood to use.
+>>
+>> We have discovered that a changelog user for one of the file systems is not catching up to its index. Manual runs of Robinhood fail to read any more records even though according to mdd/tools-MDT0000/changelog_users there are record to read!
+>>
+>> Over time the change log had filled and the file system had become sluggish. Wiping the robinhood mysql and reinitializing robin hood with a full scan didn?t fix the issue and like I said above three other change logs from different file systems (on the same MSG) are ok when used from the same robinhood instance.
+>>
+>> What makes me think this is a lustre (and we are using 2.8 on ext4) problem is this (repeated) error we are getting in syslog:
+>>
+>> [Wed May 31 14:06:59 2017] Lustre: 46400:0:(llog.c:530:llog_process_thread()) invalid length -420090294 in llog record for index 372672342/61708
+>> [Wed May 31 14:06:59 2017] LustreError: 46400:0:(mdd_device.c:261:llog_changelog_cancel()) tools-MDD0000: cancel idx 645 of catalog 0x7:10 rc=-22
+>>
+>> Deregistering the user from the change log and starting with a new one has not changed the behaviour and we still can?t use this new user to track changes to the file system.
+>>
+>> Can anyone offer any advice on how to resolve this issue in the changelog?
+>> If not can anyone confirm if taking the file system down for a e2fsck/lfsck will fix issues with the changelog? I?d settle for being able to clear the whole log and starting afresh if that?s possible?
+>>
+>> Yours
+>> Faye Gibbins
+>> Snr SysAdmin, Unix Lead Architect
+>> Software Systems and Cloud Services
+>> Cirrus Logic | cirrus.com<http://cirrus.com>  | +44 (0) 131 272 7398<tel:%2B44%20%280%29%20131%20272%207398>
+>>
+>> <image001.png>
+>>
+>> This message and any attachments may contain privileged and confidential information that is intended solely for the person(s) to whom it is addressed. If you are not an intended recipient you must not: read; copy; distribute; discuss; take any action in or make any reliance upon the contents of this message; nor open or read any attachment. If you have received this message in error, please notify us as soon as possible on the following telephone number and destroy this message including any attachments. Thank you. Cirrus Logic International (UK) Ltd and Cirrus Logic International Semiconductor Ltd are companies registered in Scotland, with registered numbers SC089839 and SC495735 respectively. Our registered office is at 7B Nightingale Way, Quartermile, Edinburgh, EH3 9EG, UK. Tel: +44 (0)131 272 7000<tel:%2B44%20%280%29131%20272%207000>. cirrus.com_______________________________________________
+>> lustre-discuss mailing list
+>> lustre-discuss at lists.lustre.org<mailto:lustre-discuss at lists.lustre.org>
+>> http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org
+>
+> ---------------------------------------------------------------------
+> Intel Corporation SAS (French simplified joint stock company)
+> Registered headquarters: "Les Montalets"- 2, rue de Paris,
+> 92196 Meudon Cedex, France
+> Registration Number:  302 456 199 R.C.S. NANTERRE
+> Capital: 4,572,000 Euros
+>
+> This e-mail and any attachments may contain confidential material for
+> the sole use of the intended recipient(s). Any review or distribution
+> by others is strictly prohibited. If you are not the intended
+> recipient, please contact the sender and delete all copies.
+>
+> _______________________________________________
+> lustre-discuss mailing list
+> lustre-discuss at lists.lustre.org<mailto:lustre-discuss at lists.lustre.org>
+> http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org
+Cheers, Andreas
+--
+Andreas Dilger
+Lustre Principal Architect
+Intel Corporation
+
+
+
+
+
+
+
+_______________________________________________
+lustre-discuss mailing list
+lustre-discuss at lists.lustre.org<mailto:lustre-discuss at lists.lustre.org>
+http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org
+
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20170601/e8dbd2c9/attachment-0001.htm>
+
+From dekemar at umich.edu  Thu Jun  1 16:34:59 2017
+From: dekemar at umich.edu (Russell Dekema)
+Date: Thu, 1 Jun 2017 19:34:59 -0400
+Subject: [lustre-discuss] Per-client I/O Operation Counters
+Message-ID: <CADoGSYiyy_2HepiwZKjLTcSAsKpgeZZhnznZARQ+YaMZ8Gu1Lg@mail.gmail.com>
+
+Greetings,
+
+Is there a way, either on the Lustre clients or (preferably) OSSes, to
+determine how many I/O operations each Lustre client is performing
+against the filesystem?
+
+I know several ways of finding the number of *bytes* read or written
+by a client (or even on a per-job basis with job_stats), but we
+suspect we have some clients overwhelming our filesystem with large
+numbers of small I/O requests, and I don't know how to find per-client
+(or per-job) I/O operation counters.
+
+This is a Lustre 2.5 system.
+
+Sincerely,
+Rusty Dekema
+University of Michigan
+Advanced Research Computing - Technical Services
+
+From paf at cray.com  Thu Jun  1 19:28:23 2017
+From: paf at cray.com (Patrick Farrell)
+Date: Fri, 2 Jun 2017 02:28:23 +0000
+Subject: [lustre-discuss] Per-client I/O Operation Counters
+In-Reply-To: <CADoGSYiyy_2HepiwZKjLTcSAsKpgeZZhnznZARQ+YaMZ8Gu1Lg@mail.gmail.com>
+References: <CADoGSYiyy_2HepiwZKjLTcSAsKpgeZZhnznZARQ+YaMZ8Gu1Lg@mail.gmail.com>
+Message-ID: <CY4PR11MB17518164FDAE64DA70DE7D9BCBF70@CY4PR11MB1751.namprd11.prod.outlook.com>
+
+rpc_stats on the clients may be helpful here, as a first step.  They are found in /proc/fs/lustre/osc/[ost ]/rpc_stats on the client.  Contents should be mostly self-explanatory.  Look for lots of small RPCs.
+
+
+- Patrick
+
+________________________________
+From: lustre-discuss <lustre-discuss-bounces at lists.lustre.org> on behalf of Russell Dekema <dekemar at umich.edu>
+Sent: Thursday, June 1, 2017 6:34:59 PM
+To: lustre-discuss at lists.lustre.org
+Subject: [lustre-discuss] Per-client I/O Operation Counters
+
+Greetings,
+
+Is there a way, either on the Lustre clients or (preferably) OSSes, to
+determine how many I/O operations each Lustre client is performing
+against the filesystem?
+
+I know several ways of finding the number of *bytes* read or written
+by a client (or even on a per-job basis with job_stats), but we
+suspect we have some clients overwhelming our filesystem with large
+numbers of small I/O requests, and I don't know how to find per-client
+(or per-job) I/O operation counters.
+
+This is a Lustre 2.5 system.
+
+Sincerely,
+Rusty Dekema
+University of Michigan
+Advanced Research Computing - Technical Services
+_______________________________________________
+lustre-discuss mailing list
+lustre-discuss at lists.lustre.org
+http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20170602/74cdec07/attachment.htm>
+
+From michael.kluge at tu-dresden.de  Fri Jun  2 00:32:52 2017
+From: michael.kluge at tu-dresden.de (Michael Kluge)
+Date: Fri, 2 Jun 2017 07:32:52 +0000
+Subject: [lustre-discuss] IOR input for pathologic file system abuse
+Message-ID: <bd41318b4ff4442b895520f7ce8db35b@MSX-L104.msx.ad.zih.tu-dresden.de>
+
+Hi all,
+
+I am looking for IOR scripts that represent pathological use cases for file systems. Something like shared file access with a small, unaligned block size or random I/O to a shared file. Does anyone has some input for me there that he/she is willing to share?
+
+
+Regards, Michael
+
+-- 
+Dr.-Ing. Michael Kluge
+
+Technische Universit?t Dresden
+Center for Information Services and
+High Performance Computing (ZIH)
+D-01062 Dresden
+Germany
+
+Contact:
+Falkenbrunnen, Room 240
+Phone:  (+49) 351 463-34217
+Fax:    (+49) 351 463-37773
+e-mail: michael.kluge at tu-dresden.de
+WWW:    http://www.tu-dresden.de/zih
+
+
+-------------- next part --------------
+A non-text attachment was scrubbed...
+Name: smime.p7s
+Type: application/pkcs7-signature
+Size: 6108 bytes
+Desc: not available
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20170602/b6702436/attachment.bin>
+
+From Faye.Gibbins at cirrus.com  Fri Jun  2 00:44:01 2017
+From: Faye.Gibbins at cirrus.com (Gibbins, Faye)
+Date: Fri, 2 Jun 2017 07:44:01 +0000
+Subject: [lustre-discuss] Changelog users failing to clear records in
+ 2.8, can anyone help?
+In-Reply-To: <CY4PR1101MB2085906784FE0EB23BE361C6BAF60@CY4PR1101MB2085.namprd11.prod.outlook.com>
+References: <aa3bb093-70a5-47de-b1fc-e627aecf8c3b@EX13.ad.cirrus.com>
+	<BB37C8DE-4801-4EB5-A986-6C0AEE022C64@intel.com>
+	<CDCA3C61-8A71-4D98-BCD6-60BB9EC1AE8E@intel.com>
+	<CAJcXmBkWJEoU_jatvNtptfkWxDg0fDqMZRsXPrD_H+TB=R8hbQ@mail.gmail.com>
+	<CY4PR1101MB2085906784FE0EB23BE361C6BAF60@CY4PR1101MB2085.namprd11.prod.outlook.com>
+Message-ID: <3FBC3B5743817B4597B6399BCE6D695D08DFC3EF@EX11.ad.cirrus.com>
+
+Hi Andy,
+
+Yes indeed!
+
+There was parallel reading and clearing of the change logs. We had both robinhood as a daemon reading clearing and attempts to do the same manually for the same user at the same time.
+
+We simply didn?t know this would be an issues.
+
+Faye
+
+From: Andy Moe [mailto:moea at cray.com]
+Sent: 01 June 2017 19:34
+To: lustre-discuss at lists.lustre.org
+Cc: IT Software Systems - All <it_sw_sys_all at cirrus.com>
+Subject: RE: [lustre-discuss] Changelog users failing to clear records in 2.8, can anyone help?
+
+Faye,
+
+Up to the point when you?ve experienced problems clearing records, had at any point Changelogs been consumed (read/cleared) in parallel? By you or anyone else? I?ve been doing a lot this in test (among other things), and I can somewhat consistently corrupt the Changelog catalog and users file.
+
+========================
+Andrew Moe
+Storage Test Engineer
+Cray, Inc.
+Bloomington, MN USA
+========================
+
+From: lustre-discuss [mailto:lustre-discuss-bounces at lists.lustre.org] On Behalf Of Colin Faber
+Sent: Thursday, June 01, 2017 12:38
+To: Dilger, Andreas <andreas.dilger at intel.com<mailto:andreas.dilger at intel.com>>
+Cc: IT Software Systems - All <it_sw_sys_all at cirrus.com<mailto:it_sw_sys_all at cirrus.com>>; lustre-discuss at lists.lustre.org<mailto:lustre-discuss at lists.lustre.org>
+Subject: Re: [lustre-discuss] Changelog users failing to clear records in 2.8, can anyone help?
+
+There seems to have been a few instances of this reported here on the list in the last few months, I don't recall the earlier versions of lustre, but we have also seen this in the wild for customer systems, so very likely a bug which results in corruption of llog files.
+
+-cf
+
+
+On Thu, Jun 1, 2017 at 11:36 AM, Dilger, Andreas <andreas.dilger at intel.com<mailto:andreas.dilger at intel.com>> wrote:
+On Jun 1, 2017, at 10:55, Faccini, Bruno <bruno.faccini at intel.com<mailto:bruno.faccini at intel.com>> wrote:
+>
+> Hello,
+> According to the error msgs, looks like there is a corrupted plain-LLOG file for the ChangeLogs of MDT0. And unfortunately, neither e2fsck nor lfsck can help to recover in this case.
+
+Bruno,
+is this bug fixed in newer Lustre releases, or can something be done in the ChangeLog handling so that the ChangeLog can still be cleared in this case?  I don't think we care if the record is invalid when it is being deleted...  Could you please file a ticket in Jira about this, if it isn't already fixed.
+
+Cheers, Andreas
+
+> I think that to clear this situation you need to stop/umount this MDT and re-mount it as ldiskfs to move both changelog_users and changelog_catalog files to some alternate place/name (do not remove them!), umount ldiskfs, re-start/mount your MDT, re-run a RBH full-scan, re-register a ChangeLog user.
+> Only side-effect doing so, can be the volume of orphan plain-LLOGs that will be kept consuming space on MDT. You should be able to identify them by running llog_reader tool over the saved/renamed old catalog file that will list you the references to all these remaining plain-LLOGs, allowing you to find+remove them during a new ldiskfs-mount session.
+>
+> Bruno.
+>
+>> On Jun 1, 2017, at 4:09 PM, Gibbins, Faye <Faye.Gibbins at cirrus.com<mailto:Faye.Gibbins at cirrus.com>> wrote:
+>>
+>> Hi,
+>>
+>> We have 4 file systems on our lustre cluster. All have changelog users registered for robinhood to use.
+>>
+>> We have discovered that a changelog user for one of the file systems is not catching up to its index. Manual runs of Robinhood fail to read any more records even though according to mdd/tools-MDT0000/changelog_users there are record to read!
+>>
+>> Over time the change log had filled and the file system had become sluggish. Wiping the robinhood mysql and reinitializing robin hood with a full scan didn?t fix the issue and like I said above three other change logs from different file systems (on the same MSG) are ok when used from the same robinhood instance.
+>>
+>> What makes me think this is a lustre (and we are using 2.8 on ext4) problem is this (repeated) error we are getting in syslog:
+>>
+>> [Wed May 31 14:06:59 2017] Lustre: 46400:0:(llog.c:530:llog_process_thread()) invalid length -420090294 in llog record for index 372672342/61708
+>> [Wed May 31 14:06:59 2017] LustreError: 46400:0:(mdd_device.c:261:llog_changelog_cancel()) tools-MDD0000: cancel idx 645 of catalog 0x7:10 rc=-22
+>>
+>> Deregistering the user from the change log and starting with a new one has not changed the behaviour and we still can?t use this new user to track changes to the file system.
+>>
+>> Can anyone offer any advice on how to resolve this issue in the changelog?
+>> If not can anyone confirm if taking the file system down for a e2fsck/lfsck will fix issues with the changelog? I?d settle for being able to clear the whole log and starting afresh if that?s possible?
+>>
+>> Yours
+>> Faye Gibbins
+>> Snr SysAdmin, Unix Lead Architect
+>> Software Systems and Cloud Services
+>> Cirrus Logic | cirrus.com<http://cirrus.com>  | +44 (0) 131 272 7398<tel:%2B44%20%280%29%20131%20272%207398>
+>>
+>> <image001.png>
+>>
+>> This message and any attachments may contain privileged and confidential information that is intended solely for the person(s) to whom it is addressed. If you are not an intended recipient you must not: read; copy; distribute; discuss; take any action in or make any reliance upon the contents of this message; nor open or read any attachment. If you have received this message in error, please notify us as soon as possible on the following telephone number and destroy this message including any attachments. Thank you. Cirrus Logic International (UK) Ltd and Cirrus Logic International Semiconductor Ltd are companies registered in Scotland, with registered numbers SC089839 and SC495735 respectively. Our registered office is at 7B Nightingale Way, Quartermile, Edinburgh, EH3 9EG, UK. Tel: +44 (0)131 272 7000<tel:%2B44%20%280%29131%20272%207000>. cirrus.com_______________________________________________
+>> lustre-discuss mailing list
+>> lustre-discuss at lists.lustre.org<mailto:lustre-discuss at lists.lustre.org>
+>> http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org<https://urldefense.proofpoint.com/v2/url?u=http-3A__lists.lustre.org_listinfo.cgi_lustre-2Ddiscuss-2Dlustre.org&d=DwMGaQ&c=O3LcjD-V2Iepl5V0N1424A&r=uYX9IusTj04zoAQZpNJuM5SyJ7Npy_e1PVoo89nWUJ0&m=KB7BUUMX-CEDP0QEDKkP2ayfbxLj9o-1b_9y7BDM89Y&s=kVghLuYTnEEstWLiaPz93MKoU6b82UpmFIMos3MyC0o&e=>
+>
+> ---------------------------------------------------------------------
+> Intel Corporation SAS (French simplified joint stock company)
+> Registered headquarters: "Les Montalets"- 2, rue de Paris,
+> 92196 Meudon Cedex, France
+> Registration Number:  302 456 199 R.C.S. NANTERRE
+> Capital: 4,572,000 Euros
+>
+> This e-mail and any attachments may contain confidential material for
+> the sole use of the intended recipient(s). Any review or distribution
+> by others is strictly prohibited. If you are not the intended
+> recipient, please contact the sender and delete all copies.
+>
+> _______________________________________________
+> lustre-discuss mailing list
+> lustre-discuss at lists.lustre.org<mailto:lustre-discuss at lists.lustre.org>
+> http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org<https://urldefense.proofpoint.com/v2/url?u=http-3A__lists.lustre.org_listinfo.cgi_lustre-2Ddiscuss-2Dlustre.org&d=DwMGaQ&c=O3LcjD-V2Iepl5V0N1424A&r=uYX9IusTj04zoAQZpNJuM5SyJ7Npy_e1PVoo89nWUJ0&m=KB7BUUMX-CEDP0QEDKkP2ayfbxLj9o-1b_9y7BDM89Y&s=kVghLuYTnEEstWLiaPz93MKoU6b82UpmFIMos3MyC0o&e=>
+Cheers, Andreas
+--
+Andreas Dilger
+Lustre Principal Architect
+Intel Corporation
+
+
+
+
+
+
+
+_______________________________________________
+lustre-discuss mailing list
+lustre-discuss at lists.lustre.org<mailto:lustre-discuss at lists.lustre.org>
+http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org<https://urldefense.proofpoint.com/v2/url?u=http-3A__lists.lustre.org_listinfo.cgi_lustre-2Ddiscuss-2Dlustre.org&d=DwMGaQ&c=O3LcjD-V2Iepl5V0N1424A&r=uYX9IusTj04zoAQZpNJuM5SyJ7Npy_e1PVoo89nWUJ0&m=KB7BUUMX-CEDP0QEDKkP2ayfbxLj9o-1b_9y7BDM89Y&s=kVghLuYTnEEstWLiaPz93MKoU6b82UpmFIMos3MyC0o&e=>
+
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20170602/5e1f3cc7/attachment-0001.htm>
+
+From andreas.dilger at intel.com  Fri Jun  2 07:01:26 2017
+From: andreas.dilger at intel.com (Dilger, Andreas)
+Date: Fri, 2 Jun 2017 14:01:26 +0000
+Subject: [lustre-discuss] Per-client I/O Operation Counters
+In-Reply-To: <CADoGSYiyy_2HepiwZKjLTcSAsKpgeZZhnznZARQ+YaMZ8Gu1Lg@mail.gmail.com>
+References: <CADoGSYiyy_2HepiwZKjLTcSAsKpgeZZhnznZARQ+YaMZ8Gu1Lg@mail.gmail.com>
+Message-ID: <ACEE27D9-7B42-4304-9A38-2B043C51230F@intel.com>
+
+On Jun 1, 2017, at 19:34, Russell Dekema <dekemar at umich.edu> wrote:
+> 
+> Greetings,
+> 
+> Is there a way, either on the Lustre clients or (preferably) OSSes, to
+> determine how many I/O operations each Lustre client is performing
+> against the filesystem?
+> 
+> I know several ways of finding the number of *bytes* read or written
+> by a client (or even on a per-job basis with job_stats), but we
+> suspect we have some clients overwhelming our filesystem with large
+> numbers of small I/O requests, and I don't know how to find per-client
+> (or per-job) I/O operation counters.
+
+On each OSS, there are per-client statistics via "lctl get_param obdfilter.*.exports.*.stats"
+(/proc/fs/lustre/obdfilter/$fsname-OST*/exports/{client NID}/stats).  Of particular interest are the "read_bytes" and "write_bytes" stats:
+
+$ lctl get_param obdfilter.*.exports.*.stats | egrep "=|_bytes"
+obdfilter.testfs-OST0000.exports.0 at lo.stats=
+write_bytes               6 samples [bytes] 4096 1048576 1069056
+obdfilter.testfs-OST0001.exports.0 at lo.stats=
+read_bytes                1 samples [bytes] 4096 4096 4096
+write_bytes               122 samples [bytes] 6 202 928
+obdfilter.testfs-OST0002.exports.0 at lo.stats=
+obdfilter.testfs-OST0003.exports.0 at lo.stats=
+write_bytes               122 samples [bytes] 6 6 732
+
+This shows 1 read RPC, and 250 write RPCs, and the min, max, sum of bytes on a per-client basis.  You would be most interested in the number of RPCs (first numeric column), but you can also work out the mean RPC size for each client by dividing the last column (sum) by the RPC count.  
+
+Cheers, Andreas
+--
+Andreas Dilger
+Lustre Principal Architect
+Intel Corporation
+
+
+
+
+
+
+
+
+From moea at cray.com  Fri Jun  2 16:06:33 2017
+From: moea at cray.com (Andy Moe)
+Date: Fri, 2 Jun 2017 23:06:33 +0000
+Subject: [lustre-discuss] Changelog users failing to clear records in
+ 2.8, can anyone help?
+In-Reply-To: <3FBC3B5743817B4597B6399BCE6D695D08DFC3EF@EX11.ad.cirrus.com>
+References: <aa3bb093-70a5-47de-b1fc-e627aecf8c3b@EX13.ad.cirrus.com>
+	<BB37C8DE-4801-4EB5-A986-6C0AEE022C64@intel.com>
+	<CDCA3C61-8A71-4D98-BCD6-60BB9EC1AE8E@intel.com>
+	<CAJcXmBkWJEoU_jatvNtptfkWxDg0fDqMZRsXPrD_H+TB=R8hbQ@mail.gmail.com>
+	<CY4PR1101MB2085906784FE0EB23BE361C6BAF60@CY4PR1101MB2085.namprd11.prod.outlook.com>
+	<3FBC3B5743817B4597B6399BCE6D695D08DFC3EF@EX11.ad.cirrus.com>
+Message-ID: <CY4PR1101MB2085AADD9F216BCBF37C79C1BAF70@CY4PR1101MB2085.namprd11.prod.outlook.com>
+
+> > Up to the point when you?ve experienced problems clearing records, had at any point Changelogs been consumed (read/cleared) in parallel?
+> Yes indeed!
+>
+> There was parallel reading and clearing of the change logs. We had both robinhood as a daemon reading clearing and attempts to do the same manually for the same user at the same time.
+
+Interesting?
+
+>>> Could you please file a ticket in Jira about this, if it isn't already fixed.
+
+Bruno, if there is a ticket on this or if you create one, could you point it out to me?
+
+:Andy
+
+From: Gibbins, Faye [mailto:Faye.Gibbins at cirrus.com]
+Sent: Friday, June 02, 2017 2:44
+To: Andy Moe <moea at cray.com>; lustre-discuss at lists.lustre.org
+Subject: RE: [lustre-discuss] Changelog users failing to clear records in 2.8, can anyone help?
+
+Hi Andy,
+
+Yes indeed!
+
+There was parallel reading and clearing of the change logs. We had both robinhood as a daemon reading clearing and attempts to do the same manually for the same user at the same time.
+
+We simply didn?t know this would be an issues.
+
+Faye
+
+From: Andy Moe [mailto:moea at cray.com]
+Sent: 01 June 2017 19:34
+To: lustre-discuss at lists.lustre.org<mailto:lustre-discuss at lists.lustre.org>
+Cc: IT Software Systems - All <it_sw_sys_all at cirrus.com<mailto:it_sw_sys_all at cirrus.com>>
+Subject: RE: [lustre-discuss] Changelog users failing to clear records in 2.8, can anyone help?
+
+Faye,
+
+Up to the point when you?ve experienced problems clearing records, had at any point Changelogs been consumed (read/cleared) in parallel? By you or anyone else? I?ve been doing a lot this in test (among other things), and I can somewhat consistently corrupt the Changelog catalog and users file.
+
+========================
+Andrew Moe
+Storage Test Engineer
+Cray, Inc.
+Bloomington, MN USA
+========================
+
+From: lustre-discuss [mailto:lustre-discuss-bounces at lists.lustre.org] On Behalf Of Colin Faber
+Sent: Thursday, June 01, 2017 12:38
+To: Dilger, Andreas <andreas.dilger at intel.com<mailto:andreas.dilger at intel.com>>
+Cc: IT Software Systems - All <it_sw_sys_all at cirrus.com<mailto:it_sw_sys_all at cirrus.com>>; lustre-discuss at lists.lustre.org<mailto:lustre-discuss at lists.lustre.org>
+Subject: Re: [lustre-discuss] Changelog users failing to clear records in 2.8, can anyone help?
+
+There seems to have been a few instances of this reported here on the list in the last few months, I don't recall the earlier versions of lustre, but we have also seen this in the wild for customer systems, so very likely a bug which results in corruption of llog files.
+
+-cf
+
+
+On Thu, Jun 1, 2017 at 11:36 AM, Dilger, Andreas <andreas.dilger at intel.com<mailto:andreas.dilger at intel.com>> wrote:
+On Jun 1, 2017, at 10:55, Faccini, Bruno <bruno.faccini at intel.com<mailto:bruno.faccini at intel.com>> wrote:
+>
+> Hello,
+> According to the error msgs, looks like there is a corrupted plain-LLOG file for the ChangeLogs of MDT0. And unfortunately, neither e2fsck nor lfsck can help to recover in this case.
+
+Bruno,
+is this bug fixed in newer Lustre releases, or can something be done in the ChangeLog handling so that the ChangeLog can still be cleared in this case?  I don't think we care if the record is invalid when it is being deleted...  Could you please file a ticket in Jira about this, if it isn't already fixed.
+
+Cheers, Andreas
+
+> I think that to clear this situation you need to stop/umount this MDT and re-mount it as ldiskfs to move both changelog_users and changelog_catalog files to some alternate place/name (do not remove them!), umount ldiskfs, re-start/mount your MDT, re-run a RBH full-scan, re-register a ChangeLog user.
+> Only side-effect doing so, can be the volume of orphan plain-LLOGs that will be kept consuming space on MDT. You should be able to identify them by running llog_reader tool over the saved/renamed old catalog file that will list you the references to all these remaining plain-LLOGs, allowing you to find+remove them during a new ldiskfs-mount session.
+>
+> Bruno.
+>
+>> On Jun 1, 2017, at 4:09 PM, Gibbins, Faye <Faye.Gibbins at cirrus.com<mailto:Faye.Gibbins at cirrus.com>> wrote:
+>>
+>> Hi,
+>>
+>> We have 4 file systems on our lustre cluster. All have changelog users registered for robinhood to use.
+>>
+>> We have discovered that a changelog user for one of the file systems is not catching up to its index. Manual runs of Robinhood fail to read any more records even though according to mdd/tools-MDT0000/changelog_users there are record to read!
+>>
+>> Over time the change log had filled and the file system had become sluggish. Wiping the robinhood mysql and reinitializing robin hood with a full scan didn?t fix the issue and like I said above three other change logs from different file systems (on the same MSG) are ok when used from the same robinhood instance.
+>>
+>> What makes me think this is a lustre (and we are using 2.8 on ext4) problem is this (repeated) error we are getting in syslog:
+>>
+>> [Wed May 31 14:06:59 2017] Lustre: 46400:0:(llog.c:530:llog_process_thread()) invalid length -420090294 in llog record for index 372672342/61708
+>> [Wed May 31 14:06:59 2017] LustreError: 46400:0:(mdd_device.c:261:llog_changelog_cancel()) tools-MDD0000: cancel idx 645 of catalog 0x7:10 rc=-22
+>>
+>> Deregistering the user from the change log and starting with a new one has not changed the behaviour and we still can?t use this new user to track changes to the file system.
+>>
+>> Can anyone offer any advice on how to resolve this issue in the changelog?
+>> If not can anyone confirm if taking the file system down for a e2fsck/lfsck will fix issues with the changelog? I?d settle for being able to clear the whole log and starting afresh if that?s possible?
+>>
+>> Yours
+>> Faye Gibbins
+>> Snr SysAdmin, Unix Lead Architect
+>> Software Systems and Cloud Services
+>> Cirrus Logic | cirrus.com<http://cirrus.com>  | +44 (0) 131 272 7398<tel:%2B44%20%280%29%20131%20272%207398>
+>>
+>> <image001.png>
+>>
+>> This message and any attachments may contain privileged and confidential information that is intended solely for the person(s) to whom it is addressed. If you are not an intended recipient you must not: read; copy; distribute; discuss; take any action in or make any reliance upon the contents of this message; nor open or read any attachment. If you have received this message in error, please notify us as soon as possible on the following telephone number and destroy this message including any attachments. Thank you. Cirrus Logic International (UK) Ltd and Cirrus Logic International Semiconductor Ltd are companies registered in Scotland, with registered numbers SC089839 and SC495735 respectively. Our registered office is at 7B Nightingale Way, Quartermile, Edinburgh, EH3 9EG, UK. Tel: +44 (0)131 272 7000<tel:%2B44%20%280%29131%20272%207000>. cirrus.com_______________________________________________
+>> lustre-discuss mailing list
+>> lustre-discuss at lists.lustre.org<mailto:lustre-discuss at lists.lustre.org>
+>> http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org<https://urldefense.proofpoint.com/v2/url?u=http-3A__lists.lustre.org_listinfo.cgi_lustre-2Ddiscuss-2Dlustre.org&d=DwMGaQ&c=O3LcjD-V2Iepl5V0N1424A&r=uYX9IusTj04zoAQZpNJuM5SyJ7Npy_e1PVoo89nWUJ0&m=KB7BUUMX-CEDP0QEDKkP2ayfbxLj9o-1b_9y7BDM89Y&s=kVghLuYTnEEstWLiaPz93MKoU6b82UpmFIMos3MyC0o&e=>
+>
+> ---------------------------------------------------------------------
+> Intel Corporation SAS (French simplified joint stock company)
+> Registered headquarters: "Les Montalets"- 2, rue de Paris,
+> 92196 Meudon Cedex, France
+> Registration Number:  302 456 199 R.C.S. NANTERRE
+> Capital: 4,572,000 Euros
+>
+> This e-mail and any attachments may contain confidential material for
+> the sole use of the intended recipient(s). Any review or distribution
+> by others is strictly prohibited. If you are not the intended
+> recipient, please contact the sender and delete all copies.
+>
+> _______________________________________________
+> lustre-discuss mailing list
+> lustre-discuss at lists.lustre.org<mailto:lustre-discuss at lists.lustre.org>
+> http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org<https://urldefense.proofpoint.com/v2/url?u=http-3A__lists.lustre.org_listinfo.cgi_lustre-2Ddiscuss-2Dlustre.org&d=DwMGaQ&c=O3LcjD-V2Iepl5V0N1424A&r=uYX9IusTj04zoAQZpNJuM5SyJ7Npy_e1PVoo89nWUJ0&m=KB7BUUMX-CEDP0QEDKkP2ayfbxLj9o-1b_9y7BDM89Y&s=kVghLuYTnEEstWLiaPz93MKoU6b82UpmFIMos3MyC0o&e=>
+Cheers, Andreas
+--
+Andreas Dilger
+Lustre Principal Architect
+Intel Corporation
+
+
+
+
+
+
+
+_______________________________________________
+lustre-discuss mailing list
+lustre-discuss at lists.lustre.org<mailto:lustre-discuss at lists.lustre.org>
+http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org<https://urldefense.proofpoint.com/v2/url?u=http-3A__lists.lustre.org_listinfo.cgi_lustre-2Ddiscuss-2Dlustre.org&d=DwMGaQ&c=O3LcjD-V2Iepl5V0N1424A&r=uYX9IusTj04zoAQZpNJuM5SyJ7Npy_e1PVoo89nWUJ0&m=KB7BUUMX-CEDP0QEDKkP2ayfbxLj9o-1b_9y7BDM89Y&s=kVghLuYTnEEstWLiaPz93MKoU6b82UpmFIMos3MyC0o&e=>
+
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20170602/51d22715/attachment-0001.htm>
+
+From glock at lbl.gov  Fri Jun  2 16:48:42 2017
+From: glock at lbl.gov (Glenn Lockwood)
+Date: Fri, 2 Jun 2017 16:48:42 -0700
+Subject: [lustre-discuss] IOR input for pathologic file system abuse
+In-Reply-To: <bd41318b4ff4442b895520f7ce8db35b@MSX-L104.msx.ad.zih.tu-dresden.de>
+References: <bd41318b4ff4442b895520f7ce8db35b@MSX-L104.msx.ad.zih.tu-dresden.de>
+Message-ID: <CAPyUXtmrCbyB0WUhCdYt312D+qPWMnzPqpvOsqWJ2RYfpuARdQ@mail.gmail.com>
+
+Hi Michael
+
+Pathological is very subjective, but the standard IOPS test with IOR
+involves doing 4K writes (or reads) with random but non-overlapping offsets:
+
+srun -N 4 -n 128 ./ior -t 4096 -b 4096 -s 1024 -e -w -z
+
+However IOR is not really designed to do truly terrible I/O patterns such
+as those that involve re-writing the same blocks, so the best you can do
+(without modifying IOR) is trigger a bunch of false sharing and lock
+contention by issuing small, strided writes, e.g.,
+
+srun -N 4 -n 128 ~/ior -t 1024 -b 1024 -s 4096 -e -w
+
+You can salt to taste, for example, by using transfer/block sizes that
+don't divide nicely into your stripe size.  But what is it exactly that
+you're trying to accomplish?  Real applications, even the bad ones, usually
+don't do the nicely defined patterns that IOR does.
+
+Glenn
+
+
+
+
+On Fri, Jun 2, 2017 at 12:32 AM, Michael Kluge <michael.kluge at tu-dresden.de>
+wrote:
+
+> Hi all,
+>
+> I am looking for IOR scripts that represent pathological use cases for
+> file systems. Something like shared file access with a small, unaligned
+> block size or random I/O to a shared file. Does anyone has some input for
+> me there that he/she is willing to share?
+>
+>
+> Regards, Michael
+>
+> --
+> Dr.-Ing. Michael Kluge
+>
+> Technische Universit?t Dresden
+> Center for Information Services and
+> High Performance Computing (ZIH)
+> D-01062 Dresden
+> Germany
+>
+> Contact:
+> Falkenbrunnen, Room 240
+> Phone:  (+49) 351 463-34217
+> Fax:    (+49) 351 463-37773
+> e-mail: michael.kluge at tu-dresden.de
+> WWW:    http://www.tu-dresden.de/zih
+>
+>
+>
+> _______________________________________________
+> lustre-discuss mailing list
+> lustre-discuss at lists.lustre.org
+> http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org
+>
+>
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20170602/c8732da6/attachment.htm>
+
+From bruno.faccini at intel.com  Sun Jun  4 15:33:20 2017
+From: bruno.faccini at intel.com (Faccini, Bruno)
+Date: Sun, 4 Jun 2017 22:33:20 +0000
+Subject: [lustre-discuss] Changelog users failing to clear records in
+ 2.8, can anyone help?
+In-Reply-To: <CY4PR1101MB2085AADD9F216BCBF37C79C1BAF70@CY4PR1101MB2085.namprd11.prod.outlook.com>
+References: <aa3bb093-70a5-47de-b1fc-e627aecf8c3b@EX13.ad.cirrus.com>
+	<BB37C8DE-4801-4EB5-A986-6C0AEE022C64@intel.com>
+	<CDCA3C61-8A71-4D98-BCD6-60BB9EC1AE8E@intel.com>
+	<CAJcXmBkWJEoU_jatvNtptfkWxDg0fDqMZRsXPrD_H+TB=R8hbQ@mail.gmail.com>
+	<CY4PR1101MB2085906784FE0EB23BE361C6BAF60@CY4PR1101MB2085.namprd11.prod.outlook.com>
+	<3FBC3B5743817B4597B6399BCE6D695D08DFC3EF@EX11.ad.cirrus.com>
+	<CY4PR1101MB2085AADD9F216BCBF37C79C1BAF70@CY4PR1101MB2085.namprd11.prod.outlook.com>
+Message-ID: <98E7B301-F920-418B-9336-1607D9D9B441@intel.com>
+
+
+Sorry to be late to update/answer.
+If it is established that there has been concurrent ChangeLog clearing operations likely to be the cause of the detected corruption, I believe this problem is already addressed by LU-8496.
+
+
+On Jun 3, 2017, at 1:06 AM, Andy Moe <moea at cray.com<mailto:moea at cray.com>> wrote:
+
+> > Up to the point when you?ve experienced problems clearing records, had at any point Changelogs been consumed (read/cleared) in parallel?
+> Yes indeed!
+>
+> There was parallel reading and clearing of the change logs. We had both robinhood as a daemon reading clearing and attempts to do the same manually for the same user at the same time.
+
+Interesting?
+
+>>> Could you please file a ticket in Jira about this, if it isn't already fixed.
+
+Bruno, if there is a ticket on this or if you create one, could you point it out to me?
+
+:Andy
+
+From: Gibbins, Faye [mailto:Faye.Gibbins at cirrus.com]
+Sent: Friday, June 02, 2017 2:44
+To: Andy Moe <moea at cray.com<mailto:moea at cray.com>>; lustre-discuss at lists.lustre.org<mailto:lustre-discuss at lists.lustre.org>
+Subject: RE: [lustre-discuss] Changelog users failing to clear records in 2.8, can anyone help?
+
+Hi Andy,
+
+Yes indeed!
+
+There was parallel reading and clearing of the change logs. We had both robinhood as a daemon reading clearing and attempts to do the same manually for the same user at the same time.
+
+We simply didn?t know this would be an issues.
+
+Faye
+
+From: Andy Moe [mailto:moea at cray.com]
+Sent: 01 June 2017 19:34
+To: lustre-discuss at lists.lustre.org<mailto:lustre-discuss at lists.lustre.org>
+Cc: IT Software Systems - All <it_sw_sys_all at cirrus.com<mailto:it_sw_sys_all at cirrus.com>>
+Subject: RE: [lustre-discuss] Changelog users failing to clear records in 2.8, can anyone help?
+
+Faye,
+
+Up to the point when you?ve experienced problems clearing records, had at any point Changelogs been consumed (read/cleared) in parallel? By you or anyone else? I?ve been doing a lot this in test (among other things), and I can somewhat consistently corrupt the Changelog catalog and users file.
+
+========================
+Andrew Moe
+Storage Test Engineer
+Cray, Inc.
+Bloomington, MN USA
+========================
+
+From: lustre-discuss [mailto:lustre-discuss-bounces at lists.lustre.org] On Behalf Of Colin Faber
+Sent: Thursday, June 01, 2017 12:38
+To: Dilger, Andreas <andreas.dilger at intel.com<mailto:andreas.dilger at intel.com>>
+Cc: IT Software Systems - All <it_sw_sys_all at cirrus.com<mailto:it_sw_sys_all at cirrus.com>>; lustre-discuss at lists.lustre.org<mailto:lustre-discuss at lists.lustre.org>
+Subject: Re: [lustre-discuss] Changelog users failing to clear records in 2.8, can anyone help?
+
+There seems to have been a few instances of this reported here on the list in the last few months, I don't recall the earlier versions of lustre, but we have also seen this in the wild for customer systems, so very likely a bug which results in corruption of llog files.
+
+-cf
+
+
+On Thu, Jun 1, 2017 at 11:36 AM, Dilger, Andreas <andreas.dilger at intel.com<mailto:andreas.dilger at intel.com>> wrote:
+On Jun 1, 2017, at 10:55, Faccini, Bruno <bruno.faccini at intel.com<mailto:bruno.faccini at intel.com>> wrote:
+>
+> Hello,
+> According to the error msgs, looks like there is a corrupted plain-LLOG file for the ChangeLogs of MDT0. And unfortunately, neither e2fsck nor lfsck can help to recover in this case.
+
+Bruno,
+is this bug fixed in newer Lustre releases, or can something be done in the ChangeLog handling so that the ChangeLog can still be cleared in this case?  I don't think we care if the record is invalid when it is being deleted...  Could you please file a ticket in Jira about this, if it isn't already fixed.
+
+Cheers, Andreas
+
+> I think that to clear this situation you need to stop/umount this MDT and re-mount it as ldiskfs to move both changelog_users and changelog_catalog files to some alternate place/name (do not remove them!), umount ldiskfs, re-start/mount your MDT, re-run a RBH full-scan, re-register a ChangeLog user.
+> Only side-effect doing so, can be the volume of orphan plain-LLOGs that will be kept consuming space on MDT. You should be able to identify them by running llog_reader tool over the saved/renamed old catalog file that will list you the references to all these remaining plain-LLOGs, allowing you to find+remove them during a new ldiskfs-mount session.
+>
+> Bruno.
+>
+>> On Jun 1, 2017, at 4:09 PM, Gibbins, Faye <Faye.Gibbins at cirrus.com<mailto:Faye.Gibbins at cirrus.com>> wrote:
+>>
+>> Hi,
+>>
+>> We have 4 file systems on our lustre cluster. All have changelog users registered for robinhood to use.
+>>
+>> We have discovered that a changelog user for one of the file systems is not catching up to its index. Manual runs of Robinhood fail to read any more records even though according to mdd/tools-MDT0000/changelog_users there are record to read!
+>>
+>> Over time the change log had filled and the file system had become sluggish. Wiping the robinhood mysql and reinitializing robin hood with a full scan didn?t fix the issue and like I said above three other change logs from different file systems (on the same MSG) are ok when used from the same robinhood instance.
+>>
+>> What makes me think this is a lustre (and we are using 2.8 on ext4) problem is this (repeated) error we are getting in syslog:
+>>
+>> [Wed May 31 14:06:59 2017] Lustre: 46400:0:(llog.c:530:llog_process_thread()) invalid length -420090294 in llog record for index 372672342/61708
+>> [Wed May 31 14:06:59 2017] LustreError: 46400:0:(mdd_device.c:261:llog_changelog_cancel()) tools-MDD0000: cancel idx 645 of catalog 0x7:10 rc=-22
+>>
+>> Deregistering the user from the change log and starting with a new one has not changed the behaviour and we still can?t use this new user to track changes to the file system.
+>>
+>> Can anyone offer any advice on how to resolve this issue in the changelog?
+>> If not can anyone confirm if taking the file system down for a e2fsck/lfsck will fix issues with the changelog? I?d settle for being able to clear the whole log and starting afresh if that?s possible?
+>>
+>> Yours
+>> Faye Gibbins
+>> Snr SysAdmin, Unix Lead Architect
+>> Software Systems and Cloud Services
+>> Cirrus Logic | cirrus.com<http://cirrus.com/>  | +44 (0) 131 272 7398<tel:%2B44%20%280%29%20131%20272%207398>
+>>
+>> <image001.png>
+>>
+>> This message and any attachments may contain privileged and confidential information that is intended solely for the person(s) to whom it is addressed. If you are not an intended recipient you must not: read; copy; distribute; discuss; take any action in or make any reliance upon the contents of this message; nor open or read any attachment. If you have received this message in error, please notify us as soon as possible on the following telephone number and destroy this message including any attachments. Thank you. Cirrus Logic International (UK) Ltd and Cirrus Logic International Semiconductor Ltd are companies registered in Scotland, with registered numbers SC089839 and SC495735 respectively. Our registered office is at 7B Nightingale Way, Quartermile, Edinburgh, EH3 9EG, UK. Tel: +44 (0)131 272 7000<tel:%2B44%20%280%29131%20272%207000>. cirrus.com<http://cirrus.com>_______________________________________________
+>> lustre-discuss mailing list
+>> lustre-discuss at lists.lustre.org<mailto:lustre-discuss at lists.lustre.org>
+>> http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org<https://urldefense.proofpoint.com/v2/url?u=http-3A__lists.lustre.org_listinfo.cgi_lustre-2Ddiscuss-2Dlustre.org&d=DwMGaQ&c=O3LcjD-V2Iepl5V0N1424A&r=uYX9IusTj04zoAQZpNJuM5SyJ7Npy_e1PVoo89nWUJ0&m=KB7BUUMX-CEDP0QEDKkP2ayfbxLj9o-1b_9y7BDM89Y&s=kVghLuYTnEEstWLiaPz93MKoU6b82UpmFIMos3MyC0o&e=>
+>
+> ---------------------------------------------------------------------
+> Intel Corporation SAS (French simplified joint stock company)
+> Registered headquarters: "Les Montalets"- 2, rue de Paris,
+> 92196 Meudon Cedex, France
+> Registration Number:  302 456 199 R.C.S. NANTERRE
+> Capital: 4,572,000 Euros
+>
+> This e-mail and any attachments may contain confidential material for
+> the sole use of the intended recipient(s). Any review or distribution
+> by others is strictly prohibited. If you are not the intended
+> recipient, please contact the sender and delete all copies.
+>
+> _______________________________________________
+> lustre-discuss mailing list
+> lustre-discuss at lists.lustre.org<mailto:lustre-discuss at lists.lustre.org>
+> http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org<https://urldefense.proofpoint.com/v2/url?u=http-3A__lists.lustre.org_listinfo.cgi_lustre-2Ddiscuss-2Dlustre.org&d=DwMGaQ&c=O3LcjD-V2Iepl5V0N1424A&r=uYX9IusTj04zoAQZpNJuM5SyJ7Npy_e1PVoo89nWUJ0&m=KB7BUUMX-CEDP0QEDKkP2ayfbxLj9o-1b_9y7BDM89Y&s=kVghLuYTnEEstWLiaPz93MKoU6b82UpmFIMos3MyC0o&e=>
+Cheers, Andreas
+--
+Andreas Dilger
+Lustre Principal Architect
+Intel Corporation
+
+
+
+
+
+
+
+_______________________________________________
+lustre-discuss mailing list
+lustre-discuss at lists.lustre.org<mailto:lustre-discuss at lists.lustre.org>
+http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org<https://urldefense.proofpoint.com/v2/url?u=http-3A__lists.lustre.org_listinfo.cgi_lustre-2Ddiscuss-2Dlustre.org&d=DwMGaQ&c=O3LcjD-V2Iepl5V0N1424A&r=uYX9IusTj04zoAQZpNJuM5SyJ7Npy_e1PVoo89nWUJ0&m=KB7BUUMX-CEDP0QEDKkP2ayfbxLj9o-1b_9y7BDM89Y&s=kVghLuYTnEEstWLiaPz93MKoU6b82UpmFIMos3MyC0o&e=>
+
+_______________________________________________
+lustre-discuss mailing list
+lustre-discuss at lists.lustre.org<mailto:lustre-discuss at lists.lustre.org>
+http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org
+
+---------------------------------------------------------------------
+Intel Corporation SAS (French simplified joint stock company)
+Registered headquarters: "Les Montalets"- 2, rue de Paris, 
+92196 Meudon Cedex, France
+Registration Number:  302 456 199 R.C.S. NANTERRE
+Capital: 4,572,000 Euros
+
+This e-mail and any attachments may contain confidential material for
+the sole use of the intended recipient(s). Any review or distribution
+by others is strictly prohibited. If you are not the intended
+recipient, please contact the sender and delete all copies.
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20170604/8805adab/attachment-0001.htm>
+
+From arm2arm at gmail.com  Tue Jun  6 03:34:50 2017
+From: arm2arm at gmail.com (Arman Khalatyan)
+Date: Tue, 6 Jun 2017 12:34:50 +0200
+Subject: [lustre-discuss] Experience with PCIe INTEL SSD
+Message-ID: <CAAqDm6anQLQeBDkp32oCAhFJxGS-rn87QSHP3q=FJ5y9JqSrOw@mail.gmail.com>
+
+Hello everybody,
+Can some one share his experience of using NVME Intel P3600 as a MDS with
+ldiskfs?
+We have two of them, is it better to use them with lvm mirror or mdraid?
+We tested with zfs mirror but somehow it is not performing as fast as we
+expected.
+
+Thanks,
+Arman.
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20170606/ee5c9128/attachment.htm>
+
+From Faye.Gibbins at cirrus.com  Tue Jun  6 04:41:28 2017
+From: Faye.Gibbins at cirrus.com (Gibbins, Faye)
+Date: Tue, 6 Jun 2017 11:41:28 +0000
+Subject: [lustre-discuss] Lustre Manual Bug Report: 25.2.2. Enabling and
+	Tuning Root Squash
+Message-ID: <4c8cb686-79e0-44e8-8829-54ce841a54d3@EX13.ad.cirrus.com>
+
+Hi,
+
+I think I've found a bug in the manual: https://build.hpdd.intel.com/job/lustre-manual/lastSuccessfulBuild/artifact/lustre_manual.xhtml#dbdoclet.50438221_48757 I've included it below in case this is the correct place to report it. If not please let me know and I'll submit it elsewhere.
+
+In section 25.2.2. Enabling and Tuning Root Squash, the bit that says:
+
+Snip---
+Root squash parameters can also be changed with the lctl conf_param command. For example:
+
+mgs# lctl conf_param testfs.mdt.root_squash="1000:101"
+mgs# lctl conf_param testfs.mdt.nosquash_nids="*@tcp"
+Snip---
+
+Should be IMHO:
+
+Snip---
+Root squash parameters can also be changed with the lctl conf_param command. For example:
+
+mgs# lctl conf_param mdt.testfs-MDT0000.root_squash="1000:101"
+mgs# lctl conf_param mdt.testfs-MDT0000.nosquash_nids="*@tcp"
+Snip---
+
+Here is an example of me using my version compared to the documentation version using Lustre 2.8 on RHEL 7:
+
+Snip---
+0 edi-vf-1-5:audiodb-MDT0000# lctl get_param mdt.audiodb-MDT0000.root_squash
+mdt.audiodb-MDT0000.root_squash=0:0
+0 edi-vf-1-5:audiodb-MDT0000# lctl set_param mdt.audiodb-MDT0000.root_squash="0:1"
+mdt.audiodb-MDT0000.root_squash=0:1
+0 edi-vf-1-5:audiodb-MDT0000# lctl get_param mdt.audiodb-MDT0000.root_squash
+mdt.audiodb-MDT0000.root_squash=0:1
+0 edi-vf-1-5:audiodb-MDT0000# lctl set_param mdt.audiodb-MDT0000.root_squash="0:0"
+mdt.audiodb-MDT0000.root_squash=0:0
+# Using the documented version.
+0 edi-vf-1-5:audiodb-MDT0000# lctl set_param audiodb.mdt.root_squash="0:1"
+error: set_param: param_path 'audiodb/mdt/root_squash': No such file or directory
+0 edi-vf-1-5:audiodb-MDT0000#
+Snip---
+
+Yours
+Faye Gibbins
+Snr SysAdmin, Unix Lead Architect
+Software Systems and Cloud Services
+Cirrus Logic | cirrus.com<http://www.cirrus.com/>  | +44 (0) 131 272 7398
+
+[cid:image002.png at 01D2CF24.9A35B8F0]
+
+This message and any attachments may contain privileged and confidential information that is intended solely for the person(s) to whom it is addressed. If you are not an intended recipient you must not: read; copy; distribute; discuss; take any action in or make any reliance upon the contents of this message; nor open or read any attachment. If you have received this message in error, please notify us as soon as possible on the following telephone number and destroy this message including any attachments. Thank you. Cirrus Logic International (UK) Ltd and Cirrus Logic International Semiconductor Ltd are companies registered in Scotland, with registered numbers SC089839 and SC495735 respectively. Our registered office is at 7B Nightingale Way, Quartermile, Edinburgh, EH3 9EG, UK. Tel: +44 (0)131 272 7000. cirrus.com
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20170606/3958c36b/attachment-0001.htm>
+-------------- next part --------------
+A non-text attachment was scrubbed...
+Name: image001.png
+Type: image/png
+Size: 18668 bytes
+Desc: image001.png
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20170606/3958c36b/attachment-0001.png>
+
+From peter.a.jones at intel.com  Tue Jun  6 05:44:13 2017
+From: peter.a.jones at intel.com (Jones, Peter A)
+Date: Tue, 6 Jun 2017 12:44:13 +0000
+Subject: [lustre-discuss] Lustre Manual Bug Report: 25.2.2. Enabling and
+ Tuning Root Squash
+In-Reply-To: <4c8cb686-79e0-44e8-8829-54ce841a54d3@EX13.ad.cirrus.com>
+References: <4c8cb686-79e0-44e8-8829-54ce841a54d3@EX13.ad.cirrus.com>
+Message-ID: <9CB57338-FFBB-4047-B6BA-8A2F28883352@intel.com>
+
+Thanks Faye. The correct place to report suspected documentation bugs is to open a ticket in the documentation project in JIRA - https://jira.hpdd.intel.com/projects/LUDOC
+
+
+On 6/6/17, 4:41 AM, "lustre-discuss on behalf of Gibbins, Faye" <lustre-discuss-bounces at lists.lustre.org<mailto:lustre-discuss-bounces at lists.lustre.org> on behalf of Faye.Gibbins at cirrus.com<mailto:Faye.Gibbins at cirrus.com>> wrote:
+
+Hi,
+
+I think I?ve found a bug in the manual: https://build.hpdd.intel.com/job/lustre-manual/lastSuccessfulBuild/artifact/lustre_manual.xhtml#dbdoclet.50438221_48757 I?ve included it below in case this is the correct place to report it. If not please let me know and I?ll submit it elsewhere.
+
+In section 25.2.2. Enabling and Tuning Root Squash, the bit that says:
+
+Snip---
+Root squash parameters can also be changed with the lctl conf_param command. For example:
+
+mgs# lctl conf_param testfs.mdt.root_squash="1000:101"
+mgs# lctl conf_param testfs.mdt.nosquash_nids="*@tcp"
+Snip---
+
+Should be IMHO:
+
+Snip---
+Root squash parameters can also be changed with the lctl conf_param command. For example:
+
+mgs# lctl conf_param mdt.testfs-MDT0000.root_squash="1000:101"
+mgs# lctl conf_param mdt.testfs-MDT0000.nosquash_nids="*@tcp"
+Snip---
+
+Here is an example of me using my version compared to the documentation version using Lustre 2.8 on RHEL 7:
+
+Snip---
+0 edi-vf-1-5:audiodb-MDT0000# lctl get_param mdt.audiodb-MDT0000.root_squash
+mdt.audiodb-MDT0000.root_squash=0:0
+0 edi-vf-1-5:audiodb-MDT0000# lctl set_param mdt.audiodb-MDT0000.root_squash="0:1"
+mdt.audiodb-MDT0000.root_squash=0:1
+0 edi-vf-1-5:audiodb-MDT0000# lctl get_param mdt.audiodb-MDT0000.root_squash
+mdt.audiodb-MDT0000.root_squash=0:1
+0 edi-vf-1-5:audiodb-MDT0000# lctl set_param mdt.audiodb-MDT0000.root_squash="0:0"
+mdt.audiodb-MDT0000.root_squash=0:0
+# Using the documented version.
+0 edi-vf-1-5:audiodb-MDT0000# lctl set_param audiodb.mdt.root_squash="0:1"
+error: set_param: param_path 'audiodb/mdt/root_squash': No such file or directory
+0 edi-vf-1-5:audiodb-MDT0000#
+Snip---
+
+Yours
+Faye Gibbins
+Snr SysAdmin, Unix Lead Architect
+Software Systems and Cloud Services
+Cirrus Logic | cirrus.com<http://www.cirrus.com/>  | +44 (0) 131 272 7398
+
+[cid:image002.png at 01D2CF24.9A35B8F0]
+
+This message and any attachments may contain privileged and confidential information that is intended solely for the person(s) to whom it is addressed. If you are not an intended recipient you must not: read; copy; distribute; discuss; take any action in or make any reliance upon the contents of this message; nor open or read any attachment. If you have received this message in error, please notify us as soon as possible on the following telephone number and destroy this message including any attachments. Thank you. Cirrus Logic International (UK) Ltd and Cirrus Logic International Semiconductor Ltd are companies registered in Scotland, with registered numbers SC089839 and SC495735 respectively. Our registered office is at 7B Nightingale Way, Quartermile, Edinburgh, EH3 9EG, UK. Tel: +44 (0)131 272 7000. cirrus.com
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20170606/e1669b61/attachment-0001.htm>
+-------------- next part --------------
+A non-text attachment was scrubbed...
+Name: image001.png
+Type: image/png
+Size: 18668 bytes
+Desc: image001.png
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20170606/e1669b61/attachment-0001.png>
+
+From Faye.Gibbins at cirrus.com  Tue Jun  6 06:00:25 2017
+From: Faye.Gibbins at cirrus.com (Gibbins, Faye)
+Date: Tue, 6 Jun 2017 13:00:25 +0000
+Subject: [lustre-discuss] Lustre Manual Bug Report: 25.2.2. Enabling and
+ Tuning Root Squash
+In-Reply-To: <9CB57338-FFBB-4047-B6BA-8A2F28883352@intel.com>
+References: <4c8cb686-79e0-44e8-8829-54ce841a54d3@EX13.ad.cirrus.com>
+	<9CB57338-FFBB-4047-B6BA-8A2F28883352@intel.com>
+Message-ID: <3FBC3B5743817B4597B6399BCE6D695D08E0D121@EX11.ad.cirrus.com>
+
+Thanks Peter, LUDOC-377 created ?
+
+From: Jones, Peter A [mailto:peter.a.jones at intel.com]
+Sent: 06 June 2017 13:44
+To: Gibbins, Faye <Faye.Gibbins at cirrus.com>; lustre-discuss at lists.lustre.org
+Subject: Re: [lustre-discuss] Lustre Manual Bug Report: 25.2.2. Enabling and Tuning Root Squash
+
+Thanks Faye. The correct place to report suspected documentation bugs is to open a ticket in the documentation project in JIRA - https://jira.hpdd.intel.com/projects/LUDOC<https://urldefense.proofpoint.com/v2/url?u=https-3A__jira.hpdd.intel.com_projects_LUDOC&d=DwMGaQ&c=O3LcjD-V2Iepl5V0N1424A&r=zYKOt5zq8DxD76qBilrgQKxtITGPmVmWHHVOs6JpkMQ&m=-sHh3KfPPVITv7WecLSwCEi3EZkfc_UwfqyDylRSkfM&s=Gi_VfHfaTLjmA_rRJ_4_AHT5bIplGWbd3iHETfu6eAA&e=>
+
+
+On 6/6/17, 4:41 AM, "lustre-discuss on behalf of Gibbins, Faye" <lustre-discuss-bounces at lists.lustre.org<mailto:lustre-discuss-bounces at lists.lustre.org> on behalf of Faye.Gibbins at cirrus.com<mailto:Faye.Gibbins at cirrus.com>> wrote:
+
+Hi,
+
+I think I?ve found a bug in the manual: https://build.hpdd.intel.com/job/lustre-manual/lastSuccessfulBuild/artifact/lustre_manual.xhtml#dbdoclet.50438221_48757<https://urldefense.proofpoint.com/v2/url?u=https-3A__build.hpdd.intel.com_job_lustre-2Dmanual_lastSuccessfulBuild_artifact_lustre-5Fmanual.xhtml-23dbdoclet.50438221-5F48757&d=DwMGaQ&c=O3LcjD-V2Iepl5V0N1424A&r=zYKOt5zq8DxD76qBilrgQKxtITGPmVmWHHVOs6JpkMQ&m=-sHh3KfPPVITv7WecLSwCEi3EZkfc_UwfqyDylRSkfM&s=qj0SfRLif84KuGagygaD4ffysqBumSG7p9FvR2PiXek&e=> I?ve included it below in case this is the correct place to report it. If not please let me know and I?ll submit it elsewhere.
+
+In section 25.2.2. Enabling and Tuning Root Squash, the bit that says:
+
+Snip---
+Root squash parameters can also be changed with the lctl conf_param command. For example:
+
+mgs# lctl conf_param testfs.mdt.root_squash="1000:101"
+mgs# lctl conf_param testfs.mdt.nosquash_nids="*@tcp"
+Snip---
+
+Should be IMHO:
+
+Snip---
+Root squash parameters can also be changed with the lctl conf_param command. For example:
+
+mgs# lctl conf_param mdt.testfs-MDT0000.root_squash="1000:101"
+mgs# lctl conf_param mdt.testfs-MDT0000.nosquash_nids="*@tcp"
+Snip---
+
+Here is an example of me using my version compared to the documentation version using Lustre 2.8 on RHEL 7:
+
+Snip---
+0 edi-vf-1-5:audiodb-MDT0000# lctl get_param mdt.audiodb-MDT0000.root_squash
+mdt.audiodb-MDT0000.root_squash=0:0
+0 edi-vf-1-5:audiodb-MDT0000# lctl set_param mdt.audiodb-MDT0000.root_squash="0:1"
+mdt.audiodb-MDT0000.root_squash=0:1
+0 edi-vf-1-5:audiodb-MDT0000# lctl get_param mdt.audiodb-MDT0000.root_squash
+mdt.audiodb-MDT0000.root_squash=0:1
+0 edi-vf-1-5:audiodb-MDT0000# lctl set_param mdt.audiodb-MDT0000.root_squash="0:0"
+mdt.audiodb-MDT0000.root_squash=0:0
+# Using the documented version.
+0 edi-vf-1-5:audiodb-MDT0000# lctl set_param audiodb.mdt.root_squash="0:1"
+error: set_param: param_path 'audiodb/mdt/root_squash': No such file or directory
+0 edi-vf-1-5:audiodb-MDT0000#
+Snip---
+
+Yours
+Faye Gibbins
+Snr SysAdmin, Unix Lead Architect
+Software Systems and Cloud Services
+Cirrus Logic | cirrus.com<http://www.cirrus.com/>  | +44 (0) 131 272 7398
+
+[cid:image002.png at 01D2CF24.9A35B8F0]
+
+This message and any attachments may contain privileged and confidential information that is intended solely for the person(s) to whom it is addressed. If you are not an intended recipient you must not: read; copy; distribute; discuss; take any action in or make any reliance upon the contents of this message; nor open or read any attachment. If you have received this message in error, please notify us as soon as possible on the following telephone number and destroy this message including any attachments. Thank you. Cirrus Logic International (UK) Ltd and Cirrus Logic International Semiconductor Ltd are companies registered in Scotland, with registered numbers SC089839 and SC495735 respectively. Our registered office is at 7B Nightingale Way, Quartermile, Edinburgh, EH3 9EG, UK. Tel: +44 (0)131 272 7000. cirrus.com
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20170606/e762a599/attachment-0001.htm>
+-------------- next part --------------
+A non-text attachment was scrubbed...
+Name: image001.png
+Type: image/png
+Size: 18668 bytes
+Desc: image001.png
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20170606/e762a599/attachment-0001.png>
+
+From rjh+lustre at cita.utoronto.ca  Tue Jun  6 07:31:03 2017
+From: rjh+lustre at cita.utoronto.ca (Robin Humble)
+Date: Tue, 6 Jun 2017 10:31:03 -0400
+Subject: [lustre-discuss] seclabel
+In-Reply-To: <9DDFE471-9D1D-4A1F-8620-1BA2ADF9AB5E@intel.com>
+References: <20170302125500.GA30049@trinity.cita.utoronto.ca>
+	<4258B707-6890-49C6-A5BA-40D4260BDCC7@intel.com>
+	<CA+K1OzSPKtYPNXOEe=uVRPXGQ4kU1K_-6-OyXKa6Rv8Q-5SHBQ@mail.gmail.com>
+	<11B5C376-6CE9-4FF8-983F-CAB4B80A781F@ddn.com>
+	<20170516163848.GA26598@trinity.cita.utoronto.ca>
+	<20170517141651.GA1064@trinity.cita.utoronto.ca>
+	<B4673494-40C1-4E5C-AB92-6A146386A86E@ddn.com>
+	<20170519064720.GA27583@trinity.cita.utoronto.ca>
+	<9DDFE471-9D1D-4A1F-8620-1BA2ADF9AB5E@intel.com>
+Message-ID: <20170606143103.GA6262@trinity.cita.utoronto.ca>
+
+On Tue, May 23, 2017 at 08:08:54PM +0000, Dilger, Andreas wrote:
+>On May 19, 2017, at 08:47, Robin Humble <rjh+lustre at cita.utoronto.ca> wrote:
+>> On Wed, May 17, 2017 at 02:37:31PM +0000, Sebastien Buisson wrote:
+>>> Le 17 mai 2017 ? 16:16, Robin Humble <rjh+lustre at cita.utoronto.ca> a ?crit :
+>>>> I took a gander at the source and noticed that llite/xattr.c
+>>>> deliberately filters out 'security.capability' and returns 0/-ENODATA
+>>>> for setcap/getcap, which is indeed what strace sees. so setcap/getcap
+>>>> is never even sent to the MDS.
+>>>> 
+>>>> if I remove that filter (see patch on lustre-devel) then setcap/getcap
+>>>> works ->
+>> ...
+>>>> 'b15587' is listed as the reason for the filtering.
+>>>> I don't know what that refers to.
+>>>> is it still relevant?
+>>> b15587 refers to the old Lustre Bugzilla tracking tool:
+>>> https://projectlava.xyratex.com/show_bug.cgi?id=15587
+>>> 
+>>> Reading the discussion in the ticket, supporting xattr at the time of Lustre 1.8 and 2.0 was causing issues on MDS side in some situations. So it was decided to discard security.capability xattr on Lustre client side. I think Andreas might have some insight, as he apparently participated in b15587.
+>> 
+>> my word that's a long time ago...
+>> I don't see much in the way of jira tickets about getxattr issues on
+>> MDS in recent times, and they're much more heavily used these days, so
+>> I hope that particular problem has long since been fixed.
+>> 
+>> should I open a jira ticket to track re-enabling of security.capabilities?
+
+LU-9562
+thanks for everyone's help!
+
+>I don't recall the details of b=15587 off the top of my head, but the high-level issue is
+>that the security labels added a significant performance overhead, since they were retrieved
+>on every file access, but not cached on the client, even if most systems never used them.
+>
+>Seagate implemented the client-side xattr cache for Lustre 2.5, so this should work a lot
+>better these days.  I'm not 100% positive if we also cache negative xattr lookups or not,
+>so this would need some testing/tracing to see if it generates a large number of RPCs.
+
+fair enough.
+
+cheers,
+robin
+
+From hornc at cray.com  Tue Jun  6 10:17:48 2017
+From: hornc at cray.com (Chris Horn)
+Date: Tue, 6 Jun 2017 17:17:48 +0000
+Subject: [lustre-discuss] Lustre Manual Bug Report: 25.2.2. Enabling and
+ Tuning Root Squash
+In-Reply-To: <4c8cb686-79e0-44e8-8829-54ce841a54d3@EX13.ad.cirrus.com>
+References: <4c8cb686-79e0-44e8-8829-54ce841a54d3@EX13.ad.cirrus.com>
+Message-ID: <1075E5F8-99E0-4487-B9C4-8168311FAB4A@cray.com>
+
+The LUDOC project in Intel?s Jira is the correct place to report these issues: https://wiki.hpdd.intel.com/display/PUB/How+to+file+a+LUDOC+bug
+
+These are the instructions for submitting fixes to the Lustre Manual if you?re so inclined: https://wiki.hpdd.intel.com/display/PUB/Making+changes+to+the+Lustre+Manual+source
+
+Chris Horn
+
+From: lustre-discuss <lustre-discuss-bounces at lists.lustre.org> on behalf of "Gibbins, Faye" <Faye.Gibbins at cirrus.com>
+Date: Tuesday, June 6, 2017 at 6:41 AM
+To: "lustre-discuss at lists.lustre.org" <lustre-discuss at lists.lustre.org>
+Subject: [lustre-discuss] Lustre Manual Bug Report: 25.2.2. Enabling and Tuning Root Squash
+
+Hi,
+
+I think I?ve found a bug in the manual: https://build.hpdd.intel.com/job/lustre-manual/lastSuccessfulBuild/artifact/lustre_manual.xhtml#dbdoclet.50438221_48757 I?ve included it below in case this is the correct place to report it. If not please let me know and I?ll submit it elsewhere.
+
+In section 25.2.2. Enabling and Tuning Root Squash, the bit that says:
+
+Snip---
+Root squash parameters can also be changed with the lctl conf_param command. For example:
+
+mgs# lctl conf_param testfs.mdt.root_squash="1000:101"
+mgs# lctl conf_param testfs.mdt.nosquash_nids="*@tcp"
+Snip---
+
+Should be IMHO:
+
+Snip---
+Root squash parameters can also be changed with the lctl conf_param command. For example:
+
+mgs# lctl conf_param mdt.testfs-MDT0000.root_squash="1000:101"
+mgs# lctl conf_param mdt.testfs-MDT0000.nosquash_nids="*@tcp"
+Snip---
+
+Here is an example of me using my version compared to the documentation version using Lustre 2.8 on RHEL 7:
+
+Snip---
+0 edi-vf-1-5:audiodb-MDT0000# lctl get_param mdt.audiodb-MDT0000.root_squash
+mdt.audiodb-MDT0000.root_squash=0:0
+0 edi-vf-1-5:audiodb-MDT0000# lctl set_param mdt.audiodb-MDT0000.root_squash="0:1"
+mdt.audiodb-MDT0000.root_squash=0:1
+0 edi-vf-1-5:audiodb-MDT0000# lctl get_param mdt.audiodb-MDT0000.root_squash
+mdt.audiodb-MDT0000.root_squash=0:1
+0 edi-vf-1-5:audiodb-MDT0000# lctl set_param mdt.audiodb-MDT0000.root_squash="0:0"
+mdt.audiodb-MDT0000.root_squash=0:0
+# Using the documented version.
+0 edi-vf-1-5:audiodb-MDT0000# lctl set_param audiodb.mdt.root_squash="0:1"
+error: set_param: param_path 'audiodb/mdt/root_squash': No such file or directory
+0 edi-vf-1-5:audiodb-MDT0000#
+Snip---
+
+Yours
+Faye Gibbins
+Snr SysAdmin, Unix Lead Architect
+Software Systems and Cloud Services
+Cirrus Logic | cirrus.com<http://www.cirrus.com/>  | +44 (0) 131 272 7398
+
+[id:image002.png at 01D2CF24.9A35B8F0]
+
+This message and any attachments may contain privileged and confidential information that is intended solely for the person(s) to whom it is addressed. If you are not an intended recipient you must not: read; copy; distribute; discuss; take any action in or make any reliance upon the contents of this message; nor open or read any attachment. If you have received this message in error, please notify us as soon as possible on the following telephone number and destroy this message including any attachments. Thank you. Cirrus Logic International (UK) Ltd and Cirrus Logic International Semiconductor Ltd are companies registered in Scotland, with registered numbers SC089839 and SC495735 respectively. Our registered office is at 7B Nightingale Way, Quartermile, Edinburgh, EH3 9EG, UK. Tel: +44 (0)131 272 7000. cirrus.com
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20170606/6d78e1b2/attachment-0001.htm>
+-------------- next part --------------
+A non-text attachment was scrubbed...
+Name: image001.png
+Type: image/png
+Size: 18669 bytes
+Desc: image001.png
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20170606/6d78e1b2/attachment-0001.png>
+
+From andreas.dilger at intel.com  Tue Jun  6 16:55:12 2017
+From: andreas.dilger at intel.com (Dilger, Andreas)
+Date: Tue, 6 Jun 2017 23:55:12 +0000
+Subject: [lustre-discuss] Lustre Manual Bug Report: 25.2.2. Enabling
+	and	Tuning Root Squash
+In-Reply-To: <4c8cb686-79e0-44e8-8829-54ce841a54d3@EX13.ad.cirrus.com>
+References: <4c8cb686-79e0-44e8-8829-54ce841a54d3@EX13.ad.cirrus.com>
+Message-ID: <E4120F86-99CC-4D4E-9A11-6CA37CE8E0D3@intel.com>
+
+One thing that is important to note here is that the syntax of "conf_param" is not the same as "set_param" and "get_param".  The conf_param syntax is what sets the parameters permanently in the configuration log, while {get,set}_param run on the local node only.
+
+There is a newer "lctl set_param -P" interface that was added, to allow permanently setting parameters using the (IMHO more familiar) "set_param" syntax, but it has some problems that currently prevent it from being used more widely.  There is a Jira ticket open for this that has been getting some attention recently, and hopefully the "set_param -P" functionality will be able to replace conf_param completely in the future.
+
+Cheers, Andreas
+
+On Jun 6, 2017, at 05:41, Gibbins, Faye <Faye.Gibbins at cirrus.com> wrote:
+> 
+> Hi,
+>  
+> I think I?ve found a bug in the manual: https://build.hpdd.intel.com/job/lustre-manual/lastSuccessfulBuild/artifact/lustre_manual.xhtml#dbdoclet.50438221_48757 I?ve included it below in case this is the correct place to report it. If not please let me know and I?ll submit it elsewhere.
+>  
+> In section 25.2.2. Enabling and Tuning Root Squash, the bit that says:
+>  
+> Snip---
+> Root squash parameters can also be changed with the lctl conf_param command. For example:
+>  
+> mgs# lctl conf_param testfs.mdt.root_squash="1000:101"
+> mgs# lctl conf_param testfs.mdt.nosquash_nids="*@tcp"
+> Snip---
+>  
+> Should be IMHO:
+>  
+> Snip---
+> Root squash parameters can also be changed with the lctl conf_param command. For example:
+>  
+> mgs# lctl conf_param mdt.testfs-MDT0000.root_squash="1000:101"
+> mgs# lctl conf_param mdt.testfs-MDT0000.nosquash_nids="*@tcp"
+> Snip---
+>  
+> Here is an example of me using my version compared to the documentation version using Lustre 2.8 on RHEL 7:
+>  
+> Snip---
+> 0 edi-vf-1-5:audiodb-MDT0000# lctl get_param mdt.audiodb-MDT0000.root_squash
+> mdt.audiodb-MDT0000.root_squash=0:0
+> 0 edi-vf-1-5:audiodb-MDT0000# lctl set_param mdt.audiodb-MDT0000.root_squash="0:1"
+> mdt.audiodb-MDT0000.root_squash=0:1
+> 0 edi-vf-1-5:audiodb-MDT0000# lctl get_param mdt.audiodb-MDT0000.root_squash
+> mdt.audiodb-MDT0000.root_squash=0:1
+> 0 edi-vf-1-5:audiodb-MDT0000# lctl set_param mdt.audiodb-MDT0000.root_squash="0:0"
+> mdt.audiodb-MDT0000.root_squash=0:0
+> # Using the documented version.
+> 0 edi-vf-1-5:audiodb-MDT0000# lctl set_param audiodb.mdt.root_squash="0:1"
+> error: set_param: param_path 'audiodb/mdt/root_squash': No such file or directory
+> 0 edi-vf-1-5:audiodb-MDT0000#
+> Snip---
+>  
+> Yours
+> Faye Gibbins
+> Snr SysAdmin, Unix Lead Architect
+> Software Systems and Cloud Services
+> Cirrus Logic | cirrus.com  | +44 (0) 131 272 7398
+>  
+> <image001.png>
+>  
+> This message and any attachments may contain privileged and confidential information that is intended solely for the person(s) to whom it is addressed. If you are not an intended recipient you must not: read; copy; distribute; discuss; take any action in or make any reliance upon the contents of this message; nor open or read any attachment. If you have received this message in error, please notify us as soon as possible on the following telephone number and destroy this message including any attachments. Thank you. Cirrus Logic International (UK) Ltd and Cirrus Logic International Semiconductor Ltd are companies registered in Scotland, with registered numbers SC089839 and SC495735 respectively. Our registered office is at 7B Nightingale Way, Quartermile, Edinburgh, EH3 9EG, UK. Tel: +44 (0)131 272 7000. cirrus.com _______________________________________________
+> lustre-discuss mailing list
+> lustre-discuss at lists.lustre.org
+> http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org
+
+Cheers, Andreas
+--
+Andreas Dilger
+Lustre Principal Architect
+Intel Corporation
+
+
+
+
+
+
+
+
+From happe at nbi.ku.dk  Thu Jun  8 01:11:45 2017
+From: happe at nbi.ku.dk (Hans Henrik Happe)
+Date: Thu, 8 Jun 2017 10:11:45 +0200
+Subject: [lustre-discuss] Lustre/ZFS space accounting
+Message-ID: <654d846e-c2a8-049b-e225-0144ea889f89@nbi.ku.dk>
+
+Hi,
+
+We are on Lustre 2.8 with ZFS.
+
+Our users have seen some unexplainable errors:
+
+062: forrtl: Input/output error
+
+Or
+
+062: forrtl: severe (28): CLOSE error, unit 10, file ?Unknown"
+
+
+From attached 'lfs df -h' you can see that the OSTs are unbalanced and
+OST0001 but far from being full. We are using default allocation setting
+so we should be in weighted mode.
+
+I've tried to find an LU matching this but no luck. Also, log on
+affected nodes and on servers are empty.
+
+Any suggestions about how to debug this?
+
+Cheers,
+Hans Henrik
+-------------- next part --------------
+UUID                       bytes        Used   Available Use% Mounted on
+astro-MDT0000_UUID        691.6G      163.0G      528.6G  24% /lustre/astro[MDT:0]
+astro-OST0000_UUID        157.2T      105.0T       52.3T  67% /lustre/astro[OST:0]
+astro-OST0001_UUID        158.5T      149.2T        9.3T  94% /lustre/astro[OST:1]
+astro-OST0002_UUID        158.6T      144.8T       13.9T  91% /lustre/astro[OST:2]
+astro-OST0003_UUID        157.3T      105.4T       51.9T  67% /lustre/astro[OST:3]
+
+filesystem summary:       631.6T      504.3T      127.3T  80% /lustre/astro
+-------------- next part --------------
+A non-text attachment was scrubbed...
+Name: happe.vcf
+Type: text/x-vcard
+Size: 224 bytes
+Desc: not available
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20170608/17fac641/attachment.vcf>
+-------------- next part --------------
+A non-text attachment was scrubbed...
+Name: signature.asc
+Type: application/pgp-signature
+Size: 198 bytes
+Desc: OpenPGP digital signature
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20170608/17fac641/attachment.pgp>
+
+From spitzcor at cray.com  Thu Jun  8 06:05:50 2017
+From: spitzcor at cray.com (Cory Spitz)
+Date: Thu, 8 Jun 2017 13:05:50 +0000
+Subject: [lustre-discuss] client complains about server version
+In-Reply-To: <CY4PR11MB1751AC01344008B39BDD8D6BCBE90@CY4PR11MB1751.namprd11.prod.outlook.com>
+References: <9c00e6e2-430b-b1bd-a9b9-1fbbc05edc6f@cnaf.infn.it>
+	<CY4PR11MB1751711B1400524D98800D4ECBE90@CY4PR11MB1751.namprd11.prod.outlook.com>
+	<be39b340-357f-7679-a8bd-f80212f06f87@cnaf.infn.it>
+	<CY4PR11MB1751AC01344008B39BDD8D6BCBE90@CY4PR11MB1751.namprd11.prod.outlook.com>
+Message-ID: <4F001F3D-E2CA-415C-AF5F-6269377B0539@cray.com>
+
+Just a minor correction on this old mail?.
+Both 2.5 and 2.4 were considered long-term-stable.
+
+-Cory
+
+p.s.
+[At least 2.4.3 was the last public 2.4.x release according to the Changelog at https://wiki.hpdd.intel.com/display/PUB/Changelog+2.4.]
+
+
+
+--
+
+
+From: lustre-discuss <lustre-discuss-bounces at lists.lustre.org> on behalf of Patrick Farrell <paf at cray.com>
+Date: Saturday, May 6, 2017 at 10:09 PM
+To: Riccardo Veraldi <Riccardo.Veraldi at cnaf.infn.it>, "lustre-discuss at lists.lustre.org" <lustre-discuss at lists.lustre.org>
+Subject: Re: [lustre-discuss] client complains about server version
+
+
+Yes, I believe so.  Andreas or someone else from Intel may be able to confirm the most recent client that got interoperability testing with the 2.4 server from Intel.  It may have been only 2.5, 2.4 was not a maintenance release.  (2.5 was, and so got testing with at least 2.7 clients, maybe 2.8 as well?)
+
+
+
+- Patrick
+
+________________________________
+From: Riccardo Veraldi <Riccardo.Veraldi at cnaf.infn.it>
+Sent: Saturday, May 6, 2017 10:03:17 PM
+To: Patrick Farrell; lustre-discuss at lists.lustre.org
+Subject: Re: [lustre-discuss] client complains about server version
+
+thanks for the hints.
+Is Lustre 2.8.0 client vs server 2.4.1 untested as well ?
+
+On 5/6/17 7:36 PM, Patrick Farrell wrote:
+
+Riccardo,
+
+You may be unable to free space on the OSTs when deleting files.  I can't remember if 2.4 has the required support for delete-from-MDS (not the real feature name, sorry).  I think it does, but I'm not sure.  It's easy to check - just delete a large file and see if the space shows up as free.
+
+Other than that, your main concern is that no one has tested this or fixed any bugs that came up. I'm not aware of anything that should be broken, again except possibly for that thing with delete I mentioned, and obviously, lots of client features will not work. But they should be disabled automatically because the server doesn't support them.
+
+So you might be OK, but there's a very real chance those clients may crash the servers or the other way around, as the combination is not supported and has not been tested.
+
+I strongly suggest you upgrade your servers!  There are lots of handy new features, and you would avoid this problem entirely.
+
+- Patrick
+________________________________
+From: lustre-discuss <lustre-discuss-bounces at lists.lustre.org><mailto:lustre-discuss-bounces at lists.lustre.org> on behalf of Riccardo Veraldi <Riccardo.Veraldi at cnaf.infn.it><mailto:Riccardo.Veraldi at cnaf.infn.it>
+Sent: Saturday, May 6, 2017 5:25:40 PM
+To: lustre-discuss at lists.lustre.org<mailto:lustre-discuss at lists.lustre.org>
+Subject: [lustre-discuss] client complains about server version
+
+Hello,
+
+I moved many of my lustre clients to 2.9.0. Anyway the server version is
+pretty old (2.4)
+
+Do I have to worry ?
+
+Things seems working though
+
+May  4 14:37:48 psana1620 kernel: [   43.145108] Lustre: Server MGS
+version (2.4.1.0) is much older than client. Consider upgrading server
+(2.9.0)
+
+
+thank you
+
+Ricl
+
+
+_______________________________________________
+lustre-discuss mailing list
+lustre-discuss at lists.lustre.org<mailto:lustre-discuss at lists.lustre.org>
+http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org
+
+
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20170608/6cbe96ce/attachment.htm>
+
+From langtonn at eclipseholdings.co.za  Thu Jun  8 07:49:45 2017
+From: langtonn at eclipseholdings.co.za (Langton)
+Date: Thu, 08 Jun 2017 16:49:45 +0200
+Subject: [lustre-discuss] RobinHood fail on Lustre IEEL v2.5
+Message-ID: <59396409.4020809@eclipseholdings.co.za>
+
+I am trying to install Robin Hood to manage a 4PB lustre filesystem.
+The environment is as follows
+IEEL Lustre 2.5
+Robinhood 2.5.5-2
+CentOS release 6.7
+kernel - 2.6.32-573.8.1.el6.x86_64
+4PB Lustre Filesystem
+Robin Hood Host has 2TB RAM and 390GB Disk capacity
+FDR Infiniband fabric network
+A Failover setup on all lustre servers
+
+  After installing robinhood , I have faced a challenge when I kickstart 
+a scan. For some reason the RBH host reboots just a few seconds after 
+issuing the scan command. I have traced the robinhood logs but they give 
+the following:
+
+2017/06/08 16:19:38 [15616/21] FS_Scan | openat failed on 
+23/pci-0000:00:1a.0-usb-0:1.6.1:1.2-event-mouse: Too many levels of 
+symbolic links
+2017/06/08 16:19:38 [15616/21] FS_Scan | openat failed on 
+23/platform-pcspkr-event-spkr: Too many levels of symbolic links
+2017/06/08 16:19:38 [15616/21] FS_Scan | openat failed on 
+23/pci-0000:00:1a.0-usb-0:1.6.1:1.2-mouse: Too many levels of symbolic links
+2017/06/08 16:19:38 [15616/21] FS_Scan | openat failed on 
+23/pci-0000:00:1a.0-usb-0:1.2:1.0-event-mouse: Too many levels of 
+symbolic links
+2017/06/08 16:19:38 [15616/21] FS_Scan | openat failed on 
+23/pci-0000:00:1a.0-usb-0:1.6.1:1.1-mouse: Too many levels of symbolic links
+2017/06/08 16:19:38 [15616/21] FS_Scan | openat failed on 
+23/pci-0000:00:1a.0-usb-0:1.5.1:1.1-event: Too many levels of symbolic links
+
+As a test i started the robinhood-lhsm service and it started fine 
+without the initial scan.
+The command - rbh-lhsm-report --fs-info gives you some info but not much 
+detailed.
+The command - rbh-lhsm-report -a says file storage has never been 
+checked which means a scan is needed.
+Currently the filesystem is in production. Can this the main reason why 
+it crashes.
+The filesystem is sitting at 2.6PB of used capacity.
+
+Regards
+
+Langton
+
+From hahn at mcmaster.ca  Thu Jun  8 08:20:26 2017
+From: hahn at mcmaster.ca (Mark Hahn)
+Date: Thu, 8 Jun 2017 11:20:26 -0400 (EDT)
+Subject: [lustre-discuss] RobinHood fail on Lustre IEEL v2.5
+In-Reply-To: <59396409.4020809@eclipseholdings.co.za>
+References: <59396409.4020809@eclipseholdings.co.za>
+Message-ID: <alpine.LFD.2.02.1706081117100.21521@coffee.psychology.mcmaster.ca>
+
+> 2017/06/08 16:19:38 [15616/21] FS_Scan | openat failed on 
+> 23/pci-0000:00:1a.0-usb-0:1.6.1:1.2-event-mouse: Too many levels of symbolic 
+> links
+
+RBH has strayed into /sys, which is loaded with traps like this...
+
+> Currently the filesystem is in production. Can this the main reason why it 
+> crashes.
+
+no, I think RBH is being told to scan from / (perhaps by default)
+rather than being directed to the Lustre mount point.
+
+regards, mark hahn.
+
+From cfaber at gmail.com  Thu Jun  8 08:59:08 2017
+From: cfaber at gmail.com (Colin Faber)
+Date: Thu, 8 Jun 2017 09:59:08 -0600
+Subject: [lustre-discuss] RobinHood fail on Lustre IEEL v2.5
+In-Reply-To: <59396409.4020809@eclipseholdings.co.za>
+References: <59396409.4020809@eclipseholdings.co.za>
+Message-ID: <CAJcXmB=nkKGuiE3ufVtemchDH+hMF73mXfkyd2QOg03t=jehXA@mail.gmail.com>
+
+Sounds like an issue with the client. Have you captured console output to
+determine what's failing?
+
+On Jun 8, 2017 8:49 AM, "Langton" <langtonn at eclipseholdings.co.za> wrote:
+
+> I am trying to install Robin Hood to manage a 4PB lustre filesystem.
+> The environment is as follows
+> IEEL Lustre 2.5
+> Robinhood 2.5.5-2
+> CentOS release 6.7
+> kernel - 2.6.32-573.8.1.el6.x86_64
+> 4PB Lustre Filesystem
+> Robin Hood Host has 2TB RAM and 390GB Disk capacity
+> FDR Infiniband fabric network
+> A Failover setup on all lustre servers
+>
+>  After installing robinhood , I have faced a challenge when I kickstart a
+> scan. For some reason the RBH host reboots just a few seconds after issuing
+> the scan command. I have traced the robinhood logs but they give the
+> following:
+>
+> 2017/06/08 16:19:38 [15616/21] FS_Scan | openat failed on
+> 23/pci-0000:00:1a.0-usb-0:1.6.1:1.2-event-mouse: Too many levels of
+> symbolic links
+> 2017/06/08 16:19:38 [15616/21] FS_Scan | openat failed on
+> 23/platform-pcspkr-event-spkr: Too many levels of symbolic links
+> 2017/06/08 16:19:38 [15616/21] FS_Scan | openat failed on
+> 23/pci-0000:00:1a.0-usb-0:1.6.1:1.2-mouse: Too many levels of symbolic
+> links
+> 2017/06/08 16:19:38 [15616/21] FS_Scan | openat failed on
+> 23/pci-0000:00:1a.0-usb-0:1.2:1.0-event-mouse: Too many levels of
+> symbolic links
+> 2017/06/08 16:19:38 [15616/21] FS_Scan | openat failed on
+> 23/pci-0000:00:1a.0-usb-0:1.6.1:1.1-mouse: Too many levels of symbolic
+> links
+> 2017/06/08 16:19:38 [15616/21] FS_Scan | openat failed on
+> 23/pci-0000:00:1a.0-usb-0:1.5.1:1.1-event: Too many levels of symbolic
+> links
+>
+> As a test i started the robinhood-lhsm service and it started fine without
+> the initial scan.
+> The command - rbh-lhsm-report --fs-info gives you some info but not much
+> detailed.
+> The command - rbh-lhsm-report -a says file storage has never been checked
+> which means a scan is needed.
+> Currently the filesystem is in production. Can this the main reason why it
+> crashes.
+> The filesystem is sitting at 2.6PB of used capacity.
+>
+> Regards
+>
+> Langton
+> _______________________________________________
+> lustre-discuss mailing list
+> lustre-discuss at lists.lustre.org
+> http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org
+>
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20170608/a1c0c9d7/attachment.htm>
+
+From t.roth at gsi.de  Thu Jun  8 23:41:12 2017
+From: t.roth at gsi.de (Thomas Roth)
+Date: Fri, 9 Jun 2017 08:41:12 +0200
+Subject: [lustre-discuss] Lustre/ZFS space accounting
+In-Reply-To: <654d846e-c2a8-049b-e225-0144ea889f89@nbi.ku.dk>
+References: <654d846e-c2a8-049b-e225-0144ea889f89@nbi.ku.dk>
+Message-ID: <6673a8cf-7cdb-e5e5-0494-c75b7ff66a96@gsi.de>
+
+Hi,
+
+I don't know about the error messages. But are you sure that the imbalance of the OST filling isn't due to some extremely large files written 
+overnight or so (- with default striping, one file -> one OST). Our users are able to do that, without realizing.
+
+Regards,
+Thomas
+
+On 08.06.2017 10:11, Hans Henrik Happe wrote:
+> Hi,
+> 
+> We are on Lustre 2.8 with ZFS.
+> 
+> Our users have seen some unexplainable errors:
+> 
+> 062: forrtl: Input/output error
+> 
+> Or
+> 
+> 062: forrtl: severe (28): CLOSE error, unit 10, file ?Unknown"
+> 
+> 
+>  From attached 'lfs df -h' you can see that the OSTs are unbalanced and
+> OST0001 but far from being full. We are using default allocation setting
+> so we should be in weighted mode.
+> 
+> I've tried to find an LU matching this but no luck. Also, log on
+> affected nodes and on servers are empty.
+> 
+> Any suggestions about how to debug this?
+> 
+> Cheers,
+> Hans Henrik
+> 
+> 
+> 
+> _______________________________________________
+> lustre-discuss mailing list
+> lustre-discuss at lists.lustre.org
+> http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org
+> 
+
+-- 
+--------------------------------------------------------------------
+Thomas Roth
+Department: HPC
+Location: SB3 1.262
+Phone: +49-6159-71 1453  Fax: +49-6159-71 2986
+
+GSI Helmholtzzentrum f?r Schwerionenforschung GmbH
+Planckstra?e 1
+64291 Darmstadt
+www.gsi.de
+
+Gesellschaft mit beschr?nkter Haftung
+Sitz der Gesellschaft: Darmstadt
+Handelsregister: Amtsgericht Darmstadt, HRB 1528
+
+Gesch?ftsf?hrung: Professor Dr. Paolo Giubellino
+Ursula Weyrich
+J?rg Blaurock
+
+Vorsitzender des Aufsichtsrates: St Dr. Georg Sch?tte
+Stellvertreter: Ministerialdirigent Dr. Rolf Bernhardt
+
+From happe at nbi.ku.dk  Fri Jun  9 00:27:27 2017
+From: happe at nbi.ku.dk (Hans Henrik Happe)
+Date: Fri, 9 Jun 2017 09:27:27 +0200
+Subject: [lustre-discuss] Lustre/ZFS space accounting
+In-Reply-To: <6673a8cf-7cdb-e5e5-0494-c75b7ff66a96@gsi.de>
+References: <654d846e-c2a8-049b-e225-0144ea889f89@nbi.ku.dk>
+	<6673a8cf-7cdb-e5e5-0494-c75b7ff66a96@gsi.de>
+Message-ID: <ce84ba4d-c44b-3373-ffda-974ff4c8a5ab@nbi.ku.dk>
+
+Hi,
+
+We have ruled that out by monitoring use. It is happening during
+checkpointing. So a continuing process were old checkpoints get deleted
+after new ones are made. There are many checkpoints before
+
+I messed things up in my first mail, so it wasn't clear why I talked
+about space. Sometimes they they just get this (first number is MPI rank):
+
+222: forrtl: Input/output error
+222: forrtl: severe (28): CLOSE error, unit 10, file "Unknown"
+
+Sometimes they get:
+
+33: forrtl: No space left on device
+14: forrtl: No space left on device
+08: forrtl: Input/output error
+08: forrtl: severe (28): CLOSE error, unit 10, file "Unknown"
+
+Info: We have a ZFS snapshot of the osts and mdt. It's ZFS 0.6.5.7.
+
+Cheers,
+Hans Henrik
+
+On 09-06-2017 08:41, Thomas Roth wrote:
+> Hi,
+> 
+> I don't know about the error messages. But are you sure that the
+> imbalance of the OST filling isn't due to some extremely large files
+> written overnight or so (- with default striping, one file -> one OST).
+> Our users are able to do that, without realizing.
+> 
+> Regards,
+> Thomas
+> 
+> On 08.06.2017 10:11, Hans Henrik Happe wrote:
+>> Hi,
+>>
+>> We are on Lustre 2.8 with ZFS.
+>>
+>> Our users have seen some unexplainable errors:
+>>
+>> 062: forrtl: Input/output error
+>>
+>> Or
+>>
+>> 062: forrtl: severe (28): CLOSE error, unit 10, file ?Unknown"
+>>
+>>
+>>  From attached 'lfs df -h' you can see that the OSTs are unbalanced and
+>> OST0001 but far from being full. We are using default allocation setting
+>> so we should be in weighted mode.
+>>
+>> I've tried to find an LU matching this but no luck. Also, log on
+>> affected nodes and on servers are empty.
+>>
+>> Any suggestions about how to debug this?
+>>
+>> Cheers,
+>> Hans Henrik
+>>
+>>
+>>
+>> _______________________________________________
+>> lustre-discuss mailing list
+>> lustre-discuss at lists.lustre.org
+>> http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org
+>>
+> 
+
+From andreas.dilger at intel.com  Fri Jun  9 09:06:28 2017
+From: andreas.dilger at intel.com (Dilger, Andreas)
+Date: Fri, 9 Jun 2017 16:06:28 +0000
+Subject: [lustre-discuss] Lustre/ZFS space accounting
+In-Reply-To: <ce84ba4d-c44b-3373-ffda-974ff4c8a5ab@nbi.ku.dk>
+References: <654d846e-c2a8-049b-e225-0144ea889f89@nbi.ku.dk>
+	<6673a8cf-7cdb-e5e5-0494-c75b7ff66a96@gsi.de>,
+	<ce84ba4d-c44b-3373-ffda-974ff4c8a5ab@nbi.ku.dk>
+Message-ID: <944AEA80-BB2D-4DA4-9E85-E502044D0460@intel.com>
+
+The error 28 on close may also be out of space (28 == ENOSPC). 
+
+How many clients on your system?
+
+I would recommend to use find/lfs find to locate some of the larger files on OST0002 and lfs_migrate them to other OSTs. 
+
+Cheers, Andreas
+
+> On Jun 9, 2017, at 01:27, Hans Henrik Happe <happe at nbi.ku.dk> wrote:
+> 
+> Hi,
+> 
+> We have ruled that out by monitoring use. It is happening during
+> checkpointing. So a continuing process were old checkpoints get deleted
+> after new ones are made. There are many checkpoints before
+> 
+> I messed things up in my first mail, so it wasn't clear why I talked
+> about space. Sometimes they they just get this (first number is MPI rank):
+> 
+> 222: forrtl: Input/output error
+> 222: forrtl: severe (28): CLOSE error, unit 10, file "Unknown"
+> 
+> Sometimes they get:
+> 
+> 33: forrtl: No space left on device
+> 14: forrtl: No space left on device
+> 08: forrtl: Input/output error
+> 08: forrtl: severe (28): CLOSE error, unit 10, file "Unknown"
+> 
+> Info: We have a ZFS snapshot of the osts and mdt. It's ZFS 0.6.5.7.
+> 
+> Cheers,
+> Hans Henrik
+> 
+>> On 09-06-2017 08:41, Thomas Roth wrote:
+>> Hi,
+>> 
+>> I don't know about the error messages. But are you sure that the
+>> imbalance of the OST filling isn't due to some extremely large files
+>> written overnight or so (- with default striping, one file -> one OST).
+>> Our users are able to do that, without realizing.
+>> 
+>> Regards,
+>> Thomas
+>> 
+>>> On 08.06.2017 10:11, Hans Henrik Happe wrote:
+>>> Hi,
+>>> 
+>>> We are on Lustre 2.8 with ZFS.
+>>> 
+>>> Our users have seen some unexplainable errors:
+>>> 
+>>> 062: forrtl: Input/output error
+>>> 
+>>> Or
+>>> 
+>>> 062: forrtl: severe (28): CLOSE error, unit 10, file ?Unknown"
+>>> 
+>>> 
+>>> From attached 'lfs df -h' you can see that the OSTs are unbalanced and
+>>> OST0001 but far from being full. We are using default allocation setting
+>>> so we should be in weighted mode.
+>>> 
+>>> I've tried to find an LU matching this but no luck. Also, log on
+>>> affected nodes and on servers are empty.
+>>> 
+>>> Any suggestions about how to debug this?
+>>> 
+>>> Cheers,
+>>> Hans Henrik
+>>> 
+>>> 
+>>> 
+>>> _______________________________________________
+>>> lustre-discuss mailing list
+>>> lustre-discuss at lists.lustre.org
+>>> http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org
+>>> 
+>> 
+> _______________________________________________
+> lustre-discuss mailing list
+> lustre-discuss at lists.lustre.org
+> http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org
+
+From andreas.dilger at intel.com  Fri Jun  9 21:02:32 2017
+From: andreas.dilger at intel.com (Dilger, Andreas)
+Date: Sat, 10 Jun 2017 04:02:32 +0000
+Subject: [lustre-discuss] Experience with PCIe INTEL SSD
+In-Reply-To: <CAAqDm6anQLQeBDkp32oCAhFJxGS-rn87QSHP3q=FJ5y9JqSrOw@mail.gmail.com>
+References: <CAAqDm6anQLQeBDkp32oCAhFJxGS-rn87QSHP3q=FJ5y9JqSrOw@mail.gmail.com>
+Message-ID: <A926B466-1F9C-4313-B960-460F12DA9BEB@intel.com>
+
+On Jun 6, 2017, at 04:34, Arman Khalatyan <arm2arm at gmail.com> wrote:
+> 
+> Hello everybody,
+> Can some one share his experience of using NVMe Intel P3600 as a MDS with ldiskfs?
+> We have two of them, is it better to use them with lvm mirror or mdraid?
+> We tested with zfs mirror but somehow it is not performing as fast as we expected.
+
+We've done a bunch of testing with the P3600 and P3700 and have seen good performance (mostly as OSTs, but also as MDTs, see https://www.eofs.eu/_media/events/lad16/17_dne_analysis_roe_2_.pdf).  It is likely that the ZFS metadata performance is limited by ZFS itself as is shown in the above tests, though that will be improved significantly with ZFS 0.7.0 and Lustre 2.9/2.10.
+
+If you are just in the process of testing the hardware before deployment, you should try out ZFS 0.7.0-rc4 and Lustre master branch (pre-2.10), even if you don't necessarily plan on going into production with those versions initially, just to see where the performance will be in the near future.
+
+It should be noted that since the P3600 is an internal PCI card that you cannot do MDT failover to a backup MDS in this case, only "reboot in place".
+
+Cheers, Andreas
+--
+Andreas Dilger
+Lustre Principal Architect
+Intel Corporation
+
+
+
+
+
+
+
+
+From liuqs.ustc at gmail.com  Sat Jun 10 21:09:27 2017
+From: liuqs.ustc at gmail.com (Qingsong Liu)
+Date: Sun, 11 Jun 2017 12:09:27 +0800
+Subject: [lustre-discuss] BUG: unable to handle kernel paging request at
+	000000000000bdb9
+Message-ID: <CABEJEqR+AzwRMBaVNc0hdaqwgY1KcA50fNjs49gwE-W3BDiWAQ@mail.gmail.com>
+
+HI,
+
+the lustre client on my server cause a kernel panic,
+could anyone help to figure it out?
+
+
+      KERNEL: /usr/lib/debug/lib/modules/3.10.0-327.22.2.el7.x86_64/vmlinux
+    DUMPFILE: ./vmcore  [PARTIAL DUMP]
+        CPUS: 48
+        DATE: Sat Jun 10 15:03:00 2017
+      UPTIME: 21:51:59
+LOAD AVERAGE: 36.70, 35.03, 36.33
+       TASKS: 1263
+    NODENAME: TitanX21.speech.unisound.com
+<http://titanx21.speech.unisound.com/>
+     RELEASE: 3.10.0-327.22.2.el7.x86_64
+     VERSION: #1 SMP Thu Jun 23 17:05:11 UTC 2016
+     MACHINE: x86_64  (2500 Mhz)
+      MEMORY: 255.9 GB
+       PANIC: "BUG: unable to handle kernel paging request at
+000000000000bdb9"
+         PID: 1889
+     COMMAND: "socknal_sd00_04"
+        TASK: ffff883fcbebdc00  [THREAD_INFO: ffff883fc7bfc000]
+         CPU: 7
+       STATE: TASK_RUNNING (PANIC)
+
+
+
+
+[78796.488211] BUG: unable to handle kernel paging request at
+000000000000bdb9
+[78796.488244] IP: [<ffffffff8163d9ba>] _raw_spin_unlock+0xa/0x30
+[78796.488270] PGD 33fc776067 PUD 336c16b067 PMD 0
+[78796.488290] Oops: 0002 [#1] SMP
+[78796.488303] Modules linked in: nvidia_uvm(POE) osc(OE) cfg80211 rfkill
+nfsv3 mpt3sas mpt2sas raid_class scsi_transport_sas mptctl mptbase
+ipt_MASQUERADE nf_nat_masquerade_ipv4 iptable_nat nf_conntrack_ipv4
+nf_defrag_ipv4 nf_nat_ipv4 xt_addrtype iptable_filter xt_conntrack nf_nat
+nf_conntrack bridge stp llc dm_thin_pool dm_persistent_data dm_bio_prison
+dm_bufio loop dm_mod mgc(OE) lustre(OE) lmv(OE) fld(OE) mdc(OE) fid(OE)
+lov(OE) ksocklnd(OE) ptlrpc(OE) obdclass(OE) lnet(OE) rpcsec_gss_krb5 nfsv4
+dns_resolver binfmt_misc nfs libcfs(OE) fscache iTCO_wdt
+iTCO_vendor_support snd_hda_codec_hdmi intel_powerclamp coretemp intel_rapl
+kvm_intel kvm crc32_pclmul ghash_clmulni_intel aesni_intel nvidia(POE) lrw
+gf128mul glue_helper ablk_helper cryptd snd_hda_intel snd_hda_codec
+snd_hda_core snd_hwdep snd_seq
+[78796.488587]  snd_seq_device pcspkr snd_pcm sg snd_timer snd soundcore
+mei_me sb_edac mei edac_core lpc_ich ioatdma shpchp i2c_i801 mfd_core
+ipmi_ssif ipmi_si ipmi_msghandler acpi_power_meter acpi_pad nfsd
+auth_rpcgss nfs_acl lockd grace sunrpc ip_tables xfs libcrc32c sd_mod
+crc_t10dif crct10dif_generic mxm_wmi crct10dif_pclmul ast crct10dif_common
+syscopyarea crc32c_intel sysfillrect sysimgblt drm_kms_helper igb ttm ixgbe
+megaraid_sas i2c_algo_bit drm ahci mdio libahci ptp pps_core i2c_core
+libata dca wmi
+[78796.488779] CPU: 7 PID: 1889 Comm: socknal_sd00_04 Tainted: P
+OE  ------------   3.10.0-327.22.2.el7.x86_64 #1
+[78796.488813] Hardware name: Supermicro SYS-4028GR-TR/X10DRG-O+-CPU, BIOS
+2.0 12/28/2015
+[78796.488839] task: ffff883fcbebdc00 ti: ffff883fc7bfc000 task.ti:
+ffff883fc7bfc000
+[78796.488862] RIP: 0010:[<ffffffff8163d9ba>]  [<ffffffff8163d9ba>]
+_raw_spin_unlock+0xa/0x30
+[78796.488891] RSP: 0018:ffff883fc7bffc38  EFLAGS: 00010202
+[78796.488909] RAX: ffff883fcfe25330 RBX: ffff883fcfe25300 RCX:
+0000000000007d1c
+[78796.488931] RDX: 0000000000000bbe RSI: 00000000000005df RDI:
+000000000000bdb9
+[78796.488954] RBP: ffff883fc7bffc50 R08: 0000000000000002 R09:
+0000000000000077
+[78796.488976] R10: 0000000000201d26 R11: 0000000000002303 R12:
+0000000000002ef8
+[78796.488999] R13: ffff881fcda7b800 R14: ffff881fcab4a674 R15:
+ffff882687a4b010
+[78796.489022] FS:  0000000000000000(0000) GS:ffff881fffae0000(0000)
+knlGS:0000000000000000
+[78796.489047] CS:  0010 DS: 0000 ES: 0000 CR0: 0000000080050033
+[78796.489066] CR2: 000000000000bdb9 CR3: 0000003df8fae000 CR4:
+00000000001407e0
+[78796.489088] DR0: 0000000000000000 DR1: 0000000000000000 DR2:
+0000000000000000
+[78796.489111] DR3: 0000000000000000 DR6: 00000000ffff0ff0 DR7:
+0000000000000400
+[78796.489132] Stack:
+[78796.489140]  ffffffffa0557b36 ffff880957be4a00 ffff881fcab4a600
+ffff883fc7bffc90
+[78796.489172]  ffffffffa08576d1 ffff882687a4b000 ffff880957be4a00
+0000000000000000
+[78796.489202]  ffff881fcc5bb040 0000000000000000 ffff880957be4a10
+ffff883fc7bffcc0
+[78796.489232] Call Trace:
+[78796.489256]  [<ffffffffa0557b36>] ? cfs_percpt_unlock+0x36/0xc0 [libcfs]
+[78796.489291]  [<ffffffffa08576d1>] lnet_return_tx_credits_locked+0x211/0x480
+[lnet]
+[78796.489320]  [<ffffffffa084a931>] lnet_msg_decommit+0x281/0x6d0 [lnet]
+[78796.489347]  [<ffffffffa084b119>] lnet_finalize+0x1e9/0x690 [lnet]
+[78796.489374]  [<ffffffffa05aedcc>] ksocknal_tx_done+0x8c/0x1c0 [ksocklnd]
+[78796.489399]  [<ffffffffa05b7235>] ksocknal_handle_zcack+0x135/0x1e0
+[ksocklnd]
+[78796.489425]  [<ffffffffa05b2ce8>] ksocknal_process_receive+0x3b8/0xd90
+[ksocklnd]
+[78796.489451]  [<ffffffffa05b3a4e>] ksocknal_scheduler+0xee/0x670
+[ksocklnd]
+[78796.489475]  [<ffffffff810a6ae0>] ? wake_up_atomic_t+0x30/0x30
+[78796.490341]  [<ffffffffa05b3960>] ? ksocknal_recv+0x2a0/0x2a0 [ksocklnd]
+[78796.491203]  [<ffffffff810a5aef>] kthread+0xcf/0xe0
+[78796.492059]  [<ffffffff810a5a20>] ? kthread_create_on_node+0x140/0x140
+[78796.492922]  [<ffffffff816467d8>] ret_from_fork+0x58/0x90
+[78796.493769]  [<ffffffff810a5a20>] ? kthread_create_on_node+0x140/0x140
+[78796.494606] Code: 90 8d 8a 00 00 02 00 89 d0 f0 0f b1 0f 39 d0 75 ea b8
+01 00 00 00 5d c3 66 0f 1f 84 00 00 00 00 00 0f 1f 44 00 00 0f 1f 44 00 00
+<66> 83 07 02 c3 90 8b 37 f0 66 83 07 02 f6 47 02 01 74 f1 55 48
+[78796.496398] RIP  [<ffffffff8163d9ba>] _raw_spin_unlock+0xa/0x30
+[78796.497258]  RSP <ffff883fc7bffc38>
+[78796.498093] CR2: 000000000000bdb9
+
+-- 
+---------------------------------------------
+Qingsong Liu
+liuqs.ustc at gmail.com
+Univ. of Sci.& Tech. of China
+----------------------------------------------
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20170611/eb074c07/attachment.htm>
+
+From spitzcor at cray.com  Mon Jun 12 06:57:43 2017
+From: spitzcor at cray.com (Cory Spitz)
+Date: Mon, 12 Jun 2017 13:57:43 +0000
+Subject: [lustre-discuss] Backup of Lustre Tuning Parameters
+In-Reply-To: <D072399C-344A-48FD-AE09-07C9B065CD5E@intel.com>
+References: <92E14363-19B7-4FA7-A6FC-60606853340B@anl.gov>
+	<D072399C-344A-48FD-AE09-07C9B065CD5E@intel.com>
+Message-ID: <B8D218DB-F9CD-4239-B9E1-630CA9193AB9@cray.com>
+
+Hello,
+
+FYI, https://jira.hpdd.intel.com/browse/LU-4939 is tracking usability improvements to query and save/restore the filesystem configuration.  There is a patch contributed late last year and we (Cray) intend to finish this work out.  The Lustre Operations Manual will need an update with some best practices for use.
+
+-Cory
+
+
+-- 
+
+
+On 5/27/17, 11:19 PM, "lustre-discuss on behalf of Dilger, Andreas" <lustre-discuss-bounces at lists.lustre.org on behalf of andreas.dilger at intel.com> wrote:
+
+    On May 22, 2017, at 08:51, Harms, Kevin <harms at alcf.anl.gov> wrote:
+    > 
+    > 
+    > what is considered best practice for backing up (or config management) of Lustre client/server tuning parameters?
+    
+    Since Lustre 2.6 the command "lctl --device %MGS llog_print '$<fsname>-client'" run on the MGS will print out the client configuration llog in YAML format so that it is easier to parse.  The MDT logs can be similarly dumped by specifying '$<fsname>-MDT0000'.
+    
+    
+    Cheers, Andreas
+    --
+    Andreas Dilger
+    Lustre Principal Architect
+    Intel Corporation
+    
+    
+    
+    
+    
+    
+    
+    _______________________________________________
+    lustre-discuss mailing list
+    lustre-discuss at lists.lustre.org
+    http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org
+    
+
+
+From esr+lustre at mail.hebrew.edu  Mon Jun 12 08:05:03 2017
+From: esr+lustre at mail.hebrew.edu (E.S. Rosenberg)
+Date: Mon, 12 Jun 2017 18:05:03 +0300
+Subject: [lustre-discuss] LUG 2017
+Message-ID: <CA+K1OzSyYYqWA=GfFOrbExvi_t1aQZFBk_P6-_r1VcTAna5sfw@mail.gmail.com>
+
+Hi all,
+Are the talks going to be posted to Youtube like in the past?
+I haven't been able to find them so far...
+Thanks,
+Eli
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20170612/7d41a12f/attachment.htm>
+
+From colin.faber at seagate.com  Mon Jun 12 08:07:28 2017
+From: colin.faber at seagate.com (Colin Faber)
+Date: Mon, 12 Jun 2017 09:07:28 -0600
+Subject: [lustre-discuss] LUG 2017
+In-Reply-To: <CA+K1OzSyYYqWA=GfFOrbExvi_t1aQZFBk_P6-_r1VcTAna5sfw@mail.gmail.com>
+References: <CA+K1OzSyYYqWA=GfFOrbExvi_t1aQZFBk_P6-_r1VcTAna5sfw@mail.gmail.com>
+Message-ID: <CAPALmnn3WzAwcK0EReYnheSGv=kgDNQBGRTc4ib713ZAsP7gbQ@mail.gmail.com>
+
+I believe this was the stated plan, they should appear on the IU channel
+IIRC once ready.
+
+On Mon, Jun 12, 2017 at 9:05 AM, E.S. Rosenberg <esr+lustre at mail.hebrew.edu>
+wrote:
+
+> Hi all,
+> Are the talks going to be posted to Youtube like in the past?
+> I haven't been able to find them so far...
+> Thanks,
+> Eli
+>
+> _______________________________________________
+> lustre-discuss mailing list
+> lustre-discuss at lists.lustre.org
+> https://urldefense.proofpoint.com/v2/url?u=http-3A__lists.
+> lustre.org_listinfo.cgi_lustre-2Ddiscuss-2Dlustre.org&
+> d=DwICAg&c=IGDlg0lD0b-nebmJJ0Kp8A&r=x9pM59OqndbWw-
+> lPPdr8w1Vud29EZigcxcNkz0uw5oQ&m=wxTLZQ7_gxunG_
+> OaEeuh4Y2WDkgmrklVP3ovlqcluiI&s=RbQa5eWSfl-sCp2rKs4c6BqYGKorb7kDJJ_
+> jaUDZIUU&e=
+>
+>
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20170612/04c77750/attachment.htm>
+
+From peter.a.jones at intel.com  Mon Jun 12 08:39:48 2017
+From: peter.a.jones at intel.com (Jones, Peter A)
+Date: Mon, 12 Jun 2017 15:39:48 +0000
+Subject: [lustre-discuss] LUG 2017
+In-Reply-To: <CAPALmnn3WzAwcK0EReYnheSGv=kgDNQBGRTc4ib713ZAsP7gbQ@mail.gmail.com>
+References: <CA+K1OzSyYYqWA=GfFOrbExvi_t1aQZFBk_P6-_r1VcTAna5sfw@mail.gmail.com>
+	<CAPALmnn3WzAwcK0EReYnheSGv=kgDNQBGRTc4ib713ZAsP7gbQ@mail.gmail.com>
+Message-ID: <F6826123-9CAD-44D7-8F58-0EF278A35214@intel.com>
+
+That?s right. Rob Ping (IU events coordinator) sent around a note around saying it would probably be a couple of weeks until they were up, so perhaps later this week?
+
+On 6/12/17, 8:07 AM, "lustre-discuss on behalf of Colin Faber" <lustre-discuss-bounces at lists.lustre.org<mailto:lustre-discuss-bounces at lists.lustre.org> on behalf of colin.faber at seagate.com<mailto:colin.faber at seagate.com>> wrote:
+
+I believe this was the stated plan, they should appear on the IU channel IIRC once ready.
+
+On Mon, Jun 12, 2017 at 9:05 AM, E.S. Rosenberg <esr+lustre at mail.hebrew.edu<mailto:esr+lustre at mail.hebrew.edu>> wrote:
+Hi all,
+Are the talks going to be posted to Youtube like in the past?
+I haven't been able to find them so far...
+Thanks,
+Eli
+
+_______________________________________________
+lustre-discuss mailing list
+lustre-discuss at lists.lustre.org<mailto:lustre-discuss at lists.lustre.org>
+https://urldefense.proofpoint.com/v2/url?u=http-3A__lists.lustre.org_listinfo.cgi_lustre-2Ddiscuss-2Dlustre.org&d=DwICAg&c=IGDlg0lD0b-nebmJJ0Kp8A&r=x9pM59OqndbWw-lPPdr8w1Vud29EZigcxcNkz0uw5oQ&m=wxTLZQ7_gxunG_OaEeuh4Y2WDkgmrklVP3ovlqcluiI&s=RbQa5eWSfl-sCp2rKs4c6BqYGKorb7kDJJ_jaUDZIUU&e=
+
+
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20170612/1e47a09f/attachment.htm>
+
+From spitzcor at cray.com  Mon Jun 12 14:50:51 2017
+From: spitzcor at cray.com (Cory Spitz)
+Date: Mon, 12 Jun 2017 21:50:51 +0000
+Subject: [lustre-discuss] IOR input for pathologic file system abuse
+Message-ID: <27AC414C-AB3B-46D4-91C8-585A9E7EBF58@cray.com>
+
+Michael,
+
+The worst case would probably involve reading/writing the same file extents across multiple nodes.  You could probably whip up a script using /bin/dd for such a thing.  Or is that too evil for you?
+
+-Cory
+
+-- 
+
+
+On 6/2/17, 2:32 AM, "lustre-discuss on behalf of Michael Kluge" <lustre-discuss-bounces at lists.lustre.org on behalf of michael.kluge at tu-dresden.de> wrote:
+
+    Hi all,
+    
+    I am looking for IOR scripts that represent pathological use cases for file systems. Something like shared file access with a small, unaligned block size or random I/O to a shared file. Does anyone has some input for me there that he/she is willing to share?
+    
+    
+    Regards, Michael
+    
+    -- 
+    Dr.-Ing. Michael Kluge
+    
+    Technische Universit?t Dresden
+    Center for Information Services and
+    High Performance Computing (ZIH)
+    D-01062 Dresden
+    Germany
+    
+    Contact:
+    Falkenbrunnen, Room 240
+    Phone:  (+49) 351 463-34217
+    Fax:    (+49) 351 463-37773
+    e-mail: michael.kluge at tu-dresden.de
+    WWW:    http://www.tu-dresden.de/zih
+    
+    
+    
+
+
+From bevans at cray.com  Tue Jun 13 07:41:22 2017
+From: bevans at cray.com (Ben Evans)
+Date: Tue, 13 Jun 2017 14:41:22 +0000
+Subject: [lustre-discuss] IOR input for pathologic file system abuse
+In-Reply-To: <27AC414C-AB3B-46D4-91C8-585A9E7EBF58@cray.com>
+References: <27AC414C-AB3B-46D4-91C8-585A9E7EBF58@cray.com>
+Message-ID: <D5657138.D3A5%jevans@cray.com>
+
+Not with dd or IOR, but one of the worst I've seen has been using named
+pipes for inter-process communication.  That and doing 4 and 8 byte I/O's
+using O_DIRECT.
+
+-Ben
+
+On 6/12/17, 5:50 PM, "lustre-discuss on behalf of Cory Spitz"
+<lustre-discuss-bounces at lists.lustre.org on behalf of spitzcor at cray.com>
+wrote:
+
+>Michael,
+>
+>The worst case would probably involve reading/writing the same file
+>extents across multiple nodes.  You could probably whip up a script using
+>/bin/dd for such a thing.  Or is that too evil for you?
+>
+>-Cory
+>
+>-- 
+>
+>
+>On 6/2/17, 2:32 AM, "lustre-discuss on behalf of Michael Kluge"
+><lustre-discuss-bounces at lists.lustre.org on behalf of
+>michael.kluge at tu-dresden.de> wrote:
+>
+>    Hi all,
+>    
+>    I am looking for IOR scripts that represent pathological use cases
+>for file systems. Something like shared file access with a small,
+>unaligned block size or random I/O to a shared file. Does anyone has some
+>input for me there that he/she is willing to share?
+>    
+>    
+>    Regards, Michael
+>    
+>    -- 
+>    Dr.-Ing. Michael Kluge
+>    
+>    Technische Universit?t Dresden
+>    Center for Information Services and
+>    High Performance Computing (ZIH)
+>    D-01062 Dresden
+>    Germany
+>    
+>    Contact:
+>    Falkenbrunnen, Room 240
+>    Phone:  (+49) 351 463-34217
+>    Fax:    (+49) 351 463-37773
+>    e-mail: michael.kluge at tu-dresden.de
+>    WWW:    http://www.tu-dresden.de/zih
+>    
+>    
+>    
+>
+>_______________________________________________
+>lustre-discuss mailing list
+>lustre-discuss at lists.lustre.org
+>http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org
+
+
+From spitzcor at cray.com  Tue Jun 13 14:48:14 2017
+From: spitzcor at cray.com (Cory Spitz)
+Date: Tue, 13 Jun 2017 21:48:14 +0000
+Subject: [lustre-discuss] LUG 2017
+In-Reply-To: <F6826123-9CAD-44D7-8F58-0EF278A35214@intel.com>
+References: <CA+K1OzSyYYqWA=GfFOrbExvi_t1aQZFBk_P6-_r1VcTAna5sfw@mail.gmail.com>
+	<CAPALmnn3WzAwcK0EReYnheSGv=kgDNQBGRTc4ib713ZAsP7gbQ@mail.gmail.com>
+	<F6826123-9CAD-44D7-8F58-0EF278A35214@intel.com>
+Message-ID: <0DDF3A88-B5B2-482E-9299-5796061633F1@cray.com>
+
+Right.  The videos aren?t up yet, but when they?re posted you?ll find them at https://www.youtube.com/user/IUPTI.
+
+-Cory
+
+--
+
+
+From: lustre-discuss <lustre-discuss-bounces at lists.lustre.org> on behalf of "Jones, Peter A" <peter.a.jones at intel.com>
+Date: Monday, June 12, 2017 at 10:39 AM
+To: Colin Faber <colin.faber at seagate.com>, "E.S. Rosenberg" <esr+lustre at mail.hebrew.edu>
+Cc: "lustre-discuss at lists.lustre.org" <lustre-discuss at lists.lustre.org>
+Subject: Re: [lustre-discuss] LUG 2017
+
+That?s right. Rob Ping (IU events coordinator) sent around a note around saying it would probably be a couple of weeks until they were up, so perhaps later this week?
+
+On 6/12/17, 8:07 AM, "lustre-discuss on behalf of Colin Faber" <lustre-discuss-bounces at lists.lustre.org<mailto:lustre-discuss-bounces at lists.lustre.org> on behalf of colin.faber at seagate.com<mailto:colin.faber at seagate.com>> wrote:
+
+I believe this was the stated plan, they should appear on the IU channel IIRC once ready.
+
+On Mon, Jun 12, 2017 at 9:05 AM, E.S. Rosenberg <esr+lustre at mail.hebrew.edu<mailto:esr+lustre at mail.hebrew.edu>> wrote:
+Hi all,
+Are the talks going to be posted to Youtube like in the past?
+I haven't been able to find them so far...
+Thanks,
+Eli
+
+_______________________________________________
+lustre-discuss mailing list
+lustre-discuss at lists.lustre.org<mailto:lustre-discuss at lists.lustre.org>
+https://urldefense.proofpoint.com/v2/url?u=http-3A__lists.lustre.org_listinfo.cgi_lustre-2Ddiscuss-2Dlustre.org&d=DwICAg&c=IGDlg0lD0b-nebmJJ0Kp8A&r=x9pM59OqndbWw-lPPdr8w1Vud29EZigcxcNkz0uw5oQ&m=wxTLZQ7_gxunG_OaEeuh4Y2WDkgmrklVP3ovlqcluiI&s=RbQa5eWSfl-sCp2rKs4c6BqYGKorb7kDJJ_jaUDZIUU&e=
+
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20170613/24e51f51/attachment.htm>
+
+From esr+lustre at mail.hebrew.edu  Wed Jun 14 03:47:40 2017
+From: esr+lustre at mail.hebrew.edu (E.S. Rosenberg)
+Date: Wed, 14 Jun 2017 13:47:40 +0300
+Subject: [lustre-discuss] LUG 2017
+In-Reply-To: <0DDF3A88-B5B2-482E-9299-5796061633F1@cray.com>
+References: <CA+K1OzSyYYqWA=GfFOrbExvi_t1aQZFBk_P6-_r1VcTAna5sfw@mail.gmail.com>
+	<CAPALmnn3WzAwcK0EReYnheSGv=kgDNQBGRTc4ib713ZAsP7gbQ@mail.gmail.com>
+	<F6826123-9CAD-44D7-8F58-0EF278A35214@intel.com>
+	<0DDF3A88-B5B2-482E-9299-5796061633F1@cray.com>
+Message-ID: <CA+K1OzRi98+xjsgRpNDJO3xTPTj9xked=YRq0Y5bikOxir3vhg@mail.gmail.com>
+
+On Wed, Jun 14, 2017 at 12:48 AM, Cory Spitz <spitzcor at cray.com> wrote:
+
+> Right.  The videos aren?t up yet, but when they?re posted you?ll find them
+> at https://www.youtube.com/user/IUPTI.
+>
+Why not OpenSFS like LUG 2016?
+
+>
+>
+> -Cory
+>
+>
+>
+> --
+>
+>
+>
+>
+>
+> *From: *lustre-discuss <lustre-discuss-bounces at lists.lustre.org> on
+> behalf of "Jones, Peter A" <peter.a.jones at intel.com>
+> *Date: *Monday, June 12, 2017 at 10:39 AM
+> *To: *Colin Faber <colin.faber at seagate.com>, "E.S. Rosenberg" <
+> esr+lustre at mail.hebrew.edu>
+> *Cc: *"lustre-discuss at lists.lustre.org" <lustre-discuss at lists.lustre.org>
+> *Subject: *Re: [lustre-discuss] LUG 2017
+>
+>
+>
+> That?s right. Rob Ping (IU events coordinator) sent around a note around
+> saying it would probably be a couple of weeks until they were up, so
+> perhaps later this week?
+>
+>
+>
+> On 6/12/17, 8:07 AM, "lustre-discuss on behalf of Colin Faber" <
+> lustre-discuss-bounces at lists.lustre.org on behalf of
+> colin.faber at seagate.com> wrote:
+>
+>
+>
+> I believe this was the stated plan, they should appear on the IU channel
+> IIRC once ready.
+>
+>
+>
+> On Mon, Jun 12, 2017 at 9:05 AM, E.S. Rosenberg <
+> esr+lustre at mail.hebrew.edu> wrote:
+>
+> Hi all,
+>
+> Are the talks going to be posted to Youtube like in the past?
+>
+> I haven't been able to find them so far...
+>
+> Thanks,
+>
+> Eli
+>
+>
+> _______________________________________________
+> lustre-discuss mailing list
+> lustre-discuss at lists.lustre.org
+> https://urldefense.proofpoint.com/v2/url?u=http-3A__lists.
+> lustre.org_listinfo.cgi_lustre-2Ddiscuss-2Dlustre.org&
+> d=DwICAg&c=IGDlg0lD0b-nebmJJ0Kp8A&r=x9pM59OqndbWw-
+> lPPdr8w1Vud29EZigcxcNkz0uw5oQ&m=wxTLZQ7_gxunG_
+> OaEeuh4Y2WDkgmrklVP3ovlqcluiI&s=RbQa5eWSfl-sCp2rKs4c6BqYGKorb7kDJJ_
+> jaUDZIUU&e=
+>
+>
+>
+>
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20170614/c8207e2c/attachment.htm>
+
+From kerawlin at iu.edu  Wed Jun 14 06:55:26 2017
+From: kerawlin at iu.edu (Rawlings, Kenrick D)
+Date: Wed, 14 Jun 2017 13:55:26 +0000
+Subject: [lustre-discuss] LUG 2017
+In-Reply-To: <CA+K1OzRi98+xjsgRpNDJO3xTPTj9xked=YRq0Y5bikOxir3vhg@mail.gmail.com>
+References: <CA+K1OzSyYYqWA=GfFOrbExvi_t1aQZFBk_P6-_r1VcTAna5sfw@mail.gmail.com>
+	<CAPALmnn3WzAwcK0EReYnheSGv=kgDNQBGRTc4ib713ZAsP7gbQ@mail.gmail.com>
+	<F6826123-9CAD-44D7-8F58-0EF278A35214@intel.com>
+	<0DDF3A88-B5B2-482E-9299-5796061633F1@cray.com>,
+	<CA+K1OzRi98+xjsgRpNDJO3xTPTj9xked=YRq0Y5bikOxir3vhg@mail.gmail.com>
+Message-ID: <1497448526913.53441@iu.edu>
+
+
+?Once the videos are available on YouTube we will add a prominent link at http://opensfs.org/lug-2017/ to a collected page for them with links to each video similar to LUG 2016. I'll also send a follow-up to the list then.
+
+Thanks,
+Ken
+
+>From: lustre-discuss <lustre-discuss-bounces at lists.lustre.org> on behalf of E.S. Rosenberg <esr+lustre at mail.hebrew.edu>
+>Sent: Wednesday, June 14, 2017 6:47 AM
+>To: Cory Spitz
+>Cc: lustre-discuss at lists.lustre.org
+>Subject: Re: [lustre-discuss] LUG 2017
+>
+> On Wed, Jun 14, 2017 at 12:48 AM, Cory Spitz  <spitzcor at cray.com> wrote:
+>> Right.? The videos aren?t up yet, but when they?re posted you?ll find them at https://www.youtube.com/user/IUPTI.
+> Why not OpenSFS like LUG 2016? 
+>>
+>>-Cory
+
+From happe at nbi.ku.dk  Wed Jun 14 23:43:28 2017
+From: happe at nbi.ku.dk (Hans Henrik Happe)
+Date: Thu, 15 Jun 2017 08:43:28 +0200
+Subject: [lustre-discuss] Lustre/ZFS space accounting
+In-Reply-To: <944AEA80-BB2D-4DA4-9E85-E502044D0460@intel.com>
+References: <654d846e-c2a8-049b-e225-0144ea889f89@nbi.ku.dk>
+	<6673a8cf-7cdb-e5e5-0494-c75b7ff66a96@gsi.de>
+	<ce84ba4d-c44b-3373-ffda-974ff4c8a5ab@nbi.ku.dk>
+	<944AEA80-BB2D-4DA4-9E85-E502044D0460@intel.com>
+Message-ID: <0eac09d0-bb69-e253-b4cd-803b7cb6b8f3@nbi.ku.dk>
+
+On 09-06-2017 18:06, Dilger, Andreas wrote:
+> The error 28 on close may also be out of space (28 == ENOSPC). 
+> 
+> How many clients on your system?
+
+~240 clients.
+
+> I would recommend to use find/lfs find to locate some of the larger files on OST0002 and lfs_migrate them to other OSTs. 
+
+Of list, it was suggested to look at LU-2049 (Thanks). Could that be it.
+I guess making more free space would help.
+
+Cheers,
+Hans Henrik
+
+>> On Jun 9, 2017, at 01:27, Hans Henrik Happe <happe at nbi.ku.dk> wrote:
+>>
+>> Hi,
+>>
+>> We have ruled that out by monitoring use. It is happening during
+>> checkpointing. So a continuing process were old checkpoints get deleted
+>> after new ones are made. There are many checkpoints before
+>>
+>> I messed things up in my first mail, so it wasn't clear why I talked
+>> about space. Sometimes they they just get this (first number is MPI rank):
+>>
+>> 222: forrtl: Input/output error
+>> 222: forrtl: severe (28): CLOSE error, unit 10, file "Unknown"
+>>
+>> Sometimes they get:
+>>
+>> 33: forrtl: No space left on device
+>> 14: forrtl: No space left on device
+>> 08: forrtl: Input/output error
+>> 08: forrtl: severe (28): CLOSE error, unit 10, file "Unknown"
+>>
+>> Info: We have a ZFS snapshot of the osts and mdt. It's ZFS 0.6.5.7.
+>>
+>> Cheers,
+>> Hans Henrik
+>>
+>>> On 09-06-2017 08:41, Thomas Roth wrote:
+>>> Hi,
+>>>
+>>> I don't know about the error messages. But are you sure that the
+>>> imbalance of the OST filling isn't due to some extremely large files
+>>> written overnight or so (- with default striping, one file -> one OST).
+>>> Our users are able to do that, without realizing.
+>>>
+>>> Regards,
+>>> Thomas
+>>>
+>>>> On 08.06.2017 10:11, Hans Henrik Happe wrote:
+>>>> Hi,
+>>>>
+>>>> We are on Lustre 2.8 with ZFS.
+>>>>
+>>>> Our users have seen some unexplainable errors:
+>>>>
+>>>> 062: forrtl: Input/output error
+>>>>
+>>>> Or
+>>>>
+>>>> 062: forrtl: severe (28): CLOSE error, unit 10, file ?Unknown"
+>>>>
+>>>>
+>>>> From attached 'lfs df -h' you can see that the OSTs are unbalanced and
+>>>> OST0001 but far from being full. We are using default allocation setting
+>>>> so we should be in weighted mode.
+>>>>
+>>>> I've tried to find an LU matching this but no luck. Also, log on
+>>>> affected nodes and on servers are empty.
+>>>>
+>>>> Any suggestions about how to debug this?
+>>>>
+>>>> Cheers,
+>>>> Hans Henrik
+>>>>
+>>>>
+>>>>
+>>>> _______________________________________________
+>>>> lustre-discuss mailing list
+>>>> lustre-discuss at lists.lustre.org
+>>>> http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org
+>>>>
+>>>
+>> _______________________________________________
+>> lustre-discuss mailing list
+>> lustre-discuss at lists.lustre.org
+>> http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org
+
+
+
+-------------- next part --------------
+A non-text attachment was scrubbed...
+Name: signature.asc
+Type: application/pgp-signature
+Size: 198 bytes
+Desc: OpenPGP digital signature
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20170615/b2e5c5bc/attachment.pgp>
+
+From andreas.dilger at intel.com  Thu Jun 15 03:49:11 2017
+From: andreas.dilger at intel.com (Dilger, Andreas)
+Date: Thu, 15 Jun 2017 10:49:11 +0000
+Subject: [lustre-discuss] LUG 2017
+In-Reply-To: <1497448526913.53441@iu.edu>
+References: <CA+K1OzSyYYqWA=GfFOrbExvi_t1aQZFBk_P6-_r1VcTAna5sfw@mail.gmail.com>
+	<CAPALmnn3WzAwcK0EReYnheSGv=kgDNQBGRTc4ib713ZAsP7gbQ@mail.gmail.com>
+	<F6826123-9CAD-44D7-8F58-0EF278A35214@intel.com>
+	<0DDF3A88-B5B2-482E-9299-5796061633F1@cray.com>,
+	<CA+K1OzRi98+xjsgRpNDJO3xTPTj9xked=YRq0Y5bikOxir3vhg@mail.gmail.com>,
+	<1497448526913.53441@iu.edu>
+Message-ID: <477EC256-0767-47DF-AC32-888E82DAF1F8@intel.com>
+
+I've started making an aggregation page on wiki.lustre.org already for LUG2017 as I've done for some of the older LUGs, which will include local copies of all the presentations and direct links to the videos. 
+
+I've found in the past that externally-hosted agendas and presentations tend to go missing after a couple of years, so prefer to host a copy of everything directly on lustre.org (as well as my laptop, though that isn't as useful to everyone else).
+
+Of course, help in finishing off that page would be welcome. This year's hosting site is particularly unfriendly to scraping, so it looks like it will all have to be transferred manually.   
+
+Cheers, Andreas
+
+> On Jun 14, 2017, at 07:55, Rawlings, Kenrick D <kerawlin at iu.edu> wrote:
+> 
+> 
+> ?Once the videos are available on YouTube we will add a prominent link at http://opensfs.org/lug-2017/ to a collected page for them with links to each video similar to LUG 2016. I'll also send a follow-up to the list then.
+> 
+> Thanks,
+> Ken
+> 
+>> From: lustre-discuss <lustre-discuss-bounces at lists.lustre.org> on behalf of E.S. Rosenberg <esr+lustre at mail.hebrew.edu>
+>> Sent: Wednesday, June 14, 2017 6:47 AM
+>> To: Cory Spitz
+>> Cc: lustre-discuss at lists.lustre.org
+>> Subject: Re: [lustre-discuss] LUG 2017
+>> 
+>>> On Wed, Jun 14, 2017 at 12:48 AM, Cory Spitz  <spitzcor at cray.com> wrote:
+>>> Right.  The videos aren?t up yet, but when they?re posted you?ll find them at https://www.youtube.com/user/IUPTI.
+>> Why not OpenSFS like LUG 2016? 
+>>> 
+>>> -Cory
+> _______________________________________________
+> lustre-discuss mailing list
+> lustre-discuss at lists.lustre.org
+> http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org
+
+From kerawlin at iu.edu  Thu Jun 15 06:56:06 2017
+From: kerawlin at iu.edu (Rawlings, Kenrick D)
+Date: Thu, 15 Jun 2017 13:56:06 +0000
+Subject: [lustre-discuss] LUG 2017
+In-Reply-To: <477EC256-0767-47DF-AC32-888E82DAF1F8@intel.com>
+References: <CA+K1OzSyYYqWA=GfFOrbExvi_t1aQZFBk_P6-_r1VcTAna5sfw@mail.gmail.com>
+	<CAPALmnn3WzAwcK0EReYnheSGv=kgDNQBGRTc4ib713ZAsP7gbQ@mail.gmail.com>
+	<F6826123-9CAD-44D7-8F58-0EF278A35214@intel.com>
+	<0DDF3A88-B5B2-482E-9299-5796061633F1@cray.com>,
+	<CA+K1OzRi98+xjsgRpNDJO3xTPTj9xked=YRq0Y5bikOxir3vhg@mail.gmail.com>,
+	<1497448526913.53441@iu.edu>,
+	<477EC256-0767-47DF-AC32-888E82DAF1F8@intel.com>
+Message-ID: <1497534966810.23392@iu.edu>
+
+
+That's appreciated Andreas. I'm currently working on methods to help collect the agendas and presentations. As you encountered, there are challenges in scraping the site, but my hope is to automate at least part of the process to save manual effort. I'll report back on this within the next day or two.
+
+Thanks,
+Ken
+
+_______________________________________
+From: Dilger, Andreas <andreas.dilger at intel.com>
+Sent: Thursday, June 15, 2017 6:49 AM
+To: Rawlings, Kenrick D
+Cc: E.S. Rosenberg; Cory Spitz; lustre-discuss at lists.lustre.org
+Subject: Re: [lustre-discuss] LUG 2017
+
+I've started making an aggregation page on wiki.lustre.org already for LUG2017 as I've done for some of the older LUGs, which will include local copies of all the presentations and direct links to the videos.
+
+I've found in the past that externally-hosted agendas and presentations tend to go missing after a couple of years, so prefer to host a copy of everything directly on lustre.org (as well as my laptop, though that isn't as useful to everyone else).
+
+Of course, help in finishing off that page would be welcome. This year's hosting site is particularly unfriendly to scraping, so it looks like it will all have to be transferred manually.
+
+Cheers, Andreas
+
+> On Jun 14, 2017, at 07:55, Rawlings, Kenrick D <kerawlin at iu.edu> wrote:
+>
+>
+> ?Once the videos are available on YouTube we will add a prominent link at http://opensfs.org/lug-2017/ to a collected page for them with links to each video similar to LUG 2016. I'll also send a follow-up to the list then.
+>
+> Thanks,
+> Ken
+>
+>> From: lustre-discuss <lustre-discuss-bounces at lists.lustre.org> on behalf of E.S. Rosenberg <esr+lustre at mail.hebrew.edu>
+>> Sent: Wednesday, June 14, 2017 6:47 AM
+>> To: Cory Spitz
+>> Cc: lustre-discuss at lists.lustre.org
+>> Subject: Re: [lustre-discuss] LUG 2017
+>>
+>>> On Wed, Jun 14, 2017 at 12:48 AM, Cory Spitz  <spitzcor at cray.com> wrote:
+>>> Right.  The videos aren?t up yet, but when they?re posted you?ll find them at https://www.youtube.com/user/IUPTI.
+>> Why not OpenSFS like LUG 2016?
+>>>
+>>> -Cory
+> _______________________________________________
+> lustre-discuss mailing list
+> lustre-discuss at lists.lustre.org
+> http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org
+
+From dkhosla at x-iss.com  Thu Jun 15 07:31:51 2017
+From: dkhosla at x-iss.com (Deepak Khosla)
+Date: Thu, 15 Jun 2017 14:31:51 +0000
+Subject: [lustre-discuss] lctl dl output fields
+Message-ID: <BN3PR16MB0769991AEB3F23BC5B85DDFFFFC00@BN3PR16MB0769.namprd16.prod.outlook.com>
+
+Is there any documentation on what the fields in the 'lctl dl' output mean? I have seen examples in the admin manual of its output but would like to understand what is/could be in the various fields and what that indicates.
+
+(As a background, I am trying to find out what 'exists' in a Lustre cluster and their relationships and this seems like a good place to start. E.g. find filesystems, OSSs, their specific OSTs etc. in a cluster from a single location)
+
+Regards,
+DK
+
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20170615/3d5ae2e3/attachment.htm>
+
+From andreas.dilger at intel.com  Sat Jun 17 08:17:43 2017
+From: andreas.dilger at intel.com (Dilger, Andreas)
+Date: Sat, 17 Jun 2017 15:17:43 +0000
+Subject: [lustre-discuss] lctl dl output fields
+In-Reply-To: <BN3PR16MB0769991AEB3F23BC5B85DDFFFFC00@BN3PR16MB0769.namprd16.prod.outlook.com>
+References: <BN3PR16MB0769991AEB3F23BC5B85DDFFFFC00@BN3PR16MB0769.namprd16.prod.outlook.com>
+Message-ID: <B3108D22-2340-4B18-B0E4-E3D179FE5DD1@intel.com>
+
+I don't think there is anything that explicitly documents the fields. I don't have a system handy, but from memory the fields are:
+- device number
+- state of the connection
+- device type
+- device name
+- device UUID
+- refcount
+
+That said, you are probably better off to use "lfs df" or "lfs osts" and "lfs mdts" to list the devices connected to a client.
+
+Cheers, Andreas
+
+On Jun 15, 2017, at 08:32, Deepak Khosla <dkhosla at x-iss.com<mailto:dkhosla at x-iss.com>> wrote:
+
+Is there any documentation on what the fields in the ?lctl dl? output mean? I have seen examples in the admin manual of its output but would like to understand what is/could be in the various fields and what that indicates.
+
+(As a background, I am trying to find out what ?exists? in a Lustre cluster and their relationships and this seems like a good place to start. E.g. find filesystems, OSSs, their specific OSTs etc. in a cluster from a single location)
+
+Regards,
+DK
+
+_______________________________________________
+lustre-discuss mailing list
+lustre-discuss at lists.lustre.org<mailto:lustre-discuss at lists.lustre.org>
+http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20170617/2f31683e/attachment.htm>
+
+From dkhosla at x-iss.com  Sat Jun 17 10:41:27 2017
+From: dkhosla at x-iss.com (Deepak Khosla)
+Date: Sat, 17 Jun 2017 17:41:27 +0000
+Subject: [lustre-discuss] lctl dl output fields
+In-Reply-To: <B3108D22-2340-4B18-B0E4-E3D179FE5DD1@intel.com>
+References: <BN3PR16MB0769991AEB3F23BC5B85DDFFFFC00@BN3PR16MB0769.namprd16.prod.outlook.com>
+	<B3108D22-2340-4B18-B0E4-E3D179FE5DD1@intel.com>
+Message-ID: <BN3PR16MB07693B9EEE191799CEA0EF03FFC60@BN3PR16MB0769.namprd16.prod.outlook.com>
+
+Thanks Andreas.
+Will try both options. Ideally trying to get all info from the backend side but it may not be possible. Some info (e.g. space, quotas etc.) are only available via 'lfs' looks like so a client has to be involved.  I guess with multiple filesystems, I just need to have one client that has them all always accessible.
+Thanks again for the info.
+
+Regards,
+DK
+
+From: Dilger, Andreas [mailto:andreas.dilger at intel.com]
+Sent: Saturday, June 17, 2017 10:18 AM
+To: Deepak Khosla <dkhosla at x-iss.com>
+Cc: lustre-discuss at lists.lustre.org
+Subject: Re: [lustre-discuss] lctl dl output fields
+
+I don't think there is anything that explicitly documents the fields. I don't have a system handy, but from memory the fields are:
+- device number
+- state of the connection
+- device type
+- device name
+- device UUID
+- refcount
+
+That said, you are probably better off to use "lfs df" or "lfs osts" and "lfs mdts" to list the devices connected to a client.
+
+Cheers, Andreas
+
+On Jun 15, 2017, at 08:32, Deepak Khosla <dkhosla at x-iss.com<mailto:dkhosla at x-iss.com>> wrote:
+Is there any documentation on what the fields in the 'lctl dl' output mean? I have seen examples in the admin manual of its output but would like to understand what is/could be in the various fields and what that indicates.
+
+(As a background, I am trying to find out what 'exists' in a Lustre cluster and their relationships and this seems like a good place to start. E.g. find filesystems, OSSs, their specific OSTs etc. in a cluster from a single location)
+
+Regards,
+DK
+
+_______________________________________________
+lustre-discuss mailing list
+lustre-discuss at lists.lustre.org<mailto:lustre-discuss at lists.lustre.org>
+http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20170617/7f091145/attachment.htm>
+
+From ccdewitt at uncc.edu  Mon Jun 19 06:52:28 2017
+From: ccdewitt at uncc.edu (Chad DeWitt)
+Date: Mon, 19 Jun 2017 09:52:28 -0400
+Subject: [lustre-discuss] Lustre [2.8.0] and the Linux Automounter
+Message-ID: <CAAyf6vBT05_2-Asc2zXmEC3_WYnzXVSraQ4VP8mXKYXjeZamfg@mail.gmail.com>
+
+Good morning, All.
+
+We are considering using Lustre [2.8.0] with the Linux automounter.  Is
+anyone using this combination successfully?  Are there any caveats?
+
+(I did check JIRA, but only found two tickets concerning 1.x Lustre.)
+
+Thank you in advance,
+Chad
+
+------------------------------------------------------------
+
+Chad DeWitt, CISSP | HPC Storage Administrator
+
+UNC Charlotte *| *ITS ? University Research Computing
+
+------------------------------------------------------------
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20170619/c38d2eb9/attachment.htm>
+
+From hahn at mcmaster.ca  Mon Jun 19 07:03:48 2017
+From: hahn at mcmaster.ca (Mark Hahn)
+Date: Mon, 19 Jun 2017 10:03:48 -0400 (EDT)
+Subject: [lustre-discuss] Lustre [2.8.0] and the Linux Automounter
+In-Reply-To: <CAAyf6vBT05_2-Asc2zXmEC3_WYnzXVSraQ4VP8mXKYXjeZamfg@mail.gmail.com>
+References: <CAAyf6vBT05_2-Asc2zXmEC3_WYnzXVSraQ4VP8mXKYXjeZamfg@mail.gmail.com>
+Message-ID: <alpine.LFD.2.02.1706190958370.22956@coffee.psychology.mcmaster.ca>
+
+> We are considering using Lustre [2.8.0] with the Linux automounter.  Is
+> anyone using this combination successfully?  Are there any caveats?
+
+fwiw, we use static Lustre mounts and then autofs doing bind mounts
+if we want to make the exposed namespace tidier.  Lustre client mounts
+are inherently heavier-weight than simple local (or NFS) mounts;
+I'd definitely try to avoid doing them frequently.
+
+Admittedly, we haven't tried Lustre automounts for years, but IMO automounts
+only make sense when the FS is infrequently used.  For us, it would be very
+strange if Lustre weren't in use - an idle node, basically.)
+
+regards, 
+Mark Hahn | SHARCnet Sysadmin | hahn at sharcnet.ca | http://www.sharcnet.ca
+           | McMaster RHPCS    | hahn at mcmaster.ca | 905 525 9140 x24687
+           | Compute/Calcul Canada                | http://www.computecanada.ca
+
+From Riccardo.Veraldi at cnaf.infn.it  Tue Jun 20 14:36:24 2017
+From: Riccardo.Veraldi at cnaf.infn.it (Riccardo Veraldi)
+Date: Tue, 20 Jun 2017 14:36:24 -0700
+Subject: [lustre-discuss] missing lustre version in /proc/fs/lustre/version
+Message-ID: <0313b821-3116-c4b2-fbc5-a826cdce0bd6@cnaf.infn.it>
+
+Hello,
+
+I built lustre-client 2.9.59 from source as dkms package.
+Everything work fine but /proc/fs/lustre/version  disappeared while it
+was there with Lustre client 2.9.0
+is this normal ?
+
+thanks
+
+
+Rick
+
+
+
+
+From andreas.dilger at intel.com  Tue Jun 20 15:34:57 2017
+From: andreas.dilger at intel.com (Dilger, Andreas)
+Date: Tue, 20 Jun 2017 22:34:57 +0000
+Subject: [lustre-discuss] missing lustre version in
+ /proc/fs/lustre/version
+In-Reply-To: <0313b821-3116-c4b2-fbc5-a826cdce0bd6@cnaf.infn.it>
+References: <0313b821-3116-c4b2-fbc5-a826cdce0bd6@cnaf.infn.it>
+Message-ID: <89CDF265-EF96-46A7-BE8A-2172B24A7014@intel.com>
+
+On Jun 20, 2017, at 15:36, Riccardo Veraldi <Riccardo.Veraldi at cnaf.infn.it> wrote:
+> 
+> Hello,
+> 
+> I built lustre-client 2.9.59 from source as dkms package.
+> Everything work fine but /proc/fs/lustre/version  disappeared while it
+> was there with Lustre client 2.9.0
+> is this normal ?
+
+We've had to move a lot of Lustre parameters out of /proc/fs/lustre and into /sys/fs/lustre
+for most parameter values, or /sys/kernel/debug/lustre (via debugfs) for large statistics
+due to rules imposed by the upstream kernel developers.  This change has already been done
+for the Lustre upstream client over a year ago.
+
+If you use, for example, "lctl get_param version" to access this parameter and others then
+the change is handled transparently.  If you are using direct access to /proc then you will
+need to special-case this by version, or use a wildcard path like:
+
+     /{proc,sys}/{fs,sys,kernel/debug}/{lustre,lnet}/
+or
+     {/sys/{fs,kernel/debug}/{lnet,lustre}/,/proc/{fs,sys}/{lnet,lustre}/}
+
+Not all combinations of the above path are actually valid for all parameters, but this is a
+catch-all combination that will find the various parameters.  The actual valid paths are
+/proc/sys/lustre, /proc/fs/lustre, /sys/fs/lustre, /sys/kernel/debug/lustre, and similar for
+lnet parameters.
+
+Cheers, Andreas
+--
+Andreas Dilger
+Lustre Principal Architect
+Intel Corporation
+
+
+
+
+
+
+
+
+From kerawlin at iu.edu  Tue Jun 20 18:02:33 2017
+From: kerawlin at iu.edu (Rawlings, Kenrick D)
+Date: Wed, 21 Jun 2017 01:02:33 +0000
+Subject: [lustre-discuss] LUG 2017
+In-Reply-To: <1497534966810.23392@iu.edu>
+References: <CA+K1OzSyYYqWA=GfFOrbExvi_t1aQZFBk_P6-_r1VcTAna5sfw@mail.gmail.com>
+	<CAPALmnn3WzAwcK0EReYnheSGv=kgDNQBGRTc4ib713ZAsP7gbQ@mail.gmail.com>
+	<F6826123-9CAD-44D7-8F58-0EF278A35214@intel.com>
+	<0DDF3A88-B5B2-482E-9299-5796061633F1@cray.com>,
+	<CA+K1OzRi98+xjsgRpNDJO3xTPTj9xked=YRq0Y5bikOxir3vhg@mail.gmail.com>,
+	<1497448526913.53441@iu.edu>,
+	<477EC256-0767-47DF-AC32-888E82DAF1F8@intel.com>,
+	<1497534966810.23392@iu.edu>
+Message-ID: <1498006954543.21938@iu.edu>
+
+The process was successful and the LUG 2017 agenda and presentation slides are available on the Lustre Wiki and the OpenSFS website:
+
+http://wiki.lustre.org/Lustre_User_Group_2017
+http://opensfs.org/lug-2017-agenda
+
+If there are any issues, please let me know. Once the presentation videos are available, links to those will be added as well and I'll send a follow-up.
+
+Thanks,
+Ken
+
+________________________________________
+From: lustre-discuss <lustre-discuss-bounces at lists.lustre.org> on behalf of Rawlings, Kenrick D <kerawlin at iu.edu>
+Sent: Thursday, June 15, 2017 9:56 AM
+To: Dilger, Andreas
+Cc: lustre-discuss at lists.lustre.org
+Subject: Re: [lustre-discuss] LUG 2017
+
+That's appreciated Andreas. I'm currently working on methods to help collect the agendas and presentations. As you encountered, there are challenges in scraping the site, but my hope is to automate at least part of the process to save manual effort. I'll report back on this within the next day or two.
+
+Thanks,
+Ken
+
+_______________________________________
+From: Dilger, Andreas <andreas.dilger at intel.com>
+Sent: Thursday, June 15, 2017 6:49 AM
+To: Rawlings, Kenrick D
+Cc: E.S. Rosenberg; Cory Spitz; lustre-discuss at lists.lustre.org
+Subject: Re: [lustre-discuss] LUG 2017
+
+I've started making an aggregation page on wiki.lustre.org already for LUG2017 as I've done for some of the older LUGs, which will include local copies of all the presentations and direct links to the videos.
+
+I've found in the past that externally-hosted agendas and presentations tend to go missing after a couple of years, so prefer to host a copy of everything directly on lustre.org (as well as my laptop, though that isn't as useful to everyone else).
+
+Of course, help in finishing off that page would be welcome. This year's hosting site is particularly unfriendly to scraping, so it looks like it will all have to be transferred manually.
+
+Cheers, Andreas
+
+> On Jun 14, 2017, at 07:55, Rawlings, Kenrick D <kerawlin at iu.edu> wrote:
+>
+>
+> ?Once the videos are available on YouTube we will add a prominent link at http://opensfs.org/lug-2017/ to a collected page for them with links to each video similar to LUG 2016. I'll also send a follow-up to the list then.
+>
+> Thanks,
+> Ken
+>
+>> From: lustre-discuss <lustre-discuss-bounces at lists.lustre.org> on behalf of E.S. Rosenberg <esr+lustre at mail.hebrew.edu>
+>> Sent: Wednesday, June 14, 2017 6:47 AM
+>> To: Cory Spitz
+>> Cc: lustre-discuss at lists.lustre.org
+>> Subject: Re: [lustre-discuss] LUG 2017
+>>
+>>> On Wed, Jun 14, 2017 at 12:48 AM, Cory Spitz  <spitzcor at cray.com> wrote:
+>>> Right.  The videos aren?t up yet, but when they?re posted you?ll find them at https://www.youtube.com/user/IUPTI.
+>> Why not OpenSFS like LUG 2016?
+>>>
+>>> -Cory
+> _______________________________________________
+> lustre-discuss mailing list
+> lustre-discuss at lists.lustre.org
+> http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org
+_______________________________________________
+lustre-discuss mailing list
+lustre-discuss at lists.lustre.org
+http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org
+
+From lihm0 at 163.com  Wed Jun 21 00:46:42 2017
+From: lihm0 at 163.com (HM Li)
+Date: Wed, 21 Jun 2017 15:46:42 +0800
+Subject: [lustre-discuss] lustre on Intel Xeon KNL Phi server reposing very
+	slow.
+Message-ID: <bb89fc3a-0fee-edb9-d209-85dd325f533e@163.com>
+
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20170621/78db4266/attachment.htm>
+
+From lihm0 at 163.com  Wed Jun 21 04:08:50 2017
+From: lihm0 at 163.com (HM Li)
+Date: Wed, 21 Jun 2017 19:08:50 +0800
+Subject: [lustre-discuss] lustre on Intel Xeon KNL Phi server reposing
+ very slow.
+In-Reply-To: <bb89fc3a-0fee-edb9-d209-85dd325f533e@163.com>
+References: <bb89fc3a-0fee-edb9-d209-85dd325f533e@163.com>
+Message-ID: <9fee0fd4-86d2-3d54-5e7f-44e0bce60ecb@163.com>
+
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20170621/a07de404/attachment-0001.htm>
+
+From scott.nolin at ssec.wisc.edu  Wed Jun 21 13:46:23 2017
+From: scott.nolin at ssec.wisc.edu (Scott Nolin)
+Date: Wed, 21 Jun 2017 20:46:23 +0000
+Subject: [lustre-discuss] Lustre [2.8.0] and the Linux Automounter
+In-Reply-To: <CAAyf6vBT05_2-Asc2zXmEC3_WYnzXVSraQ4VP8mXKYXjeZamfg@mail.gmail.com>
+References: <CAAyf6vBT05_2-Asc2zXmEC3_WYnzXVSraQ4VP8mXKYXjeZamfg@mail.gmail.com>
+Message-ID: <DM5PR06MB34041FA6D4FA9E1BFA4CD612BDDA0@DM5PR06MB3404.namprd06.prod.outlook.com>
+
+We use them fairly extensively with 2.7 and 2.8 and find them useful and stable.
+ 
+For cluster nodes, perhaps not a big deal, but for our many non-cluster clients it is useful. We have multiple filesystems so sometimes many mounts. The main benefit I think is not that sometimes they unmount, but if there are ever issues and some filesystems temprorarily not available ? much, much less pain.
+ 
+Scott
+ 
+From: lustre-discuss [mailto:lustre-discuss-bounces at lists.lustre.org] On Behalf Of Chad DeWitt
+Sent: Monday, June 19, 2017 8:52 AM
+To: lustre-discuss at lists.lustre.org
+Subject: [lustre-discuss] Lustre [2.8.0] and the Linux Automounter
+ 
+Good morning, All.
+ 
+We are considering using Lustre [2.8.0] with the Linux automounter.  Is anyone using this combination successfully?  Are there any caveats?  
+ 
+(I did check JIRA, but only found two tickets concerning 1.x Lustre.)
+ 
+Thank you in advance,
+Chad
+
+
+------------------------------------------------------------
+Chad DeWitt, CISSP | HPC Storage Administrator
+UNC Charlotte | ITS ? University Research Computing
+------------------------------------------------------------
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20170621/1bffadd8/attachment-0001.htm>
+-------------- next part --------------
+A non-text attachment was scrubbed...
+Name: smime.p7s
+Type: application/pkcs7-signature
+Size: 4991 bytes
+Desc: not available
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20170621/1bffadd8/attachment-0001.bin>
+
+From Riccardo.Veraldi at cnaf.infn.it  Wed Jun 21 18:39:31 2017
+From: Riccardo.Veraldi at cnaf.infn.it (Riccardo Veraldi)
+Date: Wed, 21 Jun 2017 18:39:31 -0700
+Subject: [lustre-discuss] missing lustre version in
+ /proc/fs/lustre/version
+In-Reply-To: <89CDF265-EF96-46A7-BE8A-2172B24A7014@intel.com>
+References: <0313b821-3116-c4b2-fbc5-a826cdce0bd6@cnaf.infn.it>
+	<89CDF265-EF96-46A7-BE8A-2172B24A7014@intel.com>
+Message-ID: <aea6bc06-b75c-e85f-124e-efe0dddfb58d@cnaf.infn.it>
+
+I noticed as well that now "lustre check osts" does not work anymore
+with normal user privileges:
+
+error: check: osts status failed
+
+while it works with root privileges.
+Looking with strace turns out that a normal user has no privileges to
+look into /sys/fs/lnet/devices   /sys/kernel/debug/lnet/devices  and so
+on...
+
+so basically to run "lustre check" from the lustre client is not
+possible as a normal user, while it was possible before.
+Is there a workaround or is it intended to be like that ?
+
+thanks
+
+
+On 6/20/17 3:34 PM, Dilger, Andreas wrote:
+> On Jun 20, 2017, at 15:36, Riccardo Veraldi <Riccardo.Veraldi at cnaf.infn.it> wrote:
+>> Hello,
+>>
+>> I built lustre-client 2.9.59 from source as dkms package.
+>> Everything work fine but /proc/fs/lustre/version  disappeared while it
+>> was there with Lustre client 2.9.0
+>> is this normal ?
+> We've had to move a lot of Lustre parameters out of /proc/fs/lustre and into /sys/fs/lustre
+> for most parameter values, or /sys/kernel/debug/lustre (via debugfs) for large statistics
+> due to rules imposed by the upstream kernel developers.  This change has already been done
+> for the Lustre upstream client over a year ago.
+>
+> If you use, for example, "lctl get_param version" to access this parameter and others then
+> the change is handled transparently.  If you are using direct access to /proc then you will
+> need to special-case this by version, or use a wildcard path like:
+>
+>      /{proc,sys}/{fs,sys,kernel/debug}/{lustre,lnet}/
+> or
+>      {/sys/{fs,kernel/debug}/{lnet,lustre}/,/proc/{fs,sys}/{lnet,lustre}/}
+>
+> Not all combinations of the above path are actually valid for all parameters, but this is a
+> catch-all combination that will find the various parameters.  The actual valid paths are
+> /proc/sys/lustre, /proc/fs/lustre, /sys/fs/lustre, /sys/kernel/debug/lustre, and similar for
+> lnet parameters.
+>
+> Cheers, Andreas
+> --
+> Andreas Dilger
+> Lustre Principal Architect
+> Intel Corporation
+>
+>
+>
+>
+>
+>
+>
+>
+
+
+From andreas.dilger at intel.com  Thu Jun 22 02:05:36 2017
+From: andreas.dilger at intel.com (Dilger, Andreas)
+Date: Thu, 22 Jun 2017 09:05:36 +0000
+Subject: [lustre-discuss] missing lustre version in
+ /proc/fs/lustre/version
+In-Reply-To: <aea6bc06-b75c-e85f-124e-efe0dddfb58d@cnaf.infn.it>
+References: <0313b821-3116-c4b2-fbc5-a826cdce0bd6@cnaf.infn.it>
+	<89CDF265-EF96-46A7-BE8A-2172B24A7014@intel.com>
+	<aea6bc06-b75c-e85f-124e-efe0dddfb58d@cnaf.infn.it>
+Message-ID: <01AA5F7A-66E8-43A3-9917-C136CEEC73DF@intel.com>
+
+On Jun 21, 2017, at 19:39, Riccardo Veraldi <Riccardo.Veraldi at cnaf.infn.it> wrote:
+> 
+> I noticed as well that now "lustre check osts" does not work anymore
+> with normal user privileges:
+> 
+> error: check: osts status failed
+> 
+> while it works with root privileges.
+> Looking with strace turns out that a normal user has no privileges to
+> look into /sys/fs/lnet/devices   /sys/kernel/debug/lnet/devices  and so
+> on...
+
+There are no files /sys/fs/lnet/devices or /sys/kernel/debug/lnet/devices, only
+/sys/kernel/debug/lustre/devices which itself appears to be world readable..
+
+Hmm, it appears that the /sys/kernel/debug is restricted to root users only,
+even though there are subdirectories and files that are world readable.
+
+> so basically to run "lustre check" from the lustre client is not
+> possible as a normal user, while it was possible before.
+> Is there a workaround or is it intended to be like that ?
+
+This change is unintentional.  Can you please file a ticket in Jira with details.
+
+Cheers, Andreas
+
+> On 6/20/17 3:34 PM, Dilger, Andreas wrote:
+>> On Jun 20, 2017, at 15:36, Riccardo Veraldi <Riccardo.Veraldi at cnaf.infn.it> wrote:
+>>> Hello,
+>>> 
+>>> I built lustre-client 2.9.59 from source as dkms package.
+>>> Everything work fine but /proc/fs/lustre/version  disappeared while it
+>>> was there with Lustre client 2.9.0
+>>> is this normal ?
+>> We've had to move a lot of Lustre parameters out of /proc/fs/lustre and into /sys/fs/lustre
+>> for most parameter values, or /sys/kernel/debug/lustre (via debugfs) for large statistics
+>> due to rules imposed by the upstream kernel developers.  This change has already been done
+>> for the Lustre upstream client over a year ago.
+>> 
+>> If you use, for example, "lctl get_param version" to access this parameter and others then
+>> the change is handled transparently.  If you are using direct access to /proc then you will
+>> need to special-case this by version, or use a wildcard path like:
+>> 
+>>     /{proc,sys}/{fs,sys,kernel/debug}/{lustre,lnet}/
+>> or
+>>     {/sys/{fs,kernel/debug}/{lnet,lustre}/,/proc/{fs,sys}/{lnet,lustre}/}
+>> 
+>> Not all combinations of the above path are actually valid for all parameters, but this is a
+>> catch-all combination that will find the various parameters.  The actual valid paths are
+>> /proc/sys/lustre, /proc/fs/lustre, /sys/fs/lustre, /sys/kernel/debug/lustre, and similar for
+>> lnet parameters.
+>> 
+>> Cheers, Andreas
+>> --
+>> Andreas Dilger
+>> Lustre Principal Architect
+>> Intel Corporation
+>> 
+>> 
+>> 
+>> 
+>> 
+>> 
+>> 
+>> 
+> 
+
+Cheers, Andreas
+--
+Andreas Dilger
+Lustre Principal Architect
+Intel Corporation
+
+
+
+
+
+
+
+
+From esr+lustre at mail.hebrew.edu  Thu Jun 22 05:13:16 2017
+From: esr+lustre at mail.hebrew.edu (E.S. Rosenberg)
+Date: Thu, 22 Jun 2017 15:13:16 +0300
+Subject: [lustre-discuss] LUG 2017
+In-Reply-To: <1498006954543.21938@iu.edu>
+References: <CA+K1OzSyYYqWA=GfFOrbExvi_t1aQZFBk_P6-_r1VcTAna5sfw@mail.gmail.com>
+	<CAPALmnn3WzAwcK0EReYnheSGv=kgDNQBGRTc4ib713ZAsP7gbQ@mail.gmail.com>
+	<F6826123-9CAD-44D7-8F58-0EF278A35214@intel.com>
+	<0DDF3A88-B5B2-482E-9299-5796061633F1@cray.com>
+	<CA+K1OzRi98+xjsgRpNDJO3xTPTj9xked=YRq0Y5bikOxir3vhg@mail.gmail.com>
+	<1497448526913.53441@iu.edu>
+	<477EC256-0767-47DF-AC32-888E82DAF1F8@intel.com>
+	<1497534966810.23392@iu.edu> <1498006954543.21938@iu.edu>
+Message-ID: <CA+K1OzS0iK9Wy8sUMGOSFOFn3oShkq0x4hNzGev+1TbbRFLt4w@mail.gmail.com>
+
+On Wed, Jun 21, 2017 at 4:02 AM, Rawlings, Kenrick D <kerawlin at iu.edu>
+wrote:
+
+> The process was successful and the LUG 2017 agenda and presentation slides
+> are available on the Lustre Wiki and the OpenSFS website:
+>
+> http://wiki.lustre.org/Lustre_User_Group_2017
+> http://opensfs.org/lug-2017-agenda
+>
+> If there are any issues, please let me know. Once the presentation videos
+> are available, links to those will be added as well and I'll send a
+> follow-up.
+>
+> Thanks,
+>
+Thank you and all the other for your dedicated work!
+
+> Ken
+>
+> ________________________________________
+> From: lustre-discuss <lustre-discuss-bounces at lists.lustre.org> on behalf
+> of Rawlings, Kenrick D <kerawlin at iu.edu>
+> Sent: Thursday, June 15, 2017 9:56 AM
+> To: Dilger, Andreas
+> Cc: lustre-discuss at lists.lustre.org
+> Subject: Re: [lustre-discuss] LUG 2017
+>
+> That's appreciated Andreas. I'm currently working on methods to help
+> collect the agendas and presentations. As you encountered, there are
+> challenges in scraping the site, but my hope is to automate at least part
+> of the process to save manual effort. I'll report back on this within the
+> next day or two.
+>
+> Thanks,
+> Ken
+>
+> _______________________________________
+> From: Dilger, Andreas <andreas.dilger at intel.com>
+> Sent: Thursday, June 15, 2017 6:49 AM
+> To: Rawlings, Kenrick D
+> Cc: E.S. Rosenberg; Cory Spitz; lustre-discuss at lists.lustre.org
+> Subject: Re: [lustre-discuss] LUG 2017
+>
+> I've started making an aggregation page on wiki.lustre.org already for
+> LUG2017 as I've done for some of the older LUGs, which will include local
+> copies of all the presentations and direct links to the videos.
+>
+> I've found in the past that externally-hosted agendas and presentations
+> tend to go missing after a couple of years, so prefer to host a copy of
+> everything directly on lustre.org (as well as my laptop, though that
+> isn't as useful to everyone else).
+>
+> Of course, help in finishing off that page would be welcome. This year's
+> hosting site is particularly unfriendly to scraping, so it looks like it
+> will all have to be transferred manually.
+>
+> Cheers, Andreas
+>
+> > On Jun 14, 2017, at 07:55, Rawlings, Kenrick D <kerawlin at iu.edu> wrote:
+> >
+> >
+> > ?Once the videos are available on YouTube we will add a prominent link
+> at http://opensfs.org/lug-2017/ to a collected page for them with links
+> to each video similar to LUG 2016. I'll also send a follow-up to the list
+> then.
+> >
+> > Thanks,
+> > Ken
+> >
+> >> From: lustre-discuss <lustre-discuss-bounces at lists.lustre.org> on
+> behalf of E.S. Rosenberg <esr+lustre at mail.hebrew.edu>
+> >> Sent: Wednesday, June 14, 2017 6:47 AM
+> >> To: Cory Spitz
+> >> Cc: lustre-discuss at lists.lustre.org
+> >> Subject: Re: [lustre-discuss] LUG 2017
+> >>
+> >>> On Wed, Jun 14, 2017 at 12:48 AM, Cory Spitz  <spitzcor at cray.com>
+> wrote:
+> >>> Right.  The videos aren?t up yet, but when they?re posted you?ll find
+> them at https://www.youtube.com/user/IUPTI.
+> >> Why not OpenSFS like LUG 2016?
+> >>>
+> >>> -Cory
+> > _______________________________________________
+> > lustre-discuss mailing list
+> > lustre-discuss at lists.lustre.org
+> > http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org
+> _______________________________________________
+> lustre-discuss mailing list
+> lustre-discuss at lists.lustre.org
+> http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org
+> _______________________________________________
+> lustre-discuss mailing list
+> lustre-discuss at lists.lustre.org
+> http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org
+>
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20170622/c432d711/attachment.htm>
+
+From darby.vicker-1 at nasa.gov  Thu Jun 22 12:12:52 2017
+From: darby.vicker-1 at nasa.gov (Vicker, Darby (JSC-EG311))
+Date: Thu, 22 Jun 2017 19:12:52 +0000
+Subject: [lustre-discuss] IML help/docs
+Message-ID: <AE88B6A8-2EE8-45D1-8520-B06A26F1311D@nasa.gov>
+
+Hello,
+
+I've been looking through the LUG '17 docs and the references to the intel manager for lustre caught my eye.  I'd like to try it out but I'm having trouble getting it compiled and haven't found much in the way of docs or further information.  If anyone knows where to find more info, please let me know.
+
+Thanks,
+Darby
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20170622/6b0543fc/attachment.htm>
+
+From peter.a.jones at intel.com  Thu Jun 22 21:13:28 2017
+From: peter.a.jones at intel.com (Jones, Peter A)
+Date: Fri, 23 Jun 2017 04:13:28 +0000
+Subject: [lustre-discuss] IML help/docs
+Message-ID: <00CB64CB-95CB-445D-A6D4-80203FD401F1@intel.com>
+
+Hi Darby
+
+The source has been made available on github but there is still some remaining work before it?s able to be built and used in the new open source distribution style. I?ll post again when things are ready ? probably in the next couple of weeks.
+
+Peter
+
+On 6/22/17, 12:12 PM, "lustre-discuss on behalf of Vicker, Darby (JSC-EG311)" <lustre-discuss-bounces at lists.lustre.org<mailto:lustre-discuss-bounces at lists.lustre.org> on behalf of darby.vicker-1 at nasa.gov<mailto:darby.vicker-1 at nasa.gov>> wrote:
+
+Hello,
+
+I've been looking through the LUG '17 docs and the references to the intel manager for lustre caught my eye.  I'd like to try it out but I'm having trouble getting it compiled and haven't found much in the way of docs or further information.  If anyone knows where to find more info, please let me know.
+
+Thanks,
+Darby
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20170623/274b9e7d/attachment.htm>
+
+From Riccardo.Veraldi at cnaf.infn.it  Sun Jun 25 08:09:37 2017
+From: Riccardo.Veraldi at cnaf.infn.it (Riccardo Veraldi)
+Date: Sun, 25 Jun 2017 08:09:37 -0700
+Subject: [lustre-discuss] LustreError and client crashes
+Message-ID: <0e7f5efe-58c5-7772-57dd-0647b8c6a244@cnaf.infn.it>
+
+Hello,
+I have a high volume data transfer between my Lustre filesystems.
+I upgraded to Lustre 2.9.0 on server side and Lustre 2.9.59 on client
+side (because of a corruption problem bug).
+My clients running 2.9.59 hangs and I need to reboot them and at about
+the same time these are the kind of the errors I got server side
+mostly errors like this one:
+
+Jun 24 12:12:02 psananehffb02 kernel: [6111617.200388] LustreError:
+20950:0:(ldlm_lib.c:3180:target_bulk_io()) @@@ bulk WRITE failed: rc
+-107 req at ffff882035941050 x1570865508218640/t0(0)
+o4->2f74d3d7-3a4b-6c70-28cd-24ce4d6a4c25 at 172.21.52.193@o2ib2:-1/-1lens
+608/448 e 0 to 0 dl 1498331528 ref 1 fl Interpret:H/0/0 rc 0/0 Jun 24
+12:12:02 psananehffb02 kernel: [6111617.200486] LustreError:
+20950:0:(ldlm_lib.c:3180:target_bulk_io()) Skipped 1 previous similar
+message
+
+
+and in particular on one OSS like this:
+
+Jun 24 21:02:46 psananehffb03 kernel: [6143466.329419] LustreError:
+6211:0:(events.c:446:server_bulk_callback()) event type 5, status -103,
+desc ffff88200c7cf400 Jun 24 21:02:46 psananehffb03 kernel:
+[6143466.330851] LustreError:
+6211:0:(events.c:446:server_bulk_callback()) event type 5, status -103,
+desc ffff88200cfc3400
+
+Any hint on what may generate this would be very helpful. looks like
+these error are network connection issues but so far the IB switches and
+ib interfaces looks fine...
+thank you very much
+
+Rick
+
+
+
+
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20170625/4294eff2/attachment.htm>
+
+From urbanjost at comcast.net  Sun Jun 25 08:45:07 2017
+From: urbanjost at comcast.net (John S. Urban)
+Date: Sun, 25 Jun 2017 11:45:07 -0400
+Subject: [lustre-discuss] lustre file system errors with large user UIDs
+Message-ID: <000001d2edca$05e5f920$11b1eb60$@comcast.net>
+
+We recently added a lustre file server.  All appears to be going well except
+when users with a UID >  2**19  (ie. 524 288,) try to access the file
+
+System; although no similar problems appear mounting other types of file
+systems (we have many others).  So the problem appears to be 
+
+Specific to the lustre mounts.  Users with the large UIDs get  "permission
+denied" if they try to access the file system, and commands like ls(1)
+
+Show question marks for most fields (permission, owner, group, .).  Is there
+a non-default mount option required to use lustre with large UID 
+
+Values?
+
+ 
+
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20170625/a611e42e/attachment.htm>
+
+From andreas.dilger at intel.com  Sun Jun 25 18:23:27 2017
+From: andreas.dilger at intel.com (Dilger, Andreas)
+Date: Mon, 26 Jun 2017 01:23:27 +0000
+Subject: [lustre-discuss] LustreError and client crashes
+In-Reply-To: <0e7f5efe-58c5-7772-57dd-0647b8c6a244@cnaf.infn.it>
+References: <0e7f5efe-58c5-7772-57dd-0647b8c6a244@cnaf.infn.it>
+Message-ID: <306AD599-9CEB-4537-8F48-CF510905E9B0@intel.com>
+
+These errors on the OSS are just from rebooting the clients in the middle of data transfer.
+
+Cheers, Andreas
+
+On Jun 25, 2017, at 09:09, Riccardo Veraldi <Riccardo.Veraldi at cnaf.infn.it<mailto:Riccardo.Veraldi at cnaf.infn.it>> wrote:
+
+Hello,
+I have a high volume data transfer between my Lustre filesystems.
+I upgraded to Lustre 2.9.0 on server side and Lustre 2.9.59 on client side (because of a corruption problem bug).
+My clients running 2.9.59 hangs and I need to reboot them and at about the same time these are the kind of the errors I got server side
+mostly errors like this one:
+
+Jun 24 12:12:02 psananehffb02 kernel: [6111617.200388] LustreError: 20950:0:(ldlm_lib.c:3180:target_bulk_io()) @@@ bulk WRITE failed: rc -107 req at ffff882035941050 x1570865508218640/t0(0) o4->2f74d3d7-3a4b-6c70-28cd-24ce4d6a4c25 at 172.21.52.193@o2ib2:-1/-1<mailto:2f74d3d7-3a4b-6c70-28cd-24ce4d6a4c25 at 172.21.52.193@o2ib2:-1/-1> lens 608/448 e 0 to 0 dl 1498331528 ref 1 fl Interpret:H/0/0 rc 0/0 Jun 24 12:12:02 psananehffb02 kernel: [6111617.200486] LustreError: 20950:0:(ldlm_lib.c:3180:target_bulk_io()) Skipped 1 previous similar message
+
+
+and in particular on one OSS like this:
+
+Jun 24 21:02:46 psananehffb03 kernel: [6143466.329419] LustreError: 6211:0:(events.c:446:server_bulk_callback()) event type 5, status -103, desc ffff88200c7cf400 Jun 24 21:02:46 psananehffb03 kernel: [6143466.330851] LustreError: 6211:0:(events.c:446:server_bulk_callback()) event type 5, status -103, desc ffff88200cfc3400
+
+Any hint on what may generate this would be very helpful. looks like these error are network connection issues but so far the IB switches and ib interfaces looks fine...
+thank you very much
+
+Rick
+
+
+
+
+
+_______________________________________________
+lustre-discuss mailing list
+lustre-discuss at lists.lustre.org<mailto:lustre-discuss at lists.lustre.org>
+http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20170626/1960bbc1/attachment.htm>
+
+From andreas.dilger at intel.com  Sun Jun 25 21:59:33 2017
+From: andreas.dilger at intel.com (Dilger, Andreas)
+Date: Mon, 26 Jun 2017 04:59:33 +0000
+Subject: [lustre-discuss] lustre file system errors with large user UIDs
+In-Reply-To: <000001d2edca$05e5f920$11b1eb60$@comcast.net>
+References: <000001d2edca$05e5f920$11b1eb60$@comcast.net>
+Message-ID: <3F37330B-14FF-4CA3-8193-86ECA1AFCA28@intel.com>
+
+I haven't heard of anything similar. You might try enabling full Lustre debugging ("lctl set_param debug=-1" on both the client and MDS) running strace on your commands to see where the error is generated. Then dump the Lustre debug log with "lctl dk /tmp/debug" on the client/MDS and look for "-2" (=-EPERM) error returns.
+
+Cheers, Andreas
+
+On Jun 25, 2017, at 09:45, John S. Urban <urbanjost at comcast.net<mailto:urbanjost at comcast.net>> wrote:
+
+We recently added a lustre file server.  All appears to be going well except when users with a UID >  2**19  (ie. 524 288,) try to access the file
+System; although no similar problems appear mounting other types of file systems (we have many others).  So the problem appears to be
+Specific to the lustre mounts.  Users with the large UIDs get  ?permission denied? if they try to access the file system, and commands like ls(1)
+Show question marks for most fields (permission, owner, group, ?).  Is there a non-default mount option required to use lustre with large UID
+Values?
+
+_______________________________________________
+lustre-discuss mailing list
+lustre-discuss at lists.lustre.org<mailto:lustre-discuss at lists.lustre.org>
+http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20170626/4f0c6c77/attachment.htm>
+
+From Ekaterina.Popova at ihep.ru  Mon Jun 26 01:04:12 2017
+From: Ekaterina.Popova at ihep.ru (Ekaterina Popova)
+Date: Mon, 26 Jun 2017 11:04:12 +0300
+Subject: [lustre-discuss] errors 107 in syslog on client 2.8.0
+Message-ID: <31190453-cf34-4cd3-cfd6-d09f6694bab1@ihep.ru>
+
+Greetings,
+
+We've installed lustre client 2.8.0 on Debian 8. Lustre is mounted, it 
+works, but there are many errors in system logs such as:
+
+Jun 26 06:42:46 fs0003 kernel: [2996428.506714] LustreError: 11-0: 
+lu-ihep-OST000f-osc-ffff88045fee0800: operation obd_ping to node 
+192.168.175.69 at tcp1 failed: rc = -107
+Jun 26 06:42:46 fs0003 kernel: [2996428.506720] Lustre: 
+lu-ihep-OST0004-osc-ffff88045fee0800: Connection to lu-ihep-OST0004 (at 
+192.168.175.146 at tcp1) was lost; in progress operations using this 
+service will wait for recovery to complete
+Jun 26 06:42:46 xxxx kernel: [2996428.506721] Lustre: Skipped 33 
+previous similar messages
+Jun 26 06:42:46 xxxx kernel: [2996428.508543] LustreError: Skipped 37 
+previous similar messages
+Jun 26 06:42:46 xxxx kernel: [2996428.510080] LustreError: 167-0: 
+lu-ihep-OST000f-osc-ffff88045fee0800: This client was evicted by 
+lu-ihep-OST000f; in progress operations using this service will fail.
+Jun 26 06:42:46 fs0003 kernel: [2996428.510142] Lustre: 
+lu-ihep-OST000b-osc-ffff88045fee0800: Connection restored to 
+192.168.175.144 at tcp1 (at 192.168.175.144 at tcp1)
+
+Our Lustre servers are not upgraded yet.
+
+uname -s -r
+Linux 2.6.32-279.2.1.el6_lustre.gc46c389.x86_64
+
+cat /proc/fs/lustre/version
+lustre: 2.1.3
+kernel: patchless_client
+build:  RC3--PRISTINE-2.6.32-279.2.1.el6_lustre.gc46c389.x86_64
+
+Any help would be appreciated.
+
+Thanks in advance,
+
+Popova Ekaterina, IHEP
+
+
+From malcolm.j.cowe at intel.com  Mon Jun 26 01:26:06 2017
+From: malcolm.j.cowe at intel.com (Cowe, Malcolm J)
+Date: Mon, 26 Jun 2017 08:26:06 +0000
+Subject: [lustre-discuss] lustre file system errors with large user UIDs
+In-Reply-To: <000001d2edca$05e5f920$11b1eb60$@comcast.net>
+References: <000001d2edca$05e5f920$11b1eb60$@comcast.net>
+Message-ID: <0671D5E9-8A56-4EED-9095-5B4B7491B877@intel.com>
+
+One of the most common causes of permissions problems on Lustre is not propagating UIDs and GIDs onto the MDS. The servers that run the MDTs for the file system need to be able to look up the UIDs and GIDs of the users that can access the file system.
+
+The symptoms you describe do match this scenario. I can reproduce this behaviour with both ?high? (600000) and ?low? (2000) UID numbers, and adding the UIDs/GIDs to the MDS fixes the issue on my testbed.
+
+Malcolm Cowe
+High Performance Data Division
+
+Intel Corporation | www.intel.com
+
+
+From: lustre-discuss <lustre-discuss-bounces at lists.lustre.org> on behalf of "John S. Urban" <urbanjost at comcast.net>
+Date: Monday, 26 June 2017 at 1:45 am
+To: Lustre discussion <lustre-discuss at lists.lustre.org>
+Subject: [lustre-discuss] lustre file system errors with large user UIDs
+
+We recently added a lustre file server.  All appears to be going well except when users with a UID >  2**19  (ie. 524 288,) try to access the file
+System; although no similar problems appear mounting other types of file systems (we have many others).  So the problem appears to be
+Specific to the lustre mounts.  Users with the large UIDs get  ?permission denied? if they try to access the file system, and commands like ls(1)
+Show question marks for most fields (permission, owner, group, ?).  Is there a non-default mount option required to use lustre with large UID
+Values?
+
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20170626/40cb4574/attachment-0001.htm>
+
+From esr+lustre at mail.hebrew.edu  Mon Jun 26 04:26:16 2017
+From: esr+lustre at mail.hebrew.edu (E.S. Rosenberg)
+Date: Mon, 26 Jun 2017 14:26:16 +0300
+Subject: [lustre-discuss] errors 107 in syslog on client 2.8.0
+In-Reply-To: <31190453-cf34-4cd3-cfd6-d09f6694bab1@ihep.ru>
+References: <31190453-cf34-4cd3-cfd6-d09f6694bab1@ihep.ru>
+Message-ID: <CA+K1OzS1r+J=JpcrxeLuE7OdjGyyOXVPO9O1BRWaPPQaMkhnWg@mail.gmail.com>
+
+Hi Ekaterina,
+
+On Mon, Jun 26, 2017 at 11:04 AM, Ekaterina Popova <Ekaterina.Popova at ihep.ru
+> wrote:
+
+> Greetings,
+>
+> We've installed lustre client 2.8.0 on Debian 8. Lustre is mounted, it
+> works, but there are many errors in system logs such as:
+>
+> Jun 26 06:42:46 fs0003 kernel: [2996428.506714] LustreError: 11-0:
+> lu-ihep-OST000f-osc-ffff88045fee0800: operation obd_ping to node
+> 192.168.175.69 at tcp1 failed: rc = -107
+> Jun 26 06:42:46 fs0003 kernel: [2996428.506720] Lustre:
+> lu-ihep-OST0004-osc-ffff88045fee0800: Connection to lu-ihep-OST0004 (at
+> 192.168.175.146 at tcp1) was lost; in progress operations using this service
+> will wait for recovery to complete
+> Jun 26 06:42:46 xxxx kernel: [2996428.506721] Lustre: Skipped 33 previous
+> similar messages
+> Jun 26 06:42:46 xxxx kernel: [2996428.508543] LustreError: Skipped 37
+> previous similar messages
+> Jun 26 06:42:46 xxxx kernel: [2996428.510080] LustreError: 167-0:
+> lu-ihep-OST000f-osc-ffff88045fee0800: This client was evicted by
+> lu-ihep-OST000f; in progress operations using this service will fail.
+> Jun 26 06:42:46 fs0003 kernel: [2996428.510142] Lustre:
+> lu-ihep-OST000b-osc-ffff88045fee0800: Connection restored to
+> 192.168.175.144 at tcp1 (at 192.168.175.144 at tcp1)
+>
+> Our Lustre servers are not upgraded yet.
+>
+You should probably not be running the new client against such old servers,
+this was not tested and though the combination may work we had issues with
+2.8.0 client with an older server (not 100% sure anymore if it was 2.7.0 or
+2.5.x) that just caused the Lustre OSS to hang.
+Sorry that I can't be of more help,
+Eli
+
+>
+> uname -s -r
+> Linux 2.6.32-279.2.1.el6_lustre.gc46c389.x86_64
+>
+> cat /proc/fs/lustre/version
+> lustre: 2.1.3
+> kernel: patchless_client
+> build:  RC3--PRISTINE-2.6.32-279.2.1.el6_lustre.gc46c389.x86_64
+>
+> Any help would be appreciated.
+>
+> Thanks in advance,
+>
+> Popova Ekaterina, IHEP
+>
+> _______________________________________________
+> lustre-discuss mailing list
+> lustre-discuss at lists.lustre.org
+> http://lists.lustre.org/listinfo.cgi/lustre-discuss-lustre.org
+>
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20170626/480de451/attachment.htm>
+
+From peter.a.jones at intel.com  Mon Jun 26 05:24:46 2017
+From: peter.a.jones at intel.com (Jones, Peter A)
+Date: Mon, 26 Jun 2017 12:24:46 +0000
+Subject: [lustre-discuss] errors 107 in syslog on client 2.8.0
+In-Reply-To: <CA+K1OzS1r+J=JpcrxeLuE7OdjGyyOXVPO9O1BRWaPPQaMkhnWg@mail.gmail.com>
+References: <31190453-cf34-4cd3-cfd6-d09f6694bab1@ihep.ru>
+	<CA+K1OzS1r+J=JpcrxeLuE7OdjGyyOXVPO9O1BRWaPPQaMkhnWg@mail.gmail.com>
+Message-ID: <9C69221D-5F87-4647-9710-A977FD3E32D0@intel.com>
+
+Eli, I expect that it was 2.7.0 servers ? I know of a number of sites with 2.5.x servers and 2.8.x clients. I do not know of anyone running successfully with a larger gap than that though.
+
+On 6/26/17, 4:26 AM, "lustre-discuss on behalf of E.S. Rosenberg" <lustre-discuss-bounces at lists.lustre.org<mailto:lustre-discuss-bounces at lists.lustre.org> on behalf of esr+lustre at mail.hebrew.edu<mailto:esr+lustre at mail.hebrew.edu>> wrote:
+
+You should probably not be running the new client against such old servers, this was not tested and though the combination may work we had issues with 2.8.0 client with an older server (not 100% sure anymore if it was 2.7.0 or 2.5.x) that just caused the Lustre OSS to hang.
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20170626/65fa8a42/attachment.htm>
+
+From matthew.sanderson at anu.edu.au  Tue Jun 27 00:18:22 2017
+From: matthew.sanderson at anu.edu.au (Matthew Sanderson)
+Date: Tue, 27 Jun 2017 17:18:22 +1000
+Subject: [lustre-discuss] uid/gid in changelog records
+Message-ID: <881cbf9e-0946-0c0f-4d83-f55afa2ee782@anu.edu.au>
+
+Hi all,
+
+Change logs would form a more complete audit trail if they contained a 
+user ID (and possibly also a primary group ID, maybe even all of the 
+user's supplementary group IDs).
+
+Is there a particular reason why this information isn't currently stored 
+in changelog records?
+
+After some investigation with my colleague (cc'd), it looks like this 
+would be a comparatively easy change to make. The information is already 
+sent over the wire to the MDS; it's just not persisted in the changelog.
+
+The additional fields could be added to the userspace 'struct 
+changelog_rec' as an additional extension, similar to the way renames 
+and job IDs are stored. As far as I can tell, this wouldn't break 
+compatibility with existing applications that consume changelogs.
+
+Regards, Matt
+
+From andreas.dilger at intel.com  Tue Jun 27 04:35:30 2017
+From: andreas.dilger at intel.com (Dilger, Andreas)
+Date: Tue, 27 Jun 2017 11:35:30 +0000
+Subject: [lustre-discuss] uid/gid in changelog records
+In-Reply-To: <881cbf9e-0946-0c0f-4d83-f55afa2ee782@anu.edu.au>
+References: <881cbf9e-0946-0c0f-4d83-f55afa2ee782@anu.edu.au>
+Message-ID: <92B570CD-C14C-493F-ACDA-CD2F90E552E2@intel.com>
+
+On Jun 27, 2017, at 01:18, Matthew Sanderson <matthew.sanderson at anu.edu.au> wrote:
+> 
+> Hi all,
+> 
+> Change logs would form a more complete audit trail if they contained a user ID (and possibly also a primary group ID, maybe even all of the user's supplementary group IDs).
+> 
+> Is there a particular reason why this information isn't currently stored in changelog records?
+> 
+> After some investigation with my colleague (cc'd), it looks like this would be a comparatively easy change to make. The information is already sent over the wire to the MDS; it's just not persisted in the changelog.
+> 
+> The additional fields could be added to the userspace 'struct changelog_rec' as an additional extension, similar to the way renames and job IDs are stored. As far as I can tell, this wouldn't break compatibility with existing applications that consume changelogs.
+
+This definitely sounds interesting.  Originally, the ChangeLog was developed for tracking resync of changes to the filesystem, and the ownership of the files can be found by looking up the inode by FID.  Definitely there has been some interest in having auditing for Lustre.
+
+Your analysis of the updated ChangeLog format is correct - it was implemented to allow addition of new fields, and I'd definitely be in support of your proposal to record the process UID/GID accessing the files, if auditing was enabled.  Would the client NID also need to be recorded?
+
+I was thinking that enabling auditing for Lustre would potentially be too much overhead, but if this was limited to a single record for each UID/GID opening each file it would likely be fairly reasonable since only a single record would be needed for even a large MPI job.
+
+Cheers, Andreas
+--
+Andreas Dilger
+Lustre Principal Architect
+Intel Corporation
+
+
+
+
+
+
+
+
+From matthew.sanderson at anu.edu.au  Wed Jun 28 21:22:06 2017
+From: matthew.sanderson at anu.edu.au (Matthew Sanderson)
+Date: Thu, 29 Jun 2017 14:22:06 +1000
+Subject: [lustre-discuss] uid/gid in changelog records
+In-Reply-To: <92B570CD-C14C-493F-ACDA-CD2F90E552E2@intel.com>
+References: <881cbf9e-0946-0c0f-4d83-f55afa2ee782@anu.edu.au>
+	<92B570CD-C14C-493F-ACDA-CD2F90E552E2@intel.com>
+Message-ID: <9bac6bed-97eb-6bec-8ee3-e42a2c3ed178@anu.edu.au>
+
+I was envisioning either unconditionally recording UID/GID, or perhaps 
+making this configurable at compile time. I hadn't considered runtime 
+configuration (distinct from registering a changelog consumer). Is this 
+necessary?
+
+Our site is probably not interested in recording NIDs. Although it would 
+make sense to include them in an audit trail, I'm concerned about the 
+possible overhead. Perhaps recording of NIDs could be configurable? I 
+would prefer to consider this later, if ever.
+
+I had originally hoped to avoid increasing the number of records 
+generated by a given MPI job, by adding the UID and GID as extensions to 
+a changelog record type that was already being generated.
+However, in my testing, some actions which should be captured in even a 
+minimal audit trail, such as a sequence of open/read/write/close system 
+calls, do not generate any changelog records.
+
+As a result, it's my understanding that generation of additional 
+changelog record(s) is unavoidable. Is this an accurate assessment?
+
+Regards,
+
+Matt
+
+
+On 27/06/17 21:35, Dilger, Andreas wrote:
+> On Jun 27, 2017, at 01:18, Matthew Sanderson <matthew.sanderson at anu.edu.au> wrote:
+>> Hi all,
+>>
+>> Change logs would form a more complete audit trail if they contained a user ID (and possibly also a primary group ID, maybe even all of the user's supplementary group IDs).
+>>
+>> Is there a particular reason why this information isn't currently stored in changelog records?
+>>
+>> After some investigation with my colleague (cc'd), it looks like this would be a comparatively easy change to make. The information is already sent over the wire to the MDS; it's just not persisted in the changelog.
+>>
+>> The additional fields could be added to the userspace 'struct changelog_rec' as an additional extension, similar to the way renames and job IDs are stored. As far as I can tell, this wouldn't break compatibility with existing applications that consume changelogs.
+> This definitely sounds interesting.  Originally, the ChangeLog was developed for tracking resync of changes to the filesystem, and the ownership of the files can be found by looking up the inode by FID.  Definitely there has been some interest in having auditing for Lustre.
+>
+> Your analysis of the updated ChangeLog format is correct - it was implemented to allow addition of new fields, and I'd definitely be in support of your proposal to record the process UID/GID accessing the files, if auditing was enabled.  Would the client NID also need to be recorded?
+>
+> I was thinking that enabling auditing for Lustre would potentially be too much overhead, but if this was limited to a single record for each UID/GID opening each file it would likely be fairly reasonable since only a single record would be needed for even a large MPI job.
+>
+> Cheers, Andreas
+> --
+> Andreas Dilger
+> Lustre Principal Architect
+> Intel Corporation
+>
+>
+>
+>
+>
+>
+>
+
+
+From rbokhorst at astron.nl  Fri Jun 30 02:03:28 2017
+From: rbokhorst at astron.nl (Reinoud Bokhorst)
+Date: Fri, 30 Jun 2017 11:03:28 +0200
+Subject: [lustre-discuss] Problem with raising osc.*.max_rpcs_in_flight
+Message-ID: <59563000020000A10000C0D2@smtp1.astron.nl>
+
+Hi all,
+
+I have a problem with raising the osc.*.max_rpcs_in_flight client
+setting on our Lustre 2.7.0. I am trying the increase the setting from
+32 to 64 but according to osc.*.rpc_stats it isn't being used. The
+statistics still stop at 31 rpcs with high write request numbers, e.g.
+
+                        read                    write
+rpcs in flight        rpcs   % cum % |       rpcs   % cum %
+0:                       0   0   0   |          0   0   0
+1:                    7293  38  38   |       2231  16  16
+2:                    3872  20  59   |       1196   8  25
+3:                    1851   9  69   |        935   6  31
+--SNIP--
+28:                      0   0 100   |         89   0  87
+29:                      0   0 100   |         90   0  87
+30:                      0   0 100   |         94   0  88
+31:                      0   0 100   |       1573  11 100
+
+I have modified some ko2iblnd driver parameters in an attempt to get it
+working:
+
+options ko2iblnd peer_credits=128 peer_credits_hiw=128 credits=2048
+concurrent_sends=256 ntx=2048 map_on_demand=32 fmr_pool_size=2048
+fmr_flush_trigger=512 fmr_cache=1
+
+Specifically I raised peer_credits_hiw to 128 as I've understood that it
+must be twice the value of max_rpcs_in_flight. Checking the module
+parameters that were actually loaded, I noticed that it was set to 127.
+So apparently it must be smaller than peers_credits. After noticing this
+I tried setting max_rpcs_in_flight to 60 but that didn't help either.
+Are there any other parameters affecting the max rpcs? Do all settings
+have to be powers of 2?
+
+Related question; documentation on the driver parameters and how it all
+hangs together is rather scarce on the internet. Does anyone have some
+good pointers?
+
+Thanks,
+Reinoud Bokhorst
+
+
+
+From toomuchit at gmail.com  Fri Jun 30 08:38:34 2017
+From: toomuchit at gmail.com (Brian Andrus)
+Date: Fri, 30 Jun 2017 08:38:34 -0700
+Subject: [lustre-discuss] tgt_grant_check issues in logs
+Message-ID: <f7fbaa67-5afd-c3d0-b9cc-2686b6227711@gmail.com>
+
+All,
+
+I have seen (pretty consistently) on one of my OSTs entries like:
+
+/*[28242.297887] LustreError: 
+10346:0:(tgt_grant.c:733:tgt_grant_check()) lustre-OST0000: cli 
+bafa5b19-f11b-9bfc-c44b-60ea94d9382d claims 4292608 GRANT, real grant 0*//*
+*//*[28242.297896] LustreError: 
+10346:0:(tgt_grant.c:733:tgt_grant_check()) Skipped 221 previous similar 
+messages*//*
+*/
+
+I see it mentioned in LU-9704, but see nothing about a cause, concern or 
+solution.
+Has anyone else seen this? Is it a concern?
+
+This is on a fresh install on a simple 2 OST system doing nothing but a 
+dd test or ost-survey from a client.
+
+Brian Andrus
+Firstspot, Inc.
+
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: <http://lists.lustre.org/pipermail/lustre-discuss-lustre.org/attachments/20170630/1196d437/attachment.htm>
+
