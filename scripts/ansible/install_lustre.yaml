@@ -1,6 +1,8 @@
 ---
 - name: Install and Build Lustre
   hosts: all
+  gather_facts: true # needed for {{ ansible_architecture }}
+  any_errors_fatal: true
   vars_files:
     - ./lustre_vars.yaml
 
@@ -17,6 +19,10 @@
         name: firewalld
         state: stopped
         enabled: no
+      tags: 
+        - firewalld
+        - lustre
+        - config
 
     - name: Check status of firewalld
       systemd:
@@ -24,10 +30,20 @@
         state: started
       register: firewalld_status
       ignore_errors: yes
+      tags: 
+        - firewalld
+        - lustre
+        - config
+
 
     - name: Print firewalld status
       debug:
-        msg: "Firewalld status: {{ firewalld_status }}"
+        msg: "Firewalld is currently {{ 'enabled' if firewalld_status.status.ActiveState == 'active' else 'disabled' }}"
+      tags: 
+        - firewalld
+        - lustre
+        - config
+
 
     - name: Disable SELinux
       replace:
@@ -35,14 +51,27 @@
         regexp: '^SELINUX=.*$'
         replace: 'SELINUX=disabled'
       register: selinux_config
+      tags: 
+        - selinux
+        - lustre
+        - config
+
 
     - name: Check SELinux status
       command: sestatus
       register: sestatus_output
+      tags: 
+        - selinux
+        - lustre
+        - config
 
     - name: Print SELinux status
       debug:
-        msg: "{{ sestatus_output.stdout_lines }}"
+        msg: "SELinux is currently {{ 'enabled' if 'enforcing' in sestatus_output.stdout else 'disabled' }}"
+      tags: 
+        - selinux
+        - lustre
+        - config
 
     - name: Install Lustre dependencies - Development Tools
       dnf:
@@ -80,8 +109,11 @@
           - libmount-devel
           - libnl3-cli
           - libnl3-devel
+          - resource-agents
         state: latest
-        enablerepo: powertools
+        enablerepo: 
+          - powertools
+          - ha
       tags: 
         - dependencies
         - lustre
@@ -101,7 +133,7 @@
       shell: |
         cd "{{ lustre_repo }}"
         sh autogen.sh
-        ./configure --with-zfs --disable-ldiskfs --with-linux=/usr/src/kernels/$(uname -r)
+        ./configure {{configure_args}} --with-linux=/usr/src/kernels/$(uname -r)
         make -j$(nproc)
       args:
         executable: /bin/bash
@@ -116,11 +148,28 @@
       args:
         executable: /bin/bash
       tags: 
-        - install
+        - build
         - lustre
 
     - name: Run llmountcleanup.sh
       command: "{{ lustre_repo }}/lustre/tests/llmountcleanup.sh"
+      when: "group_names | join(' ') | regex_search('lustre_servers')" # only run on servers
+      tags: 
+        - cleanup
+        - lustre
+
+    - name: Remove /sbin/mount.lustre if it exists
+    # sometimes make install fails due to errors with this file
+      file:
+        path: /sbin/mount.lustre
+        state: absent
+      register: result
+      ignore_errors: true
+      failed_when: >
+        result.failed and ('No such file or directory' not in result.msg)
+      tags: 
+        - cleanup
+        - lustre
 
     - name: Install Lustre
       shell: |
@@ -132,3 +181,33 @@
         - install
         - lustre
 
+    - name: Build Lustre RPMS
+      shell: |
+        cd "{{ lustre_repo }}"
+        make -j$(nproc) rpms
+      args:
+        executable: /bin/bash
+      tags: 
+        - install
+        - lustre
+        - rpms 
+
+    - name: Ensure RPM destination directory exists
+      file:
+        path: "{{ lustre_rpms }}"
+        state: directory
+        mode: '0755'
+      tags: 
+        - install
+        - lustre
+        - rpms
+
+    - name: Move RPM files
+      shell: "mv *.{{ ansible_architecture }}.rpm {{ lustre_rpms }}"
+      args:
+        executable: /bin/bash
+        chdir: "{{ lustre_repo }}"
+      tags: 
+        - install
+        - lustre
+        - rpms
