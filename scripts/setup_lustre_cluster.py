@@ -161,7 +161,7 @@ def get_image_storage_pool_path(conn):
         print(f"Error getting default storage pool path: {e}")
         return None
 
-def set_hostname_selinux(conn, vm_name, selinux='disabled'):
+def set_hostname_selinux_lustre_options(conn, vm_name, selinux='disabled', lopts=None):
     try:
         dom = conn.lookupByName(vm_name)
     except libvirt.libvirtError:
@@ -202,6 +202,14 @@ def set_hostname_selinux(conn, vm_name, selinux='disabled'):
                 else:
                     f.write(line)
 
+        # update the lustre options
+        if lopts:
+            lfile = os.path.join(mpoint, 'etc/modprobe.d/lustre.conf')
+            if not os.path.exists(lfile):
+                raise Exception(f"Warning: {lfile} not found")
+            with open(lfile, 'w') as file:
+                file.write(lopts)
+
         # unmount the disk image
         subprocess.run(['guestunmount', mpoint], check=True)
         print(f"Set hostname to be {vm_name}")
@@ -210,7 +218,7 @@ def set_hostname_selinux(conn, vm_name, selinux='disabled'):
         print(e)
         sys.exit(1)
 
-def create_node(conn, src_vm, target_vm, network_name, network, target_ip, mac_addr_map, hds=None):
+def create_node(conn, src_vm, target_vm, network_name, network, target_ip, mac_addr_map, hds=None, lopts=None):
     if not check_vm_status(conn, src_vm, shutdown=True, destroy=False):
         print(f"Warning: VM {src_vm} is not appropriately shutdown.")
         sys.exit(1)
@@ -229,7 +237,7 @@ def create_node(conn, src_vm, target_vm, network_name, network, target_ip, mac_a
     print(mac_addresses)
     setup_hostonly_network(conn, network, network_name, mac_addresses)
 
-    set_hostname_selinux(conn,target_vm)
+    set_hostname_selinux_lustre_options(conn,target_vm, lopts)
 
     # this get_letter thing is just a way to iterate through the alphabet to create good HDD names
     get_letter = lambda x: chr(ord('b') + x )
@@ -242,6 +250,7 @@ def create_node(conn, src_vm, target_vm, network_name, network, target_ip, mac_a
         pass # hds can be none 
 
 def restart_networking():
+    print("Restarting libvirt network")
     subprocess.run(['systemctl', 'restart', 'virtlogd.socket'], check=True)
     subprocess.run(['systemctl', 'restart', 'libvirtd'], check=True)
 
@@ -270,6 +279,8 @@ def main():
     # pull key things from config file
     network = config['system']['network']
     hosts   = config['system']['hosts']
+    lopts   = config['system']['lustre_options']
+    print(f"Lustre options are {lopts}")
 
     # Main execution starts here
     setup_hostonly_network(conn, network['addr'], network['name'])
@@ -279,12 +290,12 @@ def main():
         sys.exit(1)
 
     mac_addr_map = {}
-    create_node(conn, args.base_vm, args.lustre_gold, network['name'], network['addr'], args.ip_addr, mac_addr_map)
+    create_node(conn, args.base_vm, args.lustre_gold, network['name'], network['addr'], args.ip_addr, mac_addr_map, None, lopts)
 
     for hname,hinfo in hosts.items():
         hip = hinfo['ip']
         hds = hinfo['hds']
-        create_node(conn, args.lustre_gold, hname, network['name'], network['addr'], hip, mac_addr_map, hds)
+        create_node(conn, args.lustre_gold, hname, network['name'], network['addr'], hip, mac_addr_map, hds, lopts)
         print(f"Created {hname}:{network['addr']}.{hip}.")
 
     # Restart libvirt services to apply changes
