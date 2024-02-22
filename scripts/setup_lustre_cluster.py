@@ -241,6 +241,10 @@ def create_node(conn, src_vm, target_vm, network_name, network, target_ip, mac_a
     except TypeError:
         pass # hds can be none 
 
+def restart_networking():
+    subprocess.run(['systemctl', 'restart', 'virtlogd.socket'], check=True)
+    subprocess.run(['systemctl', 'restart', 'libvirtd'], check=True)
+
 def main():
 
     # Parse command-line arguments
@@ -301,6 +305,9 @@ def main():
 
     # Close the libvirt connection
     conn.close()
+
+    # restart the network to help everyone get their IP addresses
+    restart_networking()
 
     print(f"Setup completed. Lustre cluster should now be running with new NICs attached to {network['name']}.")
 
