@@ -7,76 +7,60 @@
     - ./lustre_vars.yaml
 
   tasks:
-    - name: Install ZFS RPMs
-      shell: dnf localinstall *.rpm
-      args:
-        executable: /bin/bash
-        chdir: "{{ zfs_rpms }}"
-      when: "group_names | join(' ') | regex_search('lustre_servers')"
+    - name: Disable firewalld
+      systemd:
+        name: firewalld
+        state: stopped
+        enabled: no
       tags: 
-        - install
+        - firewalld
         - lustre
-        - zfs
-        - rpms
+        - config
 
-    - name: Download resource-agents RPM
-      # this is an annoying playbook task. We shouldn't need this and I couldn't find this RPM in any of the RPM repos so have to one-off manually do it.
-      ansible.builtin.get_url:
-        url: https://yum.oracle.com/repo/OracleLinux/OL8/addons/x86_64/getPackage/resource-agents-4.9.0-29.el8.x86_64.rpm
-        dest: /tmp/resource-agents-4.9.0-29.el8.x86_64.rpm
+    - name: Check status of firewalld
+      systemd:
+        name: firewalld
+        state: started
+      register: firewalld_status
+      ignore_errors: yes
       tags: 
-        - install
+        - firewalld
         - lustre
-        - rpms
+        - config
 
-    - name: Import Oracle Linux GPG Key
-      ansible.builtin.rpm_key:
-        state: present
-        key: https://yum.oracle.com/RPM-GPG-KEY-oracle-ol8
+    - name: Print firewalld status
+      debug:
+        msg: "Firewalld is currently {{ 'enabled' if firewalld_status.status.ActiveState == 'active' else 'disabled' }}"
       tags: 
-        - install
+        - firewalld
         - lustre
-        - rpms
+        - config
 
-    - name: Install resource-agents RPM
-      ansible.builtin.dnf:
-        name: /tmp/resource-agents-4.9.0-29.el8.x86_64.rpm
-        state: present
+
+    - name: Disable SELinux
+      replace:
+        path: /etc/selinux/config
+        regexp: '^SELINUX=.*$'
+        replace: 'SELINUX=disabled'
+      register: selinux_config
       tags: 
-        - install
+        - selinux
         - lustre
-        - rpms
+        - config
 
-    - name: Install Lustre RPMs
-      # seems to hang. Do it another way.
-      shell: dnf localinstall *.rpm
-      when: false
-      args:
-        executable: /bin/bash
-        chdir: "{{ lustre_rpms }}"
+
+    - name: Check SELinux status
+      command: sestatus
+      register: sestatus_output
       tags: 
-        - install
+        - selinux
         - lustre
-        - zfs
-        - rpms
+        - config
 
-    - name: Find Lustre RPM files 
-      find:
-        paths: "{{ lustre_rpms }}"
-        patterns: "*.rpm"
-      register: rpm_files
+    - name: Print SELinux status
+      debug:
+        msg: "SELinux is currently {{ 'enabled' if 'enforcing' in sestatus_output.stdout else 'disabled' }}"
       tags: 
-        - install
+        - selinux
         - lustre
-        - rpms
-
-    - name: Install Lustre RPMs
-      dnf:
-        name: "{{ rpm_files.files | map(attribute='path') | list }}"
-        state: present
-        disable_gpg_check: yes
-      tags: 
-        - install
-        - lustre
-        - rpms
-
+        - config

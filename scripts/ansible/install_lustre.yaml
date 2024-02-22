@@ -14,65 +14,6 @@
         - dependencies
         - lustre
 
-    - name: Disable firewalld
-      systemd:
-        name: firewalld
-        state: stopped
-        enabled: no
-      tags: 
-        - firewalld
-        - lustre
-        - config
-
-    - name: Check status of firewalld
-      systemd:
-        name: firewalld
-        state: started
-      register: firewalld_status
-      ignore_errors: yes
-      tags: 
-        - firewalld
-        - lustre
-        - config
-
-
-    - name: Print firewalld status
-      debug:
-        msg: "Firewalld is currently {{ 'enabled' if firewalld_status.status.ActiveState == 'active' else 'disabled' }}"
-      tags: 
-        - firewalld
-        - lustre
-        - config
-
-
-    - name: Disable SELinux
-      replace:
-        path: /etc/selinux/config
-        regexp: '^SELINUX=.*$'
-        replace: 'SELINUX=disabled'
-      register: selinux_config
-      tags: 
-        - selinux
-        - lustre
-        - config
-
-
-    - name: Check SELinux status
-      command: sestatus
-      register: sestatus_output
-      tags: 
-        - selinux
-        - lustre
-        - config
-
-    - name: Print SELinux status
-      debug:
-        msg: "SELinux is currently {{ 'enabled' if 'enforcing' in sestatus_output.stdout else 'disabled' }}"
-      tags: 
-        - selinux
-        - lustre
-        - config
-
     - name: Install Lustre dependencies - Development Tools
       dnf:
         name: '@Development Tools'
@@ -188,26 +129,54 @@
       args:
         executable: /bin/bash
       tags: 
-        - install
+        - build
         - lustre
         - rpms 
 
-    - name: Ensure RPM destination directory exists
-      file:
-        path: "{{ lustre_rpms }}"
-        state: directory
-        mode: '0755'
+    - name: Find Lustre RPM files 
+      find:
+        paths: "{{ lustre_repo }}"
+        patterns: "*.rpm"
+        excludes: "*.src.rpm"  # Exclude source RPM files
+      register: rpm_files
       tags: 
         - install
         - lustre
         - rpms
 
-    - name: Move RPM files
-      shell: "mv *.{{ ansible_architecture }}.rpm {{ lustre_rpms }}"
-      args:
-        executable: /bin/bash
-        chdir: "{{ lustre_repo }}"
+    - name: Install Lustre RPMs
+      dnf:
+        name: "{{ rpm_files.files | map(attribute='path') | list }}"
+        state: present
+        disable_gpg_check: yes
       tags: 
         - install
         - lustre
         - rpms
+
+    - name: Run depmod -a
+      command: depmod -a
+      tags: 
+        - install
+        - modules
+        - lustre
+
+    - name: Load Lustre networking module
+      modprobe:
+        name: ksocklnd
+        state: present
+      tags: 
+        - install
+        - modules
+        - lustre
+
+
+    - name: Load Lustre module
+      modprobe:
+        name: lustre
+        state: present
+      tags: 
+        - install
+        - modules
+        - lustre
+
