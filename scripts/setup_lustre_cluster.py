@@ -237,9 +237,13 @@ def create_node(conn, src_vm, target_vm, network_name, network, target_ip, mac_a
         for idx,hd in enumerate(hds):
             path = f"{get_image_storage_pool_path(conn)}/{target_vm}_hdd{idx}_{hd}GB"
             create_disk_image(path, f"{hd}G")
-            attach_disk_to_vm(target_vm, path, f"vd{get_letter(idx)}")
+            attach_disk_to_vm(target_vm, path, f"sd{get_letter(idx)}")
     except TypeError:
         pass # hds can be none 
+
+def restart_networking():
+    subprocess.run(['systemctl', 'restart', 'virtlogd.socket'], check=True)
+    subprocess.run(['systemctl', 'restart', 'libvirtd'], check=True)
 
 def main():
 
@@ -301,6 +305,9 @@ def main():
 
     # Close the libvirt connection
     conn.close()
+
+    # restart the network to help everyone get their IP addresses
+    restart_networking()
 
     print(f"Setup completed. Lustre cluster should now be running with new NICs attached to {network['name']}.")
 
