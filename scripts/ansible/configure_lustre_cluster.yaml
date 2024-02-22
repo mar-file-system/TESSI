@@ -1,7 +1,7 @@
 ---
 - name: Configure a Lustre Cluster 
   hosts: all
-  gather_facts: true # needed for {{ ansible_architecture }}
+  gather_facts: false # needed for {{ ansible_architecture }}
   any_errors_fatal: true
   vars_files:
     - ./lustre_vars.yaml
@@ -28,39 +28,46 @@
         - lustre
         - config
 
-    - name: Print firewalld status
-      debug:
-        msg: "Firewalld is currently {{ 'enabled' if firewalld_status.status.ActiveState == 'active' else 'disabled' }}"
-      tags: 
+    - name: Verify firewalld is disabled
+      assert:
+        that:
+          - firewalld_status.status.ActiveState == 'inactive'
+        fail_msg: "Error: firewalld is not disabled."
+      no_log: yes
+      tags:
         - firewalld
         - lustre
         - config
 
-
-    - name: Disable SELinux
-      replace:
-        path: /etc/selinux/config
-        regexp: '^SELINUX=.*$'
-        replace: 'SELINUX=disabled'
-      register: selinux_config
-      tags: 
-        - selinux
-        - lustre
-        - config
-
-
     - name: Check SELinux status
-      command: sestatus
-      register: sestatus_output
-      tags: 
+      command: getenforce
+      register: selinux_status
+      changed_when: false
+      tags:
         - selinux
         - lustre
         - config
 
-    - name: Print SELinux status
-      debug:
-        msg: "SELinux is currently {{ 'enabled' if 'enforcing' in sestatus_output.stdout else 'disabled' }}"
-      tags: 
+    - name: Verify SELinux is disabled
+      assert:
+        that:
+          - selinux_status.stdout == "Disabled"
+        fail_msg: "Error: SELinux is not disabled. Current status is {{ selinux_status.stdout }}"
+      no_log: yes
+      tags:
         - selinux
         - lustre
         - config
+
+    - name: Verify {{ module_name }} module is loaded
+      command: lsmod
+      register: lsmod_output
+      failed_when: "module_name not in lsmod_output.stdout"
+      no_log: yes
+      loop:
+        - lustre
+        - zfs
+      loop_control:
+        loop_var: module_name
+      tags:
+        - modules
