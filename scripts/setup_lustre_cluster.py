@@ -161,7 +161,7 @@ def get_image_storage_pool_path(conn):
         print(f"Error getting default storage pool path: {e}")
         return None
 
-def set_hostname(conn, vm_name):
+def set_hostname_selinux(conn, vm_name, selinux='disabled'):
     try:
         dom = conn.lookupByName(vm_name)
     except libvirt.libvirtError:
@@ -185,9 +185,24 @@ def set_hostname(conn, vm_name):
         if not os.path.exists(hfile):
             raise Exception(f"Warning: {hfile} not found")
 
+        # set hostname
         with open(hfile, 'w') as f:
             f.write(vm_name + '\n')
 
+        # Update SELinux configuration
+        sfile = os.path.join(mpoint, 'etc/selinux/config')
+        if not os.path.exists(sfile):
+            raise Exception(f"Warning: {sfile} not found")
+        with open(sfile, 'r') as f:
+            lines = f.readlines()
+        with open(sfile, 'w') as f:
+            for line in lines:
+                if line.startswith('SELINUX='):
+                    f.write(f'SELINUX={selinux}\n')
+                else:
+                    f.write(line)
+
+        # unmount the disk image
         subprocess.run(['guestunmount', mpoint], check=True)
         print(f"Set hostname to be {vm_name}")
 
@@ -214,8 +229,9 @@ def create_node(conn, src_vm, target_vm, network_name, network, target_ip, mac_a
     print(mac_addresses)
     setup_hostonly_network(conn, network, network_name, mac_addresses)
 
-    set_hostname(conn,target_vm)
+    set_hostname_selinux(conn,target_vm)
 
+    # this get_letter thing is just a way to iterate through the alphabet to create good HDD names
     get_letter = lambda x: chr(ord('b') + x )
     try:
         for idx,hd in enumerate(hds):
