@@ -89,12 +89,17 @@ for domain in sorted(domains, key=lambda domain: domain.name()):
     # Find all disk elements in the XML
     for disk in root.findall('.//devices/disk'):
         if disk.get('device') == 'disk':
+            target = disk.find('target')
+            if target is not None:
+                target_dev = target.get('dev')
+            else:
+                target_dev = "Unknown"
             source = disk.find('source')
             if source is not None:
                 disk_file = source.get('file')
                 if disk_file and os.path.exists(disk_file):
                     # Get the size of the disk file
                     size_bytes = os.path.getsize(disk_file)
-                    print(f"\tHDD Size: {size_bytes / (1024 ** 3):.2f} GB")
+                    print(f"\tHDD Size: {size_bytes / (1024 ** 3):.2f} GB - Dev: {target_dev}")
                 else:
                     print("\tHDD Size: Disk source file not found or inaccessible")
