@@ -17,7 +17,7 @@ def check_vm_status(conn,vm_name,shutdown=True,destroy=False):
     try:
         dom = conn.lookupByName(vm_name)
     except libvirt.libvirtError:
-        print(f"VM {vm_name} does not exist.")
+        print(f"\tVM {vm_name} does not exist.")
         return False
 
     # does the caller require it to be shutdown?
@@ -25,7 +25,7 @@ def check_vm_status(conn,vm_name,shutdown=True,destroy=False):
         # Check if the VM is running and stop it if so
         if dom.isActive():
             dom.destroy()  # This forcibly stops the domain
-            print(f"VM {vm_name} was running. Stopped it.")
+            print(f"\tVM {vm_name} was running. Stopped it.")
 
     # does the caller require it to be destroyed?
     if destroy:
@@ -36,7 +36,7 @@ def check_vm_status(conn,vm_name,shutdown=True,destroy=False):
             libvirt.VIR_DOMAIN_UNDEFINE_SNAPSHOTS_METADATA |
             libvirt.VIR_DOMAIN_UNDEFINE_NVRAM |
             0)
-        print(f"Successfully cleaned up {vm_name}.")
+        print(f"\tSuccessfully cleaned up {vm_name}.")
 
     return True
 
@@ -57,12 +57,12 @@ def delete_vm_storage(conn, vm_name):
                     try:
                         vol = conn.storageVolLookupByPath(disk_path)
                         vol.delete(0)  # 0 is the flags parameter, currently unused
-                        print(f"Deleted volume: {disk_path}")
+                        print(f"\tDeleted volume: {disk_path}")
                     except libvirt.libvirtError as e:
-                        print(f"Error deleting volume {disk_path}: {e}")
+                        print(f"\tError deleting volume {disk_path}: {e}")
 
     except libvirt.libvirtError as e:
-        print(f"Failed to find or access VM {vm_name} for storage deletion: {e}")
+        print(f"\tFailed to find or access VM {vm_name} for storage deletion: {e}")
 
 def check_network_exists(conn, network_name):
     """Check if the specified network exists."""
@@ -87,7 +87,7 @@ def setup_hostonly_network(conn, network, network_name, mac_addresses = ''):
 </network>
 """
     if check_network_exists(conn,network_name):
-        print(f"Network '{network_name}' exists. Cleaning it up.")
+        print(f"\tNetwork '{network_name}' exists. Cleaning it up.")
         network = conn.networkLookupByName(network_name)
         network.destroy()
         # the bash version had a sleep 2 here. Is it not needed?
@@ -96,10 +96,24 @@ def setup_hostonly_network(conn, network, network_name, mac_addresses = ''):
     network.setAutostart(True)
     network.create()
 
+# run subprocess but put tabs in front of its output
+def subprocess_tabinated(command):
+    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
+    stdout, stderr = process.communicate()
+
+    if process.returncode != 0:
+        raise subprocess.CalledProcessError(process.returncode, command, output=stdout, stderr=stderr)
+
+    # add tabs and remove double newliens
+    output = '\t' + stdout.replace('\n', '\n\t')
+    output = output.replace('\n\n', '\n')
+
+    print(output, end='')
+
 def clone_vm(base_vm, new_vm):
     """Clone a VM."""
     clone_command = f"virt-clone --original {base_vm} --name {new_vm} --auto-clone --nonsparse"
-    subprocess.run(clone_command.split())
+    subprocess_tabinated(clone_command.split())
 
 def add_nic_to_vm(conn, vm_name, network_name, mac_address=None):
     """Add a NIC to a VM."""
@@ -127,22 +141,25 @@ def create_disk_image(image_path, size):
     """Create a raw disk image using qemu-img."""
     command = ["qemu-img", "create", "-f", "raw", image_path, size]
     try:
-        subprocess.run(command, check=True)
-        print(f"Disk image {image_path} created with size {size}.")
+        subprocess_tabinated(command)
+        print(f"\tDisk image {image_path} created with size {size}.")
     except subprocess.CalledProcessError as e:
-        print(f"Failed to create disk image: {e}")
+        print(f"\tFailed to create disk image: {e}")
         sys.exit(1)
 
 def attach_disk_to_vm(vm_name, disk_path, target_dev, cache_mode='none', persistent=True):
     """Attach a disk to a VM using virsh."""
-    command = ["virsh", "attach-disk", vm_name, disk_path, target_dev, "--cache", cache_mode]
+    # there is some annoying thing described here https://stackoverflow.com/questions/14935953/kvm-virsh-attach-disk-does-not-honour-device-letter
+    # apparently the target_dev argument is passed as a hint only to the guest which might use a different name
+    # we need to know the actual name for subsequent mounting so the --serial will force a predefined name in /dev/disk/by-id/ which is a symlink to dev
+    command = ["virsh", "attach-disk", vm_name, disk_path, target_dev, "--cache", cache_mode, "--serial", target_dev]
     if persistent:
         command.append("--persistent")
     try:
-        subprocess.run(command, check=True)
-        print(f"Disk {disk_path} attached to {vm_name} as {target_dev}.")
+        subprocess_tabinated(command)
+        print(f"\tDisk {disk_path} attached to {vm_name} as {target_dev}.")
     except subprocess.CalledProcessError as e:
-        print(f"Failed to attach disk to VM: {e}")
+        print(f"\tFailed to attach disk to VM: {e}")
         sys.exit(1)
 
 def get_image_storage_pool_path(conn):
@@ -161,7 +178,7 @@ def get_image_storage_pool_path(conn):
         print(f"Error getting default storage pool path: {e}")
         return None
 
-def set_hostname_selinux_lustre_options(conn, vm_name, selinux='disabled', lopts=None):
+def set_hostname_selinux_lustre_options(conn, vm_name, selinux, lopts):
     try:
         dom = conn.lookupByName(vm_name)
     except libvirt.libvirtError:
@@ -180,7 +197,7 @@ def set_hostname_selinux_lustre_options(conn, vm_name, selinux='disabled', lopts
         else:
             raise Exception("vda not found in domblklist output")
 
-        subprocess.run(['guestmount', '-a', vmimage, '-i', mpoint], check=True)
+        subprocess_tabinated(['guestmount', '-a', vmimage, '-i', mpoint])
         hfile = os.path.join(mpoint, 'etc/hostname')
         if not os.path.exists(hfile):
             raise Exception(f"Warning: {hfile} not found")
@@ -205,25 +222,30 @@ def set_hostname_selinux_lustre_options(conn, vm_name, selinux='disabled', lopts
         # update the lustre options
         if lopts:
             lfile = os.path.join(mpoint, 'etc/modprobe.d/lustre.conf')
-            if not os.path.exists(lfile):
-                raise Exception(f"Warning: {lfile} not found")
-            with open(lfile, 'w') as file:
-                file.write(lopts)
+            with open(lfile, 'w+') as file:
+                file.write(lopts + '\n')
+
+        # disable the firewall
+        firewalld_service = os.path.join(mpoint, 'etc/systemd/system/firewalld.service')
+        if os.path.lexists(firewalld_service):
+            os.remove(firewalld_service)
+        os.symlink('/dev/null', firewalld_service)
 
         # unmount the disk image
-        subprocess.run(['guestunmount', mpoint], check=True)
-        print(f"Set hostname to be {vm_name}")
+        subprocess_tabinated(['guestunmount', mpoint]) 
+        print(f"\tSet hostname to be {vm_name}")
 
     except Exception as e:
         print(e)
         sys.exit(1)
 
 def create_node(conn, src_vm, target_vm, network_name, network, target_ip, mac_addr_map, hds=None, lopts=None):
+    print(f"CREATING {target_vm} by cloning {src_vm} with target ip of {target_ip} and hds {hds}")
     if not check_vm_status(conn, src_vm, shutdown=True, destroy=False):
-        print(f"Warning: VM {src_vm} is not appropriately shutdown.")
+        print(f"\tWarning: VM {src_vm} is not appropriately shutdown.")
         sys.exit(1)
     if not check_vm_status(conn, target_vm, shutdown=True, destroy=True):
-        print(f"Warning: VM {target_vm} could not be cleaned up.")
+        print(f"\tWarning: VM {target_vm} could not be cleaned up.")
 
     # Clone the base VM
     clone_vm(src_vm, target_vm)
@@ -237,7 +259,7 @@ def create_node(conn, src_vm, target_vm, network_name, network, target_ip, mac_a
     print(mac_addresses)
     setup_hostonly_network(conn, network, network_name, mac_addresses)
 
-    set_hostname_selinux_lustre_options(conn,target_vm, lopts)
+    set_hostname_selinux_lustre_options(conn,target_vm, 'disabled', lopts)
 
     # this get_letter thing is just a way to iterate through the alphabet to create good HDD names
     get_letter = lambda x: chr(ord('b') + x )
@@ -284,14 +306,16 @@ def main():
         print(f"Warning: VM {args.base_vm} does not exist or is not shut off.")
         sys.exit(1)
 
+    # create the base image
     mac_addr_map = {}
     create_node(conn, args.base_vm, args.lustre_gold, network['name'], network['addr'], args.ip_addr, mac_addr_map, None, lopts)
 
+    # now close the base image for each requested lustre node
     for hname,hinfo in hosts.items():
         hip = hinfo['ip']
         hds = hinfo['hds']
         create_node(conn, args.lustre_gold, hname, network['name'], network['addr'], hip, mac_addr_map, hds, lopts)
-        print(f"Created {hname}:{network['addr']}.{hip}.")
+        print(f"\tCreated {hname}:{network['addr']}.{hip}.")
 
     # Restart libvirt services to apply changes
     time.sleep(2)
