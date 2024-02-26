@@ -341,7 +341,7 @@ def main():
     dom = conn.lookupByName(args.lustre_gold)
     dom.create()
     for hname in hosts:
-        print(f"Starting {hname},"
+        print(f"Starting {hname},")
         dom = conn.lookupByName(hname)
         dom.create()
     time.sleep(10)
