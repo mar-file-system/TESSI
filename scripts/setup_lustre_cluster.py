@@ -341,9 +341,17 @@ def main():
     dom = conn.lookupByName(args.lustre_gold)
     dom.create()
     for hname in hosts:
-        print(f"Starting {hname}")
+        print(f"Starting {hname},"
         dom = conn.lookupByName(hname)
         dom.create()
+    time.sleep(10)
+
+    # reboot them
+    for hname in hosts:
+        print(f"Reboot {hname} to try to ensure it gets its IP addresses correctly reported to libvirt")
+        dom = conn.lookupByName(hname)
+        dom.reboot()
+    time.sleep(10)
 
     # Close the libvirt connection
     conn.close()
