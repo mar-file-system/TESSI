@@ -48,27 +48,46 @@
         - modules
         - lustre
         - config
+      when: "'small_lustre_clients' not in group_names"
+
+    - name: Unmount client mounts 
+      ansible.builtin.mount:
+        path: "{{ item }}"
+        state: unmounted
+      with_items: "{{ target_mount }}"
+      when: 
+        - target_mount is defined
+        - "'small_lustre_clients' in group_names"
+
+    - name: Unmount OSS and MDS mounts 
+      ansible.builtin.mount:
+        path: "{{ item }}"
+        state: unmounted
+      with_items: "{{ target_mount }}"
+      when: 
+        - target_mount is defined
+        - "'small_lustre_clients' not in group_names"
+
+    - name: Unmount MGS mount 
+      ansible.builtin.mount:
+        path: "{{ item }}"
+        state: unmounted
+      with_items: "{{ mgt_mount }}"
+      when: mgt_mount is defined
 
     - name: Stop Lustre service
       ansible.builtin.systemd:
         name: lustre
         state: stopped
+      when: "'small_lustre_clients' not in group_names"
 
     - name: Stop LNet service
       ansible.builtin.systemd:
         name: lnet
         state: stopped
+      when: "'small_lustre_clients' not in group_names"
 
-    - name: Unmount Lustre mount points
-      ansible.builtin.shell: |
-        for mount_point in $(grep -e "lustre" /proc/mounts | cut -d' ' -f2); do
-          umount $mount_point
-        done
-      args:
-        executable: /bin/bash
-      register: umount_result
-      failed_when: umount_result.rc != 0 and "not mounted" not in umount_result.stderr
-
+    # would be nice if this one didn't destroy all but just destroyed the ones created later
     - name: Destroy all ZFS pools
       ansible.builtin.shell: |
         for pool in $(zpool list -H -o name); do
@@ -78,38 +97,50 @@
         executable: /bin/bash
       ignore_errors: yes
 
-    - name: Remove Lustre directories
-      ansible.builtin.file:
+    - name: Remove mgs mount points if they exist
+      file:
         path: "{{ item }}"
         state: absent
-      loop: "{{ lustre_dirs }}"
+      with_items: "{{ mgt_mount }}"
+      when: mgt_mount is defined
 
-    - name: Find the full path of the device
+    - name: Remove mds and oss and client mount points if they exist
+      file:
+        path: "{{ item }}"
+        state: absent
+      with_items: "{{ target_mount }}"
+      when: target_mount is defined
+
+    - name: Find the full path of the ost and mdt devices
       ansible.builtin.shell: "ls /dev/disk/by-id/*_sdb"
       register: device_path
       changed_when: false
+      when: "'small_lustre_clients' not in group_names"
 
-    - name: Create ZFS pool named lustre-<hostname>
+    - name: Create ZFS pools for osts and mdts
       ansible.builtin.command: 
         cmd: "zpool create lustre-{{ ansible_hostname }} {{ device_path.stdout }}"
       args:
         creates: "/dev/zvol/lustre-{{ ansible_hostname }}"
-      when: device_path.stdout != ""
+      when: 
+        - "'small_lustre_clients' not in group_names"
+        - device_path.stdout != ""
 
-    - name: Find the full path of the device for lustre-mgs
+    - name: Find the full path of the mgs device 
       ansible.builtin.shell: "ls /dev/disk/by-id/*_sdc"
       register: mgs_device_path
       changed_when: false
       when: ansible_hostname == "mds00"
 
-    - name: Create ZFS pool named lustre-mgs
+    - name: Create ZFS pool for mgt 
       ansible.builtin.command: 
-        cmd: "zpool create lustre-mgs {{ mgs_device_path.stdout }}"
+        cmd: "zpool create {{ mgt_target }} {{ mgs_device_path.stdout }}"
       args:
-        creates: "/dev/zvol/lustre-mgs"
+        creates: "/dev/zvol/{{ mgt_target }}"
       when: 
         - ansible_hostname == "mds00"
         - mgs_device_path.stdout != ""
+        - mgt_target is defined
 
     - name: Generate host ID for all hosts
       ansible.builtin.command: genhostid
@@ -118,14 +149,14 @@
 
     - name: Create Lustre filesystem on MGS
       ansible.builtin.command:
-        cmd: "mkfs.lustre --mgs --backfstype=zfs --fsname=lustre lustre-mgs/mgt"
-      when: ansible_hostname == "mds00"
+        cmd: "mkfs.lustre --mgs --backfstype=zfs --fsname=lustre {{ mgt_target }}/mgt"
+      when: mgt_target is defined
 
-    - name: Create Lustre filesystem
+    - name: Create Lustre filesystems on MDSes and OSSes
       command: >
         mkfs.lustre --reformat
         --{{ target_type }}
-        --mgsnode=192.168.56.10@tcp:192.168.56.20@tcp
+        --mgsnode={{ mgs_node }}
         --failnode=192.168.56.{{ failnode }}@tcp
         --backfstype=zfs
         --fsname=lustre
@@ -136,4 +167,39 @@
         failnode: "{{ hostvars[inventory_hostname].failnode }}"
         index: "{{ hostvars[inventory_hostname].index }}"
         target: "{{ hostvars[inventory_hostname].target }}"
+      when: 
+        - "'small_lustre_clients' not in group_names"
+        - target is defined
 
+    - name: Create MDS and OSS and client mount points
+      file:
+        path: "{{ item }}"
+        state: directory
+        mode: '0755'
+      with_items: "{{ target_mount }}"
+      when: target_mount is defined
+
+    - name: Create MGS mount point
+      file:
+        path: "{{ item }}"
+        state: directory
+        mode: '0755'
+      with_items: "{{ mgt_mount }}"
+      when: mgt_mount is defined
+
+    - name: Mount MGS target
+      ansible.builtin.shell:
+        cmd: "mount -t lustre {{ mgt_target }}/mgt {{ mgt_mount }}"
+      when: mgt_target is defined and mgt_mount is defined
+
+    - name: Mount MDS and OSS targets
+      ansible.builtin.shell:
+        cmd: "mount -t lustre {{ target }} {{ target_mount }}"
+      when: target is defined and target_mount is defined
+
+    - name: Mount client
+      ansible.builtin.shell:
+        cmd: "mount -t lustre {{ mgs_node }}:/lustre {{ target_mount }}"
+      when: 
+        - target_mount is defined 
+        - "'small_lustre_clients' in group_names"
