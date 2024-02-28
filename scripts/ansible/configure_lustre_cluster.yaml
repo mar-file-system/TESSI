@@ -1,43 +1,18 @@
 ---
 - name: Configure a Lustre Cluster 
   hosts: all
-  gather_facts: false # needed for {{ ansible_architecture }}
+  gather_facts: true # needed for {{ ansible_architecture }}
   any_errors_fatal: true
   vars_files:
     - ./lustre_vars.yaml
 
   tasks:
-    - name: Disable firewalld
-      systemd:
+    - name: Check firewall status
+      ansible.builtin.service:
         name: firewalld
         state: stopped
-        enabled: no
-      tags: 
-        - firewalld
-        - lustre
-        - config
-
-    - name: Check status of firewalld
-      systemd:
-        name: firewalld
-        state: started
-      register: firewalld_status
-      ignore_errors: yes
-      tags: 
-        - firewalld
-        - lustre
-        - config
-
-    - name: Verify firewalld is disabled
-      assert:
-        that:
-          - firewalld_status.status.ActiveState == 'inactive'
-        fail_msg: "Error: firewalld is not disabled."
-      no_log: yes
-      tags:
-        - firewalld
-        - lustre
-        - config
+      register: firewall_status
+      failed_when: firewall_status.state == "running"
 
     - name: Check SELinux status
       command: getenforce
@@ -63,7 +38,7 @@
       command: lsmod
       register: lsmod_output
       failed_when: "module_name not in lsmod_output.stdout"
-      no_log: yes
+      no_log: no
       loop:
         - lustre
         - zfs
@@ -74,16 +49,91 @@
         - lustre
         - config
 
-    - name: Create /etc/modprobe.d/lustre.conf
-      copy:
-        dest: /etc/modprobe.d/lustre.conf
-        content: |
-          options lnet ip2nets="tcp0(enp8s0) 192.168.56.[10,20,30,40,50]"
-        owner: root
-        group: root
-        mode: '0644'
-      when: false # don't need this. Moved it into the python which creates the VMs initially since needs a reboot after this
-      tags:
-        - lustre
-        - config
+    - name: Stop Lustre service
+      ansible.builtin.systemd:
+        name: lustre
+        state: stopped
+
+    - name: Stop LNet service
+      ansible.builtin.systemd:
+        name: lnet
+        state: stopped
+
+    - name: Unmount Lustre mount points
+      ansible.builtin.shell: |
+        for mount_point in $(grep -e "lustre" /proc/mounts | cut -d' ' -f2); do
+          umount $mount_point
+        done
+      args:
+        executable: /bin/bash
+      register: umount_result
+      failed_when: umount_result.rc != 0 and "not mounted" not in umount_result.stderr
+
+    - name: Destroy all ZFS pools
+      ansible.builtin.shell: |
+        for pool in $(zpool list -H -o name); do
+          zpool destroy $pool
+        done
+      args:
+        executable: /bin/bash
+      ignore_errors: yes
+
+    - name: Remove Lustre directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop: "{{ lustre_dirs }}"
+
+    - name: Find the full path of the device
+      ansible.builtin.shell: "ls /dev/disk/by-id/*_sdb"
+      register: device_path
+      changed_when: false
+
+    - name: Create ZFS pool named lustre-<hostname>
+      ansible.builtin.command: 
+        cmd: "zpool create lustre-{{ ansible_hostname }} {{ device_path.stdout }}"
+      args:
+        creates: "/dev/zvol/lustre-{{ ansible_hostname }}"
+      when: device_path.stdout != ""
+
+    - name: Find the full path of the device for lustre-mgs
+      ansible.builtin.shell: "ls /dev/disk/by-id/*_sdc"
+      register: mgs_device_path
+      changed_when: false
+      when: ansible_hostname == "mds00"
+
+    - name: Create ZFS pool named lustre-mgs
+      ansible.builtin.command: 
+        cmd: "zpool create lustre-mgs {{ mgs_device_path.stdout }}"
+      args:
+        creates: "/dev/zvol/lustre-mgs"
+      when: 
+        - ansible_hostname == "mds00"
+        - mgs_device_path.stdout != ""
+
+    - name: Generate host ID for all hosts
+      ansible.builtin.command: genhostid
+      register: genhostid_result
+      changed_when: "'Host ID set to' in genhostid_result.stdout"
+
+    - name: Create Lustre filesystem on MGS
+      ansible.builtin.command:
+        cmd: "mkfs.lustre --mgs --backfstype=zfs --fsname=lustre lustre-mgs/mgt"
+      when: ansible_hostname == "mds00"
+
+    - name: Create Lustre filesystem
+      command: >
+        mkfs.lustre --reformat
+        --{{ target_type }}
+        --mgsnode=192.168.56.10@tcp:192.168.56.20@tcp
+        --failnode=192.168.56.{{ failnode }}@tcp
+        --backfstype=zfs
+        --fsname=lustre
+        --index={{ index }}
+        {{ target }}
+      vars:
+        target_type: "{{ hostvars[inventory_hostname].target_type }}"
+        failnode: "{{ hostvars[inventory_hostname].failnode }}"
+        index: "{{ hostvars[inventory_hostname].index }}"
+        target: "{{ hostvars[inventory_hostname].target }}"
 
