@@ -106,9 +106,20 @@ def subprocess_tabinated(command):
 
     # add tabs and remove double newliens
     output = '\t' + stdout.replace('\n', '\n\t')
+    output = output.replace('\n\t\n\t', '\n\t')
     output = output.replace('\n\n', '\n')
+    output = output.replace('\t\n\t', '\t')
+
+    # the clone output does some curses stuff which results in repeated lines. So clean that up here.
+    lines = output.split('\n')
+    alloc_lines = [i for i, line in enumerate(lines) if 'Allocating' in line]
+    if alloc_lines:
+        last_alloc_index = alloc_lines[-1]
+        output = '\n'.join([line for i, line in enumerate(lines) if 'Allocating' not in line or i == last_alloc_index])
 
     print(output, end='')
+    #print("DEBUG" + repr(output)) # show the special characters so we can figure out why there are double newlines in this output
+
 
 def clone_vm(base_vm, new_vm):
     """Clone a VM."""
@@ -330,7 +341,7 @@ def main():
     dom = conn.lookupByName(args.lustre_gold)
     dom.create()
     for hname in hosts:
-        print(f"Starting {hname},"
+        print(f"Starting {hname},")
         dom = conn.lookupByName(hname)
         dom.create()
     time.sleep(10)
