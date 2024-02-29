@@ -297,12 +297,12 @@ def main():
         print("Must be run as root")
         sys.exit(1)
 
+    # Connect to libvirt
+    conn = libvirt_connect()
+
     # open the config file
     with open(args.config_file, 'r') as file:
         config = yaml.safe_load(file) 
-
-    # Connect to libvirt
-    conn = libvirt_connect()
 
     # pull key things from config file
     network = config['system']['network']
