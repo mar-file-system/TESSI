@@ -281,6 +281,14 @@ def create_node(conn, src_vm, target_vm, network_name, network, target_ip, mac_a
             attach_disk_to_vm(target_vm, path, f"sd{get_letter(idx)}")
     except TypeError:
         pass # hds can be none 
+def extract_host_details(d, host_details):
+    if isinstance(d, dict):
+        for key, value in d.items():
+            if key == 'hosts':
+                for host, attributes in value.items():
+                    host_details[host] = attributes
+            else:
+                extract_host_details(value, host_details)
 
 def main():
 
@@ -289,7 +297,7 @@ def main():
     parser.add_argument('-v', '--base_vm',     default='freshinstall', help='Name of the base VM.')
     parser.add_argument('-l', '--lustre_gold', default='lustrebase',   help='Name for the Lustre base VM clone.')
     parser.add_argument('-a', '--ip_addr',     default='101',          help='IP address to assign to the Lustre base VM.')
-    parser.add_argument('config_file',         type=str,               help='Path to the configuration file')
+    parser.add_argument('inventory_file',      type=str,               help='Path to the ansible inventory file')
     args = parser.parse_args()
 
     # Check if script is run as root
@@ -300,14 +308,19 @@ def main():
     # Connect to libvirt
     conn = libvirt_connect()
 
-    # open the config file
-    with open(args.config_file, 'r') as file:
-        config = yaml.safe_load(file) 
+    # open the ansible inventory file 
+    with open(args.inventory_file, 'r') as file:
+        inventory = yaml.safe_load(file) 
+
+    # pull key things from the ansible inventory file
+    hosts = {}
+    extract_host_details(inventory, hosts)
+    print(hosts)
 
     # pull key things from config file
-    network = config['system']['network']
-    hosts   = config['system']['hosts']
-    lopts   = config['system']['lustre_options']
+    network = inventory['all']['vars']['network']
+    #hosts   = config['system']['hosts']
+    lopts   = inventory['all']['vars']['lustre_options']
     print(f"Lustre options are {lopts}")
 
     # Main execution starts here
