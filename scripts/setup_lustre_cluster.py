@@ -315,13 +315,9 @@ def main():
     # pull key things from the ansible inventory file
     hosts = {}
     extract_host_details(inventory, hosts)
-    print(hosts)
-
-    # pull key things from config file
     network = inventory['all']['vars']['network']
-    #hosts   = config['system']['hosts']
-    lopts   = inventory['all']['vars']['lustre_options']
-    print(f"Lustre options are {lopts}")
+    lopts   = inventory['all']['vars']['lustre']['modprobe_opts']
+    network['name'] = 'hostonly-net' # define it here because we use it elsewhere
 
     # Main execution starts here
     setup_hostonly_network(conn, network['addr'], network['name'])
