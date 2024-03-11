@@ -290,6 +290,20 @@ def extract_host_details(d, host_details):
             else:
                 extract_host_details(value, host_details)
 
+# add inheritance here manually since ansible does this for us
+def apply_group_vars_to_hosts(inventory, parent_vars=None):
+    print(f"\tManually applying inheritance in the yaml inventory file")
+    for group_name, group_info in inventory.items():
+        print(f"\tProcessing group: {group_name}")
+        group_vars = group_info.get('vars', {}).copy()
+        if parent_vars:
+            group_vars.update(parent_vars)
+        if 'hosts' in group_info:
+            for host_name, host_info in group_info['hosts'].items():
+                host_info.update(group_vars)
+        if 'children' in group_info:
+            apply_group_vars_to_hosts(group_info['children'], group_vars)
+
 def main():
 
     # Parse command-line arguments
@@ -311,6 +325,9 @@ def main():
     # open the ansible inventory file 
     with open(args.inventory_file, 'r') as file:
         inventory = yaml.safe_load(file) 
+
+    # add inheritance here manually since ansible does this for us
+    apply_group_vars_to_hosts(inventory)
 
     # pull key things from the ansible inventory file
     hosts = {}
