@@ -5,7 +5,6 @@ import argparse
 import inspect
 import libvirt
 import os
-import paramiko
 import pwd
 import socket
 import shutil
@@ -18,9 +17,42 @@ import yaml
 
 from uuid import uuid4
 
+def setup_ssh_key_and_copy_to_guest(guest_mount_path, key_name="id_rsa"):
+    """
+    Checks for an SSH key pair in $HOME/.ssh, creates one if it doesn't exist,
+    and then copies the public key into the specified guest mount directory.
+
+    Args:
+        guest_mount_path (str): The path to the guest mount directory.
+        key_name (str): The name of the SSH key pair (default: "id_rsa").
+    """
+    ssh_dir = os.path.join(os.environ['HOME'], '.ssh')
+    private_key_path = os.path.join(ssh_dir, key_name)
+    public_key_path = private_key_path + '.pub'
+
+    # Check if the SSH key pair exists, create if it doesn't
+    if not os.path.exists(private_key_path) or not os.path.exists(public_key_path):
+        print(f"SSH key pair not found. Generating new key pair: {key_name}")
+        subprocess.run(['ssh-keygen', '-t', 'rsa', '-b', '2048', '-f', private_key_path, '-N', ''], check=True)
+
+    # Copy the public key to the guest mount
+    guest_ssh_dir = os.path.join(guest_mount_path, 'root', '.ssh')
+    guest_authorized_keys = os.path.join(guest_ssh_dir, 'authorized_keys')
+
+    # Ensure the guest .ssh directory exists
+    os.makedirs(guest_ssh_dir, exist_ok=True)
+
+    # Append the public key to the authorized_keys file in the guest mount
+    with open(public_key_path, 'r') as public_key_file:
+        public_key = public_key_file.read()
+        with open(guest_authorized_keys, 'a') as authorized_keys_file:
+            authorized_keys_file.write(public_key + '\n')
+
+    print(f"Public key {public_key_path} copied to {guest_authorized_keys}")
+
 def wait_for_ssh(host, port=22, username='root', timeout=300, interval=3):
     """
-    Wait for an SSH connection to become available.
+    Wait for an SSH connection to become available using OpenSSH.
 
     Args:
         host (str): The hostname or IP address of the target node.
@@ -36,18 +68,23 @@ def wait_for_ssh(host, port=22, username='root', timeout=300, interval=3):
     start_time = time.time()
     while time.time() - start_time < timeout:
         try:
-            with paramiko.SSHClient() as client:
-                client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-                client.connect(host, port=port, username=username, timeout=timeout)
-                # SSH connection is successful
-                return True
-        except (socket.gaierror, paramiko.ssh_exception.NoValidConnectionsError, paramiko.ssh_exception.SSHException):
+            # Attempt to execute a simple command (echo) on the remote host
+            subprocess.check_output(
+                ["ssh", f"{username}@{host}", "-p", str(port), "-o", "BatchMode=yes", "-o", "ConnectTimeout=3", "-o", "StrictHostKeyChecking=no", 
+                        "echo", "SSH connection successful"],
+                stderr=subprocess.STDOUT,
+            )
+            # SSH connection is successful
+            return True
+        except subprocess.CalledProcessError as e:
             # Connection failed, wait and try again
+            print(f"\tException occurred: {e.output.decode().strip()}")
             print(f"\tWaiting again for {host} to be reachable")
             time.sleep(interval)
 
     # Timeout reached, connection failed
     return False
+
 
 def stash_vm(conn, dst_path, vmname):
     def extract_disk_path_from_xml(xml_desc):
@@ -379,7 +416,7 @@ def get_image_storage_pool_path(conn):
         print(f"Error getting default storage pool path: {e}")
         return None
 
-def set_hostname_selinux_lustre_options(conn, vm_name, selinux, lopts):
+def set_hostname_keypair_selinux_lustre_options(conn, vm_name, selinux, lopts):
     try:
         dom = conn.lookupByName(vm_name)
     except libvirt.libvirtError:
@@ -432,6 +469,8 @@ def set_hostname_selinux_lustre_options(conn, vm_name, selinux, lopts):
             os.remove(firewalld_service)
         os.symlink('/dev/null', firewalld_service)
 
+        setup_ssh_key_and_copy_to_guest(mpoint)
+
         # unmount the disk image
         subprocess_tabinated(['guestunmount', mpoint]) 
         print(f"\tSet hostname to be {vm_name}")
@@ -461,7 +500,7 @@ def create_node(conn, src_vm, target_vm, network_name=None, network=None, target
         print(mac_addresses)
         setup_hostonly_network(conn, network, network_name, mac_addresses)
 
-    set_hostname_selinux_lustre_options(conn,target_vm, 'disabled', lopts)
+    set_hostname_keypair_selinux_lustre_options(conn,target_vm, 'disabled', lopts)
 
     if hds:
         # this get_letter thing is just a way to iterate through the alphabet to create good HDD names
