@@ -17,6 +17,80 @@ import yaml
 
 from uuid import uuid4
 
+def restore_vm_from_stash(conn, src_path, xml_file_path, pool_name, vmname):
+    """
+    Restore a VM from a stashed image and XML configuration.
+
+    Args:
+        conn (libvirt.virConnect): The libvirt connection object.
+        src_path (str): The path to the stashed image.
+        xml_file_path (str): The path to the stashed XML configuration file.
+        pool_name (str): The name of the libvirt storage pool to use.
+        vmname (str): The name of the VM to be restored.
+    """
+    print(f"Restoring VM {vmname} from stashed configuration {src_path}")
+
+    # Read the XML configuration from the stashed file
+    with open(xml_file_path, 'r') as xml_file:
+        xml_desc = xml_file.read()
+
+    # Get the storage pool
+    pool = conn.storagePoolLookupByName(pool_name)
+    if pool is None:
+        raise Exception(f"Storage pool {pool_name} not found")
+
+    # Refresh the pool to ensure it's up-to-date
+    pool.refresh(0)
+
+    # Copy the stashed disk image to a temporary location
+    tmp_path = f"/tmp/{vmname}.img"
+    shutil.copy2(src_path, tmp_path)
+
+    # Create a new storage volume for the restored image in the pool
+    vol_xml = f"""
+    <volume>
+        <name>{vmname}.img</name>
+        <capacity unit="bytes">{os.path.getsize(tmp_path)}</capacity>
+        <allocation unit="bytes">{os.path.getsize(tmp_path)}</allocation>
+        <target>
+            <format type="qcow2"/>
+            <permissions>
+                <mode>0644</mode>
+            </permissions>
+        </target>
+    </volume>
+    """
+    vol = pool.createXML(vol_xml, 0)
+    if vol is None:
+        raise Exception("Failed to create storage volume")
+
+    # Upload the image data to the new volume
+    stream = conn.newStream(0)
+    vol.upload(stream, 0, os.path.getsize(tmp_path), flags=0)
+    with open(tmp_path, "rb") as file:
+        stream.sendAll(lambda stream, buf, opaque: file.read(buf), None)
+    stream.finish()
+    os.remove(tmp_path)
+
+    # Get the path of the new volume
+    dst_path = vol.path()
+
+    # Update the XML configuration to use the new storage volume
+    xml_root = ET.fromstring(xml_desc)
+    disk_elements = xml_root.findall(".//disk/source[@file]")
+    if disk_elements:
+        disk_elements[0].set('file', dst_path)
+        updated_xml = ET.tostring(xml_root, encoding='unicode')
+    else:
+        raise Exception("No disk element found in XML")
+
+    # Define the VM from the updated XML configuration
+    dom = conn.defineXML(updated_xml)
+    if dom is None:
+        raise Exception(f"Failed to define the domain {vmname} from updated XML")
+
+    print(f"Restored VM {vmname} from stashed configuration")
+
 def setup_ssh_key_and_copy_to_guest(guest_mount_path, key_name="id_rsa"):
     """
     Checks for an SSH key pair in $HOME/.ssh, creates one if it doesn't exist,
@@ -213,26 +287,58 @@ def run_playbook(hname, inventory_file, playbook_file, group, verbosity):
     else:
         Fatal(f"Playbook execution failed with status: {result.status}")
 
+def get_first_storage_pool_info(conn):
+    """
+    Get the name and path of the first available storage pool.
+
+    Args:
+        conn (libvirt.virConnect): The libvirt connection object.
+
+    Returns:
+        tuple: A tuple containing the name and path of the first storage pool.
+    """
+    # Get the list of all storage pools
+    pools = conn.listAllStoragePools()
+    if not pools:
+        raise Exception("No storage pools found")
+
+    # Get the first storage pool
+    pool = pools[0]
+
+    # Get the XML description of the storage pool
+    xml_desc = pool.XMLDesc(0)
+    xml_root = ET.fromstring(xml_desc)
+
+    # Extract the name and path from the XML
+    name = pool.name()
+    path_element = xml_root.find(".//path")
+    if path_element is not None:
+        path = path_element.text
+    else:
+        raise Exception("Path element not found in storage pool XML")
+
+    return (name, path)
+
 def make_gold_vms(conn,base_vm,images,inventory,inventory_file,playbook_file,verbosity):
     lversion = get_inventory_value(inventory, 'all.vars.lustre.version')
     zversion = get_inventory_value(inventory, 'all.vars.zfs.version')
-    print(f"Need gold server {lversion}.{zversion}")
+    print(f"Need gold server {lversion}.{zversion} and gold client {lversion}")
     srv_image = f"{images}/lustre/servers/{lversion}.{zversion}.img"
     srv_hname = 'gold-lustre-server'
 
     cli_image = f"{images}/lustre/clients/{lversion}.img"
     cli_hname = 'gold-lustre-client'
 
+    (pool_name, pool_path) = get_first_storage_pool_info(conn) 
+
     if os.path.exists(cli_image):
-        Fatal(f"Image {cli_image} available. TODO: next steps here")
-        pass
+        restore_vm_from_stash(conn, cli_image, f"{cli_image}.xml", pool_name, cli_hname)
     else:
         conn = create_gold(conn, base_vm, cli_hname, inventory_file, playbook_file, 'clients', verbosity)
         stash_vm(conn, cli_image, cli_hname)
 
     if os.path.exists(srv_image):
-        Fatal(f"Image {srv_image} available. TODO: next steps here")
-        pass
+        restore_vm_from_stash(conn, srv_image, f"{srv_image}.xml", pool_name, srv_hname)
     else:
         conn = create_gold(conn, base_vm, srv_hname, inventory_file, playbook_file, 'servers', verbosity)
         stash_vm(conn, srv_image, srv_hname)
