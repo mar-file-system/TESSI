@@ -28,7 +28,7 @@ def restore_vm_from_stash(conn, src_path, xml_file_path, pool_name, vmname):
         pool_name (str): The name of the libvirt storage pool to use.
         vmname (str): The name of the VM to be restored.
     """
-    print(f"Restoring VM {vmname} from stashed configuration {src_path}")
+    print(f"\tRestoring VM {vmname} from stashed configuration {src_path}")
 
     # Read the XML configuration from the stashed file
     with open(xml_file_path, 'r') as xml_file:
@@ -89,7 +89,7 @@ def restore_vm_from_stash(conn, src_path, xml_file_path, pool_name, vmname):
     if dom is None:
         raise Exception(f"Failed to define the domain {vmname} from updated XML")
 
-    print(f"Restored VM {vmname} from stashed configuration")
+    print(f"\tRestored VM {vmname} from stashed configuration")
 
 def setup_ssh_key_and_copy_to_guest(guest_mount_path, key_name="id_rsa"):
     """
@@ -323,35 +323,52 @@ def make_gold_vms(conn,base_vm,images,inventory,inventory_file,playbook_file,ver
     lversion = get_inventory_value(inventory, 'all.vars.lustre.version')
     zversion = get_inventory_value(inventory, 'all.vars.zfs.version')
     print(f"Need gold server {lversion}.{zversion} and gold client {lversion}")
-    srv_image = f"{images}/lustre/servers/{lversion}.{zversion}.img"
-    srv_hname = 'gold-lustre-server'
 
-    cli_image = f"{images}/lustre/clients/{lversion}.img"
-    cli_hname = 'gold-lustre-client'
-
+    # get the libvirt storage pool
     (pool_name, pool_path) = get_first_storage_pool_info(conn) 
 
-    if os.path.exists(cli_image):
-        restore_vm_from_stash(conn, cli_image, f"{cli_image}.xml", pool_name, cli_hname)
-    else:
-        conn = create_gold(conn, base_vm, cli_hname, inventory_file, playbook_file, 'clients', verbosity)
-        stash_vm(conn, cli_image, cli_hname)
+    # initialize variables 
+    golds = {
+        'servers': {
+            'image': f"{images}/lustre/servers/{lversion}.{zversion}.img",
+            'hname': 'gold-lustre-server'
+        },
+        'clients': {
+            'image': f"{images}/lustre/clients/{lversion}.img",
+            'hname': 'gold-lustre-client'
+        }
+    }
 
-    if os.path.exists(srv_image):
-        restore_vm_from_stash(conn, srv_image, f"{srv_image}.xml", pool_name, srv_hname)
-    else:
-        conn = create_gold(conn, base_vm, srv_hname, inventory_file, playbook_file, 'servers', verbosity)
-        stash_vm(conn, srv_image, srv_hname)
+    for group,gold in golds.items(): 
+        if not check_vm_status(conn, gold['hname'], shutdown=True, destroy=True):
+            Fatal(f"VM {gold['hname']} could not be destroyed.")
 
-    return (srv_hname, cli_hname) 
+        if os.path.exists(gold['image']):
+            restore_vm_from_stash(conn, gold['image'], f"{gold['image']}.xml", pool_name, gold['hname'])
+        else:
+            conn = create_gold(conn, base_vm, gold['hname'], inventory_file, playbook_file, group, verbosity)
+            stash_vm(conn, gold['image'], gold['hname'])
+
+    return (golds['servers']['hname'], golds['clients']['hname']) 
 
 def check_vm_status(conn,vm_name,shutdown=True,destroy=False):
     """Check if the VM exists and is shut off."""
+
+    # Define a custom error handler that does nothing
+    def custom_error_handler(ctx, err):
+            pass
+
     try:
+        # Set a custom error handler bec we don't need an error msg if it doesn't exist
+        original_error_handler = libvirt.virGetErrorFunc()
+        libvirt.registerErrorHandler(custom_error_handler, None)
         dom = conn.lookupByName(vm_name)
     except libvirt.libvirtError:
         print(f"\tVM {vm_name} does not exist.")
         return False
+    finally:
+        # Restore the original error handler
+        libvirt.registerErrorHandler(original_error_handler, None)
 
     # does the caller require it to be shutdown?
     if shutdown:
@@ -616,14 +633,18 @@ def create_node(conn, src_vm, target_vm, network_name=None, network=None, target
             create_disk_image(path, f"{hd}G")
             attach_disk_to_vm(target_vm, path, f"sd{get_letter(idx)}")
 
-def extract_host_details(d, host_details):
+def extract_host_details(d, host_details, target_groups, current_group=None):
     if isinstance(d, dict):
         for key, value in d.items():
             if key == 'hosts':
                 for host, attributes in value.items():
                     host_details[host] = attributes
+                    if current_group:
+                        host_details[host]['group'] = current_group
+            elif key in target_groups:
+                extract_host_details(value, host_details, target_groups, key)
             else:
-                extract_host_details(value, host_details)
+                extract_host_details(value, host_details, target_groups, current_group)
 
 def load_yaml(file):
     # helper function to add inheritance here manually since ansible does this for us
@@ -661,6 +682,20 @@ def get_inventory_value(inventory, keys, default=None):
     except KeyError:
         Fatal(f"Missing '{keys}' in the inventory file.")
 
+def get_hosts(inventory, group):
+    hosts = set()
+
+    def recurse(dictionary, target_group, is_target_group):
+        if 'hosts' in dictionary and is_target_group:
+            hosts.update(dictionary['hosts'].keys())
+
+        for key, value in dictionary.items():
+            if key != 'hosts' and isinstance(value, dict):
+                recurse(value, target_group, is_target_group or key == target_group)
+
+    recurse(inventory['all'], group, False)
+    return hosts
+
 def main():
 
     # Parse command-line arguments
@@ -684,48 +719,43 @@ def main():
 
     # pull key things from the ansible inventory file
     hosts = {}
-    extract_host_details(inventory, hosts)
+    extract_host_details(inventory, hosts, ['clients', 'servers'])
     network = get_inventory_value(inventory, 'all.vars.network')
     lopts = get_inventory_value(inventory, 'all.vars.lustre.modprobe_opts')
-    images = get_inventory_value(inventory, 'all.vars.git.images')
+    vm_dir = get_inventory_value(inventory, 'all.vars.vm_dir')
     network['name'] = 'hostonly-net' # define it here because we use it elsewhere
 
     # check that the images directory exists and is part of a git repo
-    check_images_directory(images)
+    check_images_directory(vm_dir)
 
     # check for the playbook
     if not os.path.exists(args.playbook):
         Fatal(f"Ansible install playbook {args.playbook} does not exist")
 
-    # make or fetch the gold image for the server
-    make_gold_vms(conn, args.base_vm, images, inventory, args.inventory_file, args.playbook, args.ansible_verbosity) 
-
-    sys.exit(0)
-
-    # Main execution starts here
-    setup_hostonly_network(conn, network['addr'], network['name'])
-
+    # make sure we have the base vm existing
     if not check_vm_status(conn, args.base_vm):
-        print(f"Warning: VM {args.base_vm} does not exist or is not shut off.")
-        sys.exit(1)
+        Fatal(f"VM {args.base_vm} does not exist or is not shut off.")
 
-    # create the base image
-    mac_addr_map = {}
-    create_node(conn, args.base_vm, args.lustre_gold, network['name'], network['addr'], args.ip_addr, mac_addr_map, None, lopts)
+    # make or fetch the gold image for the servers and clients
+    gold_vms = {}
+    gold_vms['servers'], gold_vms['clients'] = make_gold_vms(conn, args.base_vm, vm_dir, inventory, args.inventory_file, args.playbook, args.ansible_verbosity)
 
-    # now close the base image for each requested lustre node
+    # setup the hostonly network and create the dict to hold the mac addresses as we create the nodes
+    setup_hostonly_network(conn, network['addr'], network['name'])
+    mac_addr_map = {} 
+
+    # now clone the base image for each requested lustre node
     for hname,hinfo in hosts.items():
         hip = hinfo['ip']
         hds = hinfo['hds']
-        create_node(conn, args.lustre_gold, hname, network['name'], network['addr'], hip, mac_addr_map, hds, lopts)
-        print(f"\tCreated {hname}:{network['addr']}.{hip}.")
+        gvm = gold_vms[hinfo['group']]
+        create_node(conn, gvm, hname, network['name'], network['addr'], hip, mac_addr_map, hds, lopts)
+        print(f"\tCreated {hname}:{network['addr']}.{hip} from {gvm}.")
 
     # Restart libvirt services to apply changes
     conn = restart_libvirt(conn)
 
     # Start the cloned VMs
-    dom = conn.lookupByName(args.lustre_gold)
-    dom.create()
     for hname in hosts:
         print(f"Starting {hname},")
         dom = conn.lookupByName(hname)
