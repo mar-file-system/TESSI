@@ -360,15 +360,16 @@ def check_vm_status(conn,vm_name,shutdown=True,destroy=False):
 
     try:
         # Set a custom error handler bec we don't need an error msg if it doesn't exist
-        original_error_handler = libvirt.virGetErrorFunc()
+        # Hopefully no-one else previously set a custom error handler
+        # we tried to fetch the current handler ourselves but libvirt doesn't seem to have a function for that
         libvirt.registerErrorHandler(custom_error_handler, None)
         dom = conn.lookupByName(vm_name)
     except libvirt.libvirtError:
         print(f"\tVM {vm_name} does not exist.")
         return False
     finally:
-        # Restore the original error handler
-        libvirt.registerErrorHandler(original_error_handler, None)
+        # Restore the default error handler
+        libvirt.registerErrorHandler(None, None)
 
     # does the caller require it to be shutdown?
     if shutdown:
