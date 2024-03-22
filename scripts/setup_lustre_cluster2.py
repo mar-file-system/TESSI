@@ -258,6 +258,7 @@ def create_gold(conn, base_vm, hname, inventory_file, playbook_file, group, verb
     # might need to reboot it here to affect the selinux and firewall config
     # might not be necessary however
 
+    print(f"\tRunning ansible playbook {playbook_file} on {hname}") 
     run_playbook(hname, inventory_file, playbook_file, group, verbosity)
 
     # shut it down
@@ -366,7 +367,7 @@ def check_vm_status(conn,vm_name,shutdown=True,destroy=False):
         dom = conn.lookupByName(vm_name)
     except libvirt.libvirtError:
         print(f"\tVM {vm_name} does not exist.")
-        return False
+        return True if destroy else False
     finally:
         # Restore the default error handler
         libvirt.registerErrorHandler(None, None)
