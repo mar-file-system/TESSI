@@ -250,22 +250,28 @@ def create_gold(conn, base_vm, hname, inventory_file, playbook_file, group, verb
     dom.destroy()
 
 def run_playbook(hname, inventory_file, playbook_file, group, verbosity):
-    hosts = [hname]
-    temp_inventory = create_temp_inventory_file(hosts, group=group)
 
     # get absolute paths
-    playbook_file = os.path.abspath(playbook_file)
+    playbook_file  = os.path.abspath(playbook_file)
     inventory_file = os.path.abspath(inventory_file)
 
+    # turn off key checking
     os.environ['ANSIBLE_HOST_KEY_CHECKING'] = 'False'
 
-    # now run the ansible playbook 
-    result = ansible_runner.run(
-        playbook=playbook_file,
-        inventory=[inventory_file, temp_inventory],
-        verbosity=verbosity,
-        limit=hname
-    )
+    # Construct the kwargs for ansible_runner.run
+    kwargs = {
+        "playbook":  playbook_file,
+        "inventory": [ inventory_file ],
+        "verbosity": verbosity,
+    }
+
+    if hname is not None:
+        temp_inventory = create_temp_inventory_file([hname], group=group)
+        kwargs['inventory'].append(temp_inventory)
+        kwargs["limit"] = hname
+
+    # Run the playbook
+    result = ansible_runner.run(**kwargs)
 
     if result.status == 'successful':
         print("Playbook executed successfully.")
@@ -304,7 +310,7 @@ def get_first_storage_pool_info(conn):
 
     return (name, path)
 
-def make_gold_vms(conn,base_vm,images,inventory,inventory_file,playbook_file,verbosity):
+def make_gold_vms(conn,base_vm,images,inventory,inventory_file,playbook_file,use_existing,verbosity):
     lversion = get_inventory_value(inventory, 'all.vars.lustre.version')
     zversion = get_inventory_value(inventory, 'all.vars.zfs.version')
     print(f"Need gold server {lversion}.{zversion} and gold client {lversion}")
@@ -325,6 +331,10 @@ def make_gold_vms(conn,base_vm,images,inventory,inventory_file,playbook_file,ver
     }
 
     for group,gold in golds.items(): 
+        if use_existing and check_vm_status(conn, gold['hname'], shutdown=True, destroy=False):
+            print(f"\tReusing existing VM {gold['hname']}")
+            continue
+
         if not check_vm_status(conn, gold['hname'], shutdown=True, destroy=True):
             Fatal(f"VM {gold['hname']} could not be destroyed.")
 
@@ -337,8 +347,6 @@ def make_gold_vms(conn,base_vm,images,inventory,inventory_file,playbook_file,ver
     return (golds['servers']['hname'], golds['clients']['hname']) 
 
 def check_vm_status(conn,vm_name,shutdown=True,destroy=False):
-    """Check if the VM exists and is shut off."""
-
     # Define a custom error handler that does nothing
     def custom_error_handler(ctx, err):
             pass
@@ -461,18 +469,22 @@ def clone_vm(base_vm, new_vm):
     subprocess_tabinated(clone_command.split())
 
 def add_nic_to_vm(conn, vm_name, network_name, mac_address=None):
-    """Add a NIC to a VM."""
-    if not mac_address:
-        mac_address = "02:%s" % ":".join(["%02x" % (i,) for i in os.urandom(5)])
+
     dom = conn.lookupByName(vm_name)
     xml_desc = dom.XMLDesc()
     root = ET.fromstring(xml_desc)
     devices = root.find('devices')
+
+    # If no mac_address passed, create a new one
+    if not mac_address:
+        mac_address = "02:%s" % ":".join(["%02x" % (i,) for i in os.urandom(5)])
+    
     interface = ET.SubElement(devices, 'interface', type='network')
     ET.SubElement(interface, 'mac', address=mac_address)
     ET.SubElement(interface, 'source', network=network_name)
     ET.SubElement(interface, 'model', type='virtio')
     conn.defineXML(ET.tostring(root).decode())
+
     return mac_address
 
 def create_disk_image(image_path, size):
@@ -573,36 +585,73 @@ def set_hostname_keypair_selinux_lustre_options(conn, vm_name, selinux):
         print(e)
         sys.exit(1)
 
-def create_node(conn, src_vm, target_vm, network_name=None, network=None, target_ip=None, mac_addr_map=None, hds=None):
+def is_host_in_network_by_name(conn, network_name, host_name, expected_ip):
+    """
+    Check if a host with the given name is already in the network with the expected IP address.
+    
+    :param conn: libvirt connection object
+    :param network_name: Name of the network
+    :param host_name: Name of the host to check
+    :param expected_ip: Expected IP address of the host
+    :return: True if the host is in the network with the expected IP, False otherwise
+    """
+    try:
+        network = conn.networkLookupByName(network_name)
+        xml_desc = network.XMLDesc()
+        root = ET.fromstring(xml_desc)
+        dhcp_section = root.find(".//dhcp")
+
+        if dhcp_section is not None:
+            for host in dhcp_section.findall("host"):
+                if host.get("name") == host_name:
+                    last_octet = int(host.get("ip").split('.')[-1])
+                    if last_octet != expected_ip:
+                        print(f"WARN: {host_name} exists but last octet of IP {expected_ip} != {last_octet} from {host.get('ip')}")
+                        return False
+                    else:
+                        return True
+        return False
+
+    except libvirt.libvirtError as e:
+        print(f"Error: {e}")
+        return False
+
+def create_node(conn, src_vm, target_vm, network_name=None, network=None, target_ip=None, mac_addr_map=None, hds=None, use_existing=False):
     print(f"CREATING {target_vm} by cloning {src_vm} with target ip of {target_ip} and hds {hds}")
     if not check_vm_status(conn, src_vm, shutdown=True, destroy=False):
         print(f"\tWarning: VM {src_vm} is not appropriately shutdown.")
         sys.exit(1)
-    if not check_vm_status(conn, target_vm, shutdown=True, destroy=True):
-        print(f"\tWarning: VM {target_vm} could not be cleaned up.")
+    if use_existing and check_vm_status(conn, target_vm, shutdown=True, destroy=False):
+        print(f"\tReusing existing VM {target_vm}")
+        if not is_host_in_network_by_name(conn, network_name, target_vm, target_ip):
+            Fatal(f"Cannot use use_existing flag because {target_vm} not in network {network_name}")
+    else:
+        if not check_vm_status(conn, target_vm, shutdown=True, destroy=True):
+            print(f"\tWarning: VM {target_vm} could not be cleaned up.")
 
-    # Clone the base VM
-    clone_vm(src_vm, target_vm)
+        # Clone the base VM
+        clone_vm(src_vm, target_vm)
 
-    # Add NIC to the cloned VM
-    if target_ip:
-        mac_address = add_nic_to_vm(conn, target_vm, network_name)
-        mac_addr_map[target_vm] = [ mac_address, target_ip ]
+        set_hostname_keypair_selinux_lustre_options(conn,target_vm, 'disabled')
 
-        # give static IP assignment of the new VM to the network
-        mac_addresses = '\n'.join(f'      <host mac="{mac}" name="{name}" ip="{network}.{ip}"/>' for name, (mac,ip) in mac_addr_map.items())
-        print(mac_addresses)
-        setup_hostonly_network(conn, network, network_name, mac_addresses)
+        if hds:
+            # this get_letter thing is just a way to iterate through the alphabet to create good HDD names
+            get_letter = lambda x: chr(ord('b') + x )
+            for idx,hd in enumerate(hds):
+                path = f"{get_image_storage_pool_path(conn)}/{target_vm}_hdd{idx}_{hd}GB"
+                create_disk_image(path, f"{hd}G")
+                attach_disk_to_vm(target_vm, path, f"sd{get_letter(idx)}")
 
-    set_hostname_keypair_selinux_lustre_options(conn,target_vm, 'disabled')
+        # Add NIC to the cloned VM
+        # Note: this gets called unnecessarily if we are passing the use_existing flag. Wonder if that causes problems.
+        if target_ip:
+            mac_address = add_nic_to_vm(conn, target_vm, network_name)
+            mac_addr_map[target_vm] = [ mac_address, target_ip ]
 
-    if hds:
-        # this get_letter thing is just a way to iterate through the alphabet to create good HDD names
-        get_letter = lambda x: chr(ord('b') + x )
-        for idx,hd in enumerate(hds):
-            path = f"{get_image_storage_pool_path(conn)}/{target_vm}_hdd{idx}_{hd}GB"
-            create_disk_image(path, f"{hd}G")
-            attach_disk_to_vm(target_vm, path, f"sd{get_letter(idx)}")
+            # give static IP assignment of the new VM to the network
+            mac_addresses = '\n'.join(f'      <host mac="{mac}" name="{name}" ip="{network}.{ip}"/>' for name, (mac,ip) in mac_addr_map.items())
+            print(mac_addresses)
+            setup_hostonly_network(conn, network, network_name, mac_addresses)
 
 def extract_host_details(d, host_details, target_groups, current_group=None):
     if isinstance(d, dict):
@@ -667,14 +716,33 @@ def get_hosts(inventory, group):
     recurse(inventory['all'], group, False)
     return hosts
 
-def main():
+def restart_hosts(conn, hosts):
+    # Start the cloned VMs
+    for hname in hosts:
+        print(f"Starting {hname},")
+        dom = conn.lookupByName(hname)
+        dom.create()
+    time.sleep(10)
 
+    # reboot them
+    for hname in hosts:
+        print(f"Reboot {hname} to try to ensure it gets its IP addresses correctly reported to libvirt")
+        dom = conn.lookupByName(hname)
+        dom.reboot()
+    time.sleep(10)
+
+def main():
     # Parse command-line arguments
-    parser = argparse.ArgumentParser(description='VM and network setup script using libvirt.')
-    parser.add_argument('-b', '--base_vm',     default='freshinstall', help='Name of the base VM.')
-    parser.add_argument('-p', '--playbook',    default='./ansible/install_all.yaml', help='Name of the ansible install playbook')
-    parser.add_argument('-v', '--ansible_verbosity', default=0, type=int, help='Ansible verbosity')
-    parser.add_argument('inventory_file',      type=str,               help='Path to the ansible inventory file')
+    parser = argparse.ArgumentParser(
+        description='Create libvirt VMs and install and configure a Lustre cluster.',
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter  # Add this line
+    )
+    parser.add_argument('-b', '--base_vm',             default='freshinstall',                    help='Name of the base VM.')
+    parser.add_argument('-i', '--install_playbook',    default='./ansible/install_all.yaml',      help='Name of the ansible install playbook')
+    parser.add_argument('-c', '--config_playbook',     default='./ansible/configure_lustre.yaml', help='Name of the ansible configure playbook')
+    parser.add_argument('-u', '--use_existing',        default=False, action='store_true',        help="Reuse existing VM's instead of recreating them")
+    parser.add_argument('-v', '--ansible_verbosity',   default=0, type=int,                       help='Ansible verbosity')
+    parser.add_argument('inventory_file',                         type=str,                       help='Path to the ansible inventory file')
     args = parser.parse_args()
 
     # Check if script is run as root
@@ -692,12 +760,12 @@ def main():
     vm_dir  = get_inventory_value(inventory, 'all.vars.vm_dir')
     network['name'] = 'hostonly-net' # define it here because we use it elsewhere
 
-    # check that the images directory exists and is part of a git repo
+    # check that the images directory exists 
     check_images_directory(vm_dir)
 
-    # check for the playbook
-    if not os.path.exists(args.playbook):
-        Fatal(f"Ansible install playbook {args.playbook} does not exist")
+    # check for the install playbook
+    if not os.path.exists(args.install_playbook):
+        Fatal(f"Ansible install playbook {args.install_playbook} does not exist")
 
     # Connect to libvirt
     with LibvirtConnection() as conn:
@@ -707,10 +775,19 @@ def main():
 
         # make or fetch the gold image for the servers and clients
         gold_vms = {}
-        gold_vms['servers'], gold_vms['clients'] = make_gold_vms(conn, args.base_vm, vm_dir, inventory, args.inventory_file, args.playbook, args.ansible_verbosity)
+        (gold_vms['servers'], gold_vms['clients']) = make_gold_vms(
+            conn, 
+            args.base_vm, 
+            vm_dir, 
+            inventory, 
+            args.inventory_file, 
+            args.install_playbook, 
+            args.use_existing,
+            args.ansible_verbosity)
 
         # setup the hostonly network and create the dict to hold the mac addresses as we create the nodes
-        setup_hostonly_network(conn, network['addr'], network['name'])
+        if not args.use_existing:
+            setup_hostonly_network(conn, network['addr'], network['name'])
         mac_addr_map = {} 
 
         # now clone the base image for each requested lustre node
@@ -718,25 +795,17 @@ def main():
             hip = hinfo['ip']
             hds = hinfo['hds']
             gvm = gold_vms[hinfo['group']]
-            create_node(conn, gvm, hname, network['name'], network['addr'], hip, mac_addr_map, hds)
+            create_node(conn, gvm, hname, network['name'], network['addr'], hip, mac_addr_map, hds, args.use_existing)
             print(f"\tCreated {hname}:{network['addr']}.{hip} from {gvm}.")
 
         # Restart libvirt services to apply changes
         conn.restart()
 
-        # Start the cloned VMs
-        for hname in hosts:
-            print(f"Starting {hname},")
-            dom = conn.lookupByName(hname)
-            dom.create()
-        time.sleep(10)
+        # reboot the freshly coned VMs to make sure changes are applied appropriately
+        restart_hosts(conn, hosts)
 
-        # reboot them
-        for hname in hosts:
-            print(f"Reboot {hname} to try to ensure it gets its IP addresses correctly reported to libvirt")
-            dom = conn.lookupByName(hname)
-            dom.reboot()
-        time.sleep(10)
+        # configure the lustre system
+        run_playbook(None, args.inventory_file, args.config_playbook, None, args.ansible_verbosity)
 
     print(f"Setup completed. Lustre cluster should now be running with new NICs attached to {network['name']}.")
 
