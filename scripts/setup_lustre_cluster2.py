@@ -740,6 +740,7 @@ def main():
     parser.add_argument('-b', '--base_vm',             default='freshinstall',                    help='Name of the base VM.')
     parser.add_argument('-i', '--install_playbook',    default='./ansible/install_all.yaml',      help='Name of the ansible install playbook')
     parser.add_argument('-c', '--config_playbook',     default='./ansible/configure_lustre.yaml', help='Name of the ansible configure playbook')
+    parser.add_argument('-t', '--test_playbook',       default='./ansible/test_lustre.yaml',      help='Name of the ansible test playbook')
     parser.add_argument('-u', '--use_existing',        default=False, action='store_true',        help="Reuse existing VM's instead of recreating them")
     parser.add_argument('-v', '--ansible_verbosity',   default=0, type=int,                       help='Ansible verbosity')
     parser.add_argument('inventory_file',                         type=str,                       help='Path to the ansible inventory file')
@@ -806,6 +807,9 @@ def main():
 
         # configure the lustre system
         run_playbook(None, args.inventory_file, args.config_playbook, None, args.ansible_verbosity)
+
+        # test the lustre system
+        run_playbook(None, args.inventory_file, args.test_playbook, None, args.ansible_verbosity)
 
     print(f"Setup completed. Lustre cluster should now be running with new NICs attached to {network['name']}.")
 
