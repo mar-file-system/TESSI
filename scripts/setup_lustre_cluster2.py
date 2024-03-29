@@ -338,9 +338,11 @@ def make_gold_vms(conn,base_vm,images,inventory,inventory_file,playbook_file,use
         if not check_vm_status(conn, gold['hname'], shutdown=True, destroy=True):
             Fatal(f"VM {gold['hname']} could not be destroyed.")
 
-        if os.path.exists(gold['image']):
+        if os.path.exists(gold['image']) and use_existing:
             restore_vm_from_stash(conn, gold['image'], f"{gold['image']}.xml", pool_name, gold['hname'])
         else:
+            if os.path.exists(gold['image']):
+                print(f"\tRecreating VM {gold['hname']} because 'use_existing' is False.")
             create_gold(conn, base_vm, gold['hname'], inventory_file, playbook_file, group, verbosity)
             stash_vm(conn, gold['image'], gold['hname'])
 
@@ -416,8 +418,18 @@ def check_network_exists(conn, network_name):
     except libvirt.libvirtError:
         return False
 
-def setup_hostonly_network(conn, network, network_name, mac_addresses = ''):
-    """Set up host-only network with optional static MAC address assignments."""
+def setup_hostonly_network(conn, network, network_name, mac, ip, hostname):
+    """
+    Set up or update a host-only network with a single VM entry.
+    
+    Args:
+        conn: Connection object to the libvirt API.
+        network (str): The first three octets of the IP address for the network.
+        network_name (str): The name of the network.
+        mac (str): The MAC address for the VM.
+        ip (str): The fourth octet of the IP address for the VM.
+        hostname (str): The hostname for the VM.
+    """
     network_xml = f"""
 <network>
   <name>{network_name}</name>
@@ -425,22 +437,48 @@ def setup_hostonly_network(conn, network, network_name, mac_addresses = ''):
   <ip address='{network}.1' netmask='255.255.255.0'>
     <dhcp>
       <range start='{network}.2' end='{network}.254'/>
-      {mac_addresses}
     </dhcp>
   </ip>
 </network>
 """
-    if check_network_exists(conn,network_name):
-        print(f"\tNetwork '{network_name}' exists. Cleaning it up.")
+
+    def add_entry_manually(network_name, hostname, mac, ip, description):
+        if mac is None:
+            Fatal(f"Trying to add {hostname} to {network_name} but mac address is unknown.")
+        print(f"\tAdding {hostname} to {description} network {network_name}")
+        host_entry = f"<host mac='{mac}' name='{hostname}' ip='{ip}' />"
+        command = ["virsh", "net-update", network_name, "add", "ip-dhcp-host", host_entry, "--live", "--config"]
+        subprocess_tabinated(command)
+
+    def add_entry(network, hostname, mac, host_entry, description):
+        if mac is None:
+            Fatal(f"Trying to add {hostname} to {network_name} but mac address is unknown.")
+        print(f"\tAdding {hostname} to {description} network {network_name}")
+        network.update(3, 4, -1, host_entry, 3)
+        #network.update(4, 0, 0, host_entry)
+
+    host_entry = f"<host mac='{mac}' name='{hostname}' ip='{network}.{ip}'/>"
+
+    if check_network_exists(conn, network_name):
+        if is_host_in_network_by_name(conn, network_name, hostname, ip):
+            print(f"\tReusing existing entry for {hostname} in network {network_name}")
+        else:
+            vnetwork = conn.networkLookupByName(network_name)
+            add_entry(vnetwork, hostname, mac, host_entry, 'existing')
+    else:
+        vnetwork = conn.networkDefineXML(network_xml)
+        vnetwork.setAutostart(True)
+        vnetwork.create()
+        add_entry(vnetwork, hostname, mac, host_entry, 'newly_created')
+
+def remove_network_if_exists(conn, network_name):
+    """Remove the specified network if it exists."""
+    if check_network_exists(conn, network_name):
+        print(f"Network '{network_name}' exists. Cleaning it up.")
         network = conn.networkLookupByName(network_name)
         network.destroy()
-        # the bash version had a sleep 2 here. Is it not needed?
         network.undefine()
-    network = conn.networkDefineXML(network_xml)
-    network.setAutostart(True)
-    network.create()
 
-# run subprocess but put tabs in front of its output
 def subprocess_tabinated(command):
     process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
     stdout, stderr = process.communicate()
@@ -616,15 +654,36 @@ def is_host_in_network_by_name(conn, network_name, host_name, expected_ip):
         print(f"Error: {e}")
         return False
 
-def create_node(conn, src_vm, target_vm, network_name=None, network=None, target_ip=None, mac_addr_map=None, hds=None, use_existing=False):
+def remove_ssh_host_keys(hostname):
+    def actual_remove(hostname, path):
+        print(f"\tRemoving ssh key for {hostname} from {path}")
+        subprocess_tabinated(["ssh-keygen", "-f", path, "-R", hostname])
+
+    # Check if the script is running as root
+    is_root = os.getuid() == 0
+
+    # If running as root, check if it's a sudo session
+    sudo_user = os.environ.get('SUDO_USER')
+
+    # Determine the known_hosts file path for the current user (root or non-root)
+    current_user_known_hosts = os.path.join(os.path.expanduser("~"), ".ssh", "known_hosts")
+
+    # Remove the host key for the current user (root or non-root)
+    actual_remove(hostname, current_user_known_hosts)
+
+    # If running as root in a sudo session, also remove the host key for the original user
+    if is_root and sudo_user:
+        original_user_known_hosts = os.path.join(os.path.expanduser(f"~{sudo_user}"), ".ssh", "known_hosts")
+        actual_remove(hostname, original_user_known_hosts)
+
+def create_node(conn, src_vm, target_vm, network_name=None, network=None, target_ip=None, hds=None, use_existing=False):
     print(f"CREATING {target_vm} by cloning {src_vm} with target ip of {target_ip} and hds {hds}")
     if not check_vm_status(conn, src_vm, shutdown=True, destroy=False):
         print(f"\tWarning: VM {src_vm} is not appropriately shutdown.")
         sys.exit(1)
     if use_existing and check_vm_status(conn, target_vm, shutdown=True, destroy=False):
         print(f"\tReusing existing VM {target_vm}")
-        if not is_host_in_network_by_name(conn, network_name, target_vm, target_ip):
-            Fatal(f"Cannot use use_existing flag because {target_vm} not in network {network_name}")
+        mac_address = None
     else:
         if not check_vm_status(conn, target_vm, shutdown=True, destroy=True):
             print(f"\tWarning: VM {target_vm} could not be cleaned up.")
@@ -643,15 +702,15 @@ def create_node(conn, src_vm, target_vm, network_name=None, network=None, target
                 attach_disk_to_vm(target_vm, path, f"sd{get_letter(idx)}")
 
         # Add NIC to the cloned VM
-        # Note: this gets called unnecessarily if we are passing the use_existing flag. Wonder if that causes problems.
         if target_ip:
             mac_address = add_nic_to_vm(conn, target_vm, network_name)
-            mac_addr_map[target_vm] = [ mac_address, target_ip ]
 
-            # give static IP assignment of the new VM to the network
-            mac_addresses = '\n'.join(f'      <host mac="{mac}" name="{name}" ip="{network}.{ip}"/>' for name, (mac,ip) in mac_addr_map.items())
-            print(mac_addresses)
-            setup_hostonly_network(conn, network, network_name, mac_addresses)
+    # give static IP assignment of the new VM to the network
+    if target_ip:
+        setup_hostonly_network(conn, network, network_name, mac_address, target_ip, target_vm)
+
+    # clean up ssh known_hosts for easier ssh communication after creation
+    remove_ssh_host_keys(target_vm)
 
 def extract_host_details(d, host_details, target_groups, current_group=None):
     if isinstance(d, dict):
@@ -725,6 +784,8 @@ def restart_hosts(conn, hosts):
     time.sleep(10)
 
     # reboot them
+    # TODO: this script first calls destroy() on them and then in this function it starts them
+    # therefore this reboot here is probably unnecessary
     for hname in hosts:
         print(f"Reboot {hname} to try to ensure it gets its IP addresses correctly reported to libvirt")
         dom = conn.lookupByName(hname)
@@ -737,12 +798,14 @@ def main():
         description='Create libvirt VMs and install and configure a Lustre cluster.',
         formatter_class=argparse.ArgumentDefaultsHelpFormatter  # Add this line
     )
-    parser.add_argument('-b', '--base_vm',             default='freshinstall',                    help='Name of the base VM.')
-    parser.add_argument('-i', '--install_playbook',    default='./ansible/install_all.yaml',      help='Name of the ansible install playbook')
-    parser.add_argument('-c', '--config_playbook',     default='./ansible/configure_lustre.yaml', help='Name of the ansible configure playbook')
-    parser.add_argument('-t', '--test_playbook',       default='./ansible/test_lustre.yaml',      help='Name of the ansible test playbook')
-    parser.add_argument('-u', '--use_existing',        default=False, action='store_true',        help="Reuse existing VM's instead of recreating them")
-    parser.add_argument('-v', '--ansible_verbosity',   default=0, type=int,                       help='Ansible verbosity')
+    parser.add_argument('-b', '--base_vm',           default='freshinstall',                    help='Name of the base VM.')
+    parser.add_argument('-i', '--install_playbook',  default='./ansible/install_all.yaml',      help='Name of the ansible install playbook')
+    parser.add_argument('-c', '--config_playbook',   default='./ansible/configure_lustre.yaml', help='Name of the ansible configure playbook')
+    parser.add_argument('-t', '--test_playbook',     default='./ansible/test_lustre.yaml',      help='Name of the ansible test playbook')
+    parser.add_argument('-u', '--use_existing',      default=False, action='store_true',        help="Reuse existing VM's instead of recreating them")
+    parser.add_argument('-v', '--ansible_verbosity', default=0, type=int,                       help='Ansible verbosity')
+    parser.add_argument('-n', '--virt_network',      default='hostonly-net',                    help='Name of virtual network to use/create')
+    parser.add_argument('--skip', action='append',   choices=['config', 'test'], help='Skip specified steps (can be used multiple times)')
     parser.add_argument('inventory_file',                         type=str,                       help='Path to the ansible inventory file')
     args = parser.parse_args()
 
@@ -759,7 +822,7 @@ def main():
     extract_host_details(inventory, hosts, ['clients', 'servers'])
     network = get_inventory_value(inventory, 'all.vars.network')
     vm_dir  = get_inventory_value(inventory, 'all.vars.vm_dir')
-    network['name'] = 'hostonly-net' # define it here because we use it elsewhere
+    network['name'] = args.virt_network # define it here because we use it elsewhere
 
     # check that the images directory exists 
     check_images_directory(vm_dir)
@@ -774,6 +837,9 @@ def main():
         if not check_vm_status(conn, args.base_vm):
             Fatal(f"VM {args.base_vm} does not exist or is not shut off.")
 
+        if not args.use_existing:
+            remove_network_if_exists(conn, args.virt_network)
+
         # make or fetch the gold image for the servers and clients
         gold_vms = {}
         (gold_vms['servers'], gold_vms['clients']) = make_gold_vms(
@@ -786,17 +852,12 @@ def main():
             args.use_existing,
             args.ansible_verbosity)
 
-        # setup the hostonly network and create the dict to hold the mac addresses as we create the nodes
-        if not args.use_existing:
-            setup_hostonly_network(conn, network['addr'], network['name'])
-        mac_addr_map = {} 
-
         # now clone the base image for each requested lustre node
         for hname,hinfo in hosts.items():
             hip = hinfo['ip']
             hds = hinfo['hds']
             gvm = gold_vms[hinfo['group']]
-            create_node(conn, gvm, hname, network['name'], network['addr'], hip, mac_addr_map, hds, args.use_existing)
+            create_node(conn, gvm, hname, network['name'], network['addr'], hip, hds, args.use_existing)
             print(f"\tCreated {hname}:{network['addr']}.{hip} from {gvm}.")
 
         # Restart libvirt services to apply changes
@@ -806,10 +867,16 @@ def main():
         restart_hosts(conn, hosts)
 
         # configure the lustre system
-        run_playbook(None, args.inventory_file, args.config_playbook, None, args.ansible_verbosity)
+        if args.skip is not None and 'config' in args.skip:
+            print(f"Skipping config as requested")
+        else:
+            run_playbook(None, args.inventory_file, args.config_playbook, None, args.ansible_verbosity)
 
         # test the lustre system
-        run_playbook(None, args.inventory_file, args.test_playbook, None, args.ansible_verbosity)
+        if args.skip is not None and 'config' in args.skip:
+            print(f"Skipping testing as requested")
+        else:
+            run_playbook(None, args.inventory_file, args.test_playbook, None, args.ansible_verbosity)
 
     print(f"Setup completed. Lustre cluster should now be running with new NICs attached to {network['name']}.")
 

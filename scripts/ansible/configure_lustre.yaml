@@ -17,6 +17,46 @@
     - name: Gather facts
       setup:
 
+    - name: Check firewall status
+      ansible.builtin.service:
+        name: firewalld
+        state: stopped
+      register: firewall_status
+      failed_when: firewall_status.state == "running"
+      tags:
+        - lustre
+        - config
+        - precheck
+
+    - name: Check SELinux status
+      command: getenforce
+      register: selinux_status
+      changed_when: false
+      tags:
+        - selinux
+        - lustre
+        - config
+        - precheck
+
+    - name: Verify SELinux is disabled
+      assert:
+        that:
+          - selinux_status.stdout == "Disabled"
+        fail_msg: "Error: SELinux is not disabled. Current status is {{ selinux_status.stdout }}"
+      no_log: yes
+      tags:
+        - selinux
+        - lustre
+        - config
+        - precheck
+
+    - name: Ping other nodes to ensure hostonly network is working
+      command: "ping -c 3 {{ hostvars[item].network.addr }}.{{ hostvars[item].ip }}"
+      with_items: "{{ groups['all'] }}"
+      when: "inventory_hostname != item"
+      ignore_errors: true
+      register: ping_result
+
     - name: Load ZFS kernel module
       modprobe:
         name: zfs
@@ -39,12 +79,13 @@
         - zfs
         - modules 
 
-    - name: Rebuild module dependency map
+    - name: Rebuild module dependency map after ZFS modules loaded
       command: depmod -a
       tags: 
         - configure
         - modules
         - lustre
+        - zfs
 
     - name: Construct the IP address
       set_fact:
@@ -114,33 +155,12 @@
         - modules
         - lustre
 
-
-    - name: Check firewall status
-      ansible.builtin.service:
-        name: firewalld
-        state: stopped
-      register: firewall_status
-      failed_when: firewall_status.state == "running"
-
-    - name: Check SELinux status
-      command: getenforce
-      register: selinux_status
-      changed_when: false
-      tags:
-        - selinux
+    - name: Rebuild module dependency map after ZFS modules loaded
+      command: depmod -a
+      tags: 
+        - configure
+        - modules
         - lustre
-        - config
-
-    - name: Verify SELinux is disabled
-      assert:
-        that:
-          - selinux_status.stdout == "Disabled"
-        fail_msg: "Error: SELinux is not disabled. Current status is {{ selinux_status.stdout }}"
-      no_log: yes
-      tags:
-        - selinux
-        - lustre
-        - config
 
     - name: Verify {{ module_name }} module is loaded
       command: lsmod
