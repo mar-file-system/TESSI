@@ -15,6 +15,7 @@ import time
 import xml.etree.ElementTree as ET
 import yaml
 
+from pprint import pprint
 from uuid import uuid4
 
 # create a content manager to wrap the libvirt connection so we can periodically restart it cleanly
@@ -712,7 +713,10 @@ def create_node(conn, src_vm, target_vm, network_name=None, network=None, target
     # clean up ssh known_hosts for easier ssh communication after creation
     remove_ssh_host_keys(target_vm)
 
-def extract_host_details(d, host_details, target_groups, current_group=None):
+def extract_host_details(d, target_groups, current_group=None, host_details = None):
+    if host_details is None:
+        host_details = {}
+
     if isinstance(d, dict):
         for key, value in d.items():
             if key == 'hosts':
@@ -721,9 +725,10 @@ def extract_host_details(d, host_details, target_groups, current_group=None):
                     if current_group:
                         host_details[host]['group'] = current_group
             elif key in target_groups:
-                extract_host_details(value, host_details, target_groups, key)
+                host_details = extract_host_details(value, target_groups, key, host_details)
             else:
-                extract_host_details(value, host_details, target_groups, current_group)
+                host_details = extract_host_details(value, target_groups, current_group, host_details)
+    return host_details
 
 def load_yaml(file):
     # helper function to add inheritance here manually since ansible does this for us
@@ -792,6 +797,11 @@ def restart_hosts(conn, hosts):
         dom.reboot()
     time.sleep(10)
 
+def die_unless_root():
+    # Check if script is run as root
+    if os.geteuid() != 0:
+        Fatal("Must be run as root")
+
 def main():
     # Parse command-line arguments
     parser = argparse.ArgumentParser(
@@ -809,20 +819,15 @@ def main():
     parser.add_argument('inventory_file',                         type=str,                       help='Path to the ansible inventory file')
     args = parser.parse_args()
 
-    # Check if script is run as root
-    if os.geteuid() != 0:
-        print("Must be run as root")
-        sys.exit(1)
+    die_unless_root()
 
-    # open the ansible inventory file 
+    # open the ansible inventory file and pull key items
     inventory = load_yaml(args.inventory_file)
-
-    # pull key things from the ansible inventory file
-    hosts = {}
-    extract_host_details(inventory, hosts, ['clients', 'servers'])
+    hosts = extract_host_details(inventory, ['clients', 'servers'])
     network = get_inventory_value(inventory, 'all.vars.network')
     vm_dir  = get_inventory_value(inventory, 'all.vars.vm_dir')
     network['name'] = args.virt_network # define it here because we use it elsewhere
+    pprint(hosts)
 
     # check that the images directory exists 
     check_images_directory(vm_dir)
