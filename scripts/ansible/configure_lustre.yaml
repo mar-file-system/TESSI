@@ -1,16 +1,32 @@
 ---
 - name: Configure a Lustre Cluster 
   hosts: all
-  gather_facts: true # needed for {{ ansible_architecture }}
+  gather_facts: false # needed for {{ ansible_architecture }}, do it later so we can wait for ssh
   any_errors_fatal: true
 
   tasks:
+    - name: Wait for SSH to become ready
+      wait_for:
+        host: "{{ inventory_hostname }}"
+        port: 22
+        state: started
+        timeout: 300
+      delegate_to: localhost
+      become: false
+
+    - name: Gather facts
+      setup:
+
     - name: Check firewall status
       ansible.builtin.service:
         name: firewalld
         state: stopped
       register: firewall_status
       failed_when: firewall_status.state == "running"
+      tags:
+        - lustre
+        - config
+        - precheck
 
     - name: Check SELinux status
       command: getenforce
@@ -20,6 +36,7 @@
         - selinux
         - lustre
         - config
+        - precheck
 
     - name: Verify SELinux is disabled
       assert:
@@ -31,6 +48,119 @@
         - selinux
         - lustre
         - config
+        - precheck
+
+    - name: Ping other nodes to ensure hostonly network is working
+      command: "ping -c 3 {{ hostvars[item].network.addr }}.{{ hostvars[item].ip }}"
+      with_items: "{{ groups['all'] }}"
+      when: "inventory_hostname != item"
+      ignore_errors: true
+      register: ping_result
+
+    - name: Load ZFS kernel module
+      modprobe:
+        name: zfs
+        state: present
+      when: "'servers' in group_names"
+      tags: 
+        - configure
+        - zfs
+        - modules
+
+    - name: Ensure ZFS kernel module is loaded on reboot
+      copy:
+        dest: /etc/modules-load.d/zfs.conf
+        content: |
+          # Load ZFS module on boot
+          zfs
+      when: "'servers' in group_names"
+      tags:
+        - configure
+        - zfs
+        - modules 
+
+    - name: Rebuild module dependency map after ZFS modules loaded
+      command: depmod -a
+      tags: 
+        - configure
+        - modules
+        - lustre
+        - zfs
+
+    - name: Construct the IP address
+      set_fact:
+        node_ip: "{{ network.addr }}.{{ ip }}"
+      tags: 
+        - configure
+        - modules
+        - lustre
+
+    - name: Query the interface name
+      shell: "ip -o -4 addr show | awk '/{{ node_ip }}/{print $2}'"
+      register: interface_name
+      changed_when: false
+      tags: 
+        - configure
+        - modules
+        - lustre
+
+    - name: Gather all IP addresses
+      set_fact:
+        all_ips: "{{ groups['all'] | map('extract', hostvars, 'ip') | list }}"
+      run_once: true
+      tags: 
+        - configure
+        - modules
+        - lustre
+
+    - name: Dynamically construct the modprobe_opts variable
+      set_fact:
+        modprobe_opts: "options lnet ip2nets=\"tcp0({{ interface_name.stdout }}) {{ network.addr }}.[{{ all_ips | join(',') }}]\"\n"
+      tags: 
+        - configure
+        - modules
+        - lustre
+
+    - name: Write the modprobe_opts value to /etc/modprobe.d/lustre.conf
+      copy:
+        dest: /etc/modprobe.d/lustre.conf
+        content: "{{ modprobe_opts }}"
+        mode: 0644
+      tags: 
+        - configure
+        - modules
+        - lustre
+
+    - name: Load Lustre modules
+      modprobe:
+        name: "{{ item }}"
+        state: present
+      loop:
+        - ksocklnd
+        - lustre
+      tags:
+        - install
+        - modules
+        - lustre
+
+    - name: Ensure Lustre modules are loaded on reboot
+      copy:
+        dest: /etc/modules-load.d/lustre.conf
+        content: |
+          # Load Lustre modules on boot
+          ksocklnd
+          lustre
+      tags:
+        - install
+        - modules
+        - lustre
+
+    - name: Rebuild module dependency map after ZFS modules loaded
+      command: depmod -a
+      tags: 
+        - configure
+        - modules
+        - lustre
 
     - name: Verify {{ module_name }} module is loaded
       command: lsmod

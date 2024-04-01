@@ -3,6 +3,7 @@
 import datetime
 import libvirt
 import os
+import subprocess
 import sys
 import xml.etree.ElementTree as ET
 from xml.dom import minidom
@@ -10,15 +11,9 @@ from xml.dom import minidom
 # Connect to the hypervisor
 conn = libvirt.open('qemu:///system')
 
-#
-
-
 # Check if the current user is root
 if os.geteuid() != 0:
     sys.exit("Warning: This script must be run as root.")
-
-# Connect to the libvirt daemon
-conn = libvirt.open()
 
 def state_to_string(state):
     state_strings = {
@@ -39,6 +34,18 @@ domains = conn.listAllDomains()
 for domain in sorted(domains, key=lambda domain: domain.name()):
     state = domain.state()[0]  # Get the state integer
     print(f"Name: {domain.name()} - ID: {domain.ID()}, State: {state_to_string(state)}")
+
+    # If the domain is running, get its kernel version
+    if domain.state()[0] == libvirt.VIR_DOMAIN_RUNNING:
+        try:
+            command = f"ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null {domain.name()} uname -r"
+            result = subprocess.run(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
+            if result.returncode == 0:
+                print(f"\tKernel Version: {result.stdout.strip()}")
+            else:
+                print(f"\tKernel Version: Error executing command in VM - {result.stderr.strip()}")
+        except libvirt.libvirtError as e:
+            print(f"Error getting kernel version for {domain.name()}: {e}")
 
     # Get the domain's XML description
     xml_desc = domain.XMLDesc()
@@ -103,3 +110,6 @@ for domain in sorted(domains, key=lambda domain: domain.name()):
                     print(f"\tHDD Size: {size_bytes / (1024 ** 3):.2f} GB - Dev: {target_dev}")
                 else:
                     print("\tHDD Size: Disk source file not found or inaccessible")
+
+conn.close()
+
