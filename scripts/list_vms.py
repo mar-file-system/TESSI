@@ -124,7 +124,7 @@ def main():
                 try:
                     func_dict['ptr'](domain)
                 except libvirt.libvirtError as e:
-                    print(f"Error getting {name} for {domain.name()}: {e}")
+                    print(f"ERROR: Error getting {func_dict['name']} for {domain.name()}: {e}")
 
         if args.force_delete or (args.delete and input(f"PROMPT: Delete {domain.name()}? y/n: ").strip().lower() == 'y'):
             delete_domain(domain)
