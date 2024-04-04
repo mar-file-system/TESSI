@@ -78,12 +78,21 @@ def print_networks(domain):
                 print(f"\tIP Address: {addr['addr']}")
 
 def print_kernel(domain):
-    command = f"ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null {domain.name()} uname -r"
+    (ret, kernel) = get_kernel(domain.name())
+    if ret == 0:
+        print(f"\tKernel Version: {kernel}")
+    else:
+        print(f"\tKernel Version: Error executing command in VM - {kernel}")
+
+# returns 0, kernel on success
+# returns 1, error string on failure
+def get_kernel(hname):
+    command = f"ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null {hname} uname -r"
     result = subprocess.run(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
     if result.returncode == 0:
-        print(f"\tKernel Version: {result.stdout.strip()}")
+        return(0, result.stdout.strip())
     else:
-        print(f"\tKernel Version: Error executing command in VM - {result.stderr.strip()}")
+        return(1, result.stderr.strip())
 
 def print_snapshots(domain):
     snapshots = domain.listAllSnapshots()
