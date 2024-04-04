@@ -5,7 +5,9 @@ import argparse
 import inspect
 import libvirt
 import os
+import os
 import pwd
+import re
 import socket
 import shutil
 import subprocess
@@ -16,6 +18,7 @@ import xml.etree.ElementTree as ET
 import yaml
 
 from pprint import pprint
+from textwrap import dedent
 from uuid import uuid4
 
 # create a content manager to wrap the libvirt connection so we can periodically restart it cleanly
@@ -51,6 +54,138 @@ class LibvirtConnection:
     def __getattr__(self, name):
         # Forward attribute accesses to the underlying conn object
         return getattr(self.conn, name)
+
+def wait_for_ssh_with_ansible(host, ansible_verbosity, timeout=300): 
+    playbook_content = dedent(f"""
+    ---
+    - name: Wait for SSH to become available
+      hosts: localhost 
+      tasks:
+        - name: Wait for SSH to be available on host {host}
+          wait_for:
+            host: "{host}"
+            port: 22
+            state: started
+            timeout: {timeout}
+    """)
+
+    # Create a temporary playbook file
+    with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.yml') as temp_playbook:
+        temp_playbook.write(playbook_content)
+        temp_playbook_path = temp_playbook.name
+
+    try:
+        print(f"Using ansible playbook {temp_playbook_path} to wait up to {timeout} seconds for {host} to boot.")
+        # Run the playbook
+        r = ansible_runner.run(
+            playbook=temp_playbook_path,
+            inventory=f'{host},',  # Comma is needed for a single host
+        )
+        if r.status == 'successful':
+            print(f"SSH is available on {host}.")
+            return True
+        else:
+            print(f"Failed to connect to {host} via SSH.")
+            return False
+    finally:
+        # Clean up the temporary playbook file
+        os.remove(temp_playbook_path)
+        pass
+
+def create_kickstart_file(hostname, ks_dir, ks_file, baseos_location, root_password, ssh_pub):
+    os.makedirs(ks_dir, exist_ok=True)
+    print(f"Creating kickstart file {ks_dir}/{ks_file}")
+    #repo --name="AppStream" --baseurl={appstream_location}
+    with open(f"{ks_dir}/{ks_file}", "w") as ks:
+        ks_contents = dedent(f"""\
+            #version=RHEL8
+            text
+            repo --name="AppStream" --baseurl=
+            %packages
+            @^minimal-environment
+            kexec-tools
+            %end
+            lang en_US.UTF-8
+            network  --hostname={hostname}
+            url --url="{baseos_location}"
+            firstboot --enable
+            skipx
+            ignoredisk --only-use=vda
+            bootloader --append="crashkernel=auto" --location=mbr --boot-drive=vda
+            autopart
+            clearpart --all --initlabel --drives=vda
+            timezone US/Mountain --isUtc --ntpservers=0.pool.ntp.org,1.pool.ntp.org,2.pool.ntp.org,3.pool.ntp.org
+            {"rootpw --plaintext " + root_password if root_password else ""}
+            %addon com_redhat_kdump --enable --reserve-mb='auto'
+            %end
+            %anaconda
+            pwpolicy root --minlen=6 --minquality=1 --notstrict --nochanges --notempty
+            pwpolicy user --minlen=6 --minquality=1 --notstrict --nochanges --emptyok
+            pwpolicy luks --minlen=6 --minquality=1 --notstrict --nochanges --notempty
+            %end
+            %post
+            mkdir -p /root/.ssh
+            chmod 700 /root/.ssh
+            echo "{ssh_pub}" >> /root/.ssh/authorized_keys
+            chmod 600 /root/.ssh/authorized_keys
+            reboot 
+            %end
+        """).strip().splitlines()
+            #shutdown -P now # don't do the shutdown in the kickstart, then we can use ssh to poll and know when install is done
+        # remove leading whitespace and empty lines
+        ks_contents = os.linesep.join([line.lstrip() for line in ks_contents if line.strip()])
+        ks.write(ks_contents)
+
+def install_initial_vm(conn, hostname, inventory, ansible_verbosity): 
+    # Prepare kickstart file
+    ks_dir = "/tmp/kickstart_files"
+    ks_file = f"{hostname}.kickstart"
+    baseos_location = get_inventory_value(inventory, 'all.vars.base_vm.location')
+    root_password   = get_inventory_value(inventory, 'all.vars.base_vm.root_pwd')
+    auth_keys       = get_inventory_value(inventory, 'all.vars.base_vm.auth_keys')
+    cpus            = get_inventory_value(inventory, 'all.vars.base_vm.cpus')
+    memory          = get_inventory_value(inventory, 'all.vars.base_vm.memory_mbs')
+    disk_size       = get_inventory_value(inventory, 'all.vars.base_vm.boot_hdd_gbs')
+    ssh_pub         = open(auth_keys).read().strip()
+    create_kickstart_file(hostname, ks_dir, ks_file, baseos_location, root_password, ssh_pub)
+
+    wait_minutes = 20
+    command = f"""
+    virt-install \
+    --name "{hostname}" \
+    --ram "{memory}" \
+    --vcpus "{cpus}" \
+    --disk path=/var/lib/libvirt/images/"{hostname}".img,size="{disk_size}" \
+    --os-type linux \
+    --os-variant centos8 \
+    --network network=default \
+    --graphics none \
+    --initrd-inject "{ks_dir}/{ks_file}" \
+    --location "{baseos_location}" \
+    --noautoconsole \
+    --wait {wait_minutes} \
+    --extra-args 'inst.ks=file:/{ks_file} console=tty0 console=ttyS0,115200n8'
+    """
+    #--noreboot \ # try without the noreboot and see if that helps
+    print(f"Creating VM {hostname} from {baseos_location}")
+    print(f"{command}")
+    start_time = time.time()
+    result = subprocess.run(command, shell=True, capture_output=True, text=True, stdin=subprocess.DEVNULL)
+    if result.returncode != 0:
+        error_message = f"Warning message: Potential failure to create VM {hostname}:\n" \
+                        f"Return code: {result.returncode}\n" \
+                        f"Standard Output: {result.stdout.strip()}\n" \
+                        f"Standard Error: {result.stderr.strip()}"
+    elapsed = time.time() - start_time
+
+    # Restart the VM and wait for it
+    print(f"Created VM {hostname} in {elapsed} seconds. Will now restart it.")
+    restart_domain(conn, hostname)
+    wait_for_ssh_with_ansible(hostname, ansible_verbosity)
+
+    # Clear out any old hostnames
+    print(f"Removing any old ssh hostname entries for {hostname}")
+    subprocess.run(["ssh-keygen", "-R", hostname])
 
 def restore_vm_from_stash(conn, src_path, xml_file_path, pool_name, vmname):
     """
@@ -225,6 +360,27 @@ def check_images_directory(images):
     os.makedirs(images + '/lustre/servers', exist_ok=True)
     os.makedirs(images + '/lustre/clients', exist_ok=True)
 
+def restart_domain(conn, hname, restart_libvirt=False):
+    if restart_libvirt:
+        print(f"\tRestarting libvirt")
+        conn.restart() # restart libvirt so networking works
+    print(f"\tStarting {hname}") 
+    if not check_vm_status(conn, hname, shutdown=True, destroy=False):
+        Fatal(f"Could not shutdown {hname}")
+    dom = conn.lookupByName(hname)
+    dom.create()
+
+# returns 0, kernel on success
+# returns 1, error string on failure
+def get_kernel(hname):
+    command = f"ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null {hname} uname -r"
+    result = subprocess.run(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
+    if result.returncode == 0:
+        return(0, result.stdout.strip())
+    else:
+        return(1, result.stderr.strip())
+
+
 def create_gold(conn, base_vm, hname, inventory_file, playbook_file, group, verbosity):
 
     if not check_vm_status(conn, base_vm):
@@ -236,19 +392,25 @@ def create_gold(conn, base_vm, hname, inventory_file, playbook_file, group, verb
     # clone the gold server and start it
     print(f"\tCloning {hname} from {base_vm}") 
     create_node(conn, base_vm, hname) 
-    conn.restart() # restart libvirt so networking works
-    print(f"\tStarting {hname}") 
-    dom = conn.lookupByName(hname)
-    dom.create()
-
-    # might need to reboot it here to affect the selinux and firewall config
-    # might not be necessary however
+    restart_domain(conn, hname, restart_libvirt=True)
 
     print(f"\tRunning ansible playbook {playbook_file} on {hname}") 
     run_playbook(hname, inventory_file, playbook_file, group, verbosity)
 
+    # Execute the 'uname -r' command to get the kernel version
+    (ret, output) = get_kernel(hname) 
+    if ret == 0:
+        print(f"Returning {output} as kernel version of {hname}")
+        kernel_version = output
+    else:
+        kernel_version = None
+        Fatal("Couldn't fetch kernel version from {hname}: {kernel_version}")
+
     # shut it down
+    dom = conn.lookupByName(hname)
     dom.destroy()
+
+    return kernel_version
 
 def run_playbook(hname, inventory_file, playbook_file, group, verbosity):
 
@@ -311,6 +473,36 @@ def get_first_storage_pool_info(conn):
 
     return (name, path)
 
+def find_gold_image(prefix):
+    directory = os.path.dirname(prefix)
+    if not os.path.isdir(directory):
+        Fatal(f"The directory '{directory}' does not exist or is not a directory.")
+        return None
+
+    # create a pattern to extract the kernel version
+    pattern = re.escape(prefix) + r'(\d+\.\d+\.\d+-\d+).*\.img$'
+    latest_file = None
+    latest_version = None
+
+    # returns a tuple. If there are multiple matches, the tuple compare will do piece-wise correctly
+    # for example, 4.18.0-547.el8.x86_64 will be "greater" than 4.18.0-536.el8.x86_64 because
+    # 4 is the same, 18 is the same, 0 is the same, and finally 547 > 536
+    def parse_kernel_version(version_str):
+        parts = re.split(r'[\.-]', version_str)
+        return tuple(int(part) if part.isdigit() else part for part in parts)
+
+    for filename in os.listdir(directory):
+        print(f"\tChecking possible gold image {filename}")
+        match = re.match(pattern, filename)
+        if match:
+            version = parse_kernel_version(match.group(1))
+            print(f"Found kernel version {version} in image {filename}")
+            if latest_file is None or version > latest_version:
+                latest_file = filename
+                latest_version = version
+
+    return os.path.join(directory, latest_file) if latest_file else None
+
 def make_gold_vms(conn,base_vm,images,inventory,inventory_file,playbook_file,use_existing,verbosity):
     lversion = get_inventory_value(inventory, 'all.vars.lustre.version')
     zversion = get_inventory_value(inventory, 'all.vars.zfs.version')
@@ -322,12 +514,14 @@ def make_gold_vms(conn,base_vm,images,inventory,inventory_file,playbook_file,use
     # initialize variables 
     golds = {
         'servers': {
-            'image': f"{images}/lustre/servers/{lversion}.{zversion}.img",
-            'hname': 'gold-lustre-server'
+            'image_prefix': f"{images}/lustre/servers/Lustre-{lversion}.ZFS-{zversion}.Patch-None.Kernel-",
+            'image'       : None,
+            'hname'       : 'gold-lustre-server'
         },
         'clients': {
-            'image': f"{images}/lustre/clients/{lversion}.img",
-            'hname': 'gold-lustre-client'
+            'image_prefix': f"{images}/lustre/clients/Lustre-{lversion}.Patch-None.Kernel-",
+            'image'       : None,
+            'hname'       : 'gold-lustre-client'
         }
     }
 
@@ -338,13 +532,15 @@ def make_gold_vms(conn,base_vm,images,inventory,inventory_file,playbook_file,use
 
         if not check_vm_status(conn, gold['hname'], shutdown=True, destroy=True):
             Fatal(f"VM {gold['hname']} could not be destroyed.")
-
-        if os.path.exists(gold['image']) and use_existing:
+        
+        gold['image'] = find_gold_image(gold['image_prefix'])
+        if gold['image'] and use_existing:
             restore_vm_from_stash(conn, gold['image'], f"{gold['image']}.xml", pool_name, gold['hname'])
         else:
-            if os.path.exists(gold['image']):
+            if gold['image'] and os.path.exists(gold['image']):
                 print(f"\tRecreating VM {gold['hname']} because 'use_existing' is False.")
-            create_gold(conn, base_vm, gold['hname'], inventory_file, playbook_file, group, verbosity)
+            kernel_version = create_gold(conn, base_vm, gold['hname'], inventory_file, playbook_file, group, verbosity)
+            gold['image'] = gold['image_prefix'] + kernel_version + '.img'
             stash_vm(conn, gold['image'], gold['hname'])
 
     return (golds['servers']['hname'], golds['clients']['hname']) 
@@ -677,6 +873,26 @@ def remove_ssh_host_keys(hostname):
         original_user_known_hosts = os.path.join(os.path.expanduser(f"~{sudo_user}"), ".ssh", "known_hosts")
         actual_remove(hostname, original_user_known_hosts)
 
+# Function to execute a command in the VM. Return the output.
+def execute_command_in_vm(comm,hname,command):
+    try:
+        # Open a session to the VM
+        domain = conn.lookupByName(hname)
+        session = domain.openConsole()
+        # Execute the command
+        session.send(command + "\n")
+        # Read the output
+        output = ""
+        while True:
+            data = session.recv(1024)
+            if not data:
+                break
+            output += data.decode('utf-8')
+        return output
+    except Exception as e:
+        print(f"Error executing command in VM: {e}", file=sys.stderr)
+        return None
+
 def create_node(conn, src_vm, target_vm, network_name=None, network=None, target_ip=None, hds=None, use_existing=False):
     print(f"CREATING {target_vm} by cloning {src_vm} with target ip of {target_ip} and hds {hds}")
     if not check_vm_status(conn, src_vm, shutdown=True, destroy=False):
@@ -788,13 +1004,10 @@ def restart_hosts(conn, hosts):
         dom.create()
     time.sleep(10)
 
-    # reboot them
-    # TODO: this script first calls destroy() on them and then in this function it starts them
+    # TODO: we just started them a second ago, necessary to restart them here? 
     # therefore this reboot here is probably unnecessary
     for hname in hosts:
-        print(f"Reboot {hname} to try to ensure it gets its IP addresses correctly reported to libvirt")
-        dom = conn.lookupByName(hname)
-        dom.reboot()
+        restart_domain(conn, hname)
     time.sleep(10)
 
 def die_unless_root():
@@ -838,6 +1051,9 @@ def main():
 
     # Connect to libvirt
     with LibvirtConnection() as conn:
+        # create the initial bootstrap VM if needed 
+        install_initial_vm(conn, args.base_vm, inventory, args.ansible_verbosity)
+
         # make sure we have the base vm existing
         if not check_vm_status(conn, args.base_vm):
             Fatal(f"VM {args.base_vm} does not exist or is not shut off.")
