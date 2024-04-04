@@ -2,6 +2,7 @@
 
 import ansible_runner
 import argparse
+import glob
 import inspect
 import libvirt
 import os
@@ -140,12 +141,12 @@ def install_initial_vm(conn, hostname, inventory, ansible_verbosity):
     # Prepare kickstart file
     ks_dir = "/tmp/kickstart_files"
     ks_file = f"{hostname}.kickstart"
-    baseos_location = get_inventory_value(inventory, 'all.vars.base_vm.location')
-    root_password   = get_inventory_value(inventory, 'all.vars.base_vm.root_pwd')
-    auth_keys       = get_inventory_value(inventory, 'all.vars.base_vm.auth_keys')
-    cpus            = get_inventory_value(inventory, 'all.vars.base_vm.cpus')
-    memory          = get_inventory_value(inventory, 'all.vars.base_vm.memory_mbs')
-    disk_size       = get_inventory_value(inventory, 'all.vars.base_vm.boot_hdd_gbs')
+    baseos_location = get_inventory_value(inventory, 'all.vars.bootstrap_vm.location')
+    root_password   = get_inventory_value(inventory, 'all.vars.bootstrap_vm.root_pwd')
+    auth_keys       = get_inventory_value(inventory, 'all.vars.bootstrap_vm.auth_keys')
+    cpus            = get_inventory_value(inventory, 'all.vars.bootstrap_vm.cpus')
+    memory          = get_inventory_value(inventory, 'all.vars.bootstrap_vm.memory_mbs')
+    disk_size       = get_inventory_value(inventory, 'all.vars.bootstrap_vm.boot_hdd_gbs')
     ssh_pub         = open(auth_keys).read().strip()
     create_kickstart_file(hostname, ks_dir, ks_file, baseos_location, root_password, ssh_pub)
 
@@ -381,17 +382,17 @@ def get_kernel(hname):
         return(1, result.stderr.strip())
 
 
-def create_gold(conn, base_vm, hname, inventory_file, playbook_file, group, verbosity):
+def create_gold(conn, bootstrap_vm, hname, inventory_file, playbook_file, group, verbosity):
 
-    if not check_vm_status(conn, base_vm):
-        Fatal(f"VM {base_vm} does not exist or is not shut off.")
+    if not check_vm_status(conn, bootstrap_vm):
+        Fatal(f"VM {bootstrap_vm} does not exist or is not shut off.")
 
     if group not in [ 'clients', 'servers' ]:
         Fatal(f"Unknown group {group}")
 
     # clone the gold server and start it
-    print(f"\tCloning {hname} from {base_vm}") 
-    create_node(conn, base_vm, hname) 
+    print(f"\tCloning {hname} from {bootstrap_vm}") 
+    create_node(conn, bootstrap_vm, hname) 
     restart_domain(conn, hname, restart_libvirt=True)
 
     print(f"\tRunning ansible playbook {playbook_file} on {hname}") 
@@ -503,15 +504,7 @@ def find_gold_image(prefix):
 
     return os.path.join(directory, latest_file) if latest_file else None
 
-def make_gold_vms(conn,base_vm,images,inventory,inventory_file,playbook_file,use_existing,verbosity):
-    lversion = get_inventory_value(inventory, 'all.vars.lustre.version')
-    zversion = get_inventory_value(inventory, 'all.vars.zfs.version')
-    print(f"Need gold server {lversion}.{zversion} and gold client {lversion}")
-
-    # get the libvirt storage pool
-    (pool_name, pool_path) = get_first_storage_pool_info(conn) 
-
-    # initialize variables 
+def get_gold_definitions(images,lversion,zversion):
     golds = {
         'servers': {
             'image_prefix': f"{images}/lustre/servers/Lustre-{lversion}.ZFS-{zversion}.Patch-None.Kernel-",
@@ -524,6 +517,18 @@ def make_gold_vms(conn,base_vm,images,inventory,inventory_file,playbook_file,use
             'hname'       : 'gold-lustre-client'
         }
     }
+    return golds
+
+def make_gold_vms(conn,bootstrap_vm,images,inventory,inventory_file,playbook_file,use_existing,verbosity):
+    lversion = get_inventory_value(inventory, 'all.vars.lustre.version')
+    zversion = get_inventory_value(inventory, 'all.vars.zfs.version')
+    print(f"Need gold server {lversion}.{zversion} and gold client {lversion}")
+
+    # get the libvirt storage pool
+    (pool_name, pool_path) = get_first_storage_pool_info(conn) 
+
+    # initialize variables 
+    golds = get_gold_definitions(images,lversion,zversion)
 
     for group,gold in golds.items(): 
         if use_existing and check_vm_status(conn, gold['hname'], shutdown=True, destroy=False):
@@ -539,7 +544,7 @@ def make_gold_vms(conn,base_vm,images,inventory,inventory_file,playbook_file,use
         else:
             if gold['image'] and os.path.exists(gold['image']):
                 print(f"\tRecreating VM {gold['hname']} because 'use_existing' is False.")
-            kernel_version = create_gold(conn, base_vm, gold['hname'], inventory_file, playbook_file, group, verbosity)
+            kernel_version = create_gold(conn, bootstrap_vm, gold['hname'], inventory_file, playbook_file, group, verbosity)
             gold['image'] = gold['image_prefix'] + kernel_version + '.img'
             stash_vm(conn, gold['image'], gold['hname'])
 
@@ -557,7 +562,7 @@ def check_vm_status(conn,vm_name,shutdown=True,destroy=False):
         libvirt.registerErrorHandler(custom_error_handler, None)
         dom = conn.lookupByName(vm_name)
     except libvirt.libvirtError:
-        print(f"\tVM {vm_name} does not exist.")
+        #print(f"\tVM {vm_name} does not exist.")
         return True if destroy else False
     finally:
         # Restore the default error handler
@@ -698,9 +703,9 @@ def subprocess_tabinated(command):
 
     print(output, end='')
 
-def clone_vm(base_vm, new_vm):
+def clone_vm(bootstrap_vm, new_vm):
     """Clone a VM."""
-    clone_command = f"virt-clone --original {base_vm} --name {new_vm} --auto-clone --nonsparse"
+    clone_command = f"virt-clone --original {bootstrap_vm} --name {new_vm} --auto-clone --nonsparse"
     subprocess_tabinated(clone_command.split())
 
 def add_nic_to_vm(conn, vm_name, network_name, mac_address=None):
@@ -1015,32 +1020,49 @@ def die_unless_root():
     if os.geteuid() != 0:
         Fatal("Must be run as root")
 
+def show_resources(conn, args, inventory, vm_dir, hosts):
+    avail = check_vm_status(conn, args.bootstrap_vm, shutdown=False, destroy=False)
+    print(f"Bootstrap VM {args.bootstrap_vm} {'is' if avail else 'is not'} available for re-use to create gold images if needed")
+
+    lversion = get_inventory_value(inventory, 'all.vars.lustre.version')
+    zversion = get_inventory_value(inventory, 'all.vars.zfs.version')
+    golds = get_gold_definitions(vm_dir, lversion, zversion)
+    for group,gold in golds.items(): 
+        pattern = f"{gold['image_prefix']}*.img"
+        for f in glob.glob(pattern):
+            print(f"{f.split('/')[-1]} is available to create gold VM for {group}")
+        avail = check_vm_status(conn, gold['hname'], shutdown=False, destroy=False)
+        print(f"Gold VM {gold['hname']} {'is' if avail else 'is not'} available for re-use to create {group} if needed")
+    for host in hosts:
+        avail = check_vm_status(conn, host, shutdown=False, destroy=False)
+        print(f"Host VM {host} {'is' if avail else 'is not'} available for re-use to create cluster if needed")
+
 def main():
     # Parse command-line arguments
     parser = argparse.ArgumentParser(
         description='Create libvirt VMs and install and configure a Lustre cluster.',
         formatter_class=argparse.ArgumentDefaultsHelpFormatter  # Add this line
     )
-    parser.add_argument('-b', '--base_vm',           default='freshinstall',                    help='Name of the base VM.')
+    parser.add_argument('-b', '--bootstrap_vm',      default='bootstrap',                       help='Name of the base VM.')
     parser.add_argument('-i', '--install_playbook',  default='./ansible/install_all.yaml',      help='Name of the ansible install playbook')
     parser.add_argument('-c', '--config_playbook',   default='./ansible/configure_lustre.yaml', help='Name of the ansible configure playbook')
     parser.add_argument('-t', '--test_playbook',     default='./ansible/test_lustre.yaml',      help='Name of the ansible test playbook')
-    parser.add_argument('-u', '--use_existing',      default=False, action='store_true',        help="Reuse existing VM's instead of recreating them")
     parser.add_argument('-v', '--ansible_verbosity', default=0, type=int,                       help='Ansible verbosity')
     parser.add_argument('-n', '--virt_network',      default='hostonly-net',                    help='Name of virtual network to use/create')
-    parser.add_argument('--skip', action='append',   choices=['config', 'test'], help='Skip specified steps (can be used multiple times)')
-    parser.add_argument('inventory_file',                         type=str,                       help='Path to the ansible inventory file')
+    parser.add_argument('--rebuild', action='append',   choices=['vms', 'golds'],               help='Rebuild specified items (instead of re-using) if they exist')
+    parser.add_argument('--skip',    action='append',   choices=['config', 'test'],             help='Skip specified steps (can be used multiple times)')
+    parser.add_argument('--show',    action='store_true',                                       help='Show available resources which can be re-used and then quit')
+    parser.add_argument('inventory_file',                         type=str,                     help='Path to the ansible inventory file')
     args = parser.parse_args()
 
     die_unless_root()
 
     # open the ansible inventory file and pull key items
     inventory = load_yaml(args.inventory_file)
-    hosts = extract_host_details(inventory, ['clients', 'servers'])
+    hosts   = extract_host_details(inventory, ['clients', 'servers'])
     network = get_inventory_value(inventory, 'all.vars.network')
     vm_dir  = get_inventory_value(inventory, 'all.vars.vm_dir')
     network['name'] = args.virt_network # define it here because we use it elsewhere
-    pprint(hosts)
 
     # check that the images directory exists 
     check_images_directory(vm_dir)
@@ -1051,12 +1073,16 @@ def main():
 
     # Connect to libvirt
     with LibvirtConnection() as conn:
-        # create the initial bootstrap VM if needed 
-        install_initial_vm(conn, args.base_vm, inventory, args.ansible_verbosity)
+
+        if args.show:
+            show_resources(conn, args, inventory, vm_dir, hosts)
+            sys.exit(0)
+            # create the initial bootstrap VM if needed 
+        install_initial_vm(conn, args.bootstrap_vm, inventory, args.ansible_verbosity)
 
         # make sure we have the base vm existing
-        if not check_vm_status(conn, args.base_vm):
-            Fatal(f"VM {args.base_vm} does not exist or is not shut off.")
+        if not check_vm_status(conn, args.bootstrap_vm):
+            Fatal(f"VM {args.bootstrap_vm} does not exist or is not shut off.")
 
         if not args.use_existing:
             remove_network_if_exists(conn, args.virt_network)
@@ -1065,7 +1091,7 @@ def main():
         gold_vms = {}
         (gold_vms['servers'], gold_vms['clients']) = make_gold_vms(
             conn, 
-            args.base_vm, 
+            args.bootstrap_vm, 
             vm_dir, 
             inventory, 
             args.inventory_file, 
