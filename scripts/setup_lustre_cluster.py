@@ -1022,7 +1022,9 @@ def die_unless_root():
 
 def show_resources(conn, args, inventory, vm_dir, hosts):
     avail = check_vm_status(conn, args.bootstrap_vm, shutdown=False, destroy=False)
-    print(f"Bootstrap VM {args.bootstrap_vm} {'is' if avail else 'is not'} available for re-use to create gold images if needed")
+    print(f"Bootstrap VM {args.bootstrap_vm} {'is' if avail else 'is not'} available for re-use to create gold images if needed.")
+    avail = check_network_exists(conn, args.virt_network)
+    print(f"Network '{args.virt_network}' {'is' if avail else 'is not'} available for re-use.")
 
     lversion = get_inventory_value(inventory, 'all.vars.lustre.version')
     zversion = get_inventory_value(inventory, 'all.vars.zfs.version')
@@ -1032,10 +1034,11 @@ def show_resources(conn, args, inventory, vm_dir, hosts):
         for f in glob.glob(pattern):
             print(f"{f.split('/')[-1]} is available to create gold VM for {group}")
         avail = check_vm_status(conn, gold['hname'], shutdown=False, destroy=False)
-        print(f"Gold VM {gold['hname']} {'is' if avail else 'is not'} available for re-use to create {group} if needed")
+        print(f"Gold VM {gold['hname']} {'is' if avail else 'is not'} available for re-use to create {group} if needed.")
+
     for host in hosts:
         avail = check_vm_status(conn, host, shutdown=False, destroy=False)
-        print(f"Host VM {host} {'is' if avail else 'is not'} available for re-use to create cluster if needed")
+        print(f"Host VM {host} {'is' if avail else 'is not'} available for re-use to create cluster if needed.")
 
 def main():
     # Parse command-line arguments
