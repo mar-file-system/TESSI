@@ -1043,7 +1043,8 @@ def show_resources(conn, args, inventory, vm_dir, hosts):
 def main():
     # Parse command-line arguments
     parser = argparse.ArgumentParser(
-        description='Create libvirt VMs and install and configure a Lustre cluster.',
+        description='''Create libvirt VMs, install, configure, mount, test a Lustre cluster. Defaults to reuse resources and run all playbooks.
+                       Use --rebuilt and --skip to override.''',
         formatter_class=argparse.ArgumentDefaultsHelpFormatter  # Add this line
     )
     parser.add_argument('-b', '--bootstrap_vm',      default='bootstrap',                       help='Name of the base VM.')
@@ -1052,7 +1053,7 @@ def main():
     parser.add_argument('-t', '--test_playbook',     default='./ansible/test_lustre.yaml',      help='Name of the ansible test playbook')
     parser.add_argument('-v', '--ansible_verbosity', default=0, type=int,                       help='Ansible verbosity')
     parser.add_argument('-n', '--virt_network',      default='hostonly-net',                    help='Name of virtual network to use/create')
-    parser.add_argument('--rebuild', action='append',   choices=['vms', 'golds'],               help='Rebuild specified items (instead of re-using) if they exist')
+    parser.add_argument('--rebuild', action='append',   choices=['vms', 'golds', 'network'],    help='Rebuild specified items (instead of re-using) if they exist')
     parser.add_argument('--skip',    action='append',   choices=['config', 'test'],             help='Skip specified steps (can be used multiple times)')
     parser.add_argument('--show',    action='store_true',                                       help='Show available resources which can be re-used and then quit')
     parser.add_argument('inventory_file',                         type=str,                     help='Path to the ansible inventory file')
@@ -1080,7 +1081,8 @@ def main():
         if args.show:
             show_resources(conn, args, inventory, vm_dir, hosts)
             sys.exit(0)
-            # create the initial bootstrap VM if needed 
+
+        # create the initial bootstrap VM if needed 
         install_initial_vm(conn, args.bootstrap_vm, inventory, args.ansible_verbosity)
 
         # make sure we have the base vm existing
