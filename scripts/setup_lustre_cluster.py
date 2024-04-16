@@ -1040,6 +1040,21 @@ def show_resources(conn, args, inventory, vm_dir, hosts):
         avail = check_vm_status(conn, host, shutdown=False, destroy=False)
         print(f"Host VM {host} {'is' if avail else 'is not'} available for re-use to create cluster if needed.")
 
+
+# helper function to make sure we rebuild only what is necessary
+def build_needed(conn, resource, user_overrides, Type):
+    if user_overrides and Type in user_overrides:
+        print(f"Need to build {resource} because of user specification")
+        return True
+
+    avail = check_vm_status(conn, resource, shutdown=False, destroy=False)
+    if not avail:
+        print(f"Need to build initial resource {resource}")
+        return True
+
+    print(f"Resource {resource} does not require a rebuild")
+    return False
+        
 def main():
     # Parse command-line arguments
     parser = argparse.ArgumentParser(
@@ -1053,7 +1068,8 @@ def main():
     parser.add_argument('-t', '--test_playbook',     default='./ansible/test_lustre.yaml',      help='Name of the ansible test playbook')
     parser.add_argument('-v', '--ansible_verbosity', default=0, type=int,                       help='Ansible verbosity')
     parser.add_argument('-n', '--virt_network',      default='hostonly-net',                    help='Name of virtual network to use/create')
-    parser.add_argument('--rebuild', action='append',   choices=['vms', 'golds', 'network'],    help='Rebuild specified items (instead of re-using) if they exist')
+    parser.add_argument('--rebuild', action='append', choices=['bootstrap', 'network', 'golds' 'vms', 'all'],    
+                                                                                                help='Rebuild specified items (instead of re-using) if they exist')
     parser.add_argument('--skip',    action='append',   choices=['config', 'test'],             help='Skip specified steps (can be used multiple times)')
     parser.add_argument('--show',    action='store_true',                                       help='Show available resources which can be re-used and then quit')
     parser.add_argument('inventory_file',                         type=str,                     help='Path to the ansible inventory file')
@@ -1083,7 +1099,9 @@ def main():
             sys.exit(0)
 
         # create the initial bootstrap VM if needed 
-        install_initial_vm(conn, args.bootstrap_vm, inventory, args.ansible_verbosity)
+        if build_needed(conn, args.bootstrap_vm, args.rebuild, 'bootstrap'):
+            install_initial_vm(conn, args.bootstrap_vm, inventory, args.ansible_verbosity)
+        sys.exit(0)
 
         # make sure we have the base vm existing
         if not check_vm_status(conn, args.bootstrap_vm):
