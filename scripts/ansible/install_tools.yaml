@@ -1,0 +1,82 @@
+---
+- name: Install Tools on {{ target_hosts }}
+  hosts: all 
+  any_errors_fatal: true
+  gather_facts: true 
+  vars:
+    ssh_key_path: "{{ ansible_env.HOME }}/.ssh/id_rsa.ansible"
+
+  tasks:
+    - name: Wait for SSH to become ready
+      wait_for:
+        host: "{{ inventory_hostname }}"
+        port: 22
+        state: started
+        timeout: 300
+      delegate_to: localhost
+
+    - name: Generate SSH key on each host if they do not already exist
+      ansible.builtin.openssh_keypair:
+        path: "{{ ansible_env.HOME }}/.ssh/id_rsa"
+        size: 2048
+      delegate_to: "{{ inventory_hostname }}"
+
+    - name: Fetch public key from each host
+      fetch:
+        src: "{{ ansible_env.HOME }}/.ssh/id_rsa.pub"
+        dest: "/tmp/{{ inventory_hostname }}.pub"
+        flat: yes
+
+    - name: Distribute each host's public key to all other hosts' authorized keys
+      authorized_key:
+        user: "{{ ansible_user }}"
+        state: present
+        key: "{{ lookup('file', item) }}"
+        manage_dir: yes
+      loop: "{{ query('fileglob', '/tmp/*.pub') }}"
+      delegate_to: "{{ inventory_hostname }}"
+
+    - name: Get SSH host keys from each host
+      shell: ssh-keyscan -H {{ inventory_hostname }}
+      register: host_keys
+      delegate_to: "{{ inventory_hostname }}"
+
+    - name: Add SSH host keys to known_hosts
+      known_hosts:
+        path: "{{ ansible_env.HOME }}/.ssh/known_hosts"
+        name: "{{ hostvars[item].ansible_facts.hostname }}"
+        key: "{{ hostvars[item].host_keys.stdout }}"
+      loop: "{{ ansible_play_hosts }}"
+      delegate_to: "{{ inventory_hostname }}"
+
+    - name: Install pdsh on target machines
+      dnf:
+        name: 
+          - pdsh-rcmd-ssh
+        state: present
+
+    - name: Install OpenMPI and development packages
+      dnf:
+        name:
+          - openmpi
+          - openmpi-devel
+        state: present
+      when: "'clients' in group_names"
+
+    - name: Ensure Environment Modules are initialized in /etc/bashrc
+      lineinfile:
+        path: /etc/bashrc
+        line: 'source /etc/profile.d/modules.sh'
+        create: yes
+      when: "'clients' in group_names"
+
+    - name: Load OpenMPI environment module in a new script
+      lineinfile:
+        path: /etc/profile.d/openmpi.sh
+        line: 'module load mpi/openmpi-x86_64'
+        create: yes
+      when: "'clients' in group_names"
+
+    - name: Reboot the system to apply changes
+      reboot:
+      when: "'clients' in group_names"
