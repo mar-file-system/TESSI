@@ -188,6 +188,8 @@ def install_initial_vm(conn, hostname, inventory, ansible_verbosity):
     print(f"Removing any old ssh hostname entries for {hostname}")
     subprocess.run(["ssh-keygen", "-R", hostname])
 
+# TODO: This function takes a long time to run.
+# might be good to add more debugging info to see which steps take so long
 def restore_vm_from_stash(conn, src_path, xml_file_path, pool_name, vmname):
     """
     Restore a VM from a stashed image and XML configuration.
@@ -474,14 +476,16 @@ def get_first_storage_pool_info(conn):
 
     return (name, path)
 
-def find_gold_image(prefix):
-    directory = os.path.dirname(prefix)
+def find_gold_image(full_prefix):
+    directory = os.path.dirname(full_prefix)
+    base_prefix = os.path.basename(full_prefix)
+    
     if not os.path.isdir(directory):
         Fatal(f"The directory '{directory}' does not exist or is not a directory.")
         return None
 
-    # create a pattern to extract the kernel version
-    pattern = re.escape(prefix) + r'(\d+\.\d+\.\d+-\d+).*\.img$'
+    # pattern to pull kernel version from all available images matching the prefix
+    pattern = re.escape(base_prefix) + r'(\d+\.\d+\.\d+-\d+).*\.img$'
     latest_file = None
     latest_version = None
 
@@ -493,14 +497,16 @@ def find_gold_image(prefix):
         return tuple(int(part) if part.isdigit() else part for part in parts)
 
     for filename in os.listdir(directory):
-        print(f"\tChecking possible gold image {filename}")
+        #print(f"\tChecking possible gold image {filename}")
         match = re.match(pattern, filename)
         if match:
             version = parse_kernel_version(match.group(1))
-            print(f"Found kernel version {version} in image {filename}")
+            print(f"\tFound kernel version {version} in image {filename}")
             if latest_file is None or version > latest_version:
                 latest_file = filename
                 latest_version = version
+        #else:
+        #    print(f"No regex match found on {filename} using prefix {base_prefix}")
 
     return os.path.join(directory, latest_file) if latest_file else None
 
@@ -519,7 +525,7 @@ def get_gold_definitions(images,lversion,zversion):
     }
     return golds
 
-def make_gold_vms(conn,bootstrap_vm,images,inventory,inventory_file,playbook_file,use_existing,verbosity):
+def make_gold_vms(conn,bootstrap_vm,images,inventory,inventory_file,playbook_file,rebuild_vms,rebuild_golds,verbosity):
     lversion = get_inventory_value(inventory, 'all.vars.lustre.version')
     zversion = get_inventory_value(inventory, 'all.vars.zfs.version')
     print(f"Need gold server {lversion}.{zversion} and gold client {lversion}")
@@ -531,7 +537,7 @@ def make_gold_vms(conn,bootstrap_vm,images,inventory,inventory_file,playbook_fil
     golds = get_gold_definitions(images,lversion,zversion)
 
     for group,gold in golds.items(): 
-        if use_existing and check_vm_status(conn, gold['hname'], shutdown=True, destroy=False):
+        if not rebuild_vms and check_vm_status(conn, gold['hname'], shutdown=True, destroy=False):
             print(f"\tReusing existing VM {gold['hname']}")
             continue
 
@@ -539,11 +545,12 @@ def make_gold_vms(conn,bootstrap_vm,images,inventory,inventory_file,playbook_fil
             Fatal(f"VM {gold['hname']} could not be destroyed.")
         
         gold['image'] = find_gold_image(gold['image_prefix'])
-        if gold['image'] and use_existing:
+        if gold['image'] and not rebuild_golds:
+            print(f"\tRestoring gold {gold['hname']} from stashed VM {gold['image']}")
             restore_vm_from_stash(conn, gold['image'], f"{gold['image']}.xml", pool_name, gold['hname'])
         else:
             if gold['image'] and os.path.exists(gold['image']):
-                print(f"\tRecreating VM {gold['hname']} because 'use_existing' is False.")
+                print(f"\tRebuilding (and restashing) VM {gold['hname']} due to user request.")
             kernel_version = create_gold(conn, bootstrap_vm, gold['hname'], inventory_file, playbook_file, group, verbosity)
             gold['image'] = gold['image_prefix'] + kernel_version + '.img'
             stash_vm(conn, gold['image'], gold['hname'])
@@ -584,7 +591,7 @@ def check_vm_status(conn,vm_name,shutdown=True,destroy=False):
             libvirt.VIR_DOMAIN_UNDEFINE_SNAPSHOTS_METADATA |
             libvirt.VIR_DOMAIN_UNDEFINE_NVRAM |
             0)
-        print(f"\tSuccessfully cleaned up {vm_name}.")
+        print(f"\tSuccessfully destroyed existing {vm_name}.")
 
     return True
 
@@ -613,11 +620,13 @@ def delete_vm_storage(conn, vm_name):
         print(f"\tFailed to find or access VM {vm_name} for storage deletion: {e}")
 
 def check_network_exists(conn, network_name):
+    print(f"Checking existence of network {network_name}")
     """Check if the specified network exists."""
     try:
         conn.networkLookupByName(network_name)
         return True
     except libvirt.libvirtError:
+        print(f"Network {network_name} does not exist")
         return False
 
 def setup_hostonly_network(conn, network, network_name, mac, ip, hostname):
@@ -644,6 +653,8 @@ def setup_hostonly_network(conn, network, network_name, mac, ip, hostname):
 </network>
 """
 
+    """
+    # TODO : remove this unused function
     def add_entry_manually(network_name, hostname, mac, ip, description):
         if mac is None:
             Fatal(f"Trying to add {hostname} to {network_name} but mac address is unknown.")
@@ -651,6 +662,7 @@ def setup_hostonly_network(conn, network, network_name, mac, ip, hostname):
         host_entry = f"<host mac='{mac}' name='{hostname}' ip='{ip}' />"
         command = ["virsh", "net-update", network_name, "add", "ip-dhcp-host", host_entry, "--live", "--config"]
         subprocess_tabinated(command)
+    """
 
     def add_entry(network, hostname, mac, host_entry, description):
         if mac is None:
@@ -1047,10 +1059,18 @@ def build_needed(conn, resource, user_overrides, Type):
         print(f"Need to build {resource} because of user specification")
         return True
 
-    avail = check_vm_status(conn, resource, shutdown=False, destroy=False)
-    if not avail:
-        print(f"Need to build initial resource {resource}")
-        return True
+    if Type in ['bootstrap', 'vms', 'golds']:
+        avail = check_vm_status(conn, resource, shutdown=False, destroy=False)
+        if not avail:
+            print(f"Need to build initial resource {resource}")
+            return True
+    elif Type == 'network':
+        avail = check_network_exists(conn, resource)
+        if not avail:
+            print(f"Need to build initial resource {resource}")
+            return True
+    else:
+        Fatal(f"Illegal resource type {Type}")
 
     print(f"Resource {resource} does not require a rebuild")
     return False
@@ -1068,7 +1088,7 @@ def main():
     parser.add_argument('-t', '--test_playbook',     default='./ansible/test_lustre.yaml',      help='Name of the ansible test playbook')
     parser.add_argument('-v', '--ansible_verbosity', default=0, type=int,                       help='Ansible verbosity')
     parser.add_argument('-n', '--virt_network',      default='hostonly-net',                    help='Name of virtual network to use/create')
-    parser.add_argument('--rebuild', action='append', choices=['bootstrap', 'network', 'golds' 'vms', 'all'],    
+    parser.add_argument('--rebuild', action='append', choices=['bootstrap', 'network', 'golds', 'vms', 'all'],    
                                                                                                 help='Rebuild specified items (instead of re-using) if they exist')
     parser.add_argument('--skip',    action='append',   choices=['config', 'test'],             help='Skip specified steps (can be used multiple times)')
     parser.add_argument('--show',    action='store_true',                                       help='Show available resources which can be re-used and then quit')
@@ -1101,33 +1121,44 @@ def main():
         # create the initial bootstrap VM if needed 
         if build_needed(conn, args.bootstrap_vm, args.rebuild, 'bootstrap'):
             install_initial_vm(conn, args.bootstrap_vm, inventory, args.ansible_verbosity)
-        sys.exit(0)
 
-        # make sure we have the base vm existing
+        # ensure the bootstrap VM is ready 
         if not check_vm_status(conn, args.bootstrap_vm):
             Fatal(f"VM {args.bootstrap_vm} does not exist or is not shut off.")
 
-        if not args.use_existing:
+        if build_needed(conn, args.virt_network, args.rebuild, 'network'):
             remove_network_if_exists(conn, args.virt_network)
 
         # make or fetch the gold image for the servers and clients
+        rebuilds = {}
+        for resource in [ 'vms', 'golds' ]:
+            if args.rebuild and resource in args.rebuild:
+                rebuilds[resource] = True
+            else:
+                rebuilds[resource] = False 
+        pprint(rebuilds)
         gold_vms = {}
         (gold_vms['servers'], gold_vms['clients']) = make_gold_vms(
-            conn, 
-            args.bootstrap_vm, 
-            vm_dir, 
-            inventory, 
-            args.inventory_file, 
-            args.install_playbook, 
-            args.use_existing,
-            args.ansible_verbosity)
+            conn = conn, 
+            bootstrap_vm = args.bootstrap_vm, 
+            images = vm_dir, 
+            inventory = inventory, 
+            inventory_file = args.inventory_file, 
+            playbook_file = args.install_playbook, 
+            rebuild_vms = rebuilds['vms'],
+            rebuild_golds = rebuilds['golds'],
+            verbosity = args.ansible_verbosity)
 
         # now clone the base image for each requested lustre node
+        if args.rebuild and 'vms' in args.rebuild:
+            use_existing = False
+        else:
+            use_existing = True
         for hname,hinfo in hosts.items():
             hip = hinfo['ip']
             hds = hinfo['hds']
             gvm = gold_vms[hinfo['group']]
-            create_node(conn, gvm, hname, network['name'], network['addr'], hip, hds, args.use_existing)
+            create_node(conn, gvm, hname, network['name'], network['addr'], hip, hds, use_existing)
             print(f"\tCreated {hname}:{network['addr']}.{hip} from {gvm}.")
 
         # Restart libvirt services to apply changes
