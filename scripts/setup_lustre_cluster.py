@@ -1055,7 +1055,7 @@ def show_resources(conn, args, inventory, vm_dir, hosts):
 
 # helper function to make sure we rebuild only what is necessary
 def build_needed(conn, resource, user_overrides, Type):
-    if user_overrides and Type in user_overrides:
+    if user_overrides and (Type in user_overrides or 'all' in user_overrides):
         print(f"Need to build {resource} because of user specification")
         return True
 
@@ -1132,7 +1132,7 @@ def main():
         # make or fetch the gold image for the servers and clients
         rebuilds = {}
         for resource in [ 'vms', 'golds' ]:
-            if args.rebuild and resource in args.rebuild:
+            if args.rebuild and ( resource in args.rebuild or 'all' in args.rebuild ):
                 rebuilds[resource] = True
             else:
                 rebuilds[resource] = False 
@@ -1150,7 +1150,7 @@ def main():
             verbosity = args.ansible_verbosity)
 
         # now clone the base image for each requested lustre node
-        if args.rebuild and 'vms' in args.rebuild:
+        if args.rebuild and ( 'vms' in args.rebuild or 'all' in args.rebuild ):
             use_existing = False
         else:
             use_existing = True
