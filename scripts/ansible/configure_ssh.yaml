@@ -1,0 +1,51 @@
+---
+- name: Configure passwordless ssh on {{ target_hosts }}
+  hosts: all 
+  any_errors_fatal: true
+  gather_facts: false # do it later so we can wait for ssh
+
+  tasks:
+    - name: Wait for SSH to become ready
+      wait_for:
+        host: "{{ inventory_hostname }}"
+        port: 22
+        state: started
+        timeout: 300
+      delegate_to: localhost
+
+    - name: Gather facts
+      setup:
+
+    - name: Generate SSH key on each host if they do not already exist
+      ansible.builtin.openssh_keypair:
+        path: "{{ ansible_env.HOME }}/.ssh/id_rsa"
+        size: 2048
+      delegate_to: "{{ inventory_hostname }}"
+
+    - name: Fetch public key from each host
+      fetch:
+        src: "{{ ansible_env.HOME }}/.ssh/id_rsa.pub"
+        dest: "/tmp/{{ inventory_hostname }}.pub"
+        flat: yes
+
+    - name: Distribute each host's public key to all other hosts' authorized keys
+      authorized_key:
+        user: "{{ ansible_user }}"
+        state: present
+        key: "{{ lookup('file', item) }}"
+        manage_dir: yes
+      loop: "{{ query('fileglob', '/tmp/*.pub') }}"
+      delegate_to: "{{ inventory_hostname }}"
+
+    - name: Get SSH host keys from each host
+      shell: ssh-keyscan -H {{ inventory_hostname }}
+      register: host_keys
+      delegate_to: "{{ inventory_hostname }}"
+
+    - name: Add SSH host keys to known_hosts
+      known_hosts:
+        path: "{{ ansible_env.HOME }}/.ssh/known_hosts"
+        name: "{{ hostvars[item].ansible_facts.hostname }}"
+        key: "{{ hostvars[item].host_keys.stdout }}"
+      loop: "{{ ansible_play_hosts }}"
+      delegate_to: "{{ inventory_hostname }}"
