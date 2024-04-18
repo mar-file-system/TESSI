@@ -1109,17 +1109,17 @@ def main():
                        Use --rebuilt and --skip to override.''',
         formatter_class=argparse.ArgumentDefaultsHelpFormatter  # Add this line
     )
-    parser.add_argument('-b', '--bootstrap_vm',      default='bootstrap',                       help='Name of the base VM.')
-    parser.add_argument('-i', '--install_playbook',  default='./ansible/install_all.yaml',      help='Name of the ansible install playbook')
-    parser.add_argument('-c', '--config_playbook',   default='./ansible/configure_lustre.yaml', help='Name of the ansible configure playbook')
-    parser.add_argument('-t', '--test_playbook',     default='./ansible/test_lustre.yaml',      help='Name of the ansible test playbook')
-    parser.add_argument('-v', '--ansible_verbosity', default=0, type=int,                       help='Ansible verbosity')
-    parser.add_argument('-n', '--virt_network',      default='hostonly-net',                    help='Name of virtual network to use/create')
+    parser.add_argument('-b', '--bootstrap_vm',      default='bootstrap',                    help='Name of the base VM.')
+    parser.add_argument('-i', '--install_playbook',  default='./ansible/install_all.yaml',   help='Name of the ansible install playbook')
+    parser.add_argument('-c', '--config_playbook',   default='./ansible/configure_all.yaml', help='Name of the ansible configure playbook')
+    parser.add_argument('-t', '--test_playbook',     default='./ansible/test_lustre.yaml',   help='Name of the ansible test playbook')
+    parser.add_argument('-v', '--ansible_verbosity', default=0, type=int,                    help='Ansible verbosity')
+    parser.add_argument('-n', '--virt_network',      default='hostonly-net',                 help='Name of virtual network to use/create')
     parser.add_argument('--rebuild', action='append', choices=['bootstrap', 'network', 'golds', 'vms', 'all'],    
-                                                                                                help='Rebuild specified items (instead of re-using) if they exist')
-    parser.add_argument('--skip',    action='append',   choices=['config', 'test'],             help='Skip specified steps (can be used multiple times)')
-    parser.add_argument('--show',    action='store_true',                                       help='Show available resources which can be re-used and then quit')
-    parser.add_argument('inventory_file',                         type=str,                     help='Path to the ansible inventory file')
+                                                                                             help='Rebuild specified items (instead of re-using) if they exist')
+    parser.add_argument('--skip',    action='append',   choices=['config', 'test'],          help='Skip specified steps (can be used multiple times)')
+    parser.add_argument('--show',    action='store_true',                                    help='Show available resources which can be re-used and then quit')
+    parser.add_argument('inventory_file',                         type=str,                  help='Path to the ansible inventory file')
     args = parser.parse_args()
 
     die_unless_root()
