@@ -629,6 +629,31 @@ def check_network_exists(conn, network_name):
         print(f"Network {network_name} does not exist")
         return False
 
+def get_mac_address(conn, vm_name, network_name):
+    # Lookup the domain by name
+    vm = conn.lookupByName(vm_name)
+    if vm is None:
+        Fatal(f"No VM found with the name: {vm_name}")
+    
+    # Get the XML description of the VM
+    xml_desc = vm.XMLDesc(0)
+    
+    # Parse the XML to find the MAC address for the given network
+    import xml.etree.ElementTree as ET
+    root = ET.fromstring(xml_desc)
+    
+    for interface in root.findall('.//interface'):
+        source = interface.find('source')
+        mac = interface.find('mac')
+        if source is not None and mac is not None:
+            if source.get('network') == network_name:
+                mac = mac.get('address')
+                print(f"\tFound MAC address {mac} for {vm_name} on network {network_name}")
+                return mac
+    
+    print(f"\tMAC address not found for vm {vm_name} on network {network_name}")
+    return None 
+
 def setup_hostonly_network(conn, network, network_name, mac, ip, hostname):
     """
     Set up or update a host-only network with a single VM entry.
@@ -667,10 +692,12 @@ def setup_hostonly_network(conn, network, network_name, mac, ip, hostname):
     def add_entry(network, hostname, mac, host_entry, description):
         if mac is None:
             Fatal(f"Trying to add {hostname} to {network_name} but mac address is unknown.")
-        print(f"\tAdding {hostname} to {description} network {network_name}")
+        print(f"\tAdding {hostname}:{mac} to {description} network {network_name}")
         network.update(3, 4, -1, host_entry, 3)
         #network.update(4, 0, 0, host_entry)
 
+    if mac is None:
+        mac = get_mac_address(conn, hostname, network_name)
     host_entry = f"<host mac='{mac}' name='{hostname}' ip='{network}.{ip}'/>"
 
     if check_network_exists(conn, network_name):
