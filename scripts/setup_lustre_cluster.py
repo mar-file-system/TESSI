@@ -896,9 +896,11 @@ def is_host_in_network_by_name(conn, network_name, host_name, expected_ip):
         return False
 
 def remove_ssh_host_keys(hostname):
-    def actual_remove(hostname, path):
+    def actual_remove(hostname, path, owner_uid, owner_gid):
         print(f"\tRemoving ssh key for {hostname} from {path}")
-        subprocess_tabinated(["ssh-keygen", "-f", path, "-R", hostname])
+        subprocess.run(["ssh-keygen", "-f", path, "-R", hostname])
+        # Reset file ownership to the original user
+        os.chown(path, owner_uid, owner_gid)
 
     # Check if the script is running as root
     is_root = os.getuid() == 0
@@ -909,13 +911,21 @@ def remove_ssh_host_keys(hostname):
     # Determine the known_hosts file path for the current user (root or non-root)
     current_user_known_hosts = os.path.join(os.path.expanduser("~"), ".ssh", "known_hosts")
 
-    # Remove the host key for the current user (root or non-root)
-    actual_remove(hostname, current_user_known_hosts)
+    # Get the current user's UID and GID for ownership resetting
+    current_user_uid = os.getuid()
+    current_user_gid = os.getgid()
+
+    # Remove the host key for the current user (root or non-root) and reset ownership
+    actual_remove(hostname, current_user_known_hosts, current_user_uid, current_user_gid)
 
     # If running as root in a sudo session, also remove the host key for the original user
     if is_root and sudo_user:
-        original_user_known_hosts = os.path.join(os.path.expanduser(f"~{sudo_user}"), ".ssh", "known_hosts")
-        actual_remove(hostname, original_user_known_hosts)
+        original_user_home = os.path.expanduser(f"~{sudo_user}")
+        original_user_known_hosts = os.path.join(original_user_home, ".ssh", "known_hosts")
+        # Get the original user's UID and GID
+        original_user_uid = os.stat(original_user_home).st_uid
+        original_user_gid = os.stat(original_user_home).st_gid
+        actual_remove(hostname, original_user_known_hosts, original_user_uid, original_user_gid)
 
 # Function to execute a command in the VM. Return the output.
 def execute_command_in_vm(comm,hname,command):
