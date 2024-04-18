@@ -409,9 +409,7 @@ def create_gold(conn, bootstrap_vm, hname, inventory_file, playbook_file, group,
         kernel_version = None
         Fatal("Couldn't fetch kernel version from {hname}: {kernel_version}")
 
-    # shut it down
-    dom = conn.lookupByName(hname)
-    dom.destroy()
+    shutdown_vm(conn, hname)
 
     return kernel_version
 
@@ -512,15 +510,15 @@ def find_gold_image(full_prefix):
 
 def get_gold_definitions(images,lversion,zversion):
     golds = {
-        'servers': {
-            'image_prefix': f"{images}/lustre/servers/Lustre-{lversion}.ZFS-{zversion}.Patch-None.Kernel-",
-            'image'       : None,
-            'hname'       : 'gold-lustre-server'
-        },
         'clients': {
             'image_prefix': f"{images}/lustre/clients/Lustre-{lversion}.Patch-None.Kernel-",
             'image'       : None,
             'hname'       : 'gold-lustre-client'
+        },
+        'servers': {
+            'image_prefix': f"{images}/lustre/servers/Lustre-{lversion}.ZFS-{zversion}.Patch-None.Kernel-",
+            'image'       : None,
+            'hname'       : 'gold-lustre-server'
         }
     }
     return golds
@@ -557,6 +555,15 @@ def make_gold_vms(conn,bootstrap_vm,images,inventory,inventory_file,playbook_fil
 
     return (golds['servers']['hname'], golds['clients']['hname']) 
 
+def shutdown_vm(conn,hname):
+    dom = conn.lookupByName(hname)
+    dom.shutdown()
+    while True:
+        if dom.info()[0] == libvirt.VIR_DOMAIN_SHUTOFF:
+            break
+        time.sleep(3)
+    print(f"\tShutdown {hname}")
+
 def check_vm_status(conn,vm_name,shutdown=True,destroy=False):
     # Define a custom error handler that does nothing
     def custom_error_handler(ctx, err):
@@ -579,8 +586,7 @@ def check_vm_status(conn,vm_name,shutdown=True,destroy=False):
     if shutdown:
         # Check if the VM is running and stop it if so
         if dom.isActive():
-            dom.destroy()  # This forcibly stops the domain
-            print(f"\tVM {vm_name} was running. Stopped it.")
+            shutdown_vm(conn, vm_name)
 
     # does the caller require it to be destroyed?
     if destroy:
