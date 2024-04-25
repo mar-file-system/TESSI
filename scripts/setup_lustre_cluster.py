@@ -1,10 +1,12 @@
 #! /usr/bin/env python3.8
 
 import ansible_runner
+import ansiconv
 import argparse
 import glob
 import inspect
 import libvirt
+import logging
 import os
 import os
 import pwd
@@ -18,7 +20,6 @@ import time
 import xml.etree.ElementTree as ET
 import yaml
 
-from pprint import pprint
 from textwrap import dedent
 from uuid import uuid4
 
@@ -38,23 +39,64 @@ class LibvirtConnection:
 
     def restart(self):
         if self.conn is not None:
+            logger = logging.getLogger(__name__)
             self.conn.close()
             time.sleep(5)
-            print("Restarting libvirt network")
-            subprocess.run(["systemctl", "restart", "virtlogd.socket"])
-            subprocess.run(["systemctl", "restart", "libvirtd"])
+            logger.info("Restarting libvirt network")
+            run_command(["systemctl", "restart", "virtlogd.socket"])
+            run_command(["systemctl", "restart", "libvirtd"])
             time.sleep(5)
             self._connect()
 
     def _connect(self):
         self.conn = libvirt.open(self.uri)
         if self.conn is None:
-            print(f"Failed to open connection to {self.uri}")
+            logger = logging.getLogger(__name__)
+            logger.info(f"Failed to open connection to {self.uri}")
             sys.exit(1)
 
     def __getattr__(self, name):
         # Forward attribute accesses to the underlying conn object
         return getattr(self.conn, name)
+
+def run_command(command):
+    logger = logging.getLogger(__name__)
+    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    stdout, stderr = process.communicate()
+    if stdout:
+        logger.info(stdout.strip())
+    if stderr:
+        logger.error(stderr.strip())
+    return process.returncode
+
+def setup_logging(verbose_log,concise_log):
+    filemode='w' # TODO: make this the same across the program
+    # Configure the root logger
+    logger = logging.getLogger()
+    logger.setLevel(logging.DEBUG)  # Root logger captures all levels
+
+    # Handler for verbose log file (captures everything)
+    verbose_file_handler = logging.FileHandler(verbose_log, mode=filemode)
+    verbose_file_handler.setLevel(logging.DEBUG)
+    verbose_format = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    verbose_file_handler.setFormatter(verbose_format)
+
+    # Handler for concise log file (captures warnings and errors only)
+    concise_file_handler = logging.FileHandler(concise_log, mode=filemode)
+    concise_file_handler.setLevel(logging.WARNING)
+    concise_format = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    concise_file_handler.setFormatter(concise_format)
+
+    # Console handler that replicates the verbose file handler
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(logging.DEBUG)
+    console_format = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    console_handler.setFormatter(console_format)
+
+    # Add handlers to the logger
+    logger.addHandler(verbose_file_handler)
+    logger.addHandler(concise_file_handler)
+    logger.addHandler(console_handler)
 
 def wait_for_ssh_with_ansible(host, ansible_verbosity, timeout=300): 
     playbook_content = dedent(f"""
@@ -76,17 +118,18 @@ def wait_for_ssh_with_ansible(host, ansible_verbosity, timeout=300):
         temp_playbook_path = temp_playbook.name
 
     try:
-        print(f"Using ansible playbook {temp_playbook_path} to wait up to {timeout} seconds for {host} to boot.")
+        logger = logging.getLogger(__name__)
+        logger.debug(f"Using ansible playbook {temp_playbook_path} to wait up to {timeout} seconds for {host} to boot.")
         # Run the playbook
         r = ansible_runner.run(
             playbook=temp_playbook_path,
             inventory=f'{host},',  # Comma is needed for a single host
         )
         if r.status == 'successful':
-            print(f"SSH is available on {host}.")
+            logger.debug(f"SSH is available on {host}.")
             return True
         else:
-            print(f"Failed to connect to {host} via SSH.")
+            logger.debug(f"Failed to connect to {host} via SSH.")
             return False
     finally:
         # Clean up the temporary playbook file
@@ -94,8 +137,9 @@ def wait_for_ssh_with_ansible(host, ansible_verbosity, timeout=300):
         pass
 
 def create_kickstart_file(hostname, ks_dir, ks_file, baseos_location, root_password, ssh_pub):
+    logger = logging.getLogger(__name__)
     os.makedirs(ks_dir, exist_ok=True)
-    print(f"Creating kickstart file {ks_dir}/{ks_file}")
+    logger.debug(f"Creating kickstart file {ks_dir}/{ks_file}")
     #repo --name="AppStream" --baseurl={appstream_location}
     with open(f"{ks_dir}/{ks_file}", "w") as ks:
         ks_contents = dedent(f"""\
@@ -138,6 +182,7 @@ def create_kickstart_file(hostname, ks_dir, ks_file, baseos_location, root_passw
         ks.write(ks_contents)
 
 def install_initial_vm(conn, hostname, inventory, ansible_verbosity): 
+    logger = logging.getLogger(__name__)
     # Prepare kickstart file
     ks_dir = "/tmp/kickstart_files"
     ks_file = f"{hostname}.kickstart"
@@ -168,8 +213,8 @@ def install_initial_vm(conn, hostname, inventory, ansible_verbosity):
     --extra-args 'inst.ks=file:/{ks_file} console=tty0 console=ttyS0,115200n8'
     """
     #--noreboot \ # try without the noreboot and see if that helps
-    print(f"Creating VM {hostname} from {baseos_location}")
-    print(f"{command}")
+    logger.debug(f"Creating VM {hostname} from {baseos_location}")
+    logger.debug(f"{command}")
     start_time = time.time()
     result = subprocess.run(command, shell=True, capture_output=True, text=True, stdin=subprocess.DEVNULL)
     if result.returncode != 0:
@@ -177,16 +222,25 @@ def install_initial_vm(conn, hostname, inventory, ansible_verbosity):
                         f"Return code: {result.returncode}\n" \
                         f"Standard Output: {result.stdout.strip()}\n" \
                         f"Standard Error: {result.stderr.strip()}"
+        logger.error(error_message)
+        if 'Installation has exceeded specified time limit. Exiting application.' in result.stdout:
+            logger.debug("Ignoring timeout error from virt-install.")
+        else:
+            Fatal(error_message)
+    if result.stdout:
+        logger.debug(result.stdout.strip())
+    if result.stderr:
+        logger.error(result.stderr.strip())
     elapsed = time.time() - start_time
 
     # Restart the VM and wait for it
-    print(f"Created VM {hostname} in {elapsed} seconds. Will now restart it.")
+    logger.debug(f"Created VM {hostname} in {elapsed} seconds. Will now restart it.")
     restart_domain(conn, hostname)
     wait_for_ssh_with_ansible(hostname, ansible_verbosity)
 
     # Clear out any old hostnames
-    print(f"Removing any old ssh hostname entries for {hostname}")
-    subprocess.run(["ssh-keygen", "-R", hostname])
+    logger.debug(f"Removing any old ssh hostname entries for {hostname}")
+    run_command(["ssh-keygen", "-R", hostname])
 
 # TODO: This function takes a long time to run.
 # might be good to add more debugging info to see which steps take so long
@@ -201,7 +255,8 @@ def restore_vm_from_stash(conn, src_path, xml_file_path, pool_name, vmname):
         pool_name (str): The name of the libvirt storage pool to use.
         vmname (str): The name of the VM to be restored.
     """
-    print(f"\tRestoring VM {vmname} from stashed configuration {src_path}")
+    logger = logging.getLogger(__name__)
+    logger.debug(f"Restoring VM {vmname} from stashed configuration {src_path}")
 
     # Read the XML configuration from the stashed file
     with open(xml_file_path, 'r') as xml_file:
@@ -262,7 +317,7 @@ def restore_vm_from_stash(conn, src_path, xml_file_path, pool_name, vmname):
     if dom is None:
         raise Exception(f"Failed to define the domain {vmname} from updated XML")
 
-    print(f"\tRestored VM {vmname} from stashed configuration")
+    logger.debug(f"Restored VM {vmname} from stashed configuration")
 
 def setup_ssh_key_and_copy_to_guest(guest_mount_path, key_name="id_rsa"):
     """
@@ -273,14 +328,15 @@ def setup_ssh_key_and_copy_to_guest(guest_mount_path, key_name="id_rsa"):
         guest_mount_path (str): The path to the guest mount directory.
         key_name (str): The name of the SSH key pair (default: "id_rsa").
     """
+    logger = logging.getLogger(__name__)
     ssh_dir = os.path.join(os.environ['HOME'], '.ssh')
     private_key_path = os.path.join(ssh_dir, key_name)
     public_key_path = private_key_path + '.pub'
 
     # Check if the SSH key pair exists, create if it doesn't
     if not os.path.exists(private_key_path) or not os.path.exists(public_key_path):
-        print(f"SSH key pair not found. Generating new key pair: {key_name}")
-        subprocess.run(['ssh-keygen', '-t', 'rsa', '-b', '2048', '-f', private_key_path, '-N', ''], check=True)
+        logger.debug(f"SSH key pair not found. Generating new key pair: {key_name}")
+        run_command(['ssh-keygen', '-t', 'rsa', '-b', '2048', '-f', private_key_path, '-N', '']) #, check=True)
 
     # Copy the public key to the guest mount
     guest_ssh_dir = os.path.join(guest_mount_path, 'root', '.ssh')
@@ -295,7 +351,7 @@ def setup_ssh_key_and_copy_to_guest(guest_mount_path, key_name="id_rsa"):
         with open(guest_authorized_keys, 'a') as authorized_keys_file:
             authorized_keys_file.write(public_key + '\n')
 
-    print(f"Public key {public_key_path} copied to {guest_authorized_keys}")
+    logger.debug(f"Public key {public_key_path} copied to {guest_authorized_keys}")
 
 def stash_vm(conn, dst_path, vmname):
     def extract_disk_path_from_xml(xml_desc):
@@ -307,7 +363,8 @@ def stash_vm(conn, dst_path, vmname):
         return None
 
     # Lookup the VM by name
-    print(f"Trying to stash {vmname} into {dst_path}")
+    logger = logging.getLogger(__name__)
+    logger.debug(f"Trying to stash {vmname} into {dst_path}")
     vm = conn.lookupByName(vmname)
 
     if vm is None:
@@ -328,7 +385,7 @@ def stash_vm(conn, dst_path, vmname):
         raise Exception("Failed to extract disk path from VM XML")
 
     # Copy the disk image to the destination path
-    print(f"\tStashing {dst_path} for later re-use. Reduce! Reuse! Recycle!")
+    logger.debug(f"Stashing {dst_path} for later re-use. Reduce! Reuse! Recycle!")
     shutil.copy2(disk_path, dst_path)
         
 def create_temp_inventory_file(hosts, group='servers'):
@@ -364,10 +421,11 @@ def check_images_directory(images):
     os.makedirs(images + '/lustre/clients', exist_ok=True)
 
 def restart_domain(conn, hname, restart_libvirt=False):
+    logger = logging.getLogger(__name__)
     if restart_libvirt:
-        print(f"\tRestarting libvirt")
+        logger.debug(f"Restarting libvirt")
         conn.restart() # restart libvirt so networking works
-    print(f"\tStarting {hname}") 
+    logger.debug(f"Starting {hname}") 
     if not check_vm_status(conn, hname, shutdown=True, destroy=False):
         Fatal(f"Could not shutdown {hname}")
     dom = conn.lookupByName(hname)
@@ -383,8 +441,7 @@ def get_kernel(hname):
     else:
         return(1, result.stderr.strip())
 
-
-def create_gold(conn, bootstrap_vm, hname, inventory_file, playbook_file, group, verbosity):
+def create_gold(conn, bootstrap_vm, hname, inventory_file, playbook_file, group, verbosity, ansible_log_prefix=None):
 
     if not check_vm_status(conn, bootstrap_vm):
         Fatal(f"VM {bootstrap_vm} does not exist or is not shut off.")
@@ -393,17 +450,18 @@ def create_gold(conn, bootstrap_vm, hname, inventory_file, playbook_file, group,
         Fatal(f"Unknown group {group}")
 
     # clone the gold server and start it
-    print(f"\tCloning {hname} from {bootstrap_vm}") 
+    logger = logging.getLogger(__name__)
+    logger.debug(f"Cloning {hname} from {bootstrap_vm}") 
     create_node(conn, bootstrap_vm, hname) 
     restart_domain(conn, hname, restart_libvirt=True)
 
-    print(f"\tRunning ansible playbook {playbook_file} on {hname}") 
-    run_playbook(hname, inventory_file, playbook_file, group, verbosity)
+    logger.debug(f"Running ansible playbook {playbook_file} on {hname}") 
+    run_playbook(hname, inventory_file, playbook_file, group, verbosity, f"{ansible_log_prefix}.{hname}")
 
     # Execute the 'uname -r' command to get the kernel version
     (ret, output) = get_kernel(hname) 
     if ret == 0:
-        print(f"Returning {output} as kernel version of {hname}")
+        logger.debug(f"Returning {output} as kernel version of {hname}")
         kernel_version = output
     else:
         kernel_version = None
@@ -413,7 +471,34 @@ def create_gold(conn, bootstrap_vm, hname, inventory_file, playbook_file, group,
 
     return kernel_version
 
-def run_playbook(hname, inventory_file, playbook_file, group, verbosity):
+# weird function that we need so the ansible playbook output is plain text 
+def strip_ansi_escape_codes(text):
+    """Remove ANSI escape codes and reduce multiple newlines to a single newline in the text."""
+    text = re.sub(r'\x1B(?:[@-_]|[\x80-\x9F])[0-?]*[ -/]*[@-~]', '', text)
+    text = re.sub(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])', '', text)
+    return re.sub(r'\n+', '\n', text)
+
+# weird function that we need so we can save ansible playbook output to a specified file
+def event_handler_factory(output_file,filemode):
+    """Factory function to create event handlers with a specific output file."""
+    def event_handler(event_data):
+        """Function to log the output of each Ansible event to a specified file."""
+        if 'stdout' in event_data:
+            logger = logging.getLogger(__name__)
+            clean_output = strip_ansi_escape_codes(event_data['stdout'])
+            if output_file:
+                with open(output_file, filemode) as file:
+                    file.write(clean_output + '\n')
+            logger.info(clean_output)
+    return event_handler
+
+"""Prints a message to a file if a file pointer is provided."""
+def summary(msg):
+    logger = logging.getLogger(__name__)
+    logger.warning(f"SUMMARY: {msg}") 
+
+def run_playbook(hname, inventory_file, playbook_file, group, verbosity, output_prefix=None):
+    logger = logging.getLogger(__name__)
 
     # get absolute paths
     playbook_file  = os.path.abspath(playbook_file)
@@ -422,11 +507,20 @@ def run_playbook(hname, inventory_file, playbook_file, group, verbosity):
     # turn off key checking
     os.environ['ANSIBLE_HOST_KEY_CHECKING'] = 'False'
 
+    # set up the output file
+    if output_prefix:
+        output_filename = f"{output_prefix}.{playbook_file.split('/')[-1]}.out"
+    else:
+        output_filename = None
+
     # Construct the kwargs for ansible_runner.run
+    filemode='w' # TODO: make this the same across the program
     kwargs = {
         "playbook":  playbook_file,
         "inventory": [ inventory_file ],
+        "event_handler": event_handler_factory(output_filename,filemode),  
         "verbosity": verbosity,
+        "quiet": False  # Ensure ansible_runner print to stdout as well
     }
 
     if hname is not None:
@@ -435,10 +529,11 @@ def run_playbook(hname, inventory_file, playbook_file, group, verbosity):
         kwargs["limit"] = hname
 
     # Run the playbook
+    logger.debug(f"Running playbook {playbook_file}")
     result = ansible_runner.run(**kwargs)
 
     if result.status == 'successful':
-        print("Playbook executed successfully.")
+        summary(f"Playbook {playbook_file} executed successfully. Output in {output_filename}.")
     else:
         Fatal(f"Playbook execution failed with status: {result.status}")
 
@@ -495,16 +590,17 @@ def find_gold_image(full_prefix):
         return tuple(int(part) if part.isdigit() else part for part in parts)
 
     for filename in os.listdir(directory):
-        #print(f"\tChecking possible gold image {filename}")
+        logger = logging.getLogger(__name__)
+        #logger.debug(f"Checking possible gold image {filename}")
         match = re.match(pattern, filename)
         if match:
             version = parse_kernel_version(match.group(1))
-            print(f"\tFound kernel version {version} in image {filename}")
+            logger.debug(f"Found kernel version {version} in image {filename}")
             if latest_file is None or version > latest_version:
                 latest_file = filename
                 latest_version = version
         #else:
-        #    print(f"No regex match found on {filename} using prefix {base_prefix}")
+        #    logger.debug(f"No regex match found on {filename} using prefix {base_prefix}")
 
     return os.path.join(directory, latest_file) if latest_file else None
 
@@ -523,10 +619,11 @@ def get_gold_definitions(images,lversion,zversion):
     }
     return golds
 
-def make_gold_vms(conn,bootstrap_vm,images,inventory,inventory_file,playbook_file,rebuild_vms,rebuild_golds,verbosity):
+def make_gold_vms(conn,bootstrap_vm,images,inventory,inventory_file,playbook_file,rebuild_vms,rebuild_golds,verbosity, ansible_log_prefix):
+    logger = logging.getLogger(__name__)
     lversion = get_inventory_value(inventory, 'all.vars.lustre.version')
     zversion = get_inventory_value(inventory, 'all.vars.zfs.version')
-    print(f"Need gold server {lversion}.{zversion} and gold client {lversion}")
+    logger.debug(f"Need gold server {lversion}.{zversion} and gold client {lversion}")
 
     # get the libvirt storage pool
     (pool_name, pool_path) = get_first_storage_pool_info(conn) 
@@ -536,7 +633,7 @@ def make_gold_vms(conn,bootstrap_vm,images,inventory,inventory_file,playbook_fil
 
     for group,gold in golds.items(): 
         if not rebuild_vms and check_vm_status(conn, gold['hname'], shutdown=True, destroy=False):
-            print(f"\tReusing existing VM {gold['hname']}")
+            logger.debug(f"Reusing existing VM {gold['hname']}")
             continue
 
         if not check_vm_status(conn, gold['hname'], shutdown=True, destroy=True):
@@ -544,25 +641,42 @@ def make_gold_vms(conn,bootstrap_vm,images,inventory,inventory_file,playbook_fil
         
         gold['image'] = find_gold_image(gold['image_prefix'])
         if gold['image'] and not rebuild_golds:
-            print(f"\tRestoring gold {gold['hname']} from stashed VM {gold['image']}")
+            logger.debug(f"Restoring gold {gold['hname']} from stashed VM {gold['image']}")
             restore_vm_from_stash(conn, gold['image'], f"{gold['image']}.xml", pool_name, gold['hname'])
         else:
             if gold['image'] and os.path.exists(gold['image']):
-                print(f"\tRebuilding (and restashing) VM {gold['hname']} due to user request.")
-            kernel_version = create_gold(conn, bootstrap_vm, gold['hname'], inventory_file, playbook_file, group, verbosity)
+                logger.debug(f"Rebuilding (and restashing) VM {gold['hname']} due to user request.")
+            kernel_version = create_gold(conn, bootstrap_vm, gold['hname'], inventory_file, playbook_file, group, verbosity, ansible_log_prefix)
             gold['image'] = gold['image_prefix'] + kernel_version + '.img'
             stash_vm(conn, gold['image'], gold['hname'])
 
     return (golds['servers']['hname'], golds['clients']['hname']) 
 
 def shutdown_vm(conn,hname):
+    logger = logging.getLogger(__name__)
     dom = conn.lookupByName(hname)
     dom.shutdown()
+    count = 0
+    max_retries = 10
+    sleep_time = 3
     while True:
+        time.sleep(sleep_time)
         if dom.info()[0] == libvirt.VIR_DOMAIN_SHUTOFF:
             break
-        time.sleep(3)
-    print(f"\tShutdown {hname}")
+        if count < max_retries:
+            logger.debug(f"Sleeping {count} of {max_retries} to wait for {hname} to shutdown")
+            try:
+                dom.shutdown()
+            except libvirt.libvirtError as e:
+                pass # probably a race condition and it's shutdown now
+            count += 1
+        else:
+            logger.debug(f"Warning: difficulty shutting down {hname}. Will forcibly destroy. Might cause lost data.")
+            try:
+                dom.destroy()
+            except libvirt.libvirtError as e:
+                pass # probably a race condition and it's shutdown now
+    logger.debug(f"Shutdown {hname}")
 
 def check_vm_status(conn,vm_name,shutdown=True,destroy=False):
     # Define a custom error handler that does nothing
@@ -576,7 +690,7 @@ def check_vm_status(conn,vm_name,shutdown=True,destroy=False):
         libvirt.registerErrorHandler(custom_error_handler, None)
         dom = conn.lookupByName(vm_name)
     except libvirt.libvirtError:
-        #print(f"\tVM {vm_name} does not exist.")
+        #logger.debug(f"VM {vm_name} does not exist.")
         return True if destroy else False
     finally:
         # Restore the default error handler
@@ -590,6 +704,7 @@ def check_vm_status(conn,vm_name,shutdown=True,destroy=False):
 
     # does the caller require it to be destroyed?
     if destroy:
+        logger = logging.getLogger(__name__)
         delete_vm_storage(conn, vm_name)
         # Undefine the VM, removing all associated storage and snapshots
         dom.undefineFlags(
@@ -597,12 +712,13 @@ def check_vm_status(conn,vm_name,shutdown=True,destroy=False):
             libvirt.VIR_DOMAIN_UNDEFINE_SNAPSHOTS_METADATA |
             libvirt.VIR_DOMAIN_UNDEFINE_NVRAM |
             0)
-        print(f"\tSuccessfully destroyed existing {vm_name}.")
+        logger.debug(f"Successfully destroyed existing {vm_name}.")
 
     return True
 
 def delete_vm_storage(conn, vm_name):
     """Delete storage volumes for a VM."""
+    logger = logging.getLogger(__name__)
     try:
         dom = conn.lookupByName(vm_name)
         xml_desc = dom.XMLDesc(0)
@@ -618,24 +734,26 @@ def delete_vm_storage(conn, vm_name):
                     try:
                         vol = conn.storageVolLookupByPath(disk_path)
                         vol.delete(0)  # 0 is the flags parameter, currently unused
-                        print(f"\tDeleted volume: {disk_path}")
+                        logger.debug(f"Deleted volume: {disk_path}")
                     except libvirt.libvirtError as e:
-                        print(f"\tError deleting volume {disk_path}: {e}")
+                        logger.debug(f"Error deleting volume {disk_path}: {e}")
 
     except libvirt.libvirtError as e:
-        print(f"\tFailed to find or access VM {vm_name} for storage deletion: {e}")
+        logger.debug(f"Failed to find or access VM {vm_name} for storage deletion: {e}")
 
 def check_network_exists(conn, network_name):
-    print(f"Checking existence of network {network_name}")
+    logger = logging.getLogger(__name__)
+    logger.debug(f"Checking existence of network {network_name}")
     """Check if the specified network exists."""
     try:
         conn.networkLookupByName(network_name)
         return True
     except libvirt.libvirtError:
-        print(f"Network {network_name} does not exist")
+        logger.debug(f"Network {network_name} does not exist")
         return False
 
 def get_mac_address(conn, vm_name, network_name):
+    logger = logging.getLogger(__name__)
     # Lookup the domain by name
     vm = conn.lookupByName(vm_name)
     if vm is None:
@@ -654,10 +772,10 @@ def get_mac_address(conn, vm_name, network_name):
         if source is not None and mac is not None:
             if source.get('network') == network_name:
                 mac = mac.get('address')
-                print(f"\tFound MAC address {mac} for {vm_name} on network {network_name}")
+                logger.debug(f"Found MAC address {mac} for {vm_name} on network {network_name}")
                 return mac
     
-    print(f"\tMAC address not found for vm {vm_name} on network {network_name}")
+    logger.debug(f"MAC address not found for vm {vm_name} on network {network_name}")
     return None 
 
 def setup_hostonly_network(conn, network, network_name, mac, ip, hostname):
@@ -684,21 +802,11 @@ def setup_hostonly_network(conn, network, network_name, mac, ip, hostname):
 </network>
 """
 
-    """
-    # TODO : remove this unused function
-    def add_entry_manually(network_name, hostname, mac, ip, description):
-        if mac is None:
-            Fatal(f"Trying to add {hostname} to {network_name} but mac address is unknown.")
-        print(f"\tAdding {hostname} to {description} network {network_name}")
-        host_entry = f"<host mac='{mac}' name='{hostname}' ip='{ip}' />"
-        command = ["virsh", "net-update", network_name, "add", "ip-dhcp-host", host_entry, "--live", "--config"]
-        subprocess_tabinated(command)
-    """
-
     def add_entry(network, hostname, mac, host_entry, description):
+        logger = logging.getLogger(__name__)
         if mac is None:
             Fatal(f"Trying to add {hostname} to {network_name} but mac address is unknown.")
-        print(f"\tAdding {hostname}:{mac} to {description} network {network_name}")
+        logger.debug(f"Adding {hostname}:{mac} to {description} network {network_name}")
         network.update(3, 4, -1, host_entry, 3)
         #network.update(4, 0, 0, host_entry)
 
@@ -708,7 +816,8 @@ def setup_hostonly_network(conn, network, network_name, mac, ip, hostname):
 
     if check_network_exists(conn, network_name):
         if is_host_in_network_by_name(conn, network_name, hostname, ip):
-            print(f"\tReusing existing entry for {hostname} in network {network_name}")
+            logger = logging.getLogger(__name__)
+            logger.debug(f"Reusing existing entry for {hostname} in network {network_name}")
         else:
             vnetwork = conn.networkLookupByName(network_name)
             add_entry(vnetwork, hostname, mac, host_entry, 'existing')
@@ -721,37 +830,18 @@ def setup_hostonly_network(conn, network, network_name, mac, ip, hostname):
 def remove_network_if_exists(conn, network_name):
     """Remove the specified network if it exists."""
     if check_network_exists(conn, network_name):
-        print(f"Network '{network_name}' exists. Cleaning it up.")
+        logger = logging.getLogger(__name__)
+        logger.debug(f"Network '{network_name}' exists. Cleaning it up.")
         network = conn.networkLookupByName(network_name)
         network.destroy()
         network.undefine()
 
-def subprocess_tabinated(command):
-    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
-    stdout, stderr = process.communicate()
-
-    if process.returncode != 0:
-        raise subprocess.CalledProcessError(process.returncode, command, output=stdout, stderr=stderr)
-
-    # add tabs and remove double newliens
-    output = '\t' + stdout.replace('\n', '\n\t')
-    output = output.replace('\n\t\n\t', '\n\t')
-    output = output.replace('\n\n', '\n')
-    output = output.replace('\t\n\t', '\t')
-
-    # the clone output does some curses stuff which results in repeated lines. So clean that up here.
-    lines = output.split('\n')
-    alloc_lines = [i for i, line in enumerate(lines) if 'Allocating' in line]
-    if alloc_lines:
-        last_alloc_index = alloc_lines[-1]
-        output = '\n'.join([line for i, line in enumerate(lines) if 'Allocating' not in line or i == last_alloc_index])
-
-    print(output, end='')
-
 def clone_vm(bootstrap_vm, new_vm):
     """Clone a VM."""
+    logger = logging.getLogger(__name__)
+    logger.debug(f"Cloning {bootstrap_vm} to {new_vm}")
     clone_command = f"virt-clone --original {bootstrap_vm} --name {new_vm} --auto-clone --nonsparse"
-    subprocess_tabinated(clone_command.split())
+    run_command(clone_command.split())
 
 def add_nic_to_vm(conn, vm_name, network_name, mac_address=None):
 
@@ -775,12 +865,12 @@ def add_nic_to_vm(conn, vm_name, network_name, mac_address=None):
 def create_disk_image(image_path, size):
     """Create a raw disk image using qemu-img."""
     command = ["qemu-img", "create", "-f", "raw", image_path, size]
+    logger = logging.getLogger(__name__)
     try:
-        subprocess_tabinated(command)
-        print(f"\tDisk image {image_path} created with size {size}.")
+        run_command(command)
+        logger.debug(f"Disk image {image_path} created with size {size}.")
     except subprocess.CalledProcessError as e:
-        print(f"\tFailed to create disk image: {e}")
-        sys.exit(1)
+        Fatal(f"Failed to create disk image: {e}")
 
 def attach_disk_to_vm(vm_name, disk_path, target_dev, cache_mode='none', persistent=True):
     """Attach a disk to a VM using virsh."""
@@ -790,15 +880,16 @@ def attach_disk_to_vm(vm_name, disk_path, target_dev, cache_mode='none', persist
     command = ["virsh", "attach-disk", vm_name, disk_path, target_dev, "--cache", cache_mode, "--serial", target_dev]
     if persistent:
         command.append("--persistent")
+    logger = logging.getLogger(__name__)
     try:
-        subprocess_tabinated(command)
-        print(f"\tDisk {disk_path} attached to {vm_name} as {target_dev}.")
+        run_command(command)
+        logger.debug(f"Disk {disk_path} attached to {vm_name} as {target_dev}.")
     except subprocess.CalledProcessError as e:
-        print(f"\tFailed to attach disk to VM: {e}")
-        sys.exit(1)
+        Fatal(f"Failed to attach disk to VM: {e}")
 
 def get_image_storage_pool_path(conn):
     """Get the path of the default storage pool."""
+    logger = logging.getLogger(__name__)
     try:
         # Get the default storage pool (usually named 'default')
         pool = conn.storagePoolLookupByName('images')
@@ -810,15 +901,15 @@ def get_image_storage_pool_path(conn):
         path = pool_xml[path_start:path_end]
         return path
     except libvirt.libvirtError as e:
-        print(f"Error getting default storage pool path: {e}")
+        logger.debug(f"Error getting default storage pool path: {e}")
         return None
 
 def set_hostname_keypair_selinux_lustre_options(conn, vm_name, selinux):
+    logger = logging.getLogger(__name__)
     try:
         dom = conn.lookupByName(vm_name)
     except libvirt.libvirtError:
-        print(f"VM {vm_name} not found")
-        sys.exit(1)
+        Fatal(f"VM {vm_name} not found")
 
     mpoint = f"/tmp/mnt/vm_disk.{os.getpid()}"
     os.makedirs(mpoint, exist_ok=True)
@@ -832,7 +923,7 @@ def set_hostname_keypair_selinux_lustre_options(conn, vm_name, selinux):
         else:
             raise Exception("vda not found in domblklist output")
 
-        subprocess_tabinated(['guestmount', '-a', vmimage, '-i', mpoint])
+        run_command(['guestmount', '-a', vmimage, '-i', mpoint])
         hfile = os.path.join(mpoint, 'etc/hostname')
         if not os.path.exists(hfile):
             raise Exception(f"Warning: {hfile} not found")
@@ -863,12 +954,11 @@ def set_hostname_keypair_selinux_lustre_options(conn, vm_name, selinux):
         setup_ssh_key_and_copy_to_guest(mpoint)
 
         # unmount the disk image
-        subprocess_tabinated(['guestunmount', mpoint]) 
-        print(f"\tSet hostname to be {vm_name}")
+        run_command(['guestunmount', mpoint]) 
+        logger.debug(f"Set hostname to be {vm_name}")
 
     except Exception as e:
-        print(e)
-        sys.exit(1)
+        Fatal(e)
 
 def is_host_in_network_by_name(conn, network_name, host_name, expected_ip):
     """
@@ -880,6 +970,7 @@ def is_host_in_network_by_name(conn, network_name, host_name, expected_ip):
     :param expected_ip: Expected IP address of the host
     :return: True if the host is in the network with the expected IP, False otherwise
     """
+    logger = logging.getLogger(__name__)
     try:
         network = conn.networkLookupByName(network_name)
         xml_desc = network.XMLDesc()
@@ -891,20 +982,21 @@ def is_host_in_network_by_name(conn, network_name, host_name, expected_ip):
                 if host.get("name") == host_name:
                     last_octet = int(host.get("ip").split('.')[-1])
                     if last_octet != expected_ip:
-                        print(f"WARN: {host_name} exists but last octet of IP {expected_ip} != {last_octet} from {host.get('ip')}")
+                        logger.debug(f"WARN: {host_name} exists but last octet of IP {expected_ip} != {last_octet} from {host.get('ip')}")
                         return False
                     else:
                         return True
         return False
 
     except libvirt.libvirtError as e:
-        print(f"Error: {e}")
+        logger.debug(f"Error: {e}")
         return False
 
 def remove_ssh_host_keys(hostname):
     def actual_remove(hostname, path, owner_uid, owner_gid):
-        print(f"\tRemoving ssh key for {hostname} from {path}")
-        subprocess.run(["ssh-keygen", "-f", path, "-R", hostname])
+        logger = logging.getLogger(__name__)
+        logger.debug(f"Removing ssh key for {hostname} from {path}")
+        run_command(["ssh-keygen", "-f", path, "-R", hostname])
         # Reset file ownership to the original user
         os.chown(path, owner_uid, owner_gid)
 
@@ -950,20 +1042,21 @@ def execute_command_in_vm(comm,hname,command):
             output += data.decode('utf-8')
         return output
     except Exception as e:
-        print(f"Error executing command in VM: {e}", file=sys.stderr)
+        logger = logging.getLogger(__name__)
+        logger.debug(f"Error executing command in VM: {e}", file=sys.stderr)
         return None
 
 def create_node(conn, src_vm, target_vm, network_name=None, network=None, target_ip=None, hds=None, use_existing=False):
-    print(f"CREATING {target_vm} by cloning {src_vm} with target ip of {target_ip} and hds {hds}")
+    logger = logging.getLogger(__name__)
+    logger.debug(f"ESTABLISHING {target_vm} with target ip of {target_ip} and hds {hds}")
     if not check_vm_status(conn, src_vm, shutdown=True, destroy=False):
-        print(f"\tWarning: VM {src_vm} is not appropriately shutdown.")
-        sys.exit(1)
+        Fatal(f"Warning: VM {src_vm} is not appropriately shutdown.")
     if use_existing and check_vm_status(conn, target_vm, shutdown=True, destroy=False):
-        print(f"\tReusing existing VM {target_vm}")
+        logger.debug(f"Reusing existing VM {target_vm}")
         mac_address = None
     else:
         if not check_vm_status(conn, target_vm, shutdown=True, destroy=True):
-            print(f"\tWarning: VM {target_vm} could not be cleaned up.")
+            logger.debug(f"Warning: VM {target_vm} could not be cleaned up.")
 
         # Clone the base VM
         clone_vm(src_vm, target_vm)
@@ -1009,9 +1102,10 @@ def extract_host_details(d, target_groups, current_group=None, host_details = No
 def load_yaml(file):
     # helper function to add inheritance here manually since ansible does this for us
     def apply_group_vars_to_hosts(inventory, parent_vars=None):
-        #print(f"\tManually applying inheritance in the yaml inventory file")
+        #logger.debug(f"Manually applying inheritance in the yaml inventory file")
+        logger = logging.getLogger(__name__)
         for group_name, group_info in inventory.items():
-            print(f"\tProcessing group: {group_name}")
+            logger.debug(f"Processing group: {group_name}")
             group_vars = group_info.get('vars', {}).copy()
             if parent_vars:
                 group_vars.update(parent_vars)
@@ -1021,7 +1115,8 @@ def load_yaml(file):
             if 'children' in group_info:
                 apply_group_vars_to_hosts(group_info['children'], group_vars)
 
-    print(f"Parsing inventory file {file}")
+    logger = logging.getLogger(__name__)
+    logger.debug(f"Parsing inventory file {file}")
     with open(file, 'r') as f:
         inventory = yaml.safe_load(f) 
 
@@ -1030,17 +1125,21 @@ def load_yaml(file):
     return inventory
 
 def Fatal(msg):
-    print(f"FATAL ERROR: {msg}")
+    logger = logging.getLogger(__name__)
+    logger.error(f"FATAL ERROR: {msg}")
     sys.exit(-1)
 
-def get_inventory_value(inventory, keys, default=None):
+def get_inventory_value(inventory, key, required=True):
     try:
         value = inventory
-        for key in keys.split('.'):
-            value = value[key]
+        for k in key.split('.'):
+            value = value[k]
         return value
     except KeyError:
-        Fatal(f"Missing '{keys}' in the inventory file.")
+        if required:
+            Fatal(f"Missing '{key}' in the inventory file.")
+        else:
+            pass
 
 def get_hosts(inventory, group):
     hosts = set()
@@ -1057,9 +1156,10 @@ def get_hosts(inventory, group):
     return hosts
 
 def restart_hosts(conn, hosts):
+    logger = logging.getLogger(__name__)
     # Start the cloned VMs
     for hname in hosts:
-        print(f"Starting {hname},")
+        logger.debug(f"Starting {hname},")
         dom = conn.lookupByName(hname)
         dom.create()
     time.sleep(10)
@@ -1076,10 +1176,11 @@ def die_unless_root():
         Fatal("Must be run as root")
 
 def show_resources(conn, args, inventory, vm_dir, hosts):
-    avail = check_vm_status(conn, args.bootstrap_vm, shutdown=False, destroy=False)
-    print(f"Bootstrap VM {args.bootstrap_vm} {'is' if avail else 'is not'} available for re-use to create gold images if needed.")
+    logger = logging.getLogger(__name__)
+    avail = check_vm_status(conn, args.boot_vm_name, shutdown=False, destroy=False)
+    logger.debug(f"Bootstrap VM {args.boot_vm_name} {'is' if avail else 'is not'} available for re-use to create gold images if needed.")
     avail = check_network_exists(conn, args.virt_network)
-    print(f"Network '{args.virt_network}' {'is' if avail else 'is not'} available for re-use.")
+    logger.debug(f"Network '{args.virt_network}' {'is' if avail else 'is not'} available for re-use.")
 
     lversion = get_inventory_value(inventory, 'all.vars.lustre.version')
     zversion = get_inventory_value(inventory, 'all.vars.zfs.version')
@@ -1087,37 +1188,77 @@ def show_resources(conn, args, inventory, vm_dir, hosts):
     for group,gold in golds.items(): 
         pattern = f"{gold['image_prefix']}*.img"
         for f in glob.glob(pattern):
-            print(f"{f.split('/')[-1]} is available to create gold VM for {group}")
+            logger.debug(f"{f.split('/')[-1]} is available to create gold VM for {group}")
         avail = check_vm_status(conn, gold['hname'], shutdown=False, destroy=False)
-        print(f"Gold VM {gold['hname']} {'is' if avail else 'is not'} available for re-use to create {group} if needed.")
+        logger.debug(f"Gold VM {gold['hname']} {'is' if avail else 'is not'} available for re-use to create {group} if needed.")
 
     for host in hosts:
         avail = check_vm_status(conn, host, shutdown=False, destroy=False)
-        print(f"Host VM {host} {'is' if avail else 'is not'} available for re-use to create cluster if needed.")
+        logger.debug(f"Host VM {host} {'is' if avail else 'is not'} available for re-use to create cluster if needed.")
 
 
 # helper function to make sure we rebuild only what is necessary
 def build_needed(conn, resource, user_overrides, Type):
+    logger = logging.getLogger(__name__)
     if user_overrides and (Type in user_overrides or 'all' in user_overrides):
-        print(f"Need to build {resource} because of user specification")
+        logger.debug(f"Need to build {resource} because of user specification")
         return True
 
     if Type in ['bootstrap', 'vms', 'golds']:
         avail = check_vm_status(conn, resource, shutdown=False, destroy=False)
         if not avail:
-            print(f"Need to build initial resource {resource}")
+            logger.debug(f"Need to build initial resource {resource}")
             return True
     elif Type == 'network':
         avail = check_network_exists(conn, resource)
         if not avail:
-            print(f"Need to build initial resource {resource}")
+            logger.debug(f"Need to build initial resource {resource}")
             return True
     else:
         Fatal(f"Illegal resource type {Type}")
 
-    print(f"Resource {resource} does not require a rebuild")
+    logger.debug(f"Resource {resource} does not require a rebuild")
     return False
+
+# allow user to set all variable values in the inventory file
+def override_args_from_inventory(args, inventory):
+    logger = logging.getLogger(__name__)
+    # Loop over each attribute in args
+    for arg_name in vars(args):
+        # Build the expected YAML path
+        inventory_path = f'all.vars.{arg_name}'
+
+        # Attempt to get a value from the inventory
+        new_value = get_inventory_value(inventory=inventory, key=inventory_path, required=False)
+        if new_value is not None:
+            current_value = getattr(args, arg_name)
+            if current_value != new_value:
+                setattr(args, arg_name, new_value)
+                logger.debug(f"Overriding {arg_name} from {current_value} to {new_value}")
+    
+    return args  # Returning the modified args for clarity
+
+def execute_script(script_path, output_file=None):
+    filemode='w' # TODO: make this the same across the program
+    try:
+        # Execute the script and capture the output
+        result = subprocess.run([script_path], check=True, capture_output=True, text=True)
         
+        # Print and possibly save the output
+        if output_file:
+            with open(output_file, filemode) as file:
+                file.write(result.stdout)
+        summary(f"Executed {script_path}: {result.returncode}. Output in {output_file}.")
+        return result.returncode  # Return the return code of the script
+    except subprocess.CalledProcessError as e:
+        # Print the error message to STDOUT and handle the error output
+        logger = logging.getLogger(__name__)
+        logger.error(f"Error executing script: {e}\n{e.output}")
+        if output_file:
+            with open(output_file, filemode) as file:
+                file.write(e.output)
+        return e.returncode
+
 def main():
     # Parse command-line arguments
     parser = argparse.ArgumentParser(
@@ -1125,12 +1266,14 @@ def main():
                        Use --rebuilt and --skip to override.''',
         formatter_class=argparse.ArgumentDefaultsHelpFormatter  # Add this line
     )
-    parser.add_argument('-b', '--bootstrap_vm',      default='bootstrap',                    help='Name of the base VM.')
-    parser.add_argument('-i', '--install_playbook',  default='./ansible/install_all.yaml',   help='Name of the ansible install playbook')
-    parser.add_argument('-c', '--config_playbook',   default='./ansible/configure_all.yaml', help='Name of the ansible configure playbook')
-    parser.add_argument('-t', '--test_playbook',     default='./ansible/test_lustre.yaml',   help='Name of the ansible test playbook')
-    parser.add_argument('-v', '--ansible_verbosity', default=0, type=int,                    help='Ansible verbosity')
-    parser.add_argument('-n', '--virt_network',      default='hostonly-net',                 help='Name of virtual network to use/create')
+    parser.add_argument('-b', '--boot_vm_name',             default='bootstrap',                    help='Name of the base VM.')
+    parser.add_argument('-i', '--ansible_playbook_install', default='./ansible/install_all.yaml',   help='Name of the ansible install playbook')
+    parser.add_argument('-c', '--ansible_playbook_config',  default='./ansible/configure_all.yaml', help='Name of the ansible configure playbook')
+    parser.add_argument('-t', '--ansible_playbook_test',    default='./ansible/test_lustre.yaml',   help='Name of the ansible test playbook')
+    parser.add_argument('-v', '--ansible_verbosity',        default=0, type=int,                    help='Ansible verbosity')
+    parser.add_argument('-T', '--test_script',              default=None, type=str,                 help='Test script to run after ansible test playbook')
+    parser.add_argument('-o', '--output_dir',               default='./output', type=str,           help='Directory into which to store the output files')
+    parser.add_argument('-n', '--virt_network',             default='hostonly-net',                 help='Name of virtual network to use/create')
     parser.add_argument('--rebuild', action='append', choices=['bootstrap', 'network', 'golds', 'vms', 'all'],    
                                                                                              help='Rebuild specified items (instead of re-using) if they exist')
     parser.add_argument('--skip',    action='append',   choices=['config', 'test'],          help='Skip specified steps (can be used multiple times)')
@@ -1142,17 +1285,37 @@ def main():
 
     # open the ansible inventory file and pull key items
     inventory = load_yaml(args.inventory_file)
-    hosts   = extract_host_details(inventory, ['clients', 'servers'])
-    network = get_inventory_value(inventory, 'all.vars.network')
-    vm_dir  = get_inventory_value(inventory, 'all.vars.vm_dir')
+    args      = override_args_from_inventory(args, inventory)
+    hosts     = extract_host_details(inventory, ['clients', 'servers'])
+    network   = get_inventory_value(inventory, 'all.vars.network')
+    vm_dir    = get_inventory_value(inventory, 'all.vars.vm_dir')
     network['name'] = args.virt_network # define it here because we use it elsewhere
 
-    # check that the images directory exists 
-    check_images_directory(vm_dir)
+    # setup the paths for the various output files
+    output_base = f"{args.output_dir.split('/')[-1]}/{args.inventory_file.split('/')[-1]}"
+    os.makedirs(output_base, exist_ok=True)
+    verbose_log        = f"{output_base}/log.all"
+    summary_log        = f"{output_base}/log.summary"
+    test_output        = f"{output_base}/{args.test_script.split('/')[-1]}.out"
+    ansible_log_prefix = f"{output_base}/ansible"
 
-    # check for the install playbook
-    if not os.path.exists(args.install_playbook):
-        Fatal(f"Ansible install playbook {args.install_playbook} does not exist")
+    # setup the logging
+    setup_logging(verbose_log,summary_log)
+    logger = logging.getLogger(__name__)
+    logger.debug(f"Running with {' '.join(sys.argv)}")
+
+    # check that the various directories and the ansible playbooks exist 
+    check_images_directory(vm_dir)
+    for arg_name in [arg_name for arg_name in vars(args) if 'ansible_playbook' in arg_name or arg_name == 'test_script']:
+        playbook_path = get_inventory_value(inventory, f"all.vars.{arg_name}", required=True)
+        if not os.path.exists(playbook_path):
+            Fatal(f"Ansible playbook {arg_name} at specified path {playbook_path} does not exist")
+
+    # Example logger usage
+    # logger.debug("This will appear only in verbose.log")
+    # logger.info("This will also appear only in verbose.log")
+    # logger.warning("This will appear in both verbose.log and concise.log")
+    # logger.error("This will appear in both logs as well")
 
     # Connect to libvirt
     with LibvirtConnection() as conn:
@@ -1162,12 +1325,14 @@ def main():
             sys.exit(0)
 
         # create the initial bootstrap VM if needed 
-        if build_needed(conn, args.bootstrap_vm, args.rebuild, 'bootstrap'):
-            install_initial_vm(conn, args.bootstrap_vm, inventory, args.ansible_verbosity)
+        if build_needed(conn, args.boot_vm_name, args.rebuild, 'bootstrap'):
+            if not check_vm_status(conn, args.boot_vm_name, shutdown=True, destroy=True):
+                Fatal(f"VM {gold['hname']} could not be destroyed.")
+            install_initial_vm(conn, args.boot_vm_name, inventory, args.ansible_verbosity)
 
         # ensure the bootstrap VM is ready 
-        if not check_vm_status(conn, args.bootstrap_vm):
-            Fatal(f"VM {args.bootstrap_vm} does not exist or is not shut off.")
+        if not check_vm_status(conn, args.boot_vm_name):
+            Fatal(f"VM {args.boot_vm_name} does not exist or is not shut off.")
 
         if build_needed(conn, args.virt_network, args.rebuild, 'network'):
             remove_network_if_exists(conn, args.virt_network)
@@ -1179,18 +1344,18 @@ def main():
                 rebuilds[resource] = True
             else:
                 rebuilds[resource] = False 
-        pprint(rebuilds)
         gold_vms = {}
         (gold_vms['servers'], gold_vms['clients']) = make_gold_vms(
             conn = conn, 
-            bootstrap_vm = args.bootstrap_vm, 
+            bootstrap_vm = args.boot_vm_name, 
             images = vm_dir, 
             inventory = inventory, 
             inventory_file = args.inventory_file, 
-            playbook_file = args.install_playbook, 
+            playbook_file = args.ansible_playbook_install, 
             rebuild_vms = rebuilds['vms'],
             rebuild_golds = rebuilds['golds'],
-            verbosity = args.ansible_verbosity)
+            verbosity = args.ansible_verbosity,
+            ansible_log_prefix = ansible_log_prefix)
 
         # now clone the base image for each requested lustre node
         if args.rebuild and ( 'vms' in args.rebuild or 'all' in args.rebuild ):
@@ -1202,7 +1367,7 @@ def main():
             hds = hinfo['hds']
             gvm = gold_vms[hinfo['group']]
             create_node(conn, gvm, hname, network['name'], network['addr'], hip, hds, use_existing)
-            print(f"\tCreated {hname}:{network['addr']}.{hip} from {gvm}.")
+            logger.debug(f"Created {hname}:{network['addr']}.{hip} from {gvm}.")
 
         # Restart libvirt services to apply changes
         conn.restart()
@@ -1212,17 +1377,21 @@ def main():
 
         # configure the lustre system
         if args.skip is not None and 'config' in args.skip:
-            print(f"Skipping config as requested")
+            logger.debug(f"Skipping config as requested")
         else:
-            run_playbook(None, args.inventory_file, args.config_playbook, None, args.ansible_verbosity)
+            run_playbook(None, args.inventory_file, args.ansible_playbook_config, None, args.ansible_verbosity, ansible_log_prefix)
 
         # test the lustre system
         if args.skip is not None and 'config' in args.skip:
-            print(f"Skipping testing as requested")
+            logger.debug(f"Skipping testing as requested")
         else:
-            run_playbook(None, args.inventory_file, args.test_playbook, None, args.ansible_verbosity)
+            run_playbook(None, args.inventory_file, args.ansible_playbook_test, None, args.ansible_verbosity, ansible_log_prefix)
+        
+        if args.test_script:
+            ret = execute_script(args.test_script, test_output)
+            logger.debug(f"Executed {args.test_script}: {ret}")
 
-    print(f"Setup completed. Lustre cluster should now be running with new NICs attached to {network['name']}.")
+    logger.debug(f"Setup completed. Lustre cluster should now be running with new NICs attached to {network['name']}.")
 
 if __name__ == "__main__":
     main()
