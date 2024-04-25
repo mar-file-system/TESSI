@@ -4,10 +4,12 @@ import argparse
 import git
 import logging
 import os
+import subprocess
+import sys
 
 def setup_logger(verbose, logfile):
     # Create a logger
-    logger = logging.getLogger(__name__)
+    logger = logging.getLogger(__file__)
     logger.setLevel(logging.DEBUG)  # Capture all levels to the logger
 
     # Create console handler with a higher log level
@@ -31,34 +33,65 @@ def setup_logger(verbose, logfile):
 
     return logger
 
-def get_last_commit(repo, path):
-    logger = logging.getLogger(__name__)
-    def actual_last_commit(repo, file_path):
-        commits = list(repo.iter_commits(paths=file_path, max_count=1))
-        if commits:
-            last = commits[0].hexsha
-        else:
-            last = None
-        logger.debug(f"Last commit for {file_path}: {last}")
-        return last
 
-    if os.path.isdir(path):
-        commit = None
-        for f in os.listdir(path):
-            commit = actual_last_commit(repo, os.path.join(path,f))
-            if commit:
-                return commit
-        return None
+def get_last_commit(repo, file_path):
+    logger = logging.getLogger(__file__)
+    commits = list(repo.iter_commits(paths=file_path, max_count=1))
+    if commits:
+        last = commits[0].hexsha
+        ts   = commits[0].committed_date
     else:
-        return actual_last_commit(repo, path)
+        last = None
+        ts   = None
+    logger.debug(f"Last commit for {file_path}: {last} {ts}")
+    return last,ts
+
+# search all files in a directory to see if a particular commit is present
+def commit_is_newer(repo, dirpath, test_file_path, target_commit_ts):
+    logger = logging.getLogger(__file__)
+
+    if not target_commit_ts:
+        logger.debug(f"No need to test {test_file_path}; not yet committed")
+        return False
+
+    if os.path.isdir(dirpath):
+        latest_commit_ts = None
+        for f in os.listdir(dirpath):
+            commit,ts = get_last_commit(repo, os.path.join(dirpath,f))
+            if ts and (not latest_commit_ts or ts > latest_commit_ts):
+                latest_commit_ts = ts
+        if not latest_commit_ts:
+            logger.debug(f"Need to test {test_file_path}: no test results yet committed")
+            return True
+        if latest_commit_ts > target_commit_ts:
+            logger.debug(f"No need to test {test_file_path}: most recent test results already committed")
+            return False
+        else:
+            logger.debug(f"Need to test {test_file_path}: most recent commit not yet tested")
+            return True
+    else:
+        logger.debug(f"Need to test {test_file_path}: most recent commit not yet tested (ENOENT)")
+        return True
+
+# search all files in a directory to see if a particular commit is present
+def commit_is_present(repo, dirpath, target_commit):
+    logger = logging.getLogger(__file__)
+
+    if os.path.isdir(dirpath):
+        commit = None
+        for f in os.listdir(dirpath):
+            fcommit = get_last_commit(repo, os.path.join(dirpath,f))
+            if fcommit == target_commit:
+                return True
+        return False
 
 def is_test_needed(repo, test_file, output_directory):
-    logger = logging.getLogger(__name__)
-    test_commit   = get_last_commit(repo, test_file)
-    output_commit = get_last_commit(repo, output_directory)
-    if test_commit != output_commit:
-        logger.debug(f"Test commit for {test_file}:{test_commit[-5:]} != Output commit for {output_directory}:{output_commit}")
-        return True
+    logger = logging.getLogger(__file__)
+    (test_commit,timestamp)   = get_last_commit(repo, test_file)
+    testing_needed = commit_is_newer(repo, output_directory, test_file, timestamp)
+    if testing_needed: 
+        logger.info(f"Latest version of {test_file} ({test_commit[-5:]}) has not yet been tested")
+        return (True,test_commit)
         # Run the test script
         #os.system(f"./scripts/setup_lustre_cluster.py {test_file}")
         #print(f"Test run for {test_file}")
@@ -70,24 +103,47 @@ def is_test_needed(repo, test_file, output_directory):
         #print(f"Committed changes for {output_file}")
     else:
         logger.debug(f"No need to run test for {test_file}")
-        return False
+        return (False,None)
 
-def monitor_tests(repo):
-    logger = logging.getLogger(__name__)
+def run_command(command):
+    logger = logging.getLogger(__file__)
+    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    stdout, stderr = process.communicate()
+    if stdout:
+        logger.info(stdout.strip())
+    if stderr:
+        logger.error(stderr.strip())
+    return process.returncode
+
+def monitor_tests(repo,output_dir):
+    logger = logging.getLogger(__file__)
     logger.debug(f"Working with repo {repo.working_tree_dir}")
     test_dir = os.path.join(repo.working_tree_dir, 'scripts/ansible')
     output_dir = os.path.join(repo.working_tree_dir, 'scripts/output')
     
     # Scan for test files
     logger.debug(f"Searching for new test files in {test_dir}")
-    test_files = [f for f in os.listdir(test_dir) if f.startswith('hosts')]
+    test_files = [f for f in os.listdir(test_dir) if f.startswith('autotest')]
     for test_file in test_files: 
         test_file_path   = os.path.join(test_dir, test_file)
-        output_dir       = os.path.join(repo.working_tree_dir, 'scripts/output', test_file)
-        is_test_needed(repo, test_file_path, output_dir)
+        output_dir       = os.path.join(repo.working_tree_dir, output_dir, test_file)
+        (needed,commit) = is_test_needed(repo, test_file_path, output_dir)
+        if needed:
+            os.makedirs(output_dir, exist_ok=True)
+            ret = []
+            mylog = f"{output_dir}/{__file__.split('/')[-1]}.log"
+            logger.info(f"Logging into {mylog}")
+            with open(mylog, 'w') as file:
+                file.write(f'Autorunning {test_file} with commit {commit}.\n')
+                ret.append( run_command(["sudo", "./setup_lustre_cluster.py", test_file_path, '--rebuild', 'vms', '--rebuild', 'network']))
+                file.write(f'Autoran {test_file} with commit {commit}: {ret[-1]}.\n')
+            ret.append(repo.git.add(output_dir))
+            ret.append(repo.git.commit('-m', f"automated run of {test_file}: {ret}"))
+            ret.append(repo.git.push())
+            logger.info(f"Ran {test_file} into {output_dir}: {ret}")
 
 def print_uncommitted_files(repo):
-    logger = logging.getLogger(__name__)
+    logger = logging.getLogger(__file__)
     try:
         changed_files = [item.a_path for item in repo.index.diff(None)]
         if changed_files:
@@ -98,7 +154,7 @@ def print_uncommitted_files(repo):
         logger.error("Error initializing git repository.")
 
 def get_repo(path='.'):
-    logger = logging.getLogger(__name__)
+    logger = logging.getLogger(__file__)
     def find_repo_root(path='.'):
         try:
             # Initialize a repo at the given path and climb to the root
@@ -122,11 +178,23 @@ def get_repo(path='.'):
         logger.error("Error initializing git repository.")
         sys.exit(0)
 
+def Fatal(msg):
+    logger = logging.getLogger(__file__)
+    logger.error(f"FATAL ERROR: {msg}")
+    sys.exit(-1)
+
+def die_if_root():
+    # Check if script is run as root
+    if os.geteuid() == 0:
+        Fatal("Must be run as regular user")
+
 def main():
     parser = argparse.ArgumentParser(description="Process some integers.")
     parser.add_argument('-v', '--verbose', action='store_true', help="Enable verbose logging")
     parser.add_argument('-l', '--log', type=str, help="Log file to write logging output to")
     args = parser.parse_args()
+
+    die_if_root()
 
     # Setup logger based on arguments
     logger = setup_logger(args.verbose, args.log)
@@ -139,7 +207,7 @@ def main():
 
     repo = get_repo()
     print_uncommitted_files(repo)
-    monitor_tests(repo)
+    monitor_tests(repo,'scripts/output')
 
 if __name__ == "__main__":
     main()
