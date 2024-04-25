@@ -240,6 +240,7 @@ def install_initial_vm(conn, hostname, inventory, ansible_verbosity):
 
     # Clear out any old hostnames
     logger.debug(f"Removing any old ssh hostname entries for {hostname}")
+    # TODO: create a helper function for remove old host keys
     run_command(["ssh-keygen", "-R", hostname])
 
 # TODO: This function takes a long time to run.
