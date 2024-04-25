@@ -115,18 +115,17 @@ def run_command(command):
         logger.error(stderr.strip())
     return process.returncode
 
-def monitor_tests(repo,output_dir):
+def monitor_tests(repo,incoming_output_dir):
     logger = logging.getLogger(__file__)
     logger.debug(f"Working with repo {repo.working_tree_dir}")
     test_dir = os.path.join(repo.working_tree_dir, 'scripts/ansible')
-    output_dir = os.path.join(repo.working_tree_dir, 'scripts/output')
     
     # Scan for test files
     logger.debug(f"Searching for new test files in {test_dir}")
     test_files = [f for f in os.listdir(test_dir) if f.startswith('autotest')]
     for test_file in test_files: 
         test_file_path   = os.path.join(test_dir, test_file)
-        output_dir       = os.path.join(repo.working_tree_dir, output_dir, test_file)
+        output_dir       = os.path.join(repo.working_tree_dir, incoming_output_dir, test_file)
         (needed,commit) = is_test_needed(repo, test_file_path, output_dir)
         if needed:
             os.makedirs(output_dir, exist_ok=True)
