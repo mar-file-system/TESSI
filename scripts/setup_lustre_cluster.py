@@ -1390,7 +1390,9 @@ def main():
         
         if args.test_script:
             ret = execute_script(args.test_script, test_output)
-            logger.debug(f"Executed {args.test_script}: {ret}")
+            logger.info(f"Executed test script {args.test_script}: {ret}")
+        else:
+            logger.info(f"No test script specified.")
 
     logger.debug(f"Setup completed. Lustre cluster should now be running with new NICs attached to {network['name']}.")
 
