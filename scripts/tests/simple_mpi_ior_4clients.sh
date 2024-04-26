@@ -5,7 +5,8 @@ mpi_env_vars="export OMPI_MCA_pml=ob1; export OMPI_MCA_btl=tcp,self;"
 
 # Arguments for ssh and IOR command
 ssh_args="-o StrictHostKeyChecking=no"
-ior_args="--allow-run-as-root -np 2 ior -o /mnt/lustre/testfile -host client01,client00,client02,client03 -t 1m -b 16m -s 16"
+mpi_args="--allow-run-as-root -np 4 -host client00,client01,client02,client03"
+ior_args="-o /mnt/lustre/testfile -t 1m -b 16m -s 16"
 
 # Execute the command on the remote host
-ssh $ssh_args client00 "${mpi_env_vars} mpirun ${ior_args}"
+ssh $ssh_args client00 "${mpi_env_vars} mpirun $mpi_args ior ${ior_args}"
