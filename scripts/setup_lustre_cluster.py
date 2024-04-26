@@ -1,7 +1,6 @@
 #! /usr/bin/env python3.8
 
 import ansible_runner
-import ansiconv
 import argparse
 import glob
 import inspect
