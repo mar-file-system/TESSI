@@ -43,7 +43,7 @@ def get_last_commit(repo, file_path):
     else:
         last = None
         ts   = None
-    logger.debug(f"Last commit for {file_path}: {last} {ts}")
+    logger.debug(f"Last commit for {file_path.split('/')[-1]}: {last[-5:]} {ts}")
     return last,ts
 
 # search all files in a directory to see if a particular commit is present
@@ -133,8 +133,14 @@ def monitor_tests(repo,incoming_output_dir):
             mylog = f"{output_dir}/{__file__.split('/')[-1]}.log"
             logger.info(f"Logging into {mylog}")
             with open(mylog, 'w') as file:
+                command = ["sudo", "./setup_lustre_cluster.py", test_file_path]
+                command += ['--output_dir', '/'.join(output_dir.split('/')[0:-1])]
+                #command += ['--rebuild', 'vms', '--rebuild', 'network']
+                command += ['--skip', 'config', '--skip', 'test']
                 file.write(f'Autorunning {test_file} with commit {commit}.\n')
-                ret.append( run_command(["sudo", "./setup_lustre_cluster.py", test_file_path, '--rebuild', 'vms', '--rebuild', 'network']))
+                file.write(f'COMMAND = {" ".join(command)}\n')
+                logger.info(f'COMMAND = {" ".join(command)}\n')
+                ret.append(run_command(command))
                 file.write(f'Autoran {test_file} with commit {commit}: {ret[-1]}.\n')
             ret.append(repo.git.add(output_dir))
             ret.append(repo.git.commit('-m', f"automated run of {test_file}: {ret}"))

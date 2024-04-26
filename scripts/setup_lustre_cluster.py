@@ -1243,6 +1243,8 @@ def execute_script(script_path, output_file=None):
     filemode='w' # TODO: make this the same across the program
     try:
         # Execute the script and capture the output
+        logger = logging.getLogger(__name__)
+        logger.info(f"Running test script {script_path}") 
         result = subprocess.run([script_path], check=True, capture_output=True, text=True)
         
         # Print and possibly save the output
@@ -1259,6 +1261,10 @@ def execute_script(script_path, output_file=None):
             with open(output_file, filemode) as file:
                 file.write(e.output)
         return e.returncode
+    except Exception as e:
+        logger = logging.getLogger(__name__)
+        logger.error(f"Error executing script: {e}")
+        return -1
 
 def main():
     # Parse command-line arguments
