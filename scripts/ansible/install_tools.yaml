@@ -1,0 +1,106 @@
+---
+- name: Install Tools on {{ target_hosts }}
+  hosts: all 
+  any_errors_fatal: true
+  gather_facts: false # needed for {{ ansible_architecture }}, do it later so we can wait for ssh
+
+  tasks:
+    - name: Wait for SSH to become ready
+      wait_for:
+        host: "{{ inventory_hostname }}"
+        port: 22
+        state: started
+        timeout: 300
+      delegate_to: localhost
+      become: false
+
+    - name: Gather facts
+      setup:
+
+    - name: Install pdsh on target machines
+      dnf:
+        name: 
+          - pdsh-rcmd-ssh
+        state: present
+
+    - name: Install OpenMPI and development packages
+      dnf:
+        name:
+          - openmpi
+          - openmpi-devel
+        state: present
+      when: "'clients' in group_names"
+
+    - name: Ensure Environment Modules are initialized in /etc/bashrc
+      lineinfile:
+        path: /etc/bashrc
+        line: 'source /etc/profile.d/modules.sh'
+        create: yes
+      when: "'clients' in group_names"
+
+    - name: Load OpenMPI environment module in a new script
+      lineinfile:
+        path: /etc/profile.d/openmpi.sh
+        line: 'module load mpi/openmpi-x86_64'
+        create: yes
+      when: "'clients' in group_names"
+
+    - name: Reboot the system to apply changes
+      reboot:
+      when: "'clients' in group_names"
+
+    - name: Install necessary packages for IOR
+      dnf:
+        name:
+          - git
+          - autoconf
+          - automake
+          - libtool
+          - make
+          - gcc
+        state: present
+      when: "'clients' in group_names"
+
+    - name: Clone IOR repository
+      git:
+        repo: 'https://github.com/hpc/ior'
+        dest: '/usr/local/src/ior'
+        clone: yes
+        update: yes
+      when: "'clients' in group_names"
+
+    - name: Run IOR bootstrap
+      command:
+        cmd: ./bootstrap
+        chdir: /usr/local/src/ior
+      when: "'clients' in group_names"
+
+    - name: Configure IOR with Lustre support
+      command:
+        cmd: ./configure --with-lustre --prefix=/usr/local
+        chdir: /usr/local/src/ior
+      when: "'clients' in group_names"
+
+    - name: Make and install IOR
+      command:
+        cmd: make clean all install
+        chdir: /usr/local/src/ior
+      when: "'clients' in group_names"
+
+    # had problems previously with ior not being a valid executable so try to debug that here
+    - name: Check that /usr/local/bin/ior is a valid executable
+      stat:
+        path: /usr/local/bin/ior
+      register: ior_stat
+      when: "'clients' in group_names"
+
+    - name: Assert /usr/local/bin/ior is a valid executable
+      assert:
+        that:
+          - ior_stat.stat.exists
+          - ior_stat.stat.isreg
+          - ior_stat.stat.mode | regex_replace('^0([0-7]+)$', '\\1') | int(base=8) is odd
+        fail_msg: "/usr/local/bin/ior is not a valid executable"
+        success_msg: "/usr/local/bin/ior is a valid executable"
+      when: "'clients' in group_names"
+
