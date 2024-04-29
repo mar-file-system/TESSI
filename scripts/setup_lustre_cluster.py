@@ -604,7 +604,7 @@ def find_gold_image(full_prefix):
 
     return os.path.join(directory, latest_file) if latest_file else None
 
-def get_gold_definitions(images,lversion,zversion):
+def get_gold_definitions(images,lversion,zversion,lpatch=None,zpatch=None):
     golds = {
         'clients': {
             'image_prefix': f"{images}/lustre/clients/Lustre-{lversion}.Patch-None.Kernel-",
@@ -612,7 +612,7 @@ def get_gold_definitions(images,lversion,zversion):
             'hname'       : 'gold-lustre-client'
         },
         'servers': {
-            'image_prefix': f"{images}/lustre/servers/Lustre-{lversion}.ZFS-{zversion}.Patch-None.Kernel-",
+            'image_prefix': f"{images}/lustre/servers/Lustre-{lversion}.Patch-{lpatch}.ZFS-{zversion}.Patch-{zpatch}.Kernel-",
             'image'       : None,
             'hname'       : 'gold-lustre-server'
         }
@@ -623,7 +623,9 @@ def make_gold_vms(conn,bootstrap_vm,images,inventory,inventory_file,playbook_fil
     logger = logging.getLogger(__name__)
     lversion = get_inventory_value(inventory, 'all.vars.lustre.version')
     zversion = get_inventory_value(inventory, 'all.vars.zfs.version')
-    logger.debug(f"Need gold server {lversion}.{zversion} and gold client {lversion}")
+    lpatch = get_inventory_value(inventory, 'all.vars.lustre.patch')
+    zpatch = get_inventory_value(inventory, 'all.vars.lustre.patch')
+    logger.debug(f"Need gold server {lversion}.{zversion} with respective patches {lpatch} and {zpatch} and gold client {lversion}")
 
     # get the libvirt storage pool
     (pool_name, pool_path) = get_first_storage_pool_info(conn) 
@@ -1184,7 +1186,9 @@ def show_resources(conn, args, inventory, vm_dir, hosts):
 
     lversion = get_inventory_value(inventory, 'all.vars.lustre.version')
     zversion = get_inventory_value(inventory, 'all.vars.zfs.version')
-    golds = get_gold_definitions(vm_dir, lversion, zversion)
+    lpatch = get_inventory_value(inventory, 'all.vars.lustre.patch')
+    zpatch = get_inventory_value(inventory, 'all.vars.lustre.patch')
+    golds = get_gold_definitions(vm_dir, lversion, zversion, lpatch, zpatch)
     for group,gold in golds.items(): 
         pattern = f"{gold['image_prefix']}*.img"
         for f in glob.glob(pattern):
