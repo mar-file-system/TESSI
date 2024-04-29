@@ -605,9 +605,13 @@ def find_gold_image(full_prefix):
     return os.path.join(directory, latest_file) if latest_file else None
 
 def get_gold_definitions(images,lversion,zversion,lpatch=None,zpatch=None):
+    if lpatch:
+        lpatch = lpatch.split('/')[-1] # get last token in path
+    if zpatch:
+        zpatch = zpatch.split('/')[-1] # get last token in path
     golds = {
         'clients': {
-            'image_prefix': f"{images}/lustre/clients/Lustre-{lversion}.Patch-None.Kernel-",
+            'image_prefix': f"{images}/lustre/clients/Lustre-{lversion}.Patch-{lpatch}.Kernel-",
             'image'       : None,
             'hname'       : 'gold-lustre-client'
         },
@@ -631,7 +635,7 @@ def make_gold_vms(conn,bootstrap_vm,images,inventory,inventory_file,playbook_fil
     (pool_name, pool_path) = get_first_storage_pool_info(conn) 
 
     # initialize variables 
-    golds = get_gold_definitions(images,lversion,zversion)
+    golds = get_gold_definitions(images,lversion,zversion,lpatch,zpatch)
 
     for group,gold in golds.items(): 
         if not rebuild_vms and check_vm_status(conn, gold['hname'], shutdown=True, destroy=False):
@@ -1187,9 +1191,10 @@ def show_resources(conn, args, inventory, vm_dir, hosts):
     lversion = get_inventory_value(inventory, 'all.vars.lustre.version')
     zversion = get_inventory_value(inventory, 'all.vars.zfs.version')
     lpatch = get_inventory_value(inventory, 'all.vars.lustre.patch')
-    zpatch = get_inventory_value(inventory, 'all.vars.lustre.patch')
+    zpatch = get_inventory_value(inventory, 'all.vars.zfs.patch')
     golds = get_gold_definitions(vm_dir, lversion, zversion, lpatch, zpatch)
     for group,gold in golds.items(): 
+        #logger.debug(f"Searching for stashed images matching {gold['image_prefix']}")
         pattern = f"{gold['image_prefix']}*.img"
         for f in glob.glob(pattern):
             logger.debug(f"{f.split('/')[-1]} is available to create gold VM for {group}")
