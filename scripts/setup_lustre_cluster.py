@@ -512,11 +512,15 @@ def run_playbook(hname, inventory_file, playbook_file, group, verbosity, output_
     # set up the output file
     if output_prefix:
         output_filename = f"{output_prefix}.{playbook_file.split('/')[-1]}.out"
+        if os.path.exists(output_filename):
+            with open(output_filename, 'w') as file:
+                pass # truncate to zero
+            print("{output_filename} truncated")
     else:
         output_filename = None
 
     # Construct the kwargs for ansible_runner.run
-    filemode='w' # TODO: make this the same across the program
+    filemode='a' 
     kwargs = {
         "playbook":  playbook_file,
         "inventory": [ inventory_file ],
