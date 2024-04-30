@@ -11,6 +11,7 @@ The motivation and some additional information about TASSI can be found in our [
 ## Requirements
 
 1. TASSI has been tested on CentOS Linux release 8.5.2111 running kernel 4.18.0-348.el8.x86_64.
+2. These instructions correspond to tag _v1.0.0_.
 
 ## Install
 1. The required packages can be installed by running [scripts/dnf_install.sh](scripts/dnf_install.sh).
