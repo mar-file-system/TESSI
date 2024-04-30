@@ -479,6 +479,8 @@ def strip_ansi_escape_codes(text):
     return re.sub(r'\n+', '\n', text)
 
 # weird function that we need so we can save ansible playbook output to a specified file
+# TODO: This takes a filemode of 'w' which means it truncates with each write
+# TODO: instead it needs to append except when it is opened for first time
 def event_handler_factory(output_file,filemode):
     """Factory function to create event handlers with a specific output file."""
     def event_handler(event_data):
@@ -510,11 +512,15 @@ def run_playbook(hname, inventory_file, playbook_file, group, verbosity, output_
     # set up the output file
     if output_prefix:
         output_filename = f"{output_prefix}.{playbook_file.split('/')[-1]}.out"
+        if os.path.exists(output_filename):
+            with open(output_filename, 'w') as file:
+                pass # truncate to zero
+            print("{output_filename} truncated")
     else:
         output_filename = None
 
     # Construct the kwargs for ansible_runner.run
-    filemode='w' # TODO: make this the same across the program
+    filemode='a' 
     kwargs = {
         "playbook":  playbook_file,
         "inventory": [ inventory_file ],
@@ -604,15 +610,19 @@ def find_gold_image(full_prefix):
 
     return os.path.join(directory, latest_file) if latest_file else None
 
-def get_gold_definitions(images,lversion,zversion):
+def get_gold_definitions(images,lversion,zversion,lpatch=None,zpatch=None):
+    if lpatch:
+        lpatch = lpatch.split('/')[-1] # get last token in path
+    if zpatch:
+        zpatch = zpatch.split('/')[-1] # get last token in path
     golds = {
         'clients': {
-            'image_prefix': f"{images}/lustre/clients/Lustre-{lversion}.Patch-None.Kernel-",
+            'image_prefix': f"{images}/lustre/clients/Lustre-{lversion}.Patch-{lpatch}.Kernel-",
             'image'       : None,
             'hname'       : 'gold-lustre-client'
         },
         'servers': {
-            'image_prefix': f"{images}/lustre/servers/Lustre-{lversion}.ZFS-{zversion}.Patch-None.Kernel-",
+            'image_prefix': f"{images}/lustre/servers/Lustre-{lversion}.Patch-{lpatch}.ZFS-{zversion}.Patch-{zpatch}.Kernel-",
             'image'       : None,
             'hname'       : 'gold-lustre-server'
         }
@@ -623,13 +633,15 @@ def make_gold_vms(conn,bootstrap_vm,images,inventory,inventory_file,playbook_fil
     logger = logging.getLogger(__name__)
     lversion = get_inventory_value(inventory, 'all.vars.lustre.version')
     zversion = get_inventory_value(inventory, 'all.vars.zfs.version')
-    logger.debug(f"Need gold server {lversion}.{zversion} and gold client {lversion}")
+    lpatch = get_inventory_value(inventory, 'all.vars.lustre.patch', required=False)
+    zpatch = get_inventory_value(inventory, 'all.vars.zfs.patch', required=False)
+    logger.debug(f"Need gold server {lversion}.{zversion} with respective patches {lpatch} and {zpatch} and gold client {lversion}")
 
     # get the libvirt storage pool
     (pool_name, pool_path) = get_first_storage_pool_info(conn) 
 
     # initialize variables 
-    golds = get_gold_definitions(images,lversion,zversion)
+    golds = get_gold_definitions(images,lversion,zversion,lpatch,zpatch)
 
     for group,gold in golds.items(): 
         if not rebuild_vms and check_vm_status(conn, gold['hname'], shutdown=True, destroy=False):
@@ -1126,7 +1138,9 @@ def load_yaml(file):
 
 def Fatal(msg):
     logger = logging.getLogger(__name__)
-    logger.error(f"FATAL ERROR: {msg}")
+    msg = f"FATAL ERROR: {msg}"
+    logger.warning(msg)
+    logger.error(msg)
     sys.exit(-1)
 
 def get_inventory_value(inventory, key, required=True):
@@ -1184,8 +1198,11 @@ def show_resources(conn, args, inventory, vm_dir, hosts):
 
     lversion = get_inventory_value(inventory, 'all.vars.lustre.version')
     zversion = get_inventory_value(inventory, 'all.vars.zfs.version')
-    golds = get_gold_definitions(vm_dir, lversion, zversion)
+    lpatch = get_inventory_value(inventory, 'all.vars.lustre.patch', required=False)
+    zpatch = get_inventory_value(inventory, 'all.vars.zfs.patch', required=False)
+    golds = get_gold_definitions(vm_dir, lversion, zversion, lpatch, zpatch)
     for group,gold in golds.items(): 
+        #logger.debug(f"Searching for stashed images matching {gold['image_prefix']}")
         pattern = f"{gold['image_prefix']}*.img"
         for f in glob.glob(pattern):
             logger.debug(f"{f.split('/')[-1]} is available to create gold VM for {group}")
