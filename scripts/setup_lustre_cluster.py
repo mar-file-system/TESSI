@@ -479,6 +479,8 @@ def strip_ansi_escape_codes(text):
     return re.sub(r'\n+', '\n', text)
 
 # weird function that we need so we can save ansible playbook output to a specified file
+# TODO: This takes a filemode of 'w' which means it truncates with each write
+# TODO: instead it needs to append except when it is opened for first time
 def event_handler_factory(output_file,filemode):
     """Factory function to create event handlers with a specific output file."""
     def event_handler(event_data):
