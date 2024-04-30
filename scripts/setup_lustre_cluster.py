@@ -1132,7 +1132,9 @@ def load_yaml(file):
 
 def Fatal(msg):
     logger = logging.getLogger(__name__)
-    logger.error(f"FATAL ERROR: {msg}")
+    msg = f"FATAL ERROR: {msg}"
+    logger.warning(msg)
+    logger.error(msg)
     sys.exit(-1)
 
 def get_inventory_value(inventory, key, required=True):
