@@ -630,7 +630,7 @@ def make_gold_vms(conn,bootstrap_vm,images,inventory,inventory_file,playbook_fil
     lversion = get_inventory_value(inventory, 'all.vars.lustre.version')
     zversion = get_inventory_value(inventory, 'all.vars.zfs.version')
     lpatch = get_inventory_value(inventory, 'all.vars.lustre.patch', required=False)
-    zpatch = get_inventory_value(inventory, 'all.vars.lustre.patch', required=False)
+    zpatch = get_inventory_value(inventory, 'all.vars.zfs.patch', required=False)
     logger.debug(f"Need gold server {lversion}.{zversion} with respective patches {lpatch} and {zpatch} and gold client {lversion}")
 
     # get the libvirt storage pool
