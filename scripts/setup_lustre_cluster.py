@@ -1257,13 +1257,16 @@ def override_args_from_inventory(args, inventory):
     
     return args  # Returning the modified args for clarity
 
-def execute_script(script_path, output_file=None):
+def execute_script(script_path, script_args=None, output_file=None):
     filemode='w' # TODO: make this the same across the program
     try:
         # Execute the script and capture the output
         logger = logging.getLogger(__name__)
         logger.info(f"Running test script {script_path}") 
-        result = subprocess.run([script_path], check=True, capture_output=True, text=True)
+        command = [script_path]
+        if script_args:
+            command.extend(script_args.split())
+        result = subprocess.run(command, check=True, capture_output=True, text=True)
         
         # Print and possibly save the output
         if output_file:
@@ -1289,7 +1292,7 @@ def main():
     parser = argparse.ArgumentParser(
         description='''Create libvirt VMs, install, configure, mount, test a Lustre cluster. Defaults to reuse resources and run all playbooks.
                        Use --rebuilt and --skip to override.''',
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter  # Add this line
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter  
     )
     parser.add_argument('-b', '--boot_vm_name',             default='bootstrap',                    help='Name of the base VM.')
     parser.add_argument('-i', '--ansible_playbook_install', default='./ansible/install_all.yaml',   help='Name of the ansible install playbook')
@@ -1297,6 +1300,7 @@ def main():
     parser.add_argument('-t', '--ansible_playbook_test',    default='./ansible/test_lustre.yaml',   help='Name of the ansible test playbook')
     parser.add_argument('-v', '--ansible_verbosity',        default=0, type=int,                    help='Ansible verbosity')
     parser.add_argument('-T', '--test_script',              default=None, type=str,                 help='Test script to run after ansible test playbook')
+    parser.add_argument('-a', '--test_script_args',         default=None, type=str,                 help='Args to pass to test script')
     parser.add_argument('-o', '--output_dir',               default='./output', type=str,           help='Directory into which to store the output files')
     parser.add_argument('-n', '--virt_network',             default='hostonly-net',                 help='Name of virtual network to use/create')
     parser.add_argument('--rebuild', action='append', choices=['bootstrap', 'network', 'golds', 'vms', 'all'],    
@@ -1413,7 +1417,7 @@ def main():
             run_playbook(None, args.inventory_file, args.ansible_playbook_test, None, args.ansible_verbosity, ansible_log_prefix)
         
         if args.test_script:
-            ret = execute_script(args.test_script, test_output)
+            ret = execute_script(args.test_script, args.test_script_args, test_output)
             logger.info(f"Executed test script {args.test_script}: {ret}")
         else:
             logger.info(f"No test script specified.")
