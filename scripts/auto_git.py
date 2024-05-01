@@ -135,9 +135,10 @@ def monitor_tests(repo,incoming_output_dir):
             with open(mylog, 'w') as file:
                 command = ["sudo", "./setup_lustre_cluster.py", test_file_path]
                 command += ['--output_dir', '/'.join(output_dir.split('/')[0:-1])]
-                command += ['--rebuild', 'vms', '--rebuild', 'network']
+                #command += ['--rebuild', 'vms', '--rebuild', 'network']
                 #command += ['--skip', 'config', '--skip', 'test']
                 #command += ['--rebuild', 'all']
+                command += ['--rebuild', 'network'] # this is appropriate in most cases
                 file.write(f'Autorunning {test_file} with commit {commit}.\n')
                 file.write(f'COMMAND = {" ".join(command)}\n')
                 logger.info(f'COMMAND = {" ".join(command)}\n')
