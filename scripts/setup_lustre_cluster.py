@@ -608,7 +608,9 @@ def find_gold_image(full_prefix):
         #else:
         #    logger.debug(f"No regex match found on {filename} using prefix {base_prefix}")
 
-    return os.path.join(directory, latest_file) if latest_file else None
+    gold_image =  os.path.join(directory, latest_file) if latest_file else None
+    logger.debug(f"Returning {gold_image} for prefix {base_prefix}")
+    return gold_image
 
 def get_gold_definitions(images,lversion,zversion,lpatch=None,zpatch=None):
     if lpatch:
@@ -657,7 +659,7 @@ def make_gold_vms(conn,bootstrap_vm,images,inventory,inventory_file,playbook_fil
             restore_vm_from_stash(conn, gold['image'], f"{gold['image']}.xml", pool_name, gold['hname'])
         else:
             if gold['image'] and os.path.exists(gold['image']):
-                logger.debug(f"Rebuilding (and restashing) VM {gold['hname']} due to user request.")
+                logger.debug(f"Rebuilding (and restashing) VM {gold['hname']} due to user request ({rebuild_vms},{rebuild_golds}).")
             kernel_version = create_gold(conn, bootstrap_vm, gold['hname'], inventory_file, playbook_file, group, verbosity, ansible_log_prefix)
             gold['image'] = gold['image_prefix'] + kernel_version + '.img'
             stash_vm(conn, gold['image'], gold['hname'])
