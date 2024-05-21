@@ -1303,7 +1303,7 @@ def main():
     parser.add_argument('-a', '--test_script_args',         default=None, type=str,                 help='Args to pass to test script')
     parser.add_argument('-o', '--output_dir',               default='./output', type=str,           help='Directory into which to store the output files')
     parser.add_argument('-n', '--virt_network',             default='hostonly-net',                 help='Name of virtual network to use/create')
-    parser.add_argument('--rebuild', action='append', choices=['bootstrap', 'network', 'golds', 'vms', 'all'],    
+    parser.add_argument('--rebuild',                        action='append',                        choices=['bootstrap', 'network', 'golds', 'vms', 'all'],    
                                                                                              help='Rebuild specified items (instead of re-using) if they exist')
     parser.add_argument('--skip',    action='append',   choices=['config', 'test'],          help='Skip specified steps (can be used multiple times)')
     parser.add_argument('--show',    action='store_true',                                    help='Show available resources which can be re-used and then quit')
@@ -1353,10 +1353,11 @@ def main():
             show_resources(conn, args, inventory, vm_dir, hosts)
             sys.exit(0)
 
+        # TODO: reverse the logic. bootstrap not needed if using existant golds but it builds it unnecessarily.
         # create the initial bootstrap VM if needed 
         if build_needed(conn, args.boot_vm_name, args.rebuild, 'bootstrap'):
             if not check_vm_status(conn, args.boot_vm_name, shutdown=True, destroy=True):
-                Fatal(f"VM {gold['hname']} could not be destroyed.")
+                Fatal(f"VM {args.boot_vm_name} could not be destroyed.")
             install_initial_vm(conn, args.boot_vm_name, inventory, args.ansible_verbosity)
 
         # ensure the bootstrap VM is ready 
@@ -1411,7 +1412,7 @@ def main():
             run_playbook(None, args.inventory_file, args.ansible_playbook_config, None, args.ansible_verbosity, ansible_log_prefix)
 
         # test the lustre system
-        if args.skip is not None and 'config' in args.skip:
+        if args.skip is not None and 'test' in args.skip:
             logger.debug(f"Skipping testing as requested")
         else:
             run_playbook(None, args.inventory_file, args.ansible_playbook_test, None, args.ansible_verbosity, ansible_log_prefix)
