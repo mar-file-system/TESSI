@@ -9,7 +9,42 @@ import sys
 import xml.etree.ElementTree as ET
 from xml.dom import minidom
 
+def delete_domain2(domain):
+    print(f"Now deleting {domain.name()} and all associated data.")
+    try:
+        if domain.isActive():
+            domain.destroy()  # Forcefully stop the domain
+
+        # Get all disk sources
+        disk_sources = []
+        xml_desc = domain.XMLDesc()
+        xml = etree.fromstring(xml_desc)
+        for disk in xml.findall('.//disk/source'):
+            if 'file' in disk.attrib:
+                disk_sources.append(disk.attrib['file'])
+
+        # Undefine the domain with flags to remove all storage and snapshots metadata
+        domain.undefineFlags(libvirt.VIR_DOMAIN_UNDEFINE_MANAGED_SAVE |
+                             libvirt.VIR_DOMAIN_UNDEFINE_SNAPSHOTS_METADATA |
+                             libvirt.VIR_DOMAIN_UNDEFINE_NVRAM |
+                             libvirt.VIR_DOMAIN_UNDEFINE_CHECKPOINTS_METADATA |
+                             libvirt.VIR_DOMAIN_UNDEFINE_STORAGE)  # Adding storage undefine flag
+
+        # Optionally, manually remove any remaining disk files
+        for disk_source in disk_sources:
+            try:
+                os.remove(disk_source)
+            except Exception as e:
+                print(f"Failed to delete disk image {disk_source}: {e}")
+
+    except libvirt.libvirtError as e:
+        print(f"Error deleting {domain.name()}: {e}")
+
+
 def delete_domain(domain):
+    // TODO: the .img in /var/lib/libvirt/images does not seem to be deleted
+    // TODO: the delete_domain2 function should handle this better. Test later.
+    // TODO: actually, this functionality already exists in setup_lustre_cluster.py in check_vm_status so import that and use it instead
     print(f"Now deleting {domain.name()} and all associated data.")
     try:
         if domain.isActive():
