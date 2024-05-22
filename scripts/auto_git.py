@@ -43,7 +43,7 @@ def get_last_commit(repo, file_path):
     else:
         last = None
         ts   = None
-    logger.debug(f"Last commit for {file_path.split('/')[-1]}: {last[-5:]} {ts}")
+    logger.debug(f"Last commit for {file_path.split('/')[-1]}: {last[-5:] if last else ''} {ts}")
     return last,ts
 
 # search all files in a directory to see if a particular commit is present
