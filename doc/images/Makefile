@@ -19,7 +19,7 @@ all: $(PUML_PNGS) $(GNU_PNGS) $(DOT_PNGS)
 
 # Rule to convert .puml to .png
 $(OUT_DIR)/%-puml.png: $(SRC_DIR)/%.puml
-	plantuml -tpng -o $(OUT_DIR) $<
+	plantuml -tpng -pipe < $< > $@
 
 # Rule to convert .gnu to .png
 $(OUT_DIR)/%-gnu.png: $(SRC_DIR)/%.gnu
