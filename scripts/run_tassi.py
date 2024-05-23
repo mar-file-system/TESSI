@@ -414,11 +414,11 @@ def create_temp_inventory_file(hosts, group='servers'):
     return temp_file_path
 
 
-def check_images_directory(images):
+def check_images_directory(system, images):
     if not os.path.isdir(images):
         Fatal(f"Specified image directory {images} is not a valid directory.")
-    os.makedirs(images + '/lustre/servers', exist_ok=True)
-    os.makedirs(images + '/lustre/clients', exist_ok=True)
+    os.makedirs(images + f'/{system}/servers', exist_ok=True)
+    os.makedirs(images + f'/{system}/clients', exist_ok=True)
 
 def restart_domain(conn, hname, restart_libvirt=False):
     logger = logging.getLogger(__name__)
@@ -612,38 +612,38 @@ def find_gold_image(full_prefix):
     logger.debug(f"Returning {gold_image} for prefix {base_prefix}")
     return gold_image
 
-def get_gold_definitions(images,lversion,zversion,lpatch=None,zpatch=None):
+def get_gold_definitions(images,system,lversion,zversion,lpatch=None,zpatch=None):
     if lpatch:
         lpatch = lpatch.split('/')[-1] # get last token in path
     if zpatch:
         zpatch = zpatch.split('/')[-1] # get last token in path
     golds = {
         'clients': {
-            'image_prefix': f"{images}/lustre/clients/Lustre-{lversion}.Patch-{lpatch}.Kernel-",
+            'image_prefix': f"{images}/{system}/clients/Lustre-{lversion}.Patch-{lpatch}.Kernel-",
             'image'       : None,
             'hname'       : 'gold-lustre-client'
         },
         'servers': {
-            'image_prefix': f"{images}/lustre/servers/Lustre-{lversion}.Patch-{lpatch}.ZFS-{zversion}.Patch-{zpatch}.Kernel-",
+            'image_prefix': f"{images}/{system}/servers/Lustre-{lversion}.Patch-{lpatch}.ZFS-{zversion}.Patch-{zpatch}.Kernel-",
             'image'       : None,
             'hname'       : 'gold-lustre-server'
         }
     }
     return golds
 
-def make_gold_vms(conn,bootstrap_vm,images,inventory,inventory_file,playbook_file,rebuild_vms,rebuild_golds,verbosity, ansible_log_prefix):
+def make_gold_vms(conn,bootstrap_vm,images,system,inventory,inventory_file,playbook_file,rebuild_vms,rebuild_golds,verbosity, ansible_log_prefix):
     logger = logging.getLogger(__name__)
-    lversion = get_inventory_value(inventory, 'all.vars.lustre.version')
-    zversion = get_inventory_value(inventory, 'all.vars.zfs.version')
-    lpatch = get_inventory_value(inventory, 'all.vars.lustre.patch', required=False)
-    zpatch = get_inventory_value(inventory, 'all.vars.zfs.patch', required=False)
+    lversion = get_inventory_value(inventory, 'all.vars.system.version')
+    zversion = get_inventory_value(inventory, 'all.vars.system.backend.version')
+    lpatch = get_inventory_value(inventory, 'all.vars.system.patch', required=False)
+    zpatch = get_inventory_value(inventory, 'all.vars.system.backend.patch', required=False)
     logger.debug(f"Need gold server {lversion}.{zversion} with respective patches {lpatch} and {zpatch} and gold client {lversion}")
 
     # get the libvirt storage pool
     (pool_name, pool_path) = get_first_storage_pool_info(conn) 
 
     # initialize variables 
-    golds = get_gold_definitions(images,lversion,zversion,lpatch,zpatch)
+    golds = get_gold_definitions(images,system,lversion,zversion,lpatch,zpatch)
 
     for group,gold in golds.items(): 
         if not rebuild_vms and check_vm_status(conn, gold['hname'], shutdown=True, destroy=False):
@@ -1191,18 +1191,18 @@ def die_unless_root():
     if os.geteuid() != 0:
         Fatal("Must be run as root")
 
-def show_resources(conn, args, inventory, vm_dir, hosts):
+def show_resources(conn, args, inventory, vm_dir, system, hosts):
     logger = logging.getLogger(__name__)
     avail = check_vm_status(conn, args.boot_vm_name, shutdown=False, destroy=False)
     logger.debug(f"Bootstrap VM {args.boot_vm_name} {'is' if avail else 'is not'} available for re-use to create gold images if needed.")
     avail = check_network_exists(conn, args.virt_network)
     logger.debug(f"Network '{args.virt_network}' {'is' if avail else 'is not'} available for re-use.")
 
-    lversion = get_inventory_value(inventory, 'all.vars.lustre.version')
-    zversion = get_inventory_value(inventory, 'all.vars.zfs.version')
-    lpatch = get_inventory_value(inventory, 'all.vars.lustre.patch', required=False)
-    zpatch = get_inventory_value(inventory, 'all.vars.zfs.patch', required=False)
-    golds = get_gold_definitions(vm_dir, lversion, zversion, lpatch, zpatch)
+    lversion = get_inventory_value(inventory, 'all.vars.system.version')
+    zversion = get_inventory_value(inventory, 'all.vars.system,backend.version')
+    lpatch = get_inventory_value(inventory, 'all.vars.system.patch', required=False)
+    zpatch = get_inventory_value(inventory, 'all.vars.system.backend.patch', required=False)
+    golds = get_gold_definitions(vm_dir, system, lversion, zversion, lpatch, zpatch)
     for group,gold in golds.items(): 
         #logger.debug(f"Searching for stashed images matching {gold['image_prefix']}")
         pattern = f"{gold['image_prefix']}*.img"
@@ -1295,12 +1295,7 @@ def main():
         formatter_class=argparse.ArgumentDefaultsHelpFormatter  
     )
     parser.add_argument('-b', '--boot_vm_name',             default='bootstrap',                    help='Name of the base VM.')
-    parser.add_argument('-i', '--ansible_playbook_install', default='./ansible/install_all.yaml',   help='Name of the ansible install playbook')
-    parser.add_argument('-c', '--ansible_playbook_config',  default='./ansible/configure_all.yaml', help='Name of the ansible configure playbook')
-    parser.add_argument('-t', '--ansible_playbook_test',    default='./ansible/test_lustre.yaml',   help='Name of the ansible test playbook')
     parser.add_argument('-v', '--ansible_verbosity',        default=0, type=int,                    help='Ansible verbosity')
-    parser.add_argument('-T', '--test_script',              default=None, type=str,                 help='Test script to run after ansible test playbook')
-    parser.add_argument('-a', '--test_script_args',         default=None, type=str,                 help='Args to pass to test script')
     parser.add_argument('-o', '--output_dir',               default='./output', type=str,           help='Directory into which to store the output files')
     parser.add_argument('-n', '--virt_network',             default='hostonly-net',                 help='Name of virtual network to use/create')
     parser.add_argument('--rebuild',                        action='append',                        choices=['bootstrap', 'network', 'golds', 'vms', 'all'],    
@@ -1318,6 +1313,7 @@ def main():
     hosts     = extract_host_details(inventory, ['clients', 'servers'])
     network   = get_inventory_value(inventory, 'all.vars.network')
     vm_dir    = get_inventory_value(inventory, 'all.vars.vm_dir')
+    system    = get_inventory_value(inventory, 'all.vars.system.type')
     network['name'] = args.virt_network # define it here because we use it elsewhere
 
     # setup the paths for the various output files
@@ -1325,7 +1321,7 @@ def main():
     os.makedirs(output_base, exist_ok=True)
     verbose_log        = f"{output_base}/log.all"
     summary_log        = f"{output_base}/log.summary"
-    test_output        = f"{output_base}/{args.test_script.split('/')[-1]}.out"
+    test_output        = f"{output_base}/{get_inventory_value(inventory, 'all.vars.test_script.path').split('/')[-1]}.out"
     ansible_log_prefix = f"{output_base}/ansible"
 
     # setup the logging
@@ -1334,11 +1330,16 @@ def main():
     logger.debug(f"Running with {' '.join(sys.argv)}")
 
     # check that the various directories and the ansible playbooks exist 
-    check_images_directory(vm_dir)
-    for arg_name in [arg_name for arg_name in vars(args) if 'ansible_playbook' in arg_name or arg_name == 'test_script']:
-        playbook_path = get_inventory_value(inventory, f"all.vars.{arg_name}", required=True)
+    check_images_directory(system,vm_dir)
+        
+    for playbook in [ 'install', 'config', 'test' ]:
+        playbook_path = get_inventory_value(inventory, f"all.vars.ansible_playbooks.{playbook}", required=True)
         if not os.path.exists(playbook_path):
-            Fatal(f"Ansible playbook {arg_name} at specified path {playbook_path} does not exist")
+            Fatal(f"Ansible {playbook} playbook at specified path {playbook_path} does not exist")
+
+    playbook_path = get_inventory_value(inventory, f"all.vars.test_script.path", required=True)
+    if not os.path.exists(playbook_path):
+        Fatal(f"Test script at specified path {playbook_path} does not exist")
 
     # Example logger usage
     # logger.debug("This will appear only in verbose.log")
@@ -1350,7 +1351,7 @@ def main():
     with LibvirtConnection() as conn:
 
         if args.show:
-            show_resources(conn, args, inventory, vm_dir, hosts)
+            show_resources(conn, args, inventory, vm_dir, system, hosts)
             sys.exit(0)
 
         # TODO: reverse the logic. bootstrap not needed if using existant golds but it builds it unnecessarily.
@@ -1379,15 +1380,16 @@ def main():
             conn = conn, 
             bootstrap_vm = args.boot_vm_name, 
             images = vm_dir, 
+            system = system,
             inventory = inventory, 
             inventory_file = args.inventory_file, 
-            playbook_file = args.ansible_playbook_install, 
+            playbook_file = get_inventory_value(inventory,'all.vars.ansible_playbooks.install', required=True),
             rebuild_vms = rebuilds['vms'],
             rebuild_golds = rebuilds['golds'],
             verbosity = args.ansible_verbosity,
             ansible_log_prefix = ansible_log_prefix)
 
-        # now clone the base image for each requested lustre node
+        # now clone the base image for each requested cluster node
         if args.rebuild and ( 'vms' in args.rebuild or 'all' in args.rebuild ):
             use_existing = False
         else:
@@ -1405,21 +1407,27 @@ def main():
         # reboot the freshly coned VMs to make sure changes are applied appropriately
         restart_hosts(conn, hosts)
 
-        # configure the lustre system
+        # configure the cluster system
         if args.skip is not None and 'config' in args.skip:
             logger.debug(f"Skipping config as requested")
         else:
-            run_playbook(None, args.inventory_file, args.ansible_playbook_config, None, args.ansible_verbosity, ansible_log_prefix)
+            config = get_inventory_value(inventory, 'all.vars.ansible_playbooks.config') 
+            if config: 
+                run_playbook(None, args.inventory_file, config, None, args.ansible_verbosity, ansible_log_prefix)
 
-        # test the lustre system
+        # test the cluster system
         if args.skip is not None and 'test' in args.skip:
             logger.debug(f"Skipping testing as requested")
         else:
-            run_playbook(None, args.inventory_file, args.ansible_playbook_test, None, args.ansible_verbosity, ansible_log_prefix)
+            test = get_inventory_value(inventory, 'all.vars.ansible_playbooks.test') 
+            if test:
+                run_playbook(None, args.inventory_file, test, None, args.ansible_verbosity, ansible_log_prefix)
         
-        if args.test_script:
-            ret = execute_script(args.test_script, args.test_script_args, test_output)
-            logger.info(f"Executed test script {args.test_script}: {ret}")
+        test_script = get_inventory_value(inventory, 'all.vars.test_script.path', required=False)
+        test_script_args = get_inventory_value(inventory, 'all.vars.test_script.args', required=False)
+        if test_script:
+            ret = execute_script(test_script, test_script_args, test_output)
+            logger.info(f"Executed test script {test_script}: {ret}")
         else:
             logger.info(f"No test script specified.")
 
