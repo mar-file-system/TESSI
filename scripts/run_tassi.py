@@ -578,6 +578,7 @@ def get_first_storage_pool_info(conn):
 def find_gold_image(full_prefix):
     directory = os.path.dirname(full_prefix)
     base_prefix = os.path.basename(full_prefix)
+    logger = logging.getLogger(__name__)
     
     if not os.path.isdir(directory):
         Fatal(f"The directory '{directory}' does not exist or is not a directory.")
@@ -596,7 +597,6 @@ def find_gold_image(full_prefix):
         return tuple(int(part) if part.isdigit() else part for part in parts)
 
     for filename in os.listdir(directory):
-        logger = logging.getLogger(__name__)
         #logger.debug(f"Checking possible gold image {filename}")
         match = re.match(pattern, filename)
         if match:
@@ -619,22 +619,22 @@ def get_gold_definitions(images,system,lversion,zversion,lpatch=None,zpatch=None
         zpatch = zpatch.split('/')[-1] # get last token in path
     golds = {
         'clients': {
-            'image_prefix': f"{images}/{system}/clients/Lustre-{lversion}.Patch-{lpatch}.Kernel-",
+            'image_prefix': f"{images}/{system}/clients/{system}-{lversion}.Patch-{lpatch}.Kernel-",
             'image'       : None,
-            'hname'       : 'gold-lustre-client'
+            'hname'       : f"gold-{system}-client",
         },
         'servers': {
-            'image_prefix': f"{images}/{system}/servers/Lustre-{lversion}.Patch-{lpatch}.ZFS-{zversion}.Patch-{zpatch}.Kernel-",
+            'image_prefix': f"{images}/{system}/servers/{system}-{lversion}.Patch-{lpatch}.backend-{zversion}.Patch-{zpatch}.Kernel-",
             'image'       : None,
-            'hname'       : 'gold-lustre-server'
+            'hname'       : f"gold-{system}-server",
         }
     }
     return golds
 
 def make_gold_vms(conn,bootstrap_vm,images,system,inventory,inventory_file,playbook_file,rebuild_vms,rebuild_golds,verbosity, ansible_log_prefix):
     logger = logging.getLogger(__name__)
-    lversion = get_inventory_value(inventory, 'all.vars.system.version')
-    zversion = get_inventory_value(inventory, 'all.vars.system.backend.version')
+    lversion = get_inventory_value(inventory, 'all.vars.system.version',required=False)
+    zversion = get_inventory_value(inventory, 'all.vars.system.backend.version',required=False)
     lpatch = get_inventory_value(inventory, 'all.vars.system.patch', required=False)
     zpatch = get_inventory_value(inventory, 'all.vars.system.backend.patch', required=False)
     logger.debug(f"Need gold server {lversion}.{zversion} with respective patches {lpatch} and {zpatch} and gold client {lversion}")
@@ -1120,7 +1120,10 @@ def load_yaml(file):
         logger = logging.getLogger(__name__)
         for group_name, group_info in inventory.items():
             logger.debug(f"Processing group: {group_name}")
-            group_vars = group_info.get('vars', {}).copy()
+            try:
+                group_vars = group_info.get('vars', {}).copy()
+            except AttributeError:
+                group_vars = {}
             if parent_vars:
                 group_vars.update(parent_vars)
             if 'hosts' in group_info:
@@ -1290,7 +1293,7 @@ def execute_script(script_path, script_args=None, output_file=None):
 def main():
     # Parse command-line arguments
     parser = argparse.ArgumentParser(
-        description='''Create libvirt VMs, install, configure, mount, test a Lustre cluster. Defaults to reuse resources and run all playbooks.
+        description='''Create libvirt VMs, install, configure, mount, test a storage cluster. Defaults to reuse resources and run all playbooks.
                        Use --rebuilt and --skip to override.''',
         formatter_class=argparse.ArgumentDefaultsHelpFormatter  
     )
@@ -1431,7 +1434,7 @@ def main():
         else:
             logger.info(f"No test script specified.")
 
-    logger.debug(f"Setup completed. Lustre cluster should now be running with new NICs attached to {network['name']}.")
+    logger.debug(f"Setup completed. {system} cluster should now be running with new NICs attached to {network['name']}.")
 
 if __name__ == "__main__":
     main()
