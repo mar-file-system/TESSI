@@ -2,6 +2,8 @@
 - name: Configure BeeGFS
   hosts: all
   become: yes
+  vars:
+    connauthfile: /etc/beegfs/connauthfile
   tasks:
     - name: Ensure BeeGFS directories exist
       ansible.builtin.file:
@@ -10,7 +12,41 @@
         owner: root
         group: root
         mode: '0755'
-      when: "'meta00' in inventory_hostname or 'meta01' in inventory_hostname or 'data' in group_names"
+
+    - name: Create BeeGFS connection auth file on meta00
+      ansible.builtin.command:
+        cmd: "dd if=/dev/random of={{ connauthfile }} bs=128 count=1"
+      when: inventory_hostname == 'meta00'
+
+    - name: Set ownership of connection auth file on meta00
+      ansible.builtin.command:
+        cmd: "chown root:root {{ connauthfile }}"
+      when: inventory_hostname == 'meta00'
+
+    - name: Set permissions of connection auth file on meta00
+      ansible.builtin.command:
+        cmd: "chmod 400 {{ connauthfile }}"
+      when: inventory_hostname == 'meta00'
+
+    - name: Copy connection auth file to other nodes
+      ansible.builtin.synchronize:
+        src: "{{ connauthfile }}"
+        dest: "{{ connauthfile }}"
+        mode: push
+        owner: yes
+        group: yes
+        perms: yes
+      delegate_to: meta00
+      with_items: "{{ groups['all'] | difference(['meta00']) }}"
+      when: inventory_hostname == 'meta00'
+
+    - name: Ensure connAuthFile is set in all configuration files
+      ansible.builtin.lineinfile:
+        path: "{{ item }}"
+        regexp: '^(connAuthFile\s*=\s*).*$'
+        line: 'connAuthFile = {{ connauthfile }}'
+        create: yes
+      loop: "{{ conf_files }}"
 
     - name: Configure BeeGFS services
       ansible.builtin.command:
@@ -21,7 +57,7 @@
       ansible.builtin.systemd:
         name: "{{ item }}"
         enabled: yes
-        state: started
+        state: restarted
       loop:
         - beegfs-mgmtd
         - beegfs-meta
@@ -29,4 +65,9 @@
       when: >
         (inventory_hostname == 'meta00' and item == 'beegfs-mgmtd') or
         (inventory_hostname == 'meta01' and item == 'beegfs-meta') or
-        ('data' in group_names and item == 'beegfs-storage')
+        ('data' in group_names and item == 'beegfs-storage') 
+
+    #- name: Mount BeeGFS file system on clients
+    #  ansible.builtin.command:
+    #    cmd: "mount -t beegfs tcp://192.168.56.10:8004 /mnt/beegfs"
+    #  when: "'clients' in group_names"
