@@ -2,8 +2,54 @@
 - name: Install BeeGFS
   hosts: all
   become: yes
+  gather_facts: false # needed for {{ ansible_architecture }}, do it later so we can wait for ssh
   vars:
+    selinux: disabled  # or permissive, enforcing
   tasks:
+    - name: Include wait_ssh task
+      include_tasks: wait_ssh.yaml
+
+    - name: Gather facts
+      setup:
+
+    - name: Update SELinux configuration
+      lineinfile:
+        path: /etc/selinux/config
+        regexp: '^SELINUX='
+        line: "SELINUX={{ selinux }}"
+      when: selinux is defined
+
+    - name: Disable the firewall
+      systemd:
+        name: firewalld
+        state: stopped
+        enabled: no
+      when: selinux is defined
+
+    - name: Remove firewalld package
+      package:
+        name: firewalld
+        state: absent
+      when: selinux is defined
+
+    - name: Reboot the VM to get the correct selinux setting
+      command: shutdown -r now
+      async: 1
+      poll: 0
+      when: selinux is defined 
+
+    - name: Wait for ssh after changing selinux setting 
+      include_tasks: wait_ssh.yaml
+      when: selinux is defined 
+
+    - name: Wait for the VM to restart and SSH to be available
+      wait_for:
+        port: 22
+        host: "{{ inventory_hostname }}"
+        delay: 10
+        timeout: 300
+      when: vm_name is defined
+
     - name: Set repository URL
       ansible.builtin.set_fact:
         repo_url: 'https://www.beegfs.io/release/beegfs_{{ system.version }}/dists/rhel8/'

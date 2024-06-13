@@ -142,7 +142,7 @@ def create_kickstart_file(hostname, ks_dir, ks_file, baseos_location, root_passw
     #repo --name="AppStream" --baseurl={appstream_location}
     with open(f"{ks_dir}/{ks_file}", "w") as ks:
         ks_contents = dedent(f"""\
-            #version=RHEL8
+            #version=ALMA8
             text
             repo --name="AppStream" --baseurl=
             %packages
@@ -150,7 +150,7 @@ def create_kickstart_file(hostname, ks_dir, ks_file, baseos_location, root_passw
             kexec-tools
             %end
             lang en_US.UTF-8
-            network  --hostname={hostname}
+            network  --bootproto=dhcp --device=enp1s0 --onboot=yes --hostname={hostname}
             url --url="{baseos_location}"
             firstboot --enable
             skipx
@@ -186,6 +186,9 @@ def install_initial_vm(conn, hostname, inventory, ansible_verbosity):
     ks_dir = "/tmp/kickstart_files"
     ks_file = f"{hostname}.kickstart"
     baseos_location = get_inventory_value(inventory, 'all.vars.bootstrap_vm.location')
+    os_variant      = get_inventory_value(inventory, 'all.vars.bootstrap_vm.os_variant', required = False)
+    if not os_variant:
+        os_variant = 'centos8'
     root_password   = get_inventory_value(inventory, 'all.vars.bootstrap_vm.root_pwd')
     auth_keys       = get_inventory_value(inventory, 'all.vars.bootstrap_vm.auth_keys')
     cpus            = get_inventory_value(inventory, 'all.vars.bootstrap_vm.cpus')
@@ -202,7 +205,7 @@ def install_initial_vm(conn, hostname, inventory, ansible_verbosity):
     --vcpus "{cpus}" \
     --disk path=/var/lib/libvirt/images/"{hostname}".img,size="{disk_size}" \
     --os-type linux \
-    --os-variant centos8 \
+    --os-variant {os_variant} \
     --network network=default \
     --graphics none \
     --initrd-inject "{ks_dir}/{ks_file}" \
@@ -237,7 +240,7 @@ def install_initial_vm(conn, hostname, inventory, ansible_verbosity):
     restart_domain(conn, hostname)
     wait_for_ssh_with_ansible(hostname, ansible_verbosity)
 
-    # Clear out any old hostnames
+    # Clear out any old hostnames from the local host
     logger.debug(f"Removing any old ssh hostname entries for {hostname}")
     # TODO: create a helper function for remove old host keys
     run_command(["ssh-keygen", "-R", hostname])
@@ -328,6 +331,9 @@ def setup_ssh_key_and_copy_to_guest(guest_mount_path, key_name="id_rsa"):
         guest_mount_path (str): The path to the guest mount directory.
         key_name (str): The name of the SSH key pair (default: "id_rsa").
     """
+    # OK. I think this function should never be called again because we are moving this to the install playbook
+    fname=inspect.currentframe().f_code.co_name
+    Fatal(f"This function {fname} should never be called again")
     logger = logging.getLogger(__name__)
     ssh_dir = os.path.join(os.environ['HOME'], '.ssh')
     private_key_path = os.path.join(ssh_dir, key_name)
@@ -455,7 +461,7 @@ def create_gold(conn, bootstrap_vm, hname, inventory_file, playbook_file, group,
     create_node(conn, bootstrap_vm, hname) 
     restart_domain(conn, hname, restart_libvirt=True)
 
-    logger.debug(f"Running ansible playbook {playbook_file} on {hname}") 
+    logger.debug(f"Running ansible playbook {playbook_file} on {group}:{hname} with inventory {inventory_file}") 
     run_playbook(hname, inventory_file, playbook_file, group, verbosity, f"{ansible_log_prefix}.{hname}")
 
     # Execute the 'uname -r' command to get the kernel version
@@ -499,7 +505,60 @@ def summary(msg):
     logger = logging.getLogger(__name__)
     logger.warning(f"SUMMARY: {msg}") 
 
-def run_playbook(hname, inventory_file, playbook_file, group, verbosity, output_prefix=None):
+def run_playbook(hname, inventory_file, playbook_file, group, verbosity, output_prefix=None, extravars=None):
+    logger = logging.getLogger(__name__)
+
+    # Ensure extravars is a dictionary if provided
+    if extravars is not None and not isinstance(extravars, dict):
+        raise ValueError("extravars must be a dictionary")
+
+    # get absolute paths
+    playbook_file  = os.path.abspath(playbook_file)
+    inventory_file = os.path.abspath(inventory_file)
+
+    # turn off key checking
+    os.environ['ANSIBLE_HOST_KEY_CHECKING'] = 'False'
+
+    # set up the output file
+    if output_prefix:
+        output_filename = f"{output_prefix}.{playbook_file.split('/')[-1]}.out"
+        if os.path.exists(output_filename):
+            with open(output_filename, 'w') as file:
+                pass # truncate to zero
+            print(f"{output_filename} truncated")
+    else:
+        output_filename = None
+
+    # Construct the kwargs for ansible_runner.run
+    filemode='a'
+    kwargs = {
+        "playbook":  playbook_file,
+        "inventory": [ inventory_file ],
+        "event_handler": event_handler_factory(output_filename,filemode),
+        "verbosity": verbosity,
+        "quiet": False  # Ensure ansible_runner print to stdout as well
+    }
+
+    # Add extravars if provided
+    if extravars:
+        kwargs["extravars"] = extravars
+
+    if hname is not None:
+        temp_inventory = create_temp_inventory_file([hname], group=group)
+        kwargs['inventory'].append(temp_inventory)
+        kwargs["limit"] = hname
+
+    # Run the playbook
+    logger.debug(f"Running playbook {playbook_file} on {group}:{hname} with inventory {inventory_file} ")
+    result = ansible_runner.run(**kwargs)
+
+    if result.status == 'successful':
+        summary(f"Playbook {playbook_file} executed successfully. Output in {output_filename}.")
+    else:
+        Fatal(f"Playbook execution failed with status: {result.status}")
+
+
+def run_playbook_old(hname, inventory_file, playbook_file, group, verbosity, output_prefix=None):
     logger = logging.getLogger(__name__)
 
     # get absolute paths
@@ -535,7 +594,7 @@ def run_playbook(hname, inventory_file, playbook_file, group, verbosity, output_
         kwargs["limit"] = hname
 
     # Run the playbook
-    logger.debug(f"Running playbook {playbook_file}")
+    logger.debug(f"Running playbook {playbook_file} on {group}:{hname} with inventory {inventory_file} ")
     result = ansible_runner.run(**kwargs)
 
     if result.status == 'successful':
@@ -612,19 +671,19 @@ def find_gold_image(full_prefix):
     logger.debug(f"Returning {gold_image} for prefix {base_prefix}")
     return gold_image
 
-def get_gold_definitions(images,system,lversion,zversion,lpatch=None,zpatch=None):
-    if lpatch:
-        lpatch = lpatch.split('/')[-1] # get last token in path
-    if zpatch:
-        zpatch = zpatch.split('/')[-1] # get last token in path
+def get_gold_definitions(images,system,system_version,backend_version,system_patch=None,backend_patch=None):
+    if system_patch:
+        system_patch = system_patch.split('/')[-1] # get last token in path
+    if backend_patch:
+        backend_patch = backend_patch.split('/')[-1] # get last token in path
     golds = {
         'clients': {
-            'image_prefix': f"{images}/{system}/clients/{system}-{lversion}.Patch-{lpatch}.Kernel-",
+            'image_prefix': f"{images}/{system}/clients/{system}-{system_version}.Patch-{system_patch}.Kernel-",
             'image'       : None,
             'hname'       : f"gold-{system}-client",
         },
         'servers': {
-            'image_prefix': f"{images}/{system}/servers/{system}-{lversion}.Patch-{lpatch}.backend-{zversion}.Patch-{zpatch}.Kernel-",
+            'image_prefix': f"{images}/{system}/servers/{system}-{system_version}.Patch-{system_patch}.backend-{backend_version}.Patch-{backend_patch}.Kernel-",
             'image'       : None,
             'hname'       : f"gold-{system}-server",
         }
@@ -633,17 +692,17 @@ def get_gold_definitions(images,system,lversion,zversion,lpatch=None,zpatch=None
 
 def make_gold_vms(conn,bootstrap_vm,images,system,inventory,inventory_file,playbook_file,rebuild_vms,rebuild_golds,verbosity, ansible_log_prefix):
     logger = logging.getLogger(__name__)
-    lversion = get_inventory_value(inventory, 'all.vars.system.version',required=False)
-    zversion = get_inventory_value(inventory, 'all.vars.system.backend.version',required=False)
-    lpatch = get_inventory_value(inventory, 'all.vars.system.patch', required=False)
-    zpatch = get_inventory_value(inventory, 'all.vars.system.backend.patch', required=False)
-    logger.debug(f"Need gold server {lversion}.{zversion} with respective patches {lpatch} and {zpatch} and gold client {lversion}")
+    system_version = get_inventory_value(inventory, 'all.vars.system.version',required=False)
+    backend_version = get_inventory_value(inventory, 'all.vars.system.backend.version',required=False)
+    system_patch = get_inventory_value(inventory, 'all.vars.system.patch', required=False)
+    backend_patch = get_inventory_value(inventory, 'all.vars.system.backend.patch', required=False)
+    logger.debug(f"Need gold server {system_version}.{backend_version} with respective patches {system_patch} and {backend_patch} and gold client {system_version}")
 
     # get the libvirt storage pool
     (pool_name, pool_path) = get_first_storage_pool_info(conn) 
 
     # initialize variables 
-    golds = get_gold_definitions(images,system,lversion,zversion,lpatch,zpatch)
+    golds = get_gold_definitions(images,system,system_version,backend_version,system_patch,backend_patch)
 
     for group,gold in golds.items(): 
         if not rebuild_vms and check_vm_status(conn, gold['hname'], shutdown=True, destroy=False):
@@ -919,6 +978,9 @@ def get_image_storage_pool_path(conn):
         return None
 
 def set_hostname_keypair_selinux_lustre_options(conn, vm_name, selinux):
+    fname=inspect.currentframe().f_code.co_name
+    Fatal(f"This function {fname} should never be called again")
+
     logger = logging.getLogger(__name__)
     try:
         dom = conn.lookupByName(vm_name)
@@ -1075,7 +1137,8 @@ def create_node(conn, src_vm, target_vm, network_name=None, network=None, target
         # Clone the base VM
         clone_vm(src_vm, target_vm)
 
-        set_hostname_keypair_selinux_lustre_options(conn,target_vm, 'disabled')
+        print("We used to use guestmount to perform some operations on the newly created node. Moved that to the install_playbook")
+        #set_hostname_keypair_selinux_lustre_options(conn,target_vm, 'disabled')
 
         if hds:
             # this get_letter thing is just a way to iterate through the alphabet to create good HDD names
@@ -1201,11 +1264,11 @@ def show_resources(conn, args, inventory, vm_dir, system, hosts):
     avail = check_network_exists(conn, args.virt_network)
     logger.debug(f"Network '{args.virt_network}' {'is' if avail else 'is not'} available for re-use.")
 
-    lversion = get_inventory_value(inventory, 'all.vars.system.version')
-    zversion = get_inventory_value(inventory, 'all.vars.system,backend.version')
-    lpatch = get_inventory_value(inventory, 'all.vars.system.patch', required=False)
-    zpatch = get_inventory_value(inventory, 'all.vars.system.backend.patch', required=False)
-    golds = get_gold_definitions(vm_dir, system, lversion, zversion, lpatch, zpatch)
+    system_version = get_inventory_value(inventory, 'all.vars.system.version')
+    backend_version = get_inventory_value(inventory, 'all.vars.system,backend.version')
+    system_patch = get_inventory_value(inventory, 'all.vars.system.patch', required=False)
+    backend_patch = get_inventory_value(inventory, 'all.vars.system.backend.patch', required=False)
+    golds = get_gold_definitions(vm_dir, system, system_version, backend_version, system_patch, backend_patch)
     for group,gold in golds.items(): 
         #logger.debug(f"Searching for stashed images matching {gold['image_prefix']}")
         pattern = f"{gold['image_prefix']}*.img"
