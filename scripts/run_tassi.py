@@ -1312,14 +1312,15 @@ def build_needed(conn, resource, user_overrides, Type):
         logger.debug(f"Need to build {resource} because of user specification")
         return True
 
-    if Type in ['bootstrap', 'vms', 'golds']:
+    if Type in ['bootstrap', 'golds']:
         avail = check_vm_status(conn, resource, shutdown=False, destroy=False)
         if not avail:
             logger.debug(f"Need to build initial resource {resource}")
             return True
-    elif Type == 'network':
-        avail = check_network_exists(conn, resource)
-        if not avail:
+    elif Type == 'cluster':
+        avail_net = check_network_exists(conn, resource)
+        avail_vm  = check_vm_status(conn, resource, shutdown=False, destroy=False)
+        if not avail_net and not avail_vm:
             logger.debug(f"Need to build initial resource {resource}")
             return True
     else:
