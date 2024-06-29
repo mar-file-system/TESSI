@@ -1456,8 +1456,6 @@ def main():
     if not os.path.exists(playbook_path):
         Fatal(f"Test script at specified path {playbook_path} does not exist")
 
-    sys.exit(0)
-
     # Example logger usage
     # logger.debug("This will appear only in verbose.log")
     # logger.info("This will also appear only in verbose.log")
