@@ -528,6 +528,30 @@ def summary(msg):
     logger = logging.getLogger(__name__)
     logger.warning(f"SUMMARY: {msg}") 
 
+def check_playbook(inventory_file, playbook):
+    """
+    Check the Ansible playbook for syntax correctness.
+
+    :param inventory_file: Path to the inventory file
+    :param playbook: Path to the playbook file
+    :return: True if the syntax check passes, False otherwise
+    """
+    logger = logging.getLogger(__name__)
+    try:
+        result = subprocess.run(
+            ["ansible-playbook", "--syntax-check", "-i", inventory_file, playbook],
+            check=True,
+            capture_output=True,
+            text=True
+        )
+        logger.debug(f"Syntax check of ansible playbook {playbook} passed.")
+        return True
+    except subprocess.CalledProcessError as e:
+        logger.error(e.stdout)
+        logger.error(e.stderr)
+        Fatal(f"Syntax check of ansible playbook {playbook} failed.")
+        return False
+
 def run_playbook(hname, inventory_file, playbook_file, group, verbosity, output_prefix=None, extravars=None):
     logger = logging.getLogger(__name__)
 
@@ -1419,17 +1443,20 @@ def main():
     logger = logging.getLogger(__name__)
     logger.debug(f"Running with {' '.join(sys.argv)}")
 
-    # check that the various directories and the ansible playbooks exist 
+    # check that the various directories and the ansible playbooks and the test script exist 
     check_images_directory(system,vm_dir)
         
     for playbook in [ 'install', 'config', 'test' ]:
         playbook_path = get_inventory_value(inventory, f"all.vars.ansible_playbooks.{playbook}", required=True)
         if not os.path.exists(playbook_path):
             Fatal(f"Ansible {playbook} playbook at specified path {playbook_path} does not exist")
+        check_playbook(args.inventory_file, playbook_path)
 
     playbook_path = get_inventory_value(inventory, f"all.vars.test_script.path", required=True)
     if not os.path.exists(playbook_path):
         Fatal(f"Test script at specified path {playbook_path} does not exist")
+
+    sys.exit(0)
 
     # Example logger usage
     # logger.debug("This will appear only in verbose.log")
