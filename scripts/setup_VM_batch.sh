@@ -21,20 +21,28 @@ ssh_pub=`cat /home/jbent/.ssh/authorized_keys`
 # Prepare kickstart file and chdir to the directory where we create it
 ks_dir="kickstart_files"
 ks_file=hostname.kickstart
+=======
+iso_path="/var/lib/libvirt/images/AlmaLinux-8.10-x86_64-minimal.iso"
+root_password="password"
+ssh_pub=$(cat /home/jbent/.ssh/authorized_keys)
+
+# Prepare kickstart file and chdir to the directory where we create it
+ks_dir="kickstart_files"
+ks_file="$hostname.kickstart"
 mkdir -p $ks_dir
 
 # Embed and customize the kickstart template
 cat <<EOF > $ks_dir/$ks_file 
 #version=RHEL8
 text
-repo --name="AppStream" --baseurl=${appstream_location}
 %packages
 @^minimal-environment
 kexec-tools
 %end
 lang en_US.UTF-8
+network  --bootproto=dhcp --device=enp1s0 --nameserver=8.8.8.8,8.8.4.4 --ipv6=auto --activate
 network  --hostname=$hostname
-url --url="${baseos_location}"
+cdrom
 firstboot --enable
 skipx
 ignoredisk --only-use=vda
@@ -66,19 +74,15 @@ virt-install \
 --vcpus "$cpus" \
 --disk path=/var/lib/libvirt/images/"$hostname".img,size="$disk_size" \
 --os-type linux \
---os-variant centos8 \
+--os-variant almalinux8 \
 --network network=default \
 --graphics none \
 --initrd-inject "$ks_dir/$ks_file" \
---location "$baseos_location" \
+--location "$iso_path" \
 --noreboot \
 --wait 20 \
 --noautoconsole \
 --extra-args "inst.ks=file:/$ks_file console=tty0 console=ttyS0,115200n8" < /dev/null
-
-#--noautoconsole < /dev/null
-
-# --extra-args "console=ttyS0 ks=http://$web_server_ip:$web_server_port/$hostname.kickstart" \
 
 virsh shutdown $hostname
 sleep 60
@@ -89,4 +93,4 @@ virsh start $hostname
 # clear out any old hostnames
 ssh-keygen -R $hostname
 
-echo "$hostname should be booting now." 
+echo "$hostname should be booting now."

@@ -135,23 +135,29 @@ def wait_for_ssh_with_ansible(host, ansible_verbosity, timeout=300):
         os.remove(temp_playbook_path)
         pass
 
-def create_kickstart_file(hostname, ks_dir, ks_file, baseos_location, root_password, ssh_pub):
+def create_kickstart_file(hostname, ks_dir, ks_file, baseos_location, root_password, ssh_pub, nameserver):
     logger = logging.getLogger(__name__)
     os.makedirs(ks_dir, exist_ok=True)
     logger.debug(f"Creating kickstart file {ks_dir}/{ks_file}")
     #repo --name="AppStream" --baseurl={appstream_location}
+    #repo --name="AppStream" --baseurl=
+    nameservers="--nameserver=8.8.8.8,8.8.4.4"
+    nameservers=f"--nameserver={nameserver},8.8.8.8" # manually add and prioritize the libvirt newly created nameserver
+    nameservers=f"--nameserver=8.8.8.8" # don't manually add and prioritize the libvirt newly created nameserver, it breaks the system to rely on that
+    ipv6="--ipv6=auto"
+    ipv6="--noipv6"
     with open(f"{ks_dir}/{ks_file}", "w") as ks:
         ks_contents = dedent(f"""\
-            #version=ALMA8
+            #version=RHEL8
             text
-            repo --name="AppStream" --baseurl=
             %packages
             @^minimal-environment
             kexec-tools
             %end
             lang en_US.UTF-8
-            network  --bootproto=dhcp --device=enp1s0 --onboot=yes --hostname={hostname}
-            url --url="{baseos_location}"
+            network --bootproto=dhcp --device=enp1s0 {nameservers} {ipv6} --activate --onboot=yes
+            network --hostname={hostname}
+            cdrom
             firstboot --enable
             skipx
             ignoredisk --only-use=vda
@@ -172,8 +178,8 @@ def create_kickstart_file(hostname, ks_dir, ks_file, baseos_location, root_passw
             chmod 700 /root/.ssh
             echo "{ssh_pub}" >> /root/.ssh/authorized_keys
             chmod 600 /root/.ssh/authorized_keys
-            reboot 
             %end
+            reboot 
         """).strip().splitlines()
             #shutdown -P now # don't do the shutdown in the kickstart, then we can use ssh to poll and know when install is done
         # remove leading whitespace and empty lines
@@ -182,6 +188,7 @@ def create_kickstart_file(hostname, ks_dir, ks_file, baseos_location, root_passw
 
 def install_initial_vm(conn, hostname, inventory, ansible_verbosity): 
     logger = logging.getLogger(__name__)
+
     # Prepare kickstart file
     ks_dir = "/tmp/kickstart_files"
     ks_file = f"{hostname}.kickstart"
@@ -194,9 +201,23 @@ def install_initial_vm(conn, hostname, inventory, ansible_verbosity):
     cpus            = get_inventory_value(inventory, 'all.vars.bootstrap_vm.cpus')
     memory          = get_inventory_value(inventory, 'all.vars.bootstrap_vm.memory_mbs')
     disk_size       = get_inventory_value(inventory, 'all.vars.bootstrap_vm.boot_hdd_gbs')
+    network         = get_inventory_value(inventory, 'all.vars.network.addr')
+    nameserver      = f"{network}.1"
     ssh_pub         = open(auth_keys).read().strip()
-    create_kickstart_file(hostname, ks_dir, ks_file, baseos_location, root_password, ssh_pub)
+    create_kickstart_file(hostname, ks_dir, ks_file, baseos_location, root_password, ssh_pub, nameserver)
 
+    # alma seems to work better when it is installed from local and not from NFS
+    image_dir      ="/var/lib/libvirt/images"
+    image_name     = os.path.basename(baseos_location)
+    image_location = os.path.join(image_dir, image_name)
+    if not os.path.exists(image_location):
+        logger.debug(f"{image_location} does not exist. Copying from {baseos_location}...")
+        os.makedirs(image_dir, exist_ok=True)
+        shutil.copy(baseos_location, image_location)
+    else:
+        logger.debug(f"{image_location} already exists.")
+
+    # now try the virt-install command
     wait_minutes = 20
     command = f"""
     virt-install \
@@ -209,10 +230,10 @@ def install_initial_vm(conn, hostname, inventory, ansible_verbosity):
     --network network=default \
     --graphics none \
     --initrd-inject "{ks_dir}/{ks_file}" \
-    --location "{baseos_location}" \
+    --location "{image_location}" \
     --noautoconsole \
     --wait {wait_minutes} \
-    --extra-args 'inst.ks=file:/{ks_file} console=tty0 console=ttyS0,115200n8'
+    --extra-args 'inst.text inst.ks=file:/{ks_file} console=tty0 console=ttyS0,115200n8'
     """
     #--noreboot \ # try without the noreboot and see if that helps
     logger.debug(f"Creating VM {hostname} from {baseos_location}")
@@ -461,6 +482,8 @@ def create_gold(conn, bootstrap_vm, hname, inventory_file, playbook_file, group,
     create_node(conn, bootstrap_vm, hname) 
     restart_domain(conn, hname, restart_libvirt=True)
 
+    # TODO: instead of running this playbook serially for both client and server, run it simultaneously on both
+    # TODO: certainly would speed up the empty install 
     logger.debug(f"Running ansible playbook {playbook_file} on {group}:{hname} with inventory {inventory_file}") 
     run_playbook(hname, inventory_file, playbook_file, group, verbosity, f"{ansible_log_prefix}.{hname}")
 
@@ -504,6 +527,30 @@ def event_handler_factory(output_file,filemode):
 def summary(msg):
     logger = logging.getLogger(__name__)
     logger.warning(f"SUMMARY: {msg}") 
+
+def check_playbook(inventory_file, playbook):
+    """
+    Check the Ansible playbook for syntax correctness.
+
+    :param inventory_file: Path to the inventory file
+    :param playbook: Path to the playbook file
+    :return: True if the syntax check passes, False otherwise
+    """
+    logger = logging.getLogger(__name__)
+    try:
+        result = subprocess.run(
+            ["ansible-playbook", "--syntax-check", "-i", inventory_file, playbook],
+            check=True,
+            capture_output=True,
+            text=True
+        )
+        logger.debug(f"Syntax check of ansible playbook {playbook} passed.")
+        return True
+    except subprocess.CalledProcessError as e:
+        logger.error(e.stdout)
+        logger.error(e.stderr)
+        Fatal(f"Syntax check of ansible playbook {playbook} failed.")
+        return False
 
 def run_playbook(hname, inventory_file, playbook_file, group, verbosity, output_prefix=None, extravars=None):
     logger = logging.getLogger(__name__)
@@ -555,7 +602,7 @@ def run_playbook(hname, inventory_file, playbook_file, group, verbosity, output_
     if result.status == 'successful':
         summary(f"Playbook {playbook_file} executed successfully. Output in {output_filename}.")
     else:
-        Fatal(f"Playbook execution failed with status: {result.status}")
+        Fatal(f"Playbook {playbook_file} execution failed with status: {result.status}")
 
 
 def run_playbook_old(hname, inventory_file, playbook_file, group, verbosity, output_prefix=None):
@@ -705,7 +752,7 @@ def make_gold_vms(conn,bootstrap_vm,images,system,inventory,inventory_file,playb
     golds = get_gold_definitions(images,system,system_version,backend_version,system_patch,backend_patch)
 
     for group,gold in golds.items(): 
-        if not rebuild_vms and check_vm_status(conn, gold['hname'], shutdown=True, destroy=False):
+        if not rebuild_golds and check_vm_status(conn, gold['hname'], shutdown=True, destroy=False):
             logger.debug(f"Reusing existing VM {gold['hname']}")
             continue
 
@@ -1289,14 +1336,15 @@ def build_needed(conn, resource, user_overrides, Type):
         logger.debug(f"Need to build {resource} because of user specification")
         return True
 
-    if Type in ['bootstrap', 'vms', 'golds']:
+    if Type in ['bootstrap', 'golds']:
         avail = check_vm_status(conn, resource, shutdown=False, destroy=False)
         if not avail:
             logger.debug(f"Need to build initial resource {resource}")
             return True
-    elif Type == 'network':
-        avail = check_network_exists(conn, resource)
-        if not avail:
+    elif Type == 'cluster':
+        avail_net = check_network_exists(conn, resource)
+        avail_vm  = check_vm_status(conn, resource, shutdown=False, destroy=False)
+        if not avail_net and not avail_vm:
             logger.debug(f"Need to build initial resource {resource}")
             return True
     else:
@@ -1364,7 +1412,7 @@ def main():
     parser.add_argument('-v', '--ansible_verbosity',        default=0, type=int,                    help='Ansible verbosity')
     parser.add_argument('-o', '--output_dir',               default='./output', type=str,           help='Directory into which to store the output files')
     parser.add_argument('-n', '--virt_network',             default='hostonly-net',                 help='Name of virtual network to use/create')
-    parser.add_argument('--rebuild',                        action='append',                        choices=['bootstrap', 'network', 'golds', 'vms', 'all'],    
+    parser.add_argument('--rebuild',                        action='append',                        choices=['bootstrap', 'golds', 'cluster', 'all'],    
                                                                                              help='Rebuild specified items (instead of re-using) if they exist')
     parser.add_argument('--skip',    action='append',   choices=['config', 'test'],          help='Skip specified steps (can be used multiple times)')
     parser.add_argument('--show',    action='store_true',                                    help='Show available resources which can be re-used and then quit')
@@ -1395,13 +1443,14 @@ def main():
     logger = logging.getLogger(__name__)
     logger.debug(f"Running with {' '.join(sys.argv)}")
 
-    # check that the various directories and the ansible playbooks exist 
+    # check that the various directories and the ansible playbooks and the test script exist 
     check_images_directory(system,vm_dir)
         
     for playbook in [ 'install', 'config', 'test' ]:
         playbook_path = get_inventory_value(inventory, f"all.vars.ansible_playbooks.{playbook}", required=True)
         if not os.path.exists(playbook_path):
             Fatal(f"Ansible {playbook} playbook at specified path {playbook_path} does not exist")
+        check_playbook(args.inventory_file, playbook_path)
 
     playbook_path = get_inventory_value(inventory, f"all.vars.test_script.path", required=True)
     if not os.path.exists(playbook_path):
@@ -1431,12 +1480,12 @@ def main():
         if not check_vm_status(conn, args.boot_vm_name):
             Fatal(f"VM {args.boot_vm_name} does not exist or is not shut off.")
 
-        if build_needed(conn, args.virt_network, args.rebuild, 'network'):
+        if build_needed(conn, args.virt_network, args.rebuild, 'cluster'):
             remove_network_if_exists(conn, args.virt_network)
 
         # make or fetch the gold image for the servers and clients
         rebuilds = {}
-        for resource in [ 'vms', 'golds' ]:
+        for resource in [ 'cluster', 'golds' ]:
             if args.rebuild and ( resource in args.rebuild or 'all' in args.rebuild ):
                 rebuilds[resource] = True
             else:
@@ -1450,13 +1499,13 @@ def main():
             inventory = inventory, 
             inventory_file = args.inventory_file, 
             playbook_file = get_inventory_value(inventory,'all.vars.ansible_playbooks.install', required=True),
-            rebuild_vms = rebuilds['vms'],
+            rebuild_vms = rebuilds['cluster'],
             rebuild_golds = rebuilds['golds'],
             verbosity = args.ansible_verbosity,
             ansible_log_prefix = ansible_log_prefix)
 
         # now clone the base image for each requested cluster node
-        if args.rebuild and ( 'vms' in args.rebuild or 'all' in args.rebuild ):
+        if args.rebuild and ( 'cluster' in args.rebuild or 'all' in args.rebuild ):
             use_existing = False
         else:
             use_existing = True
