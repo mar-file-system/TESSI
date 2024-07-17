@@ -910,10 +910,95 @@ def setup_hostonly_network(conn, network, network_name, mac, ip, hostname):
         ip (str): The fourth octet of the IP address for the VM.
         hostname (str): The hostname for the VM.
     """
+    logger = logging.getLogger(__name__)
+    
+    # Define the network XML
     network_xml = f"""
 <network>
   <name>{network_name}</name>
   <bridge name='virbr1' stp='on' delay='0'/>
+  <dns>
+    <forwarder addr='8.8.8.8'/>
+    <forwarder addr='8.8.4.4'/>
+  </dns>
+  <ip address='{network}.1' netmask='255.255.255.0'>
+    <dhcp>
+      <range start='{network}.2' end='{network}.254'/>
+    </dhcp>
+  </ip>
+</network>
+"""
+
+    def add_entry(network, hostname, mac, host_entry, description):
+        if mac is None:
+            logger.error(f"Trying to add {hostname} to {network_name} but MAC address is unknown.")
+            raise ValueError(f"MAC address for {hostname} is unknown.")
+        logger.debug(f"Adding {hostname}:{mac} to {description} network {network_name}")
+        network.update(3, 4, -1, host_entry, 3)
+
+    # Ensure we have a MAC address
+    if mac is None:
+        mac = get_mac_address(conn, hostname, network_name)
+    host_entry = f"<host mac='{mac}' name='{hostname}' ip='{network}.{ip}'/>"
+
+    # Check if the network already exists
+    if check_network_exists(conn, network_name):
+        if is_host_in_network_by_name(conn, network_name, hostname, ip):
+            logger.debug(f"Reusing existing entry for {hostname} in network {network_name}")
+        else:
+            vnetwork = conn.networkLookupByName(network_name)
+            add_entry(vnetwork, hostname, mac, host_entry, 'existing')
+    else:
+        vnetwork = conn.networkDefineXML(network_xml)
+        vnetwork.setAutostart(True)
+        vnetwork.create()
+        add_entry(vnetwork, hostname, mac, host_entry, 'newly_created')
+    
+    # Ensure the new network DNS is in /etc/resolv.conf
+    resolv_conf_path = '/etc/resolv.conf'
+    dns_entry = f"nameserver {network}.1"
+    
+    # Read the current /etc/resolv.conf content
+    with open(resolv_conf_path, 'r') as file:
+        resolv_conf = file.read()
+    
+    # Check if the DNS entry is already in /etc/resolv.conf
+    if dns_entry not in resolv_conf:
+        # Backup the current resolv.conf
+        backup_path = f"{resolv_conf_path}.backup"
+        with open(backup_path, 'w') as backup_file:
+            backup_file.write(resolv_conf)
+        logger.debug(f"Backup of /etc/resolv.conf created at {backup_path}")
+        
+        # Add the new DNS entry to resolv.conf
+        with open(resolv_conf_path, 'a') as file:
+            file.write(f"{dns_entry}\n")
+        logger.debug(f"Added {dns_entry} to /etc/resolv.conf")
+    else:
+        logger.debug(f"{dns_entry} is already present in /etc/resolv.conf")
+
+
+def setup_hostonly_network_old(conn, network, network_name, mac, ip, hostname):
+    """
+    Set up or update a host-only network with a single VM entry.
+    
+    Args:
+        conn: Connection object to the libvirt API.
+        network (str): The first three octets of the IP address for the network.
+        network_name (str): The name of the network.
+        mac (str): The MAC address for the VM.
+        ip (str): The fourth octet of the IP address for the VM.
+        hostname (str): The hostname for the VM.
+    """
+    # added a dns forwarding section to hopefully help with some networking errors
+    network_xml = f"""
+<network>
+  <name>{network_name}</name>
+  <bridge name='virbr1' stp='on' delay='0'/>
+  <dns>
+    <forwarder addr='8.8.8.8'/>
+    <forwarder addr='8.8.4.4'/>
+  </dns>
   <ip address='{network}.1' netmask='255.255.255.0'>
     <dhcp>
       <range start='{network}.2' end='{network}.254'/>

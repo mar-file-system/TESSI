@@ -12,8 +12,17 @@ fi
 memory=4096
 cpus=2
 disk_size=12
+centos8="http://mirror.centos.org/centos/8-stream"
+baseos_location="$centos8/BaseOS/x86_64/os/"
+appstr_location="$centos8/AppStream/x86_64/os/"
+root_password="password"
+ssh_pub=`cat /home/jbent/.ssh/authorized_keys`
+
+# Prepare kickstart file and chdir to the directory where we create it
+ks_dir="kickstart_files"
+ks_file=hostname.kickstart
+=======
 iso_path="/var/lib/libvirt/images/AlmaLinux-8.10-x86_64-minimal.iso"
-ios_path="/var/lib/libvirt/boot/AlmaLinux-8.10-x86_64-minimal.iso"
 root_password="password"
 ssh_pub=$(cat /home/jbent/.ssh/authorized_keys)
 
@@ -40,7 +49,7 @@ ignoredisk --only-use=vda
 bootloader --append="crashkernel=auto" --location=mbr --boot-drive=vda
 autopart
 clearpart --all --initlabel --drives=vda
-timezone America/New_York --isUtc
+timezone US/Mountain --isUtc --ntpservers=0.pool.ntp.org,1.pool.ntp.org,2.pool.ntp.org,3.pool.ntp.org
 rootpw --plaintext ${root_password}
 %addon com_redhat_kdump --enable --reserve-mb='auto'
 %end
@@ -85,4 +94,3 @@ virsh start $hostname
 ssh-keygen -R $hostname
 
 echo "$hostname should be booting now."
-
