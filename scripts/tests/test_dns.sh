@@ -30,6 +30,7 @@ commands=(
     "ping -c 1 meta00"
     "ssh meta00 hostname"
     "nc -z -v -w 5 meta00 22"
+    "nc -z -v -w 5 meta00 8008"
 )
 
 # Execute each command and store the return code
