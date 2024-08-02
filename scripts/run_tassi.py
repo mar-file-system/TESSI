@@ -7,7 +7,6 @@ import inspect
 import libvirt
 import logging
 import os
-import os
 import pwd
 import re
 import socket
@@ -1203,10 +1202,16 @@ def is_host_in_network_by_name(conn, network_name, host_name, expected_ip):
 def remove_ssh_host_keys(hostname):
     def actual_remove(hostname, path, owner_uid, owner_gid):
         logger = logging.getLogger(__name__)
-        logger.debug(f"Removing ssh key for {hostname} from {path}")
-        run_command(["ssh-keygen", "-f", path, "-R", hostname])
-        # Reset file ownership to the original user
-        os.chown(path, owner_uid, owner_gid)
+        if os.path.exists(path):
+            logger.debug(f"Removing ssh key for {hostname} from {path}")
+            try:
+                subprocess.run(["ssh-keygen", "-f", path, "-R", hostname], check=True)
+                # Reset file ownership to the original user
+                os.chown(path, owner_uid, owner_gid)
+            except subprocess.CalledProcessError as e:
+                logger.error(f"Failed to remove ssh key for {hostname} from {path}: {e}")
+        else:
+            logger.warning(f"{path} does not exist. Skipping removal.")
 
     # Check if the script is running as root
     is_root = os.getuid() == 0
