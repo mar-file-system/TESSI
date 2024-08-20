@@ -20,7 +20,7 @@ if [ ! -f "$iso_path" ]; then
 fi
 
 # Define VM parameters
-vm_name="in15vm04"
+vm_name="testdnf"
 memory=4096
 cpus=2
 disk_size=12
@@ -28,6 +28,9 @@ disk_size=12
 location="http://mirror.centos.org/centos/8-stream/BaseOS/x86_64/os/"
 location="https://repo.almalinux.org/almalinux/8.10/isos/x86_64/AlmaLinux-8.10-x86_64-minimal.iso"
 location="/var/lib/libvirt/images/AlmaLinux-8.10-x86_64-minimal.iso"
+osvar="almalinux8"
+location="https://download.fedoraproject.org/pub/fedora/linux/releases/40/Everything/x86_64/os"
+osvar="fedora31"
 
 # cleanup any old ones
 virsh destroy $vm_name
@@ -36,13 +39,13 @@ rm -f /var/lib/libvirt/images/$vm_name.img
 
 # Create VM, we were using iso_path as the argument to --location but let's try to do a network install now
 # --location "$iso_path" \
-virt-install \
+echo virt-install \
 --name "$vm_name" \
 --ram "$memory" \
 --vcpus "$cpus" \
 --disk path=/var/lib/libvirt/images/"$vm_name".img,size="$disk_size" \
 --os-type linux \
---os-variant almalinux8 \
+--os-variant $osvar \
 --network network=default \
 --graphics none \
 --console pty,target_type=serial \

@@ -134,7 +134,7 @@ def wait_for_ssh_with_ansible(host, ansible_verbosity, timeout=300):
         os.remove(temp_playbook_path)
         pass
 
-def create_kickstart_file(hostname, ks_dir, ks_file, baseos_location, root_password, ssh_pub, nameserver):
+def create_kickstart_file(hostname, ks_dir, ks_file, baseos_location, root_password, ssh_pub, nameserver, os_variant, repos):
     logger = logging.getLogger(__name__)
     os.makedirs(ks_dir, exist_ok=True)
     logger.debug(f"Creating kickstart file {ks_dir}/{ks_file}")
@@ -145,6 +145,17 @@ def create_kickstart_file(hostname, ks_dir, ks_file, baseos_location, root_passw
     nameservers=f"--nameserver=8.8.8.8" # don't manually add and prioritize the libvirt newly created nameserver, it breaks the system to rely on that
     ipv6="--ipv6=auto"
     ipv6="--noipv6"
+    install_type = "cdrom" if 'fedora' not in os_variant else f'url --url="{baseos_location}"'
+    net_device = "enp1s0" if 'fedora' not in os_variant else 'link'
+
+    # did the user specify to add additional repos to the kickstart file?
+    repo_str = ''
+    if repos:
+        for repo in repos.split(','):
+            repo_str = f'repo --name={repo}\n'
+        logger.debug(f"Added repos {repo_str} to the kickstart file due to user specification")
+
+    # TODO: change enp1s0 to link below and test the alma and see if it's ok with link. specifiying seems unnecessary here.
     with open(f"{ks_dir}/{ks_file}", "w") as ks:
         ks_contents = dedent(f"""\
             #version=RHEL8
@@ -154,9 +165,10 @@ def create_kickstart_file(hostname, ks_dir, ks_file, baseos_location, root_passw
             kexec-tools
             %end
             lang en_US.UTF-8
-            network --bootproto=dhcp --device=enp1s0 {nameservers} {ipv6} --activate --onboot=yes
+            network --bootproto=dhcp --device={net_device} {nameservers} {ipv6} --activate --onboot=yes
             network --hostname={hostname}
-            cdrom
+            {install_type}
+            {repo_str}
             firstboot --enable
             skipx
             ignoredisk --only-use=vda
@@ -166,11 +178,6 @@ def create_kickstart_file(hostname, ks_dir, ks_file, baseos_location, root_passw
             timezone US/Mountain --isUtc --ntpservers=0.pool.ntp.org,1.pool.ntp.org,2.pool.ntp.org,3.pool.ntp.org
             {"rootpw --plaintext " + root_password if root_password else ""}
             %addon com_redhat_kdump --enable --reserve-mb='auto'
-            %end
-            %anaconda
-            pwpolicy root --minlen=6 --minquality=1 --notstrict --nochanges --notempty
-            pwpolicy user --minlen=6 --minquality=1 --notstrict --nochanges --emptyok
-            pwpolicy luks --minlen=6 --minquality=1 --notstrict --nochanges --notempty
             %end
             %post
             mkdir -p /root/.ssh
@@ -200,44 +207,67 @@ def install_initial_vm(conn, hostname, inventory, ansible_verbosity):
     cpus            = get_inventory_value(inventory, 'all.vars.bootstrap_vm.cpus')
     memory          = get_inventory_value(inventory, 'all.vars.bootstrap_vm.memory_mbs')
     disk_size       = get_inventory_value(inventory, 'all.vars.bootstrap_vm.boot_hdd_gbs')
+    boot_repos      = get_inventory_value(inventory, 'all.vars.bootstrap_vm.repos', required=False)
     network         = get_inventory_value(inventory, 'all.vars.network.addr')
     nameserver      = f"{network}.1"
     ssh_pub         = open(auth_keys).read().strip()
-    create_kickstart_file(hostname, ks_dir, ks_file, baseos_location, root_password, ssh_pub, nameserver)
+    create_kickstart_file(hostname, ks_dir, ks_file, baseos_location, root_password, ssh_pub, nameserver, os_variant, boot_repos)
 
-    # alma seems to work better when it is installed from local and not from NFS
-    image_dir      ="/var/lib/libvirt/images"
-    image_name     = os.path.basename(baseos_location)
-    image_location = os.path.join(image_dir, image_name)
-    if not os.path.exists(image_location):
-        logger.debug(f"{image_location} does not exist. Copying from {baseos_location}...")
-        os.makedirs(image_dir, exist_ok=True)
-        shutil.copy(baseos_location, image_location)
-    else:
-        logger.debug(f"{image_location} already exists.")
+    prefix, extension = os.path.splitext(baseos_location)
 
-    # now try the virt-install command
+    # begin making the virt-install command with shared arguments 
     wait_minutes = 20
     command = f"""
     virt-install \
     --name "{hostname}" \
     --ram "{memory}" \
     --vcpus "{cpus}" \
-    --disk path=/var/lib/libvirt/images/"{hostname}".img,size="{disk_size}" \
     --os-type linux \
     --os-variant {os_variant} \
     --network network=default \
     --graphics none \
     --initrd-inject "{ks_dir}/{ks_file}" \
-    --location "{image_location}" \
     --noautoconsole \
     --wait {wait_minutes} \
-    --extra-args 'inst.text inst.ks=file:/{ks_file} console=tty0 console=ttyS0,115200n8'
     """
+
+    if extension == ".iso":
+        # alma seems to work better when it is installed from local and not from NFS
+        image_dir      ="/var/lib/libvirt/images"
+        image_name     = os.path.basename(baseos_location)
+        image_location = os.path.join(image_dir, image_name)
+        if not os.path.exists(image_location):
+            logger.debug(f"{image_location} does not exist. Copying from {baseos_location}...")
+            os.makedirs(image_dir, exist_ok=True)
+            shutil.copy(baseos_location, image_location)
+        else:
+            logger.debug(f"{image_location} already exists.")
+        command += f'--disk path=/var/lib/libvirt/images/"{hostname}".img,size="{disk_size}" '
+        command += f'--location "{image_location}" '
+        command += f"--extra-args 'inst.text inst.ks=file:/{ks_file} console=tty0 console=ttyS0,115200n8'"
+    else:
+        image_location = baseos_location
+        command += f'--disk=/var/lib/libvirt/images/"{hostname}".qcow2,bus=virtio,format=qcow2,size="{disk_size}" '
+        command += f'--location "{image_location}" '
+        command += f'--extra-args="inst.ks=file:/{ks_file} console=ttyS0 net.ifnames=0 biosdevname=0"'
+
+    # now try the virt-install command
     #--noreboot \ # try without the noreboot and see if that helps
     logger.debug(f"Creating VM {hostname} from {baseos_location}")
     logger.debug(f"{command}")
     start_time = time.time()
+
+    working_libvirt = 'virt-install --name dnftest2 --ram 2048 --os-type linux --os-variant fedora31 --graphics none --disk=/var/lib/libvirt/images/f32-min.vda.x86_64.qcow2,bus=virtio,format=qcow2,size=7 --location=https://download.fedoraproject.org/pub/fedora/linux/releases/40/Everything/x86_64/os --initrd-inject ./ks-min.cfg --extra-args="inst.ks=file:/ks-min.cfg console=ttyS0 net.ifnames=0 biosdevname=0"'
+
+    # temporarily just output the libvirt command and exit
+    logger.debug(f"Constructed virt-install command {command}")
+    #logger.debug(f"Known working virt-install command {working_libvirt}")
+    # I think the problem is not with the virt-install command but with the cdrom directive in the kickstart file. Instead should use url I think. 
+    # testing now with /tmp/kickstart_files/bootstrap_dnf2.kickstart
+    # looks like also the anaconda section in the kickstart file is problem. testing now with /tmp/kickstart_files/bootstrap_dnf3.kickstart
+    # also hostname cannot include underscores
+
+    #sys.exit(0)
     result = subprocess.run(command, shell=True, capture_output=True, text=True, stdin=subprocess.DEVNULL)
     if result.returncode != 0:
         error_message = f"Warning message: Potential failure to create VM {hostname}:\n" \
@@ -1358,7 +1388,7 @@ def get_inventory_value(inventory, key, required=True):
         if required:
             Fatal(f"Missing '{key}' in the inventory file.")
         else:
-            pass
+            return None
 
 def get_hosts(inventory, group):
     hosts = set()
@@ -1377,11 +1407,11 @@ def get_hosts(inventory, group):
 def restart_hosts(conn, hosts):
     logger = logging.getLogger(__name__)
     # Start the cloned VMs
-    for hname in hosts:
-        logger.debug(f"Starting {hname},")
-        dom = conn.lookupByName(hname)
-        dom.create()
-    time.sleep(10)
+    #for hname in hosts:
+    #    logger.debug(f"Starting {hname},")
+    #    dom = conn.lookupByName(hname)
+    #    dom.create()
+    #time.sleep(10)
 
     # TODO: we just started them a second ago, necessary to restart them here? 
     # therefore this reboot here is probably unnecessary
