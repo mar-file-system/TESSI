@@ -1,0 +1,86 @@
+---
+- name: Configure a Fedora system to run a dnf local cache
+  hosts: all
+  vars:
+    dnflocal_conf: /etc/dnf/plugins/local.conf
+    repodir: /var/lib/dnf/plugins/local
+  gather_facts: false # needed for {{ ansible_architecture }}, do it later so we can wait for ssh
+  any_errors_fatal: true
+
+  tasks:
+    - name: Include wait_ssh task
+      include_tasks: wait_ssh.yaml
+
+    - name: Gather facts
+      setup:
+
+    - name: Include set_hostname
+      include_tasks: set_hostname.yaml
+
+    - name: Ensure the directory for dnflocal_conf exists
+      file:
+        path: "{{ dnflocal_conf | dirname }}"
+        state: directory
+        mode: '0755'
+      when: "'servers' in group_names"
+
+    - name: Ensure the directory for repodir exists
+      file:
+        path: "{{ repodir }}"
+        state: directory
+        mode: '0755'
+      when: "'servers' in group_names"
+
+    - name: Ensure the dnflocal_conf file exists
+      file:
+        path: "{{ dnflocal_conf }}"
+        state: touch
+        mode: '0644'
+      when: "'servers' in group_names"
+
+    - name: Add or ensure the repodir setting in dnflocal_conf
+      lineinfile:
+        path: "{{ dnflocal_conf }}"
+        regexp: '^repodir='
+        line: "repodir={{ repodir }}"
+        create: yes
+      when: "'servers' in group_names"
+
+    - name: Ensure createrepo_c is installed
+      dnf:
+        name: createrepo_c
+        state: present
+      when: "'servers' in group_names"
+
+    - name: Generate repository metadata
+      command: createrepo_c "{{ repodir }}"
+      args:
+        creates: "{{ repodir }}/repodata/repomd.xml"
+      when: "'servers' in group_names"
+
+    - name: Ensure the DNF local plugin is enabled
+      lineinfile:
+        path: "{{ dnflocal_conf }}"
+        regexp: '^enabled='
+        line: 'enabled=true'
+        create: yes
+      when: "'servers' in group_names"
+
+    - name: Ensure the createrepo section is enabled
+      lineinfile:
+        path: "{{ dnflocal_conf }}"
+        regexp: '^\[createrepo\]'
+        insertafter: '^# Createrepo options. See man createrepo_c'
+        line: '[createrepo]'
+      when: "'servers' in group_names"
+
+    - name: Ensure the createrepo section is enabled (enabled=true)
+      lineinfile:
+        path: "{{ dnflocal_conf }}"
+        regexp: '^enabled='
+        insertafter: '^\[createrepo\]'
+        line: 'enabled=true'
+      when: "'servers' in group_names"
+
+- import_playbook: configure_ssh.yaml
+
