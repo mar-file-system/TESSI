@@ -1,10 +1,12 @@
 ---
-- name: Configure a Fedora system to run a dnf local cache
+- name: Configure a Fedora system to run a DNF local cache and Squid proxy
   hosts: all
   vars:
     dnflocal_conf: /etc/dnf/plugins/local.conf
     repodir: /var/lib/dnf/plugins/local
-  gather_facts: false # needed for {{ ansible_architecture }}, do it later so we can wait for ssh
+    squid_conf: /etc/squid/squid.conf
+    apache_conf: /etc/httpd/conf.d/dnf-repo.conf
+  gather_facts: false
   any_errors_fatal: true
 
   tasks:
@@ -66,20 +68,91 @@
         create: yes
       when: "'servers' in group_names"
 
-    - name: Ensure the createrepo section is enabled
-      lineinfile:
-        path: "{{ dnflocal_conf }}"
-        regexp: '^\[createrepo\]'
-        insertafter: '^# Createrepo options. See man createrepo_c'
-        line: '[createrepo]'
+    - name: Ensure Apache is installed
+      dnf:
+        name: httpd
+        state: present
       when: "'servers' in group_names"
 
-    - name: Ensure the createrepo section is enabled (enabled=true)
-      lineinfile:
-        path: "{{ dnflocal_conf }}"
-        regexp: '^enabled='
-        insertafter: '^\[createrepo\]'
-        line: 'enabled=true'
+    - name: Ensure the Apache conf.d directory exists and the dnf-repo.conf file is touched
+      block:
+        - name: Ensure the Apache conf.d directory exists
+          file:
+            path: "{{ apache_conf | dirname }}"
+            state: directory
+            mode: '0755'
+          when: "'servers' in group_names"
+
+        - name: Ensure the dnf-repo.conf file exists
+          file:
+            path: "{{ apache_conf }}"
+            state: touch
+            mode: '0644'
+          when: "'servers' in group_names"
+
+    - name: Configure Apache to serve the DNF repository
+      blockinfile:
+        path: "{{ apache_conf }}"
+        block: |
+          Alias /dnf-repo {{ repodir }}
+
+          <Directory {{ repodir }}>
+              Options Indexes FollowSymLinks
+              AllowOverride None
+              Require all granted
+          </Directory>
+      when: "'servers' in group_names"
+
+    - name: Restart and enable Apache service
+      systemd:
+        name: httpd
+        state: restarted
+        enabled: yes
+      when: "'servers' in group_names"
+
+    - name: Ensure Squid is installed
+      dnf:
+        name: squid
+        state: present
+      when: "'servers' in group_names"
+
+    - name: Configure Squid to forward RPM requests to the local DNF cache
+      blockinfile:
+        path: "{{ squid_conf }}"
+        block: |
+          # Basic settings for Squid
+          http_port 3128 intercept
+          acl localnet src 192.168.56.0/24
+          http_access allow localnet
+
+          cache_dir ufs /var/spool/squid 10000 16 256
+          maximum_object_size 1 GB
+          minimum_object_size 0 KB
+          refresh_pattern . 0 20% 4320
+
+          # Redirect RPM requests to the local DNF cache
+          cache_peer 127.0.0.1 parent 80 0 no-query originserver name=dnf_local
+          acl dnf_rpm urlpath_regex \.rpm$
+          cache_peer_access dnf_local allow dnf_rpm
+          cache_peer_access dnf_local deny all
+
+          # Allow all HTTP and HTTPS traffic
+          http_access allow all
+      when: "'servers' in group_names"
+
+    - name: Start and enable Squid service
+      systemd:
+        name: squid
+        state: started
+        enabled: yes
+      when: "'servers' in group_names"
+
+    - name: Configure iptables to redirect HTTP and HTTPS traffic to Squid
+      command: >
+        iptables -t nat -A PREROUTING -p tcp --dport {{ item }} -j REDIRECT --to-port 3128
+      loop:
+        - 80
+        - 443
       when: "'servers' in group_names"
 
 - import_playbook: configure_ssh.yaml
