@@ -1,0 +1,82 @@
+---
+- name: Configure a Fedora system to run a Squid caching proxy for DNF and configure clients
+  hosts: all
+  vars:
+    squid_conf: /etc/squid/squid.conf
+    squid_cache_dir: /var/spool/squid
+    cache_size_mb: 10000 # Size of the cache in MB
+    cache_dir_levels: "16 256" # Cache directory structure levels
+    max_object_size_mb: 1000 # Maximum object size to cache in MB
+    min_object_size_kb: 0 # Minimum object size to cache in KB
+    rpm_cache_duration_min: 43200 # Cache duration for RPMs in minutes (30 days)
+    rpm_refresh_percent: 100 # Percentage of time before RPM expires to refresh it
+    refresh_pattern: "-i \\.rpm$ {{ rpm_cache_duration_min }} {{ rpm_refresh_percent }}% {{ rpm_cache_duration_min }}"
+
+    dnf_conf: /etc/dnf/dnf.conf
+  gather_facts: true
+  any_errors_fatal: true
+
+  tasks:
+    - name: Include wait_ssh task
+      include_tasks: wait_ssh.yaml
+
+    - name: Gather facts
+      setup:
+
+    - name: Include set_hostname
+      include_tasks: set_hostname.yaml
+
+    - name: Get the IP address of the server
+      set_fact:
+        server_ip: "{{ ansible_default_ipv4.address }}"
+      when: "'servers' in group_names"
+
+    - name: Ensure Squid is installed (on the server)
+      dnf:
+        name: squid
+        state: present
+      when: "'servers' in group_names"
+
+    - name: Configure Squid for caching DNF packages (on the server)
+      blockinfile:
+        path: "{{ squid_conf }}"
+        block: |
+          # Basic settings for Squid
+          http_port 3128 intercept
+          acl localnet src 192.168.56.0/24
+          http_access allow localnet
+
+          cache_dir ufs {{ squid_cache_dir }} {{ cache_size_mb }} {{ cache_dir_levels }}
+          maximum_object_size {{ max_object_size_mb }} MB
+          minimum_object_size {{ min_object_size_kb }} KB
+          refresh_pattern {{ refresh_pattern }}
+
+          # Allow all HTTP and HTTPS traffic
+          http_access allow all
+      when: "'servers' in group_names"
+
+    - name: Start and enable Squid service (on the server)
+      systemd:
+        name: squid
+        state: started
+        enabled: yes
+      when: "'servers' in group_names"
+
+    - name: Configure iptables to redirect HTTP and HTTPS traffic to Squid (on the server)
+      command: >
+        iptables -t nat -A PREROUTING -p tcp --dport {{ item }} -j REDIRECT --to-port 3128
+      loop:
+        - 80
+        - 443
+      when: "'servers' in group_names"
+
+    - name: Configure DNF to use the Squid proxy (on all hosts)
+      blockinfile:
+        path: "{{ dnf_conf }}"
+        block: |
+          [main]
+          proxy=http://{{ server_ip }}:3128
+      when: server_ip is defined
+
+- import_playbook: configure_ssh.yaml
+
