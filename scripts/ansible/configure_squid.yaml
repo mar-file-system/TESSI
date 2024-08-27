@@ -1,0 +1,107 @@
+---
+- name: Configure a Fedora system to run a Squid caching proxy for DNF and configure clients
+  hosts: all
+  vars:
+    squid_conf: /etc/squid/squid.conf
+    squid_cache_dir: /var/spool/squid
+    cache_size_mb: 10000 # Size of the cache in MB
+    cache_dir_levels: "16 256" # Cache directory structure levels
+    max_object_size_mb: 1000 # Maximum object size to cache in MB
+    min_object_size_kb: 0 # Minimum object size to cache in KB
+    rpm_cache_duration_min: 43200 # Cache duration for RPMs in minutes (30 days)
+    rpm_refresh_percent: 100 # Percentage of time before RPM expires to refresh it
+    refresh_pattern: "-i \\.rpm$ {{ rpm_cache_duration_min }} {{ rpm_refresh_percent }}% {{ rpm_cache_duration_min }}"
+    dnf_conf: /etc/dnf/dnf.conf
+
+  tasks:
+    - name: Gather facts
+      setup:
+
+    - name: Get the IP address of the server
+      set_fact:
+        squid_server_ip: "{{ ansible_default_ipv4.address }}"
+      when: "'servers' in group_names"
+      delegate_facts: true
+
+    - name: Propagate the server IP to all hosts
+      set_fact:
+        squid_server_ip: "{{ hostvars['dnfcachesrv']['squid_server_ip'] }}"
+      delegate_to: localhost
+      run_once: true
+
+    - name: Ensure Squid is installed
+      dnf:
+        name: squid
+        state: present
+      when: "'servers' in group_names"
+
+    - name: Configure Squid for caching DNF packages
+      blockinfile:
+        path: "{{ squid_conf }}"
+        block: |
+          # Basic settings for Squid
+          http_port 3128 intercept
+          acl localnet src 192.168.0.0/16  # Avoid duplicate ACL entries
+          acl SSL_ports port 443
+          acl Safe_ports port 80 443
+          acl CONNECT method CONNECT
+
+          # Allow SSL traffic
+          http_access allow localnet CONNECT SSL_ports
+
+          # Allow all local network traffic
+          http_access allow localnet
+
+          # Allow all other traffic
+          http_access allow all
+
+          # refresh pattern for rpms
+          refresh_pattern {{ refresh_pattern }}
+
+      when: "'servers' in group_names"
+
+    - name: Comment out any existing deny rules in squid.conf
+      replace:
+        path: "{{ squid_conf }}"
+        regexp: '^http_access deny'
+        replace: '#\0'
+      when: "'servers' in group_names"
+
+    - name: Start and enable Squid service
+      systemd:
+        name: squid
+        state: started
+        enabled: yes
+      when: "'servers' in group_names"
+
+    - name: Configure iptables to redirect HTTP and HTTPS traffic to Squid
+      command: >
+        iptables -t nat -A PREROUTING -i eth0 -p tcp -m multiport --dports 80,443 -j REDIRECT --to-port 3128
+      when: "'servers' in group_names"
+
+    - name: Enable IP forwarding
+      sysctl:
+        name: net.ipv4.ip_forward
+        value: 1
+        state: present
+        sysctl_set: yes
+        reload: yes
+      when: "'servers' in group_names"
+
+    - name: Configure DNF to use the Squid proxy on all hosts
+      blockinfile:
+        path: "{{ dnf_conf }}"
+        block: |
+          [main]
+          proxy=http://{{ squid_server_ip }}:3128
+      when: squid_server_ip is defined
+
+    - name: Verify transparent proxy setup
+      shell: "iptables -t nat -L PREROUTING -n -v"
+      register: iptables_output
+      when: "'servers' in group_names"
+
+    - debug:
+        var: iptables_output
+      when: "'servers' in group_names"
+
