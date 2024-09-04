@@ -125,7 +125,7 @@ def main():
                 except libvirt.libvirtError as e:
                     print(f"ERROR: Error getting {func_dict['name']} for {domain.name()}: {e}")
 
-        if (args.force_delete and domain.name() != 'bootstrap') or (args.delete and input(f"PROMPT: Delete {domain.name()}? y/n: ").strip().lower() == 'y'):
+        if (args.force_delete and 'bootstrap' not in domain.name()) or (args.delete and input(f"PROMPT: Delete {domain.name()}? y/n: ").strip().lower() == 'y'):
             delete_domain(domain,conn)
 
     conn.close()
