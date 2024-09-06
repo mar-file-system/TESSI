@@ -7,6 +7,7 @@ import inspect
 import libvirt
 import logging
 import os
+import pprint
 import pwd
 import re
 import socket
@@ -193,6 +194,95 @@ def create_kickstart_file(hostname, ks_dir, ks_file, baseos_location, root_passw
         ks.write(ks_contents)
 
 def install_initial_vm(conn, hostname, inventory, ansible_verbosity): 
+    logger = logging.getLogger(__name__)
+
+    # Prepare kickstart file
+    ks_dir = "/tmp/kickstart_files"
+    ks_file = f"{hostname}.kickstart"
+    baseos_location = get_inventory_value(inventory, 'all.vars.bootstrap_vm.location')
+    os_variant      = get_inventory_value(inventory, 'all.vars.bootstrap_vm.os_variant', required = False)
+    if not os_variant:
+        os_variant = 'centos8'
+    root_password   = get_inventory_value(inventory, 'all.vars.bootstrap_vm.root_pwd')
+    auth_keys       = get_inventory_value(inventory, 'all.vars.bootstrap_vm.auth_keys')
+    cpus            = get_inventory_value(inventory, 'all.vars.bootstrap_vm.cpus')
+    memory          = get_inventory_value(inventory, 'all.vars.bootstrap_vm.memory_mbs')
+    disk_size       = get_inventory_value(inventory, 'all.vars.bootstrap_vm.boot_hdd_gbs')
+    boot_repos      = get_inventory_value(inventory, 'all.vars.bootstrap_vm.repos', required=False)
+    network         = get_inventory_value(inventory, 'all.vars.network.addr')
+    nameserver      = f"{network}.1"
+    ssh_pub         = open(auth_keys).read().strip()
+    create_kickstart_file(hostname, ks_dir, ks_file, baseos_location, root_password, ssh_pub, nameserver, os_variant, boot_repos)
+
+    prefix, extension = os.path.splitext(baseos_location)
+
+    # begin making the virt-install command with shared arguments 
+    wait_minutes = 20
+    command = f"""
+    virt-install \
+    --name "{hostname}" \
+    --ram "{memory}" \
+    --vcpus "{cpus}" \
+    --os-type linux \
+    --os-variant {os_variant} \
+    --network network=default \
+    --graphics none \
+    --initrd-inject "{ks_dir}/{ks_file}" \
+    --noautoconsole \
+    --wait {wait_minutes} \
+    """
+
+    if extension == ".iso":
+        image_dir      ="/var/lib/libvirt/images"
+        image_name     = os.path.basename(baseos_location)
+        image_location = os.path.join(image_dir, image_name)
+        if not os.path.exists(image_location):
+            logger.debug(f"{image_location} does not exist. Copying from {baseos_location}...")
+            os.makedirs(image_dir, exist_ok=True)
+            shutil.copy(baseos_location, image_location)
+        else:
+            logger.debug(f"{image_location} already exists.")
+        command += f'--disk path=/var/lib/libvirt/images/"{hostname}".img,size="{disk_size}" '
+        command += f'--location "{image_location}" '
+        command += f"--extra-args 'inst.text inst.ks=file:/{ks_file} console=tty0 console=ttyS0,115200n8'"
+    else:
+        image_location = baseos_location
+        command += f'--disk=/var/lib/libvirt/images/"{hostname}".qcow2,bus=virtio,format=qcow2,size="{disk_size}" '
+        command += f'--location "{image_location}" '
+        command += f'--extra-args="inst.ks=file:/{ks_file} console=ttyS0 net.ifnames=0 biosdevname=0"'
+
+    # now try the virt-install command
+    logger.debug(f"Creating VM {hostname} from {baseos_location}")
+    logger.debug(f"{command}")
+    start_time = time.time()
+
+    result = subprocess.run(command, shell=True, capture_output=True, text=True, stdin=subprocess.DEVNULL)
+    if result.returncode != 0:
+        error_message = f"Warning message: Potential failure to create VM {hostname}:\n" \
+                        f"Return code: {result.returncode}\n" \
+                        f"Standard Output: {result.stdout.strip()}\n" \
+                        f"Standard Error: {result.stderr.strip()}"
+        logger.error(error_message)
+        if 'Installation has exceeded specified time limit. Exiting application.' in result.stdout:
+            logger.debug("Ignoring timeout error from virt-install.")
+        else:
+            Fatal(error_message)
+    if result.stdout:
+        logger.debug(result.stdout.strip())
+    if result.stderr:
+        logger.error(result.stderr.strip())
+    elapsed = time.time() - start_time
+
+    # Restart the VM and wait for it
+    logger.debug(f"Created VM {hostname} in {elapsed} seconds. Will now restart it.")
+    restart_domain(conn, hostname)
+    wait_for_ssh_with_ansible(hostname, ansible_verbosity)
+
+    # Clear out any old hostnames from the local host
+    logger.debug(f"Removing any old ssh hostname entries for {hostname}")
+    run_command(["ssh-keygen", "-R", hostname])
+
+def install_initial_vm_old(conn, hostname, inventory, ansible_verbosity): 
     logger = logging.getLogger(__name__)
 
     # Prepare kickstart file
@@ -1369,6 +1459,8 @@ def load_yaml(file):
 
     # add inheritance here manually since ansible does this for us
     apply_group_vars_to_hosts(inventory)
+    #pprint.pprint(inventory)
+    #print(type(inventory['all']['vars']['nfs_export']))
     return inventory
 
 def Fatal(msg):
@@ -1521,6 +1613,68 @@ def execute_script(script_path, script_args=None, output_file=None):
         logger.error(f"Error executing script: {e}")
         return -1
 
+def export_nfs(nfs_mount_point, network, guest_ip):
+    logger = logging.getLogger(__name__)
+    logger.debug(f"Need to export {nfs_mount_point} to {network}.{guest_ip}.")
+    
+    is_root = os.getuid() == 0
+    sudo_user = os.environ.get('SUDO_USER')
+    
+    if is_root and sudo_user:
+        original_user_home = os.path.expanduser(f"~{sudo_user}")
+        original_user_uid = os.stat(original_user_home).st_uid
+        original_user_gid = os.stat(original_user_home).st_gid
+        squash_options = f"all_squash,anonuid={original_user_uid},anongid={original_user_gid}"
+    else:
+        squash_options = "no_root_squash"
+    
+    export_line = f"{nfs_mount_point} {network}.{guest_ip}/24(rw,sync,{squash_options},no_subtree_check,fsid={guest_ip})"
+
+    # Step 1: Ensure the NFS server is running and enabled
+    try:
+        is_active = subprocess.run(["sudo", "systemctl", "is-active", "nfs-server"], check=False, stdout=subprocess.PIPE)
+        if b"inactive" in is_active.stdout:
+            subprocess.run(["sudo", "systemctl", "start", "nfs-server"], check=True)
+            logger.debug("NFS server started.")
+        else:
+            logger.debug("NFS server already running.")
+
+        is_enabled = subprocess.run(["sudo", "systemctl", "is-enabled", "nfs-server"], check=False, stdout=subprocess.PIPE)
+        if b"disabled" in is_enabled.stdout:
+            subprocess.run(["sudo", "systemctl", "enable", "nfs-server"], check=True)
+            logger.debug("NFS server enabled.")
+        else:
+            logger.debug("NFS server already enabled.")
+    except subprocess.CalledProcessError as e:
+        Fatal(f"Failed to start or enable NFS server: {e}")
+        return
+
+    # Step 2: Check and edit /etc/exports to add the export_line if not already present
+    try:
+        try:
+            with open("/etc/exports", "r") as exports_file:
+                exports_content = exports_file.read()
+        except FileNotFoundError:
+            logger.warning("/etc/exports not found, creating it.")
+            exports_content = ""
+
+        if export_line not in exports_content:
+            with open("/etc/exports", "a") as exports_file:
+                exports_file.write(f"\n{export_line}\n")
+            logger.debug(f"Added {export_line} to /etc/exports.")
+
+            # Step 3: Reload NFS exports to apply changes
+            try:
+                subprocess.run(["sudo", "exportfs", "-r"], check=True)
+                logger.debug("NFS exports reloaded successfully.")
+            except subprocess.CalledProcessError as e:
+                Fatal(f"Failed to reload NFS exports: {e}")
+        else:
+            logger.debug(f"{export_line} is already present in /etc/exports.")
+    except Exception as e:
+        Fatal(f"Failed to edit /etc/exports: {e}")
+        return
+
 def main():
     # Parse command-line arguments
     parser = argparse.ArgumentParser(
@@ -1635,6 +1789,14 @@ def main():
             gvm = gold_vms[hinfo['group']]
             create_node(conn, gvm, hname, network['name'], network['addr'], hip, hds, use_existing)
             logger.debug(f"Created {hname}:{network['addr']}.{hip} from {gvm}.")
+            try:
+                nfs_import = hinfo['nfs_import'] 
+                nfs_export = get_inventory_value(inventory,'all.vars.nfs_export', required=True)
+                logger.debug(f"Need to export {nfs_export} ({type(nfs_export)} to {network['addr']}.{hip} as {nfs_import} ({type(nfs_import)}")
+                # if this value is set, that means the VM is going to import an NFS mount which needs be exported by the host
+                export_nfs(nfs_export, network['addr'], hip) 
+            except KeyError:
+                pass
 
         # Restart libvirt services to apply changes
         conn.restart()
