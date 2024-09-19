@@ -1,8 +1,9 @@
 #!/bin/env bash
 set -e  # Exit on any error
+set -x  # Echo commands before executing them
 
 # Variables
-NFS_MNT="10.15.1.11:/mnt/vol0/usrc-storage"
+NFS_MNT="192.168.56.1:/mnt/usrc-storage-nfs"
 NFS_DIR="/mnt/usrc-storage-nfs"
 BASE_MIRROR_DIR="${NFS_DIR}/jbent/dnf"
 APACHE_CONF="/etc/httpd/conf.d/dnf-mirror.conf"

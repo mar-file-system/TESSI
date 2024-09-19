@@ -17,6 +17,11 @@ GUEST_IP="$3"
 IS_ROOT=$(id -u)
 SUDO_USER=$(echo $SUDO_USER)
 
+if [ "$IS_ROOT" -ne 0 ]; then
+    echo "This script must be run as root. Exiting."
+    exit 1
+fi
+
 if [ "$IS_ROOT" -eq 0 ] && [ -n "$SUDO_USER" ]; then
     ORIGINAL_USER_HOME=$(eval echo ~$SUDO_USER)
     ORIGINAL_USER_UID=$(stat -c '%u' "$ORIGINAL_USER_HOME")
