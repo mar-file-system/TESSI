@@ -153,7 +153,7 @@ def create_kickstart_file(hostname, ks_dir, ks_file, baseos_location, root_passw
     repo_str = ''
     if repos:
         for repo in repos.split(','):
-            repo_str = f'repo --name={repo}\n'
+            repo_str += f'repo --name={repo}\n'
         logger.debug(f"Added repos {repo_str} to the kickstart file due to user specification")
 
     # TODO: change enp1s0 to link below and test the alma and see if it's ok with link. specifiying seems unnecessary here.
