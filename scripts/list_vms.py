@@ -74,6 +74,13 @@ def print_kernel(domain):
     else:
         print(f"\tKernel Version: Error executing command in VM - {kernel}")
 
+def print_distro(domain):
+    (ret, distro) = get_distro(domain.name())
+    if ret == 0:
+        print(f"\tDistribution: {distro}")
+    else:
+        print(f"\tKernel Version: Error executing command in VM - {distro}")
+
 # returns 0, kernel on success
 # returns 1, error string on failure
 def get_kernel(hname):
@@ -81,6 +88,16 @@ def get_kernel(hname):
     result = subprocess.run(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
     if result.returncode == 0:
         return(0, result.stdout.strip())
+    else:
+        return(1, result.stderr.strip())
+
+# returns 0, distro on success
+# returns 1, error string on failure
+def get_distro(hname):
+    command = f"ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null {hname} grep PRETTY_NAME /etc/os-release "
+    result = subprocess.run(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
+    if result.returncode == 0:
+        return(0, result.stdout.strip().split('=')[1])
     else:
         return(1, result.stderr.strip())
 
@@ -107,6 +124,7 @@ def main():
 
     functions = [
         {'ptr': print_kernel,    'name': 'kernel',    'require_running': True},
+        {'ptr': print_distro,    'name': 'distro',    'require_running': True},
         {'ptr': print_networks,  'name': 'networks',  'require_running': True},
         {'ptr': print_snapshots, 'name': 'snapshots', 'require_running': True},
         {'ptr': print_disks,     'name': 'disks',     'require_running': False}
