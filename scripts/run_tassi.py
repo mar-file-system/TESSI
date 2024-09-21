@@ -16,6 +16,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import uuid
 import xml.etree.ElementTree as ET
 import yaml
 
@@ -415,6 +416,9 @@ def restore_vm_from_stash(conn, src_path, xml_file_path, pool_name, vmname):
 
     # Copy the stashed disk image to a temporary location
     tmp_path = f"/tmp/{vmname}.img"
+    # add a uniquifier because this function started failing with an:
+    # libvirt: Storage Driver error : Requested operation is not valid: volume target path '/tmp/gold-dnfmirror-client.img' already exists
+    tmp_path = f"/tmp/{vmname}_{uuid.uuid4().hex}.img"
     shutil.copy2(src_path, tmp_path)
 
     # Create a new storage volume for the restored image in the pool
@@ -837,21 +841,21 @@ def find_gold_image(full_prefix):
     logger.debug(f"Returning {gold_image} for prefix {base_prefix}")
     return gold_image
 
-def get_gold_definitions(images,system,system_version,backend_version,system_patch=None,backend_patch=None):
+def get_gold_definitions(images,system,system_version,backend_version,system_patch=None,backend_patch=None,os_variant=None):
     if system_patch:
         system_patch = system_patch.split('/')[-1] # get last token in path
     if backend_patch:
         backend_patch = backend_patch.split('/')[-1] # get last token in path
     golds = {
         'clients': {
-            'image_prefix': f"{images}/{system}/clients/{system}-{system_version}.Patch-{system_patch}.Kernel-",
+            'image_prefix': f"{images}/{system}/clients/{system}-{system_version}.Patch-{system_patch}.{os_variant}.Kernel-",
             'image'       : None,
-            'hname'       : f"gold-{system}-client",
+            'hname'       : f"gold-{system}-{os_variant}-client",
         },
         'servers': {
-            'image_prefix': f"{images}/{system}/servers/{system}-{system_version}.Patch-{system_patch}.backend-{backend_version}.Patch-{backend_patch}.Kernel-",
+            'image_prefix': f"{images}/{system}/servers/{system}-{system_version}.Patch-{system_patch}.backend-{backend_version}.Patch-{backend_patch}.{os_variant}.Kernel-",
             'image'       : None,
-            'hname'       : f"gold-{system}-server",
+            'hname'       : f"gold-{system}-{os_variant}-server",
         }
     }
     return golds
@@ -862,13 +866,14 @@ def make_gold_vms(conn,bootstrap_vm,images,system,inventory,inventory_file,playb
     backend_version = get_inventory_value(inventory, 'all.vars.system.backend.version',required=False)
     system_patch = get_inventory_value(inventory, 'all.vars.system.patch', required=False)
     backend_patch = get_inventory_value(inventory, 'all.vars.system.backend.patch', required=False)
+    os_variant = get_inventory_value(inventory, 'all.vars.bootstrap_vm.os_variant', required=True)
     logger.debug(f"Need gold server {system_version}.{backend_version} with respective patches {system_patch} and {backend_patch} and gold client {system_version}")
 
     # get the libvirt storage pool
     (pool_name, pool_path) = get_first_storage_pool_info(conn) 
 
     # initialize variables 
-    golds = get_gold_definitions(images,system,system_version,backend_version,system_patch,backend_patch)
+    golds = get_gold_definitions(images,system,system_version,backend_version,system_patch,backend_patch,os_variant)
 
     for group,gold in golds.items(): 
         if not rebuild_golds and check_vm_status(conn, gold['hname'], shutdown=True, destroy=False):
