@@ -21,6 +21,16 @@
     - name: Include set_hostname
       include_tasks: set_hostname.yaml
 
+    - name: Set the mirror_url variable 
+      set_fact:
+        mirror_url: "{{ dnfmirror.mirror_url | default('http://' + hostvars[groups['servers'][0]].network.addr + '.' + hostvars[groups['servers'][0]].ip | string) }}"
+      tags: client_config
+
+    - name: Debug mirror_url variable
+      debug:
+        msg: "mirror_url: '>{{ mirror_url }}<'"
+      tags: client_config
+
     - name: Get the current version (Fedora/AlmaLinux)
       command: >
         {% if ansible_distribution == "Fedora" %}
@@ -101,46 +111,38 @@
         mode: '0755'
       when: "'servers' in group_names"
 
-    - name: Capture dnf repolist all output
+    # Capture only the repositories that are currently enabled
+    - name: Capture enabled repositories
+      command: dnf repolist --enabled
+      register: enabled_repo_list_output
+      changed_when: false
+      tags: client_config
+
+    - name: Extract repository IDs of enabled repositories
+      set_fact:
+        enabled_repo_ids: "{{ enabled_repo_list_output.stdout_lines[1:] | map('split', ' ') | map('first') | list }}"
+      tags: client_config
+
+    - name: Debug all enabled repository IDs
+      debug:
+        msg: "All enabled repository IDs: {{ enabled_repo_ids }}"
+      tags: client_config
+
+    - name: Capture all repository IDs
       command: dnf repolist all
-      register: repo_list_output
+      register: all_repo_list_output
       changed_when: false
       tags: client_config
 
     - name: Extract repository IDs that contain 'abled' but not 'local'
       set_fact:
-        repo_ids: "{{ repo_list_output.stdout_lines | select('search', 'abled') | reject('search', 'local') | map('split', ' ') | map('first') | list }}"
+        all_repo_ids: "{{ all_repo_list_output.stdout_lines | select('search', 'abled') | reject('search', 'local') | map('split', ' ') | map('first') | list }}"
       tags: client_config
 
-    - name: Debug repository IDs
+    - name: Debug all repository IDs
       debug:
-        msg: "Repository IDs found: {{ repo_ids }}"
+        msg: "All repository IDs: {{ all_repo_ids }}"
       tags: client_config
-
-    - name: Sync repositories to the DNF mirror directory
-      command: >
-        reposync --download-metadata --repoid={{ item }}
-        --destdir="{{ base_mirror_dir }}/{{ distro_name }}"
-      loop: "{{ repo_ids }}"
-      when: "'servers' in group_names"
-
-    - name: Check if repository metadata already exists
-      stat:
-        path: "{{ base_mirror_dir }}/{{ distro_name }}/repodata/repomd.xml"
-      register: repomd_check
-      when: "'servers' in group_names"
-
-    - name: Create repository metadata (initial run)
-      command: createrepo "{{ base_mirror_dir }}/{{ distro_name }}"
-      when:
-        - "'servers' in group_names"
-        - not repomd_check.stat.exists
-
-    - name: Update repository metadata (subsequent run)
-      command: createrepo --update "{{ base_mirror_dir }}/{{ distro_name }}"
-      when:
-        - "'servers' in group_names"
-        - repomd_check.stat.exists
 
     - name: Disable all other repositories
       find:
@@ -149,27 +151,12 @@
       register: repo_files
       tags: client_config
 
-    - name: Disable all other repositories
+    - name: Disable all repositories in current configuration
       replace:
         path: "{{ item.path }}"
         regexp: '^enabled=.*'
         replace: 'enabled=0'
       loop: "{{ repo_files.files }}"
-      tags: client_config
-
-    - name: Set the mirror_url variable 
-      set_fact:
-        mirror_url: "http://{{ hostvars[groups['servers'][0]].network.addr }}.{{ hostvars[groups['servers'][0]].ip }}"
-      tags: client_config
-
-    - name: Debug mirror_url variable with delimiters
-      debug:
-        msg: "mirror_url: '>{{ mirror_url }}<'"
-      tags: client_config
-
-    - name: Debug distro_name variable with delimiters
-      debug:
-        msg: "distro_name: '>{{ distro_name }}<'"
       tags: client_config
 
     - name: Set the baseurl variable
@@ -182,16 +169,19 @@
         msg: "baseurl: '>{{ baseurl }}<'"
       tags: client_config
 
+    # Create a repository configuration file for the local DNF mirror
     - name: Create a repository configuration file for the local DNF mirror
       copy:
         dest: "{{ mirror_repo_file }}"
         content: |
-          {% for repo in repo_ids %}
+          {% for repo in all_repo_ids %}
           [local-{{ repo }}]
           name={{ ansible_distribution }} {{ repo }}
           baseurl={{ baseurl }}
-          enabled=1
+          enabled={% if repo in enabled_repo_ids %}1{% else %}0{% endif %}
+
           gpgcheck=0
+
           {% endfor %}
       tags: client_config
 
