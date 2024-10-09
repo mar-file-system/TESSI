@@ -11,6 +11,9 @@ from xml.dom import minidom
 
 import run_tassi
 
+# global connection variable
+conn = None
+
 def delete_domain(domain,conn):
     run_tassi.check_vm_status(conn,domain.name(),shutdown=True,destroy=True)
 
@@ -28,10 +31,16 @@ def state_to_string(state):
 
     return state_strings.get(state, "Unknown")
 
+import libvirt
+import os
+import xml.etree.ElementTree as ET
+
 def print_disks(domain):
     # Get the domain's XML description
     xml_desc = domain.XMLDesc()
     root = ET.fromstring(xml_desc)
+
+    global conn
 
     for disk in root.findall('.//devices/disk'):
         if disk.get('device') == 'disk':
@@ -40,15 +49,40 @@ def print_disks(domain):
                 target_dev = target.get('dev')
             else:
                 target_dev = "Unknown"
+
             source = disk.find('source')
-            if source is not None:
+
+            # Handle volume-based disks
+            if source is not None and 'volume' in source.attrib:
+                pool_name = source.get('pool')
+                volume_name = source.get('volume')
+
+                if pool_name and volume_name:
+                    # Look up the storage pool and volume
+                    pool = conn.storagePoolLookupByName(pool_name)
+                    vol = pool.storageVolLookupByName(volume_name)
+                    
+                    # Get the volume info
+                    vol_info = vol.info()
+                    size_bytes = vol_info[1]  # Second element is the size in bytes
+                    
+                    print(f"\tHDD Size: {size_bytes / (1024 ** 3):.2f} GB - Dev: {target_dev}")
+                else:
+                    print(f"\tHDD Size: Volume info not found for {target_dev}")
+
+            # Handle file-based disks
+            elif source is not None and 'file' in source.attrib:
                 disk_file = source.get('file')
                 if disk_file and os.path.exists(disk_file):
                     # Get the size of the disk file
                     size_bytes = os.path.getsize(disk_file)
                     print(f"\tHDD Size: {size_bytes / (1024 ** 3):.2f} GB - Dev: {target_dev}")
                 else:
-                    print("\tHDD Size: Disk source file not found or inaccessible")
+                    print(f"\tHDD Size: Disk source file not found or inaccessible for {target_dev}")
+
+            else:
+                print(f"\tHDD Size: No valid disk source for {target_dev}")
+
 
 def print_networks(domain):
     addresses = domain.interfaceAddresses(libvirt.VIR_DOMAIN_INTERFACE_ADDRESSES_SRC_LEASE)
@@ -130,6 +164,7 @@ def main():
         {'ptr': print_disks,     'name': 'disks',     'require_running': False}
     ]
 
+    global conn
     conn = libvirt.open('qemu:///system')
     domains = conn.listAllDomains()
     for domain in sorted(domains, key=lambda domain: domain.name()):
