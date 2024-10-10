@@ -73,7 +73,8 @@ resource "libvirt_volume" "second_volumes" {
 
 resource "libvirt_domain" "vms" {
   for_each   = { for vm in var.vm_name : vm.name => vm }
-  name       = "${each.value.number}-playground-${each.value.name}"
+  #name       = "${each.value.number}-playground-${each.value.name}"
+  name       = "${each.value.name}"
   memory     = each.value.memory  # Default memory if not specified
   vcpu       = each.value.vcpu    # Default vCPU if not specified
   running    = true
@@ -104,5 +105,29 @@ resource "libvirt_domain" "vms" {
     target_port = "0"
   }
 
+}
+
+data "external" "vm_ips" {
+  for_each = { for vm in var.vm_name : vm.name => vm }
+  depends_on = [libvirt_domain.vms]
+
+  program = ["bash", "-c", <<EOT
+    for i in {1..10}; do
+      ip=$(virsh domifaddr ${each.value.number}-playground-${each.value.name} | grep -m1 ipv4 | awk '{print $4}' | cut -d'/' -f1)
+      if [ -n "$ip" ]; then
+        echo "{\"output\": \"$ip\"}"
+        exit 0
+      fi
+      sleep 60  # Wait before retrying
+    done
+    echo '{"output": ""}'  # Return an empty string if no IP found after retries
+  EOT
+  ]
+}
+
+
+# Output the IP addresses for all VMs
+output "vm_ips" {
+  value = { for vm in var.vm_name : vm.name => data.external.vm_ips[vm.name].result["output"] }
 }
 
