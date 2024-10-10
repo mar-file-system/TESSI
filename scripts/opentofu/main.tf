@@ -31,19 +31,31 @@ variable "vm_name" {
   default = [
     {
       number          = "01"
-      name            = "athreos"
-      second_disk_size = 10                     # 10GB secondary disk (raw format)
+      name            = "beegfs-client00"
     },
     {
       number          = "02"
-      name            = "kratos"
-      memory          = "4096"                  # Custom memory
-      vcpu            = 4                       # Custom vCPU
+      name            = "beegfs-client01"
     },
     {
       number          = "03"
-      name            = "freya"
-      second_disk_size = 5                      # 5GB secondary disk (raw format)
+      name            = "beegfs-meta00"
+      second_disk_size = 5                     
+    },
+    {
+      number          = "04"
+      name            = "beegfs-meta01"
+      second_disk_size = 5                      
+    },
+    {
+      number          = "05"
+      name            = "beegfs-data00"
+      second_disk_size = 10                      
+    },
+    {
+      number          = "06"
+      name            = "beegfs-data01"
+      second_disk_size = 10                   
     }
   ]
 }
