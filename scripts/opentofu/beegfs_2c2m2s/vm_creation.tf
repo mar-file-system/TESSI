@@ -22,7 +22,8 @@ resource "libvirt_domain" "in07_vms" {
   }
 
   network_interface {
-    network_name = "${each.value.network}"
+    #network_name = var.network_name # this doesn't work. VMs don't get assigned an IP address
+    network_name = "hostonly-net"
   }
 
   console {
@@ -36,7 +37,8 @@ resource "libvirt_domain" "in07_vms" {
   #   and depends_on only works on static lists so we can't create conditional dependencies
   depends_on = [
     libvirt_volume.in07_volumes,
-    libvirt_volume.in07_second_volumes
+    libvirt_volume.in07_second_volumes,
+    libvirt_network.in07_bridge
   ]
 
 }
@@ -65,7 +67,8 @@ resource "libvirt_domain" "in16_vms" {
   }
 
   network_interface {
-    network_name = "${each.value.network}"
+    #network_name = var.network_name # this doesn't work. VMs don't get assigned an IP address
+    network_name = "hostonly-net"
   }
 
   console {
@@ -79,7 +82,8 @@ resource "libvirt_domain" "in16_vms" {
   #   and depends_on only works on static lists so we can't create conditional dependencies
   depends_on = [
     libvirt_volume.in16_volumes,
-    libvirt_volume.in16_second_volumes
+    libvirt_volume.in16_second_volumes,
+    libvirt_network.in16_bridge
   ]
 
 }

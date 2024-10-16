@@ -9,3 +9,11 @@ provider "libvirt" {
   uri   = "qemu+ssh://root@in16/system"
 }
 
+# Define a variable list for hosts
+variable "hosts" {
+  type = map(string)
+  default = {
+    "in07" = "qemu+ssh://root@in07/system"
+    "in16" = "qemu+ssh://root@in16/system"
+  }
+}
