@@ -4,17 +4,39 @@
   environment:
     PATH: "{{ ansible_env.PATH }}:/usr/local/share/openvswitch/scripts:/usr/local/share/ovn/scripts"
   tasks:
+    - name: Check if Open vSwitch is running
+      shell: "pgrep -f 'ovs-vswitchd'"
+      register: ovs_status
+      ignore_errors: yes
+
+    - name: Stop Open vSwitch if it is running
+      command: "ovs-ctl stop"
+      when: ovs_status.rc == 0
+
     - name: Start Open vSwitch
       command: "ovs-ctl start"
+
+    - name: Check if OVN controller is running
+      shell: "pgrep -f 'ovn-controller'"
+      register: ovn_controller_status
       ignore_errors: yes
+
+    - name: Stop OVN controller if it is running
+      command: "ovn-ctl stop_controller"
+      when: ovn_controller_status.rc == 0
 
     - name: Start OVN
       command: "ovn-ctl start_controller"
-      ignore_errors: yes
+
+    - name: Cleanup existing bridge
+      openvswitch.openvswitch.openvswitch_bridge:
+        bridge: "{{ ovn_bridge }}"
+        state: absent
+      tags: cleanup
 
     - name: Create bridge
       openvswitch.openvswitch.openvswitch_bridge:
-        bridge: "{{ bridgename }}"
+        bridge: "{{ ovn_bridge }}"
         state: present
 
     - name: List OVS bridges to verify creation
@@ -33,11 +55,13 @@
       command: "ovn-nbctl --if-exists destroy nb_global ."
       when: "'dhcpsrv' in group_names"
       ignore_errors: yes
+      tags: cleanup
 
     - name: Reset OVN Southbound Database (optional)
       command: "ovn-sbctl --if-exists destroy sb_global ."
       when: "'dhcpsrv' in group_names"
       ignore_errors: yes
+      tags: cleanup
 
     - name: Set OVN southbound connection on DHCP server
       command: "ovn-sbctl set-connection ptcp:{{ south_port }}"
@@ -109,12 +133,13 @@
         msg: "{{ ovs_output.stdout }}"
 
     - name: Delete logical switch if it exists
-      command: "ovn-nbctl --if-exists ls-del {{ logical_switch }}"
+      command: "ovn-nbctl --if-exists ls-del {{ ovn_switch }}"
       when: "'dhcpsrv' in group_names"
       ignore_errors: yes
+      tags: cleanup
 
     - name: Create logical switch on the DCHP server from which we will allocate addresses via DHCP
-      command: "ovn-nbctl ls-add {{ logical_switch }}"
+      command: "ovn-nbctl ls-add {{ ovn_switch }}"
       when: "'dhcpsrv' in group_names"
       ignore_errors: yes
 
@@ -130,7 +155,7 @@
 
     - name: Set subnet and exclude IPs for logical switch
       command: >
-        ovn-nbctl set logical_switch {{ logical_switch }}
+        ovn-nbctl set logical_switch {{ ovn_switch }}
         other_config:subnet={{ subnet }}
         other_config:exclude_ips={{ exclude_ips }}
       when: "'dhcpsrv' in group_names"
@@ -141,6 +166,7 @@
       register: dhcp_options_uuids
       run_once: true
       when: "'dhcpsrv' in group_names"
+      tags: cleanup
 
     - name: Delete existing DHCP options for the subnet
       command: >
@@ -148,6 +174,7 @@
       loop: "{{ dhcp_options_uuids.stdout_lines }}"
       when: "'dhcpsrv' in group_names"
       ignore_errors: yes
+      tags: cleanup
 
     - name: Create DHCP options
       command: ovn-nbctl dhcp-options-create {{ subnet }}
@@ -189,10 +216,9 @@
       loop: "{{ range(1, number_of_ports + 1) | list }}"
       loop_control:
         loop_var: port_index
-      include_tasks: create_ports.yaml
+      include_tasks: create_ovn_ports.yaml
       vars:
         port_num: "{{ port_index }}"
-      when: "'dhcpsrv' in group_names"
 
     - name: Capture OVN configuration
       command: >
@@ -205,3 +231,13 @@
       debug:
         var: ovn_show_output.stdout
       when: "'dhcpsrv' in group_names"
+
+    - name: Stop OVN if cleanup in tags
+      command: "ovn-ctl stop_controller"
+      when: "'cleanup' in ansible_run_tags"
+      tags: cleanup
+
+    - name: Start Open vSwitch if cleanup in tags
+      command: "ovs-ctl stop"
+      when: "'cleanup' in ansible_run_tags"
+      tags: cleanup
