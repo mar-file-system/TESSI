@@ -23,5 +23,7 @@ ip link set $INTERFACE up
 # watch the top video here: https://www.wireguard.com/quickstart/
 
 wg show
+ip address show eno1
+
 echo Get the public key from peers and then for each one run the following:
 echo wg set $INTERFACE peer _PEER_KEY_ allowed-ips _PEER_WG_IP_/32 end point _PEER_PUBLIC_IP_:_PEER_WG_LISTENING_PORT_
