@@ -1529,7 +1529,7 @@ def show_resources(conn, args, inventory, vm_dir, system, hosts):
     logger.debug(f"Network '{args.virt_network}' {'is' if avail else 'is not'} available for re-use.")
 
     system_version = get_inventory_value(inventory, 'all.vars.system.version')
-    backend_version = get_inventory_value(inventory, 'all.vars.system,backend.version')
+    backend_version = get_inventory_value(inventory, 'all.vars.system,backend.version', required=False)
     system_patch = get_inventory_value(inventory, 'all.vars.system.patch', required=False)
     backend_patch = get_inventory_value(inventory, 'all.vars.system.backend.patch', required=False)
     golds = get_gold_definitions(vm_dir, system, system_version, backend_version, system_patch, backend_patch)
