@@ -3,23 +3,42 @@
 - name: Set up wireguard tunnels
   hosts: physical_hosts
   tasks:
-    - name: Delete existing network interface if any
+    - name: Debug IP ranges
+      debug:
+        msg: "Host {{ inventory_hostname }}: WireGuard IP is {{ wireguard_ip }}, Libvirt subnet is {{ libvirt_addresses }}"
+
+    - name: Delete network interface and bridge
       ansible.builtin.command:
-        cmd: "ip link delete {{ INTERFACE }}"
+        cmd: "ip link delete {{ item }}"
+      with_items:
+        - "{{ wireguard.interface }}"
+        - "{{ wireguard.bridge }}"
+      ignore_errors: true
+      tags: cleanup
+
+    - name: Delete existing connections if they exist
+      command: nmcli connection delete "{{ item }}"
+      with_items:
+        - "{{ wireguard.bridge }}"
+        - "{{ wireguard.interface }}-slave"
+      ignore_errors: true
+      tags: cleanup
+
+    - name: Destroy and undefine the libvirt network
+      command: "virsh net-{{ item }} {{ libvirt.name }}"
+      with_items:
+        - destroy
+        - undefine
       ignore_errors: true
       tags: cleanup
 
     - name: Create wireguard interface
       ansible.builtin.command:
-        cmd: "ip link add dev {{ INTERFACE }} type wireguard"
-
-    - name: Set WG_IP fact
-      set_fact:
-        WG_IP: "{{ BASE_IP }}.{{ last_octet }}"
+        cmd: "ip link add dev {{ wireguard.interface }} type wireguard"
 
     - name: Set IPRANGE fact
       set_fact:
-        IPRANGE: "{{ WG_IP }}/24"
+        IPRANGE: "{{ wireguard_ip }}/24"
 
     - name: Debug IPRANGE
       debug:
@@ -27,7 +46,7 @@
 
     - name: Add IP address to interface
       ansible.builtin.command:
-        cmd: "ip address add dev {{ INTERFACE }} {{ IPRANGE }}"
+        cmd: "ip address add dev {{ wireguard.interface }} {{ IPRANGE }}"
 
     - name: Generate private key
       ansible.builtin.command:
@@ -37,7 +56,7 @@
     - name: Save private key to file
       ansible.builtin.copy:
         content: "{{ private_key_result.stdout }}"
-        dest: "{{ PRIV_KEY }}"
+        dest: "{{ wireguard.priv_key }}"
 
     - name: Generate public key
       ansible.builtin.command:
@@ -52,20 +71,20 @@
 
     - name: Set WireGuard private key
       ansible.builtin.command:
-        cmd: "wg set {{ INTERFACE }} private-key {{ PRIV_KEY }}"
+        cmd: "wg set {{ wireguard.interface }} private-key {{ wireguard.priv_key }}"
 
     - name: Delete private key file
       ansible.builtin.file:
-        path: "{{ PRIV_KEY }}"
+        path: "{{ wireguard.priv_key }}"
         state: absent
 
     - name: Bring up WireGuard interface
       ansible.builtin.command:
-        cmd: "ip link set {{ INTERFACE }} up"
+        cmd: "ip link set {{ wireguard.interface }} up"
 
     - name: Get WireGuard listening port
       ansible.builtin.command:
-        cmd: "wg show {{ INTERFACE }} listen-port"
+        cmd: "wg show {{ wireguard.interface }} listen-port"
       register: wg_listen_port_result
 
     - name: Set WG_LISTENING_PORT fact
@@ -84,9 +103,10 @@
           {%- set info = {
               'hostname': hostvars[host]['inventory_hostname'],
               'public_key': hostvars[host]['public_key_result']['stdout'] | default(''),
-              'WG_IP': hostvars[host]['WG_IP'] | default(''),
+              'wireguard_ip': hostvars[host]['wireguard_ip'] | default(''),
               'PUBLIC_IP': hostvars[host]['PUBLIC_IP'] | default(''),
-              'WG_LISTENING_PORT': hostvars[host]['WG_LISTENING_PORT'] | default('')
+              'WG_LISTENING_PORT': hostvars[host]['WG_LISTENING_PORT'] | default(''),
+              'libvirt_addresses': hostvars[host]['libvirt_addresses'] | default('')
             } -%}
           {{ data.append(info) }}
           {%- endfor -%}
@@ -98,17 +118,67 @@
 
     - name: Configure peers on each host
       ansible.builtin.shell: |
-        wg set {{ INTERFACE }} peer {{ item.public_key }} allowed-ips {{ item.WG_IP }}/32 endpoint {{ item.PUBLIC_IP }}:{{ item.WG_LISTENING_PORT }}
+        wg set {{ wireguard.interface }} peer {{ item.public_key }} allowed-ips {{ item.wireguard_ip }}/32,{{ item.libvirt_addresses }} endpoint {{ item.PUBLIC_IP }}:{{ item.WG_LISTENING_PORT }}
       with_items: "{{ host_data | selectattr('hostname', 'ne', inventory_hostname) | list }}"
 
     - name: Ping WireGuard IPs of all other hosts
-      ansible.builtin.shell: "ping -c 1 {{ item.WG_IP }}"
+      ansible.builtin.shell: "ping -c 1 {{ item.wireguard_ip }}"
       with_items: "{{ host_data | selectattr('hostname', 'ne', inventory_hostname) | list }}"
       register: ping_results
 
     - name: Debug ping results
       ansible.builtin.debug:
-        msg: "Ping result for {{ item.item.WG_IP }}: {{ item.stdout }}"
+        msg: "Ping result for {{ item.item.wireguard_ip }}: {{ item.stdout }}"
       with_items: "{{ ping_results.results }}"
 
+    # this ends the basic wireguard installation. 
+    # the rest is setting up the libvirt network integration
+
+    - name: Add bridge connection
+      ansible.builtin.command:
+        cmd: "nmcli connection add type bridge con-name {{ wireguard.bridge }} ifname {{ wireguard.bridge }}"
+      when: false
+
+    - name: Add ethernet to bridge
+      ansible.builtin.command:
+        cmd: "nmcli connection add type ethernet slave-type bridge con-name {{ wireguard.interface }}-slave ifname {{ wireguard.interface }} master {{ wireguard.bridge }}"
+      when: false
+
+    - name: Bring up bridge connection
+      ansible.builtin.command:
+        cmd: "nmcli connection up {{ wireguard.bridge }}"
+      when: false
+
+    - name: Allow forwarding from bridge to interface
+      ansible.builtin.command:
+        cmd: "iptables -A FORWARD -i {{ wireguard.bridge }} -o {{ wireguard.interface }} -j ACCEPT"
+      when: false
+
+    - name: Allow forwarding from interface to bridge
+      ansible.builtin.command:
+        cmd: "iptables -A FORWARD -i {{ wireguard.interface }} -o {{ wireguard.bridge }} -j ACCEPT"
+      when: false
+
+    - name: Add NAT for outgoing traffic
+      ansible.builtin.command:
+        cmd: "iptables -t nat -A POSTROUTING -o {{ wireguard.interface }} -j MASQUERADE"
+      when: false
+
+    # this play is hard-coded right now to just work from in07. Later we'll need to fix this so we can have visibility in all directions
+    - name: Add route to VM network via WireGuard
+      ansible.builtin.command:
+        cmd: "ip route add {{ VM_IPS }} dev {{ wireguard.interface }}"
+      when: inventory_hostname == 'in07'
+
+    # this play is hard-coded right now to just work from in16. Later we'll need to fix this so we can have visibility in all directions
+    - name: Allow traffic from WireGuard to VM network
+      ansible.builtin.command:
+        cmd: "iptables -I LIBVIRT_FWI 1 -i {{ wireguard.interface }} -o {{ libvirt.interface }} -j ACCEPT"
+      when: inventory_hostname == 'in16'
+
+    # this play is hard-coded right now to just work from in16. Later we'll need to fix this so we can have visibility in all directions
+    - name: Allow traffic from VM network to WireGuard
+      ansible.builtin.command:
+        cmd: "iptables -I LIBVIRT_FWO 1 -i {{ libvirt.interface }} -o {{ wireguard.interface }} -j ACCEPT"
+      when: inventory_hostname == 'in16'
 
