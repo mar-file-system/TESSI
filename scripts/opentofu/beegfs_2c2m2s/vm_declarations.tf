@@ -9,7 +9,8 @@ variable "vm_name" {
     host             = string  # The short-hand for the host (e.g., "in07" or "in16")
     source_image     = optional(string, "/var/lib/libvirt/images/gold-beegfs-almalinux8-server.qcow2")  # Optional source image with default
     storage_pool     = optional(string, "default")
-    network          = optional(string, "hostonly-net")
+    network          = optional(string, "wireguard-virt")
+    #network          = optional(string, "vm-net")
   }))
   default = [
     {
