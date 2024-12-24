@@ -32,6 +32,25 @@
       ignore_errors: true
       tags: cleanup
 
+    - name: Gather routes referencing specific interfaces
+      ansible.builtin.command:
+        cmd: "ip route show | grep '{{ item }}'"
+      with_items:
+        - "{{ wireguard.interface }}"
+        - "{{ libvirt.interface }}"
+      register: found_routes
+      failed_when: found_routes.rc != 0 and found_routes.stdout != ""
+      tags:
+        - cleanup
+
+    - name: Delete routes referencing specific interfaces
+      ansible.builtin.command:
+        cmd: "ip route del {{ item }}"
+      with_items: "{{ found_routes.results | map(attribute='stdout_lines') | flatten }}"
+      ignore_errors: true
+      tags:
+        - cleanup
+
     - name: Create wireguard interface
       ansible.builtin.command:
         cmd: "ip link add dev {{ wireguard.interface }} type wireguard"
@@ -164,21 +183,41 @@
         cmd: "iptables -t nat -A POSTROUTING -o {{ wireguard.interface }} -j MASQUERADE"
       when: false
 
-    # this play is hard-coded right now to just work from in07. Later we'll need to fix this so we can have visibility in all directions
-    - name: Add route to VM network via WireGuard
+    - name: Add route to VM networks via WireGuard
       ansible.builtin.command:
-        cmd: "ip route add {{ VM_IPS }} dev {{ wireguard.interface }}"
-      when: inventory_hostname == 'in07'
+        cmd: "ip route add {{ item.libvirt_addresses }} dev {{ wireguard.interface }}"
+      with_items: "{{ host_data | selectattr('hostname', 'ne', inventory_hostname) | list }}"
 
-    # this play is hard-coded right now to just work from in16. Later we'll need to fix this so we can have visibility in all directions
     - name: Allow traffic from WireGuard to VM network
       ansible.builtin.command:
         cmd: "iptables -I LIBVIRT_FWI 1 -i {{ wireguard.interface }} -o {{ libvirt.interface }} -j ACCEPT"
-      when: inventory_hostname == 'in16'
 
-    # this play is hard-coded right now to just work from in16. Later we'll need to fix this so we can have visibility in all directions
     - name: Allow traffic from VM network to WireGuard
       ansible.builtin.command:
         cmd: "iptables -I LIBVIRT_FWO 1 -i {{ libvirt.interface }} -o {{ wireguard.interface }} -j ACCEPT"
-      when: inventory_hostname == 'in16'
+
+    - name: Create libvirt network
+      community.libvirt.virt_net:
+        name: "{{ libvirt.name }}"
+        state: present
+        xml: |
+          <network>
+            <name>{{ libvirt.name }}</name>
+            <bridge name="{{ libvirt.interface }}" />
+            <ip address="{{ libvirt_addresses.split('/')[0] }}" netmask="255.255.255.240">
+              <dhcp>
+                <range start="{{ libvirt.base_ip }}.{{ libvirt_first_address }}" end="{{ libvirt.base_ip }}.{{ libvirt_last_address }}" />
+              </dhcp>
+            </ip>
+          </network>
+
+    - name: Create libvirt network
+      community.libvirt.virt_net:
+        name: "{{ libvirt.name }}"
+        state: active
+
+    - name: Create libvirt network
+      community.libvirt.virt_net:
+        name: "{{ libvirt.name }}"
+        autostart: true
 
