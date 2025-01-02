@@ -1,0 +1,179 @@
+# Ansible Playbook for Dynamic Network Graph and Validation
+- hosts: all
+  gather_facts: no
+  tasks:
+    - name: Get list of VMs matching regex
+      shell: >
+        virsh list --name | grep {{ vm_regex }}
+      register: matching_vms
+
+    - name: Get IP address for each VM
+      shell: >
+        virsh domifaddr {{ item }} | grep '{{ network }}'
+      with_items: "{{ matching_vms.stdout_lines }}"
+      register: vm_ips
+
+    - name: Get list of all libvirt networks
+      shell: >
+        virsh net-list --all | awk '{print $1}' | grep -v Name | grep -v '^[-]*$'
+      register: all_networks
+    
+    - name: Debug list of all networks
+      debug:
+        msg: "Networks found: {{ all_networks.stdout_lines }}"
+      tags: debug
+
+    - name: Find libvirt network containing the IP range 
+      shell: > 
+        virsh net-dumpxml {{ item }} | grep -q '{{ network }}' && echo {{ item }}
+      with_items: "{{ all_networks.stdout_lines }}"
+      register: libvirt_network_name
+      ignore_errors: yes
+        
+    - name: Extract valid libvirt network name
+      set_fact:
+        valid_libvirt_network: "{{ item.item }}" 
+      with_items: "{{ libvirt_network_name.results }}" 
+      when: item.rc == 0
+    
+    - name: Query libvirt network for bridge and DHCP range
+      shell: >
+        virsh net-dumpxml {{ valid_libvirt_network }}
+      when: valid_libvirt_network is defined
+      register: libvirt_network
+            
+    - name: Debug libvirt network output
+      debug:
+        msg: "Libvirt network XML: {{ libvirt_network.stdout }}"
+      tags: debug
+            
+    - name: Extract bridge name from libvirt network
+      shell: >
+        virsh net-dumpxml {{ valid_libvirt_network }} | 
+        grep 'bridge name' |
+        awk -F= '{print $2}' |
+        awk '{print $1}' |
+        sed "s/'//g"
+      when: valid_libvirt_network is defined
+      register: bridge_name_result
+        
+    - name: Set bridge name fact 
+      set_fact:
+        bridge_name: "{{ bridge_name_result.stdout.strip() }}"
+
+    - name: Debug bridge name
+      debug:
+        msg: "Bridge name: {{ bridge_name }}"
+      tags: debug
+
+    - name: Get IP details of the bridge
+      shell: >
+        ip addr show {{ bridge_name }}
+      register: bridge_ip_details
+      when: bridge_name is defined
+
+    - name: Debug bridge IP details
+      debug:
+        msg: "Bridge IP details: {{ bridge_ip_details.stdout }}"
+      tags: debug
+
+    - name: Get bridge configuration
+      shell: >
+        brctl show {{ bridge_name }}
+      register: bridge_config
+      when: bridge_name is defined
+
+    - name: Debug bridge configuration
+      debug:
+        msg: "Bridge configuration: {{ bridge_config.stdout }}"
+      tags: debug
+
+    - name: Get list of WireGuard interfaces
+      shell: wg show | grep interface | awk '{print $2}'
+      register: wireguard_interfaces
+
+    - name: Identify relevant WireGuard interface
+      shell: >
+        wg show {{ item }} | grep 'allowed ips' | grep '{{ network }}'
+      with_items: "{{ wireguard_interfaces.stdout_lines }}"
+      register: matching_wireguard
+      ignore_errors: yes
+
+    - name: Set the correct WireGuard interface
+      set_fact:
+        selected_wireguard: "{{ item.item }}"
+      with_items: "{{ matching_wireguard.results }}"
+      when: item.rc == 0
+
+    - name: Debug selected WireGuard interface
+      debug:
+        msg: "Selected WireGuard interface: {{ selected_wireguard }}"
+      tags: debug
+
+    - name: Get WireGuard details for the selected interface
+      shell: wg show {{ selected_wireguard }}
+      register: wireguard_info
+      when: selected_wireguard is defined
+
+    - name: Debug WireGuard info
+      debug:
+        msg: "WireGuard info: {{ wireguard_info.stdout }}"
+      tags: debug
+
+    - name: Extract WireGuard Allowed IPs and Endpoint
+      set_fact:
+        wireguard_allowed_ips: "{{ wireguard_info.stdout | regex_search('allowed ips: (.*)', '\\1') }}"
+        wireguard_endpoint: "{{ wireguard_info.stdout | regex_search('endpoint: (.*)', '\\1') }}"
+
+    - name: Debug WireGuard allowed IPs and endpoint
+      debug:
+        msg: "Allowed IPs: {{ wireguard_allowed_ips }}, Endpoint: {{ wireguard_endpoint }}"
+      tags: debug
+
+    - name: Extract Bridge IP
+      set_fact:
+        bridge_ip: "{{ bridge_ip_details.stdout | regex_search('inet ([^ ]+)', '\\1') }}"
+
+    - name: Debug extracted bridge IP
+      debug:
+        msg: "Bridge IP: {{ bridge_ip }}"
+      tags: debug
+
+    - name: Extract Libvirt Network Range
+      shell: >
+        echo "{{ libvirt_network.stdout }}" | grep -oP "range start='[^']+' end='[^']+'" |
+        sed -E "s/range start='([^']+)' end='([^']+)'/\\1 - \\2/"
+      register: libvirt_network_range_result
+      when: libvirt_network.stdout is defined
+
+    - name: Set Libvirt Network Range fact
+      set_fact:
+        libvirt_network_range: "{{ libvirt_network_range_result.stdout.strip() }}"
+
+    - name: Debug Libvirt Network Range
+      debug:
+        msg: "Libvirt network range: {{ libvirt_network_range }}"
+      tags: debug
+
+    - name: Save collected data to a JSON file
+      copy:
+        content: "{{ hostvars | to_json }}"
+        dest: /tmp/hostvars.json
+      run_once: true
+      delegate_to: localhost
+
+    - name: Render graph in DOT format
+      template:
+        src: templates/graph.dot.j2
+        dest: /tmp/graph.dot
+      run_once: true
+      delegate_to: localhost
+
+    - name: Convert DOT file to PNG
+      shell: dot -Tpng /tmp/graph.dot -o ./graph.png
+      args:
+        executable: /bin/bash
+      register: dot_to_png_result
+      run_once: true
+      delegate_to: localhost
+
