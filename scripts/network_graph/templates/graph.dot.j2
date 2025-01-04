@@ -1,3 +1,5 @@
+// Jinja2 Template for DOT Graph
+
 digraph VM_Network {
     {% for host, host_data in hostvars.items() %}
     subgraph cluster_{{ host }} {
@@ -5,51 +7,36 @@ digraph VM_Network {
         style = filled;
         color = lightgrey;
 
+        // Define VMs and connections to Libvirt networks
         {% for vm in host_data.matching_vms.stdout_lines %}
-        {% for ip_data in host_data.vm_ips.results %}
-        {% if ip_data.item == vm %}
+        {% for ip_data in host_data.vm_ips.results if ip_data.item == vm %}
         "{{ vm }}_{{ host }}" [label="{{ vm }}\n{{ ip_data.stdout.split()[3] }}", shape=box];
-        {% endif %}
+        "{{ vm }}_{{ host }}" -> "{{ host_data.valid_libvirt_network }}_{{ host }}" [style=solid, label="{{ ip_data.stdout.split()[0] }}"];
         {% endfor %}
         {% endfor %}
 
-        "{{ host_data.ansible_default_ipv4.address }}" [label="WireGuard: {{ host_data.selected_wireguard }}\nPublic IP: {{ host_data.ansible_default_ipv4.address }}", shape=ellipse, color=blue];
+        // Define WireGuard interface
+        "{{ host_data.ansible_default_ipv4.address }}" [label="WireGuard: {{ host_data.selected_wireguard }}\n{{ host_data.ansible_default_ipv4.address }}", shape=ellipse, color=blue];
+
+        // Define Bridge and its connection to WireGuard
         "{{ host_data.bridge_name }}_{{ host }}" [label="Bridge: {{ host_data.bridge_name }}\n{{ host_data.bridge_ip }}", shape=ellipse, color=green];
-        "{{ host_data.valid_libvirt_network }}_{{ host }}" [label="Libvirt: {{ host_data.valid_libvirt_network }}\nRange: {{ host_data.libvirt_network_range }}", shape=note, color=orange];
+        "{{ host_data.bridge_name }}_{{ host }}" -> "{{ host_data.ansible_default_ipv4.address }}" [style=solid];
 
-         // uncomment the below to add routing info. I don't like it now though because takes too much space
-        // "routing_info_{{ host }}" [label="Routing:\n{% for route in host_data.routing_info %}{{ route }}\n{% endfor %}", shape=plaintext, color=black];
+        // Define Libvirt network and its connection to Bridge
+        "{{ host_data.valid_libvirt_network }}_{{ host }}" [label="Libvirt: {{ host_data.valid_libvirt_network }}\nRange: {{ host_data.libvirt_network_range }}", shape=note, color=orange];
+        "{{ host_data.valid_libvirt_network }}_{{ host }}" -> "{{ host_data.bridge_name }}_{{ host }}" [style=dotted];
     }
     {% endfor %}
 
-    // Define WireGuard tunnel
-    {% for host_a, host_data_a in hostvars.items() %}
-        {% for host_b, host_data_b in hostvars.items() %}
-            {% if host_a != host_b and host_a < host_b %}
-            "{{ host_data_a.ansible_default_ipv4.address }}" -> "{{ host_data_b.ansible_default_ipv4.address }}" [dir=both, style=dashed];
-            {% endif %}
-        {% endfor %}
-    {% endfor %}
-
-    // Connect WireGuard interfaces to bridges
+    // Define WireGuard tunnels in a separate loop to ensure all nodes are defined
+    // This avoids referencing undefined nodes when creating connections.
     {% for host, host_data in hostvars.items() %}
-        "{{ host_data.bridge_name }}_{{ host }}" -> "{{ host_data.ansible_default_ipv4.address }}" [style=solid];
-    {% endfor %}
-
-    // Connect VMs to libvirt networks
-    {% for host, host_data in hostvars.items() %}
-        {% for vm in host_data.matching_vms.stdout_lines %}
-        {% for ip_data in host_data.vm_ips.results %}
-        {% if ip_data.item == vm %}
-        "{{ vm }}_{{ host }}" -> "{{ host_data.valid_libvirt_network }}_{{ host }}" [style=solid, label="{{ ip_data.stdout.split()[0] }}"];
-        {% endif %}
+    {% if host_data.wireguard_peer_mapping is defined %}
+        {% for line in host_data.wireguard_peer_mapping.stdout_lines %}
+        {% set peer_ip, allowed_ips = line.split(' ', 1) %}
+        "{{ host_data.ansible_default_ipv4.address }}" -> "{{ peer_ip }}" [style=dashed, label="{{ allowed_ips }}", fontsize=10];
         {% endfor %}
-        {% endfor %}
-    {% endfor %}
-
-    // Connect libvirt networks to bridges
-    {% for host, host_data in hostvars.items() %}
-        "{{ host_data.valid_libvirt_network }}_{{ host }}" -> "{{ host_data.bridge_name }}_{{ host }}" [style=dotted];
+    {% endif %}
     {% endfor %}
 }
 
