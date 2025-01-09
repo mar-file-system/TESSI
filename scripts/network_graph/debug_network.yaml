@@ -1,9 +1,135 @@
-# Ansible Playbook for Dynamic Network Graph and Validation
-- hosts: all
+- name: Debug network connectivity
+  hosts: all
   gather_facts: yes
   gather_subset:
     - network
   vars:
+    ping_count: 3
   tasks:
     - name: Collect network information
       include_tasks: collect_network_info.yaml
+
+    # Gather all VM hostnames globally
+    - name: Gather all VM hostnames globally
+      set_fact:
+        all_vm_hostnames: "{{ groups['all'] | map('extract', hostvars, 'matching_vms.stdout_lines') | sum(start=[]) }}"
+      when: false # this task doesn't work
+
+    # Local pings
+    # Ping the bridge interface on each host
+    - name: Ping the bridge interface on each host (local)
+      ansible.builtin.shell: |
+        ping -c {{ ping_count }} {{ hostvars[inventory_hostname].bridge_ip }}
+      register: bridge_ping_results
+
+    - name: Report bridge ping results (local)
+      ansible.builtin.debug:
+        msg: >
+          Ping to local bridge {{ hostvars[inventory_hostname].bridge_ip }} {{ 'succeeded' if bridge_ping_results.rc == 0 else 'failed' }}
+
+    # Ping the WireGuard tunnel on each host
+    - name: Ping the WireGuard tunnel on each host (local)
+      ansible.builtin.shell: |
+        ping -c {{ ping_count }} {{ hostvars[inventory_hostname].wireguard_ip_address.stdout }}
+      register: wireguard_ping_results
+
+    - name: Report WireGuard tunnel ping results (local)
+      ansible.builtin.debug:
+        msg: >
+          Ping to local WireGuard {{ hostvars[inventory_hostname].wireguard_ip_address.stdout }} {{ 'succeeded' if wireguard_ping_results.rc == 0 else 'failed' }}
+
+    # Ping VMs on the same host by IP address
+    - name: Ping VMs on the same host by IP address (local)
+      ansible.builtin.shell: |
+        ping -c {{ ping_count }} {{ item }}
+      with_items: "{{ hostvars[inventory_hostname].vm_ips }}"
+      register: vm_local_ping_results
+      ignore_errors: yes
+
+    - name: Report VM ping results for the same host by IP address (local)
+      ansible.builtin.debug:
+        msg: >
+          Ping to local VM by IP {{ item.item }} {{ 'succeeded' if item.rc == 0 else 'failed' }}
+      with_items: "{{ vm_local_ping_results.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+
+    # Ping VMs on the same host by hostname (local)
+    - name: Ping VMs on the same host by hostname (local)
+      ansible.builtin.shell: |
+        ping -c {{ ping_count }} {{ item }}
+      with_items: "{{ hostvars[inventory_hostname].matching_vms.stdout_lines }}"
+      register: vm_local_hostname_ping_results
+      ignore_errors: yes
+
+    - name: Report VM ping results for the same host by hostname (local)
+      ansible.builtin.debug:
+        msg: >
+          Ping to local VM by hostname {{ item.item }} {{ 'succeeded' if item.rc == 0 else 'failed' }}
+      with_items: "{{ vm_local_hostname_ping_results.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+
+    # Remote pings
+    # Ping WireGuard endpoints on other hosts
+    - name: Ping WireGuard endpoints on other hosts (remote)
+      ansible.builtin.shell: |
+        ping -c {{ ping_count }} {{ item }}
+      with_items: "{{ hostvars[inventory_hostname].wireguard_peer_map.keys() }}"
+      register: wireguard_peer_ping_results
+
+    - name: Report WireGuard endpoint ping results (remote)
+      ansible.builtin.debug:
+        msg: >
+          Ping to remote WireGuard endpoint {{ item.item }} {{ 'succeeded' if item.rc == 0 else 'failed' }}
+      with_items: "{{ wireguard_peer_ping_results.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+
+    # Ping bridges on other hosts
+    - name: Ping bridges on other hosts (remote)
+      ansible.builtin.shell: |
+        ping -c {{ ping_count }} {{ item }}
+      with_items: "{{ groups['all'] | map('extract', hostvars, 'bridge_ip') | difference([hostvars[inventory_hostname].bridge_ip]) }}"
+      register: bridge_peer_ping_results
+
+    - name: Report bridge ping results for other hosts (remote)
+      ansible.builtin.debug:
+        msg: >
+          Ping to remote bridge {{ item.item }} {{ 'succeeded' if item.rc == 0 else 'failed' }}
+      with_items: "{{ bridge_peer_ping_results.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+
+    # Ping VMs on other hosts by IP address
+    - name: Ping VMs on other hosts by IP address (remote)
+      ansible.builtin.shell: |
+        ping -c {{ ping_count }} {{ item }}
+      with_items: "{{ groups['all'] | map('extract', hostvars, 'vm_ips') | sum(start=[]) | difference(hostvars[inventory_hostname].vm_ips) }}"
+      register: vm_peer_ping_results
+      ignore_errors: yes
+
+    - name: Report VM ping results for other hosts by IP address (remote)
+      ansible.builtin.debug:
+        msg: >
+          Ping to remote VM by IP {{ item.item }} {{ 'succeeded' if item.rc == 0 else 'failed' }}
+      with_items: "{{ vm_peer_ping_results.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+
+    # Ping VMs on other hosts by hostname
+    - name: Ping VMs on other hosts by hostname (remote)
+      ansible.builtin.shell: |
+        ping -c {{ ping_count }} {{ item }}
+      with_items: "{{ all_vm_hostnames | difference(hostvars[inventory_hostname].matching_vms.stdout_lines) }}"
+      register: vm_peer_hostname_ping_results
+      ignore_errors: yes
+
+    - name: Report VM ping results for other hosts by hostname (remote)
+      ansible.builtin.debug:
+        msg: >
+          Ping to remote VM by hostname {{ item.item }} {{ 'succeeded' if item.rc == 0 else 'failed' }}
+      with_items: "{{ vm_peer_hostname_ping_results.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+
