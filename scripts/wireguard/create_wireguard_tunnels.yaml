@@ -3,24 +3,29 @@
 - name: Set up wireguard tunnels
   hosts: physical_hosts
   tasks:
+    - name: Compute subnet base and CIDR
+      set_fact:
+        subnet_base: "{{ libvirt_addresses.split('.')[3].split('/')[0] | int }}"
+        cidr: "{{ libvirt_addresses.split('/')[1] }}"
+
+    - name: Compute usable addresses and first addresses
+      set_fact:
+        usable_addresses: "{{ (2 ** (32 - cidr | int)) - 2 }}"
+        libvirt_first_address: "{{ subnet_base | int + 1 }}"
+
+    - name: Compute last addresses
+      set_fact:
+        libvirt_last_address: "{{ subnet_base | int + usable_addresses | int }}"
+
     - name: Debug IP ranges
       debug:
-        msg: "Host {{ inventory_hostname }}: WireGuard IP is {{ wireguard_ip }}, Libvirt subnet is {{ libvirt_addresses }}"
+        msg: "{{ inventory_hostname }}: WireGuard {{ wireguard_ip }}, lvirt {{ libvirt_addresses }} {{ libvirt_first_address }}-{{ libvirt_last_address }}, sub {{ subnet_base }}, cidr {{ cidr }}, "
 
     - name: Delete network interface and bridge
       ansible.builtin.command:
         cmd: "ip link delete {{ item }}"
       with_items:
         - "{{ wireguard.interface }}"
-        - "{{ wireguard.bridge }}"
-      ignore_errors: true
-      tags: cleanup
-
-    - name: Delete existing connections if they exist
-      command: nmcli connection delete "{{ item }}"
-      with_items:
-        - "{{ wireguard.bridge }}"
-        - "{{ wireguard.interface }}-slave"
       ignore_errors: true
       tags: cleanup
 
@@ -152,36 +157,6 @@
 
     # this ends the basic wireguard installation. 
     # the rest is setting up the libvirt network integration
-
-    - name: Add bridge connection
-      ansible.builtin.command:
-        cmd: "nmcli connection add type bridge con-name {{ wireguard.bridge }} ifname {{ wireguard.bridge }}"
-      when: false
-
-    - name: Add ethernet to bridge
-      ansible.builtin.command:
-        cmd: "nmcli connection add type ethernet slave-type bridge con-name {{ wireguard.interface }}-slave ifname {{ wireguard.interface }} master {{ wireguard.bridge }}"
-      when: false
-
-    - name: Bring up bridge connection
-      ansible.builtin.command:
-        cmd: "nmcli connection up {{ wireguard.bridge }}"
-      when: false
-
-    - name: Allow forwarding from bridge to interface
-      ansible.builtin.command:
-        cmd: "iptables -A FORWARD -i {{ wireguard.bridge }} -o {{ wireguard.interface }} -j ACCEPT"
-      when: false
-
-    - name: Allow forwarding from interface to bridge
-      ansible.builtin.command:
-        cmd: "iptables -A FORWARD -i {{ wireguard.interface }} -o {{ wireguard.bridge }} -j ACCEPT"
-      when: false
-
-    - name: Add NAT for outgoing traffic
-      ansible.builtin.command:
-        cmd: "iptables -t nat -A POSTROUTING -o {{ wireguard.interface }} -j MASQUERADE"
-      when: false
 
     - name: Add route to VM networks via WireGuard
       ansible.builtin.command:
