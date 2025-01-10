@@ -11,6 +11,7 @@ module "vms" {
   secondary   = try(module.volumes["${each.key}-secondary"].volume_id, null)
   netone      = each.value.netone
   nettwo      = each.value.nettwo
+  mac_address = each.value.mac_address
   
   providers = {
     libvirt = libvirt.by_host[each.value.host]

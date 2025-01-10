@@ -14,6 +14,7 @@ variable "primary" {}
 variable "secondary" {}
 variable "netone" {}
 variable "nettwo" {}
+variable "mac_address" {}
 
 resource "libvirt_domain" "domain" {
   name       = var.name 
@@ -45,6 +46,7 @@ resource "libvirt_domain" "domain" {
   # secondary storage network
   network_interface {
     network_name = var.nettwo 
+    mac          = var.mac_address
   }
 
   console {
