@@ -5,12 +5,11 @@ variable "vm_name" {
     memory           = optional(string, "2048")
     vcpu             = optional(number, 2)
     second_disk_size = optional(number, null)
-    host             = string  # The short-hand for the host (e.g., "in07" or "in16")
-    source_image     = optional(string, "/var/lib/libvirt/images/gold-beegfs-almalinux8-server.qcow2")  # Optional source image with default
+    host             = string  
+    source_image     = optional(string, "/var/lib/libvirt/images/gold-beegfs-almalinux8-server.qcow2")  
     storage_pool     = optional(string, "default")
     netone           = optional(string, "default")
     nettwo           = optional(string, "wireguard-virt")
-    #network          = optional(string, "vm-net")
   }))
   default = [
     {
