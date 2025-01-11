@@ -31,6 +31,12 @@ cd $CREATE_WG
 sudo ansible-playbook -i inventory.yaml create_wireguard_tunnels.yaml --tags cleanup
 popd
 
+phase "Clean up Artifacts"
+pushd . 
+cd $CREATE_GRAPH
+sudo \rm artifacts/*png
+popd
+
 phase "Create Networking and Tofu System Description"
 pushd .
 cd $CREATE_WG
@@ -55,4 +61,10 @@ phase "Debug Network"
 pushd .
 cd $CREATE_GRAPH
 sudo ansible-playbook -i inventory.yaml debug_network.yaml 
+popd
+
+phase "Look at Artifacts"
+pushd . 
+cd $CREATE_GRAPH
+ls -ltr artifacts/*png
 popd
