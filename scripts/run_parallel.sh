@@ -54,7 +54,6 @@ phase "Create Graph"
 pushd .
 cd $CREATE_GRAPH
 sudo ansible-playbook -i inventory.yaml make_network_graph.yaml 
-sudo cp graph.png /tmp
 popd
 
 phase "Debug Network"
