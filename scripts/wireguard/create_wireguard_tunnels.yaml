@@ -56,6 +56,44 @@
       tags:
         - cleanup
 
+    - name: List iptables rules matching WireGuard or libvirt interfaces
+      ansible.builtin.shell: |
+        iptables -S | grep -E '{{ wireguard.interface }}|{{ libvirt.interface }}'
+      register: matching_rules
+      tags:
+        - cleanup
+        - debug
+      ignore_errors: true
+
+    - name: Debug matching iptables rules
+      debug:
+        var: matching_rules.stdout_lines
+      tags:
+        - cleanup
+        - debug
+
+    - name: Delete iptables rules matching WireGuard or libvirt interfaces
+      ansible.builtin.shell: |
+        iptables {{ item | regex_replace('^-A', '-D') }}
+      loop: "{{ matching_rules.stdout_lines }}"
+      tags:
+        - cleanup
+        - debug
+
+    - name: Verify remaining iptables rules
+      shell: iptables -L -v --line-numbers
+      register: remaining_rules
+      tags:
+        - cleanup
+        - debug
+
+    - name: Debug remaining iptables rules
+      debug:
+        var: remaining_rules.stdout_lines
+      tags:
+        - cleanup
+        - debug
+
     - name: Create wireguard interface
       ansible.builtin.command:
         cmd: "ip link add dev {{ wireguard.interface }} type wireguard"
@@ -140,9 +178,12 @@
       ansible.builtin.debug:
         msg: "Host data: {{ host_data }}"
 
-    - name: Configure peers on each host
+    - name: Configure peers with PersistentKeepalive
       ansible.builtin.shell: |
-        wg set {{ wireguard.interface }} peer {{ item.public_key }} allowed-ips {{ item.wireguard_ip }}/32,{{ item.libvirt_addresses }} endpoint {{ item.PUBLIC_IP }}:{{ item.WG_LISTENING_PORT }}
+        wg set {{ wireguard.interface }} peer {{ item.public_key }} \
+          allowed-ips {{ item.wireguard_ip }}/32,{{ item.libvirt_addresses }} \
+          endpoint {{ item.PUBLIC_IP }}:{{ item.WG_LISTENING_PORT }} \
+          persistent-keepalive 25
       with_items: "{{ host_data | selectattr('hostname', 'ne', inventory_hostname) | list }}"
 
     - name: Ping WireGuard IPs of all other hosts
