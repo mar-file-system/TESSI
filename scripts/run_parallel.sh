@@ -1,4 +1,4 @@
-#! /bin/bash
+#! /bin/bash -e
 
 CREATE_WG=wireguard
 CREATE_VMS=opentofu/dynamic_hosts_libvirt_vms/
@@ -34,7 +34,7 @@ popd
 phase "Clean up Artifacts"
 pushd . 
 cd $CREATE_GRAPH
-sudo \rm artifacts/*png
+sudo \rm -f artifacts/*png
 popd
 
 phase "Create Networking and Tofu System Description"
@@ -50,7 +50,19 @@ sudo cp /tmp/system_description.tf .
 sudo tofu apply --auto-approve
 popd
 
-phase "Create Graph"
+phase "Manually add Routes. TODO: Automate this somehow"
+# VMs on in07
+for vm in beegfs-meta00 beegfs-client01 beegfs-client00; do
+  ssh in07 "ssh -o StrictHostKeyChecking=no root@$vm 'ip route add 192.68.2.0/24 via 192.68.3.1'"
+done
+
+# VMs on in16
+for vm in beegfs-meta01 beegfs-data00 beegfs-data01; do
+  ssh in16 "ssh -o StrictHostKeyChecking=no root@$vm 'ip route add 192.68.2.0/24 via 192.68.3.33'"
+done
+
+
+phase "Create Network Graph"
 pushd .
 cd $CREATE_GRAPH
 sudo ansible-playbook -i inventory.yaml make_network_graph.yaml 
