@@ -53,12 +53,14 @@ popd
 phase "Manually add Routes. TODO: Automate this somehow"
 # VMs on in07
 for vm in beegfs-meta00 beegfs-client01 beegfs-client00; do
-  ssh in07 "ssh -o StrictHostKeyChecking=no root@$vm 'ip route add 192.68.2.0/24 via 192.68.3.1'"
+  #ssh in07 "ssh -o StrictHostKeyChecking=no root@$vm 'ip route add 192.68.2.0/24 via 192.68.3.1'"
+  echo "Not manually adding route to $vm. Hoping this is done automatically in kickstart"
 done
 
 # VMs on in16
 for vm in beegfs-meta01 beegfs-data00 beegfs-data01; do
-  ssh in16 "ssh -o StrictHostKeyChecking=no root@$vm 'ip route add 192.68.2.0/24 via 192.68.3.33'"
+  #ssh in16 "ssh -o StrictHostKeyChecking=no root@$vm 'ip route add 192.68.2.0/24 via 192.68.3.33'"
+  echo "Not manually adding route to $vm. Hoping this is done automatically in kickstart"
 done
 
 
