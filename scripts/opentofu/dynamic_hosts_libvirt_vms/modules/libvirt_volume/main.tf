@@ -13,14 +13,22 @@ variable "size" {}
 variable "format" {}
 
 resource "libvirt_volume" "volume" {
-  name     = var.name 
-  pool     = var.pool
-  source   = var.source_img
-  size     = var.size
-  format   = var.format 
+  name   = var.name
+  pool   = var.pool
+  source = var.source_img
+  size   = var.size
+  format = var.format
 }
 
 output "volume_id" {
   value = libvirt_volume.volume.id
+}
+
+output "debug_source" {
+  value = var.source_img
+}
+
+output "debug_size" {
+  value = var.size
 }
 
