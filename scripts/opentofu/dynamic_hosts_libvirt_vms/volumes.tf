@@ -1,3 +1,4 @@
+# Regular volumes module
 module "volumes" {
   source = "./modules/libvirt_volume"
 
@@ -17,11 +18,8 @@ module "volumes" {
   }
 }
 
+# Outputs
 output "volume_paths" {
-  description = "Paths to all created volumes, including both primary and secondary"
-  value = {
-    for key, instance in module.volumes :
-    key => instance.volume_id
-  }
+  description = "Paths to all created volumes, including primary and secondary"
+  value = { for key, instance in module.volumes : key => instance.volume_id }
 }
-
