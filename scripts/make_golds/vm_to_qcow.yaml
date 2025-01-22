@@ -1,32 +1,29 @@
 - name: Check if VM {{ item.name }} is running
-  command: "virsh domstate {{ item.name }}"
+  community.libvirt.virt:
+    name: "{{ item.name }}"
+    command: list_vms
+    state: running
+    uri: qemu:///system
+  register: running_vms
+
+- name: Shut down VM {{ item.name }} if running
+  community.libvirt.virt:
+    name: "{{ item.name }}"
+    state: shutdown
+    uri: qemu:///system
+  register: shutdown_result
+  when: item.name in running_vms.list_vms 
+
+- name: Wait for VM {{ item.name }} to shut down
+  community.libvirt.virt:
+    command: list_vms
+    state: shutdown
+    uri: qemu:///system
   register: vm_state
-  delegate_to: localhost
+  until: item.name in vm_state.list_vms
+  retries: 10
+  delay: 5
 
-- block:
-    - name: Shut down VM {{ item.name }} if running
-      command: "virsh shutdown {{ item.name }}"
-      delegate_to: localhost
-
-    - name: Wait for VM {{ item.name }} to shut down
-      command: "virsh domstate {{ item.name }}"
-      register: shutdown_state
-      delegate_to: localhost
-      until: shutdown_state.stdout.strip() == 'shut off'
-      retries: 10
-      delay: 5
-  when: vm_state.stdout.strip() == 'running'
-
-# Task to delete the image if `makeclean` is a tag
-- name: Delete QCOW2 image for VM {{ item.name }} if makeclean is passed
-  file:
-    path: "{{ vm_directory }}/{{ item.name }}.qcow2"
-    state: absent
-  when: "'makeclean' in ansible_run_tags"
-  tags:
-    - makeclean
-
-# Task to check if the QCOW2 image already exists
 - name: Check if QCOW2 image for VM {{ item.name }} exists
   stat:
     path: "{{ vm_directory }}/{{ item.name }}.qcow2"
@@ -44,10 +41,10 @@
 
 # Block to handle image creation if it doesn't exist
 - block:
+    # would be nice to replace this with the virt module, but it puts it into an ugly structure
     - name: Extract disk path for VM {{ item.name }} 
       shell: "virsh dumpxml {{ item.name }} | awk -F\"'\" '/<source file=/ {print $2}'"
       register: disk_path
-      delegate_to: localhost
 
     - name: Copy QCOW2 image for VM {{ item.name }} to target directory
       command: "qemu-img convert -O qcow2 {{ disk_path.stdout.strip() }} {{ vm_directory }}/{{ item.name }}.qcow2"

@@ -1,52 +1,21 @@
-- block:
-    - name: Stop VM {{ item.name }} if it is running
-      command: "virsh destroy {{ item.name }}"
-      register: destroy_result
-      ignore_errors: yes
+- name: Collect existant VMs
+  community.libvirt.virt:
+    command: list_vms
+  register: all_vms
 
-    - name: Wait for VM {{ item.name }} to stop
-      command: "virsh domstate {{ item.name }}"
-      register: vm_shutdown_state
-      retries: 5
-      delay: 2
-      until: vm_shutdown_state.stdout.strip() == "shut off"
-      when: destroy_result.rc == 0  # Run only if 'destroy' was successful
-      ignore_errors: yes
-
-    - name: Undefine the VM {{ item.name }}
-      command: "virsh undefine {{ item.name }}"
-      ignore_errors: yes
-
-    - name: Wait until the VM {{ item.name }} is undefined
-      command: "virsh list --all --name"
-      register: vm_list
-      retries: 10
-      delay: 5
-      until: item.name not in vm_list.stdout_lines
-
-    - name: Remove any existing image file for VM {{ item.name }} if makeclean was passed
-      file:
-        path: "{{ vm_directory }}/{{ item.name }}.img"
-        state: absent
-  ignore_errors: yes
-  when: "'makeclean' in ansible_run_tags"
-  tags:
-    - makeclean
-
-- name: Check if VM {{ item.name }} exists
-  command: "virsh dominfo {{ item.name }}"
-  register: vm_check
-  ignore_errors: yes
+- name: Set fact if VM {{ item.name }} exists
+  set_fact:
+    vm_exists: "{{ item.name in all_vms.list_vms }}"
 
 - block:
-    - name: Skip creation if VM {{ item.name }} already exists
+    - name: Check whether to skip creation if VM {{ item.name }} already exists
       debug:
         msg: "VM {{ item.name }} already exists. Not recreating it. Pass --tags makeclean to force recreation."
 
     - name: Sleep for 2 seconds if VM creation is skipped
       wait_for:
         timeout: 2
-  when: vm_check.rc == 0
+  when: vm_exists 
 
 - block:
    - name: Create kickstart file for VM {{ item.name }}  
@@ -81,5 +50,4 @@
      debug:
        msg: "VM {{ item.name }} installation completed with output: {{ virt_install_output.stdout }}"
 
-  when: vm_check.rc != 0
-
+  when: not vm_exists 
