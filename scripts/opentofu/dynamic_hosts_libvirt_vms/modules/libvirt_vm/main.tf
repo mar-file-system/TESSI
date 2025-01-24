@@ -47,7 +47,7 @@ resource "libvirt_domain" "domain" {
   # Attach cloudinit disk the proper way which fails because q35 machine doesn't support ide
   cloudinit = libvirt_cloudinit_disk.cloudinit.id
 
-  # weird thing. need to transform the XML. Refer to:
+  # weird thing. need to transform the XML to address the ide problem noted above. Refer to:
   # https://gist.github.com/dariush/7405cbf62835e03d0b5c953d798a87cd and
   # https://github.com/dmacvicar/terraform-provider-libvirt/issues/667
   xml {
