@@ -3,355 +3,320 @@
 - name: Set up wireguard tunnels
   hosts: physical_hosts
   tasks:
-    - name: Compute subnet base and CIDR
-      set_fact:
-        subnet_base: "{{ libvirt_addresses.split('.')[3].split('/')[0] | int }}"
-        cidr: "{{ libvirt_addresses.split('/')[1] }}"
 
-    - name: Compute usable addresses and first addresses
-      set_fact:
-        usable_addresses: "{{ (2 ** (32 - cidr | int)) - 2 }}"
-        libvirt_first_address: "{{ subnet_base | int + 1 }}"
+    - name: Cleanup block
+      block:
+        - name: Delete network interface and bridge
+          ansible.builtin.command:
+            cmd: "ip link delete {{ item }}"
+          with_items:
+            - "{{ wireguard.interface }}"
+          ignore_errors: true
 
-    - name: Compute last addresses
-      set_fact:
-        libvirt_last_address: "{{ subnet_base | int + usable_addresses | int }}"
+        - name: Destroy and undefine the libvirt network
+          command: "virsh net-{{ item }} {{ libvirt.name }}"
+          with_items:
+            - destroy
+            - undefine
+          ignore_errors: true
 
-    - name: Debug IP ranges
-      debug:
-        msg: "{{ inventory_hostname }}: WireGuard {{ wireguard_ip }}, lvirt {{ libvirt_addresses }} {{ libvirt_first_address }}-{{ libvirt_last_address }}, sub {{ subnet_base }}, cidr {{ cidr }}, "
+        - name: Gather routes referencing specific interfaces
+          ansible.builtin.command:
+            cmd: "ip route show | grep '{{ item }}'"
+          with_items:
+            - "{{ wireguard.interface }}"
+            - "{{ libvirt.interface }}"
+          register: found_routes
+          failed_when: found_routes.rc != 0 and found_routes.stdout != ""
 
-    - name: Delete network interface and bridge
-      ansible.builtin.command:
-        cmd: "ip link delete {{ item }}"
-      with_items:
-        - "{{ wireguard.interface }}"
-      ignore_errors: true
-      tags: cleanup
+        - name: Delete routes referencing specific interfaces
+          ansible.builtin.command:
+            cmd: "ip route del {{ item }}"
+          with_items: "{{ found_routes.results | map(attribute='stdout_lines') | flatten }}"
+          ignore_errors: true
 
-    - name: Destroy and undefine the libvirt network
-      command: "virsh net-{{ item }} {{ libvirt.name }}"
-      with_items:
-        - destroy
-        - undefine
-      ignore_errors: true
-      tags: cleanup
+        - name: List iptables rules matching WireGuard or libvirt interfaces
+          ansible.builtin.shell: |
+            iptables -S | grep -E '{{ wireguard.interface }}|{{ libvirt.interface }}'
+          register: matching_rules
+          ignore_errors: true
 
-    - name: Gather routes referencing specific interfaces
-      ansible.builtin.command:
-        cmd: "ip route show | grep '{{ item }}'"
-      with_items:
-        - "{{ wireguard.interface }}"
-        - "{{ libvirt.interface }}"
-      register: found_routes
-      failed_when: found_routes.rc != 0 and found_routes.stdout != ""
-      tags:
-        - cleanup
+        - name: Debug matching iptables rules
+          debug:
+            var: matching_rules.stdout_lines
 
-    - name: Delete routes referencing specific interfaces
-      ansible.builtin.command:
-        cmd: "ip route del {{ item }}"
-      with_items: "{{ found_routes.results | map(attribute='stdout_lines') | flatten }}"
-      ignore_errors: true
-      tags:
-        - cleanup
+        - name: Delete iptables rules matching WireGuard or libvirt interfaces
+          ansible.builtin.shell: |
+            iptables {{ item | regex_replace('^-A', '-D') }}
+          loop: "{{ matching_rules.stdout_lines }}"
 
-    - name: List iptables rules matching WireGuard or libvirt interfaces
-      ansible.builtin.shell: |
-        iptables -S | grep -E '{{ wireguard.interface }}|{{ libvirt.interface }}'
-      register: matching_rules
-      tags:
-        - cleanup
-        - debug
-      ignore_errors: true
+        - name: Verify remaining iptables rules
+          shell: iptables -L -v --line-numbers
+          register: remaining_rules
 
-    - name: Debug matching iptables rules
-      debug:
-        var: matching_rules.stdout_lines
-      tags:
-        - cleanup
-        - debug
+        - name: Debug remaining iptables rules
+          debug:
+            var: remaining_rules.stdout_lines
+      tags: makeclean
 
-    - name: Delete iptables rules matching WireGuard or libvirt interfaces
-      ansible.builtin.shell: |
-        iptables {{ item | regex_replace('^-A', '-D') }}
-      loop: "{{ matching_rules.stdout_lines }}"
-      tags:
-        - cleanup
-        - debug
+    - name: Create the wireguard tunnels and do some rudimentary testing
+      block:
+        - name: Compute subnet base and CIDR
+          set_fact:
+            subnet_base: "{{ libvirt_addresses.split('.')[3].split('/')[0] | int }}"
+            cidr: "{{ libvirt_addresses.split('/')[1] }}"
 
-    - name: Verify remaining iptables rules
-      shell: iptables -L -v --line-numbers
-      register: remaining_rules
-      tags:
-        - cleanup
-        - debug
+        - name: Compute usable addresses and first addresses
+          set_fact:
+            usable_addresses: "{{ (2 ** (32 - cidr | int)) - 2 }}"
+            libvirt_first_address: "{{ subnet_base | int + 1 }}"
 
-    - name: Debug remaining iptables rules
-      debug:
-        var: remaining_rules.stdout_lines
-      tags:
-        - cleanup
-        - debug
+        - name: Compute last addresses
+          set_fact:
+            libvirt_last_address: "{{ subnet_base | int + usable_addresses | int }}"
 
-    - name: Create wireguard interface
-      ansible.builtin.command:
-        cmd: "ip link add dev {{ wireguard.interface }} type wireguard"
+        - name: Debug IP ranges
+          debug:
+            msg: "{{ inventory_hostname }}: WGuard {{ wireguard_ip }}, lvirt {{ libvirt_addresses }} {{ libvirt_first_address }}-{{ libvirt_last_address }}, sub {{ subnet_base }}, cidr {{ cidr }}, "
 
-    - name: Set IPRANGE fact
-      set_fact:
-        IPRANGE: "{{ wireguard_ip }}/{{ wireguard.cidr }}"
+        - name: Create wireguard interface
+          ansible.builtin.command:
+            cmd: "ip link add dev {{ wireguard.interface }} type wireguard"
 
-    - name: Debug IPRANGE
-      debug:
-        msg: "Host {{ inventory_hostname }} has IPRANGE set to {{ IPRANGE }}"
+        - name: Set IPRANGE fact
+          set_fact:
+            IPRANGE: "{{ wireguard_ip }}/{{ wireguard.cidr }}"
 
-    - name: Add IP address to interface
-      ansible.builtin.command:
-        cmd: "ip address add dev {{ wireguard.interface }} {{ IPRANGE }}"
+        - name: Debug IPRANGE
+          debug:
+            msg: "Host {{ inventory_hostname }} has IPRANGE set to {{ IPRANGE }}"
 
-    - name: Generate private key
-      ansible.builtin.command:
-        cmd: "wg genkey"
-      register: private_key_result
+        - name: Add IP address to interface
+          ansible.builtin.command:
+            cmd: "ip address add dev {{ wireguard.interface }} {{ IPRANGE }}"
 
-    - name: Save private key to file
-      ansible.builtin.copy:
-        content: "{{ private_key_result.stdout }}"
-        dest: "{{ wireguard.priv_key }}"
+        - name: Generate private key
+          ansible.builtin.command:
+            cmd: "wg genkey"
+          register: private_key_result
 
-    - name: Generate public key
-      ansible.builtin.command:
-        cmd: "wg pubkey"
-      register: public_key_result
-      args:
-        stdin: "{{ private_key_result.stdout }}"
+        - name: Save private key to file
+          ansible.builtin.copy:
+            content: "{{ private_key_result.stdout }}"
+            dest: "{{ wireguard.priv_key }}"
 
-    - name: Debug public key
-      debug:
-        msg: "Generated public key: {{ public_key_result.stdout }}"
+        - name: Generate public key
+          ansible.builtin.command:
+            cmd: "wg pubkey"
+          register: public_key_result
+          args:
+            stdin: "{{ private_key_result.stdout }}"
 
-    - name: Set WireGuard private key
-      ansible.builtin.command:
-        cmd: "wg set {{ wireguard.interface }} private-key {{ wireguard.priv_key }}"
+        - name: Debug public key
+          debug:
+            msg: "Generated public key: {{ public_key_result.stdout }}"
 
-    - name: Delete private key file
-      ansible.builtin.file:
-        path: "{{ wireguard.priv_key }}"
-        state: absent
+        - name: Set WireGuard private key
+          ansible.builtin.command:
+            cmd: "wg set {{ wireguard.interface }} private-key {{ wireguard.priv_key }}"
 
-    - name: Bring up WireGuard interface
-      ansible.builtin.command:
-        cmd: "ip link set {{ wireguard.interface }} up"
+        - name: Delete private key file
+          ansible.builtin.file:
+            path: "{{ wireguard.priv_key }}"
+            state: absent
 
-    - name: Get WireGuard listening port
-      ansible.builtin.command:
-        cmd: "wg show {{ wireguard.interface }} listen-port"
-      register: wg_listen_port_result
+        - name: Bring up WireGuard interface
+          ansible.builtin.command:
+            cmd: "ip link set {{ wireguard.interface }} up"
 
-    - name: Set WG_LISTENING_PORT fact
-      set_fact:
-        WG_LISTENING_PORT: "{{ wg_listen_port_result.stdout }}"
+        - name: Get WireGuard listening port
+          ansible.builtin.command:
+            cmd: "wg show {{ wireguard.interface }} listen-port"
+          register: wg_listen_port_result
 
-    - name: Set PUBLIC_IP fact using default Ansible variable
-      set_fact:
-        PUBLIC_IP: "{{ ansible_default_ipv4.address }}"
+        - name: Set WG_LISTENING_PORT fact
+          set_fact:
+            WG_LISTENING_PORT: "{{ wg_listen_port_result.stdout }}"
 
-    - name: Gather public keys and IPs of all hosts
-      ansible.builtin.set_fact:
-        host_data: >
-          {%- set data = [] -%}
-          {%- for host in hostvars -%}
-          {%- set info = {
-              'hostname': hostvars[host]['inventory_hostname'],
-              'public_key': hostvars[host]['public_key_result']['stdout'] | default(''),
-              'wireguard_ip': hostvars[host]['wireguard_ip'] | default(''),
-              'PUBLIC_IP': hostvars[host]['PUBLIC_IP'] | default(''),
-              'WG_LISTENING_PORT': hostvars[host]['WG_LISTENING_PORT'] | default(''),
-              'libvirt_addresses': hostvars[host]['libvirt_addresses'] | default('')
-            } -%}
-          {{ data.append(info) }}
-          {%- endfor -%}
-          {{ data }}
+        - name: Set PUBLIC_IP fact using default Ansible variable
+          set_fact:
+            PUBLIC_IP: "{{ ansible_default_ipv4.address }}"
 
-    - name: Share host data across all hosts
-      ansible.builtin.debug:
-        msg: "Host data: {{ host_data }}"
+        - name: Gather public keys and IPs of all hosts
+          ansible.builtin.set_fact:
+            host_data: >
+              {%- set data = [] -%}
+              {%- for host in hostvars -%}
+              {%- set info = {
+                  'hostname': hostvars[host]['inventory_hostname'],
+                  'public_key': hostvars[host]['public_key_result']['stdout'] | default(''),
+                  'wireguard_ip': hostvars[host]['wireguard_ip'] | default(''),
+                  'PUBLIC_IP': hostvars[host]['PUBLIC_IP'] | default(''),
+                  'WG_LISTENING_PORT': hostvars[host]['WG_LISTENING_PORT'] | default(''),
+                  'libvirt_addresses': hostvars[host]['libvirt_addresses'] | default('')
+                } -%}
+              {{ data.append(info) }}
+              {%- endfor -%}
+              {{ data }}
 
-    - name: Configure peers with PersistentKeepalive
-      ansible.builtin.shell: |
-        wg set {{ wireguard.interface }} peer {{ item.public_key }} \
-          allowed-ips {{ item.wireguard_ip }}/32,{{ item.libvirt_addresses }} \
-          endpoint {{ item.PUBLIC_IP }}:{{ item.WG_LISTENING_PORT }} \
-          persistent-keepalive 25
-      with_items: "{{ host_data | selectattr('hostname', 'ne', inventory_hostname) | list }}"
+        - name: Share host data across all hosts
+          ansible.builtin.debug:
+            msg: "Host data: {{ host_data }}"
 
-    - name: Ping WireGuard IPs of all other hosts
-      ansible.builtin.shell: "ping -c 1 {{ item.wireguard_ip }}"
-      with_items: "{{ host_data | selectattr('hostname', 'ne', inventory_hostname) | list }}"
-      register: ping_results
+        - name: Configure peers with PersistentKeepalive
+          ansible.builtin.shell: |
+            wg set {{ wireguard.interface }} peer {{ item.public_key }} \
+              allowed-ips {{ item.wireguard_ip }}/32,{{ item.libvirt_addresses }} \
+              endpoint {{ item.PUBLIC_IP }}:{{ item.WG_LISTENING_PORT }} \
+              persistent-keepalive 25
+          with_items: "{{ host_data | selectattr('hostname', 'ne', inventory_hostname) | list }}"
 
-    - name: Debug ping results
-      ansible.builtin.debug:
-        msg: "Ping result for {{ item.item.wireguard_ip }}: {{ item.stdout }}"
-      with_items: "{{ ping_results.results }}"
+        - name: Ping WireGuard IPs of all other hosts
+          ansible.builtin.shell: "ping -c 1 {{ item.wireguard_ip }}"
+          with_items: "{{ host_data | selectattr('hostname', 'ne', inventory_hostname) | list }}"
+          register: ping_results
 
-    # this ends the basic wireguard installation. 
-    # the rest is setting up the libvirt network integration and setting up routing between the two
+        - name: Debug ping results
+          ansible.builtin.debug:
+            msg: "Ping result for {{ item.item.wireguard_ip }}: {{ item.stdout }}"
+          with_items: "{{ ping_results.results }}"
 
-    - name: Debug each VM definition
-      debug:
-        msg: "Processing VM: {{ item }}"
-      loop: "{{ vms }}"  # note that vms is a list of lists. Using 'with_items:' will iterate over the sub-elements
-      # see this discussion: https://stackoverflow.com/questions/35662388/ansible-with-items-list-of-lists-is-flattening
+    - name: Create the libvirt networks and the routing and bridges between them and the wireguard tunnels
+      block:
+        - name: Debug each VM definition
+          debug:
+            msg: "Processing VM: {{ item }}"
+          loop: "{{ vms }}"  # note that vms is a list of lists. Using 'with_items:' will iterate over the sub-elements
+          # see this discussion: https://stackoverflow.com/questions/35662388/ansible-with-items-list-of-lists-is-flattening
 
-    - name: Debug VM item structure
-      debug:
-        msg: >
-          VM item: {{ item }},
-          VM Name: {{ item[0] | default('undefined') }},
-          Last Octet: {{ item[1] | default('undefined') }},
-          Casted Last Octet: {{ (item[1] | int) | default('undefined') }},
-          Loop Index: {{ loop_index | default('undefined') }}
-      loop: "{{ vms }}"
-      loop_control:
-        index_var: loop_index
+        - name: Debug VM item structure
+          debug:
+            msg: >
+              VM item: {{ item }},
+              VM Name: {{ item[0] | default('undefined') }},
+              Last Octet: {{ item[1] | default('undefined') }},
+              Casted Last Octet: {{ (item[1] | int) | default('undefined') }},
+              Loop Index: {{ loop_index | default('undefined') }}
+          loop: "{{ vms }}"
+          loop_control:
+            index_var: loop_index
 
-    - name: Initialize VM mappings
-      set_fact:
-        vm_mappings: {}
+        - name: Initialize VM mappings
+          set_fact:
+            vm_mappings: {}
 
-    - name: Generate IP and MAC mappings for each VM
-      set_fact:
-        vm_mappings: >-
-          {{
-            vm_mappings | combine({
-              item[0]: {
-                'ip': "{}.{}".format(libvirt.base_ip, item[1]),
-                'mac': "52:54:00:00:{:02x}:{:02x}".format(loop_index, item[1])
-              }
-            })
-          }}
-      loop: "{{ vms }}"
-      loop_control:
-        label: "{{ item[0] }}"
-        index_var: loop_index
+        - name: Generate IP and MAC mappings for each VM
+          set_fact:
+            vm_mappings: >-
+              {{
+                vm_mappings | combine({
+                  item[0]: {
+                    'ip': "{}.{}".format(libvirt.base_ip, item[1]),
+                    'mac': "52:54:00:00:{:02x}:{:02x}".format(loop_index, item[1])
+                  }
+                })
+              }}
+          loop: "{{ vms }}"
+          loop_control:
+            label: "{{ item[0] }}"
+            index_var: loop_index
 
-    - name: Debug the VM mappings
-      debug:
-        msg: >-
-          Generated mappings:
-          {% for vm, mapping in vm_mappings.items() %}
-          VM: {{ vm }}, IP: {{ mapping.ip }}, MAC: {{ mapping.mac }}
-          {% endfor %}
+        - name: Debug the VM mappings
+          debug:
+            msg: >-
+              Generated mappings:
+              {% for vm, mapping in vm_mappings.items() %}
+              VM: {{ vm }}, IP: {{ mapping.ip }}, MAC: {{ mapping.mac }}
+              {% endfor %}
 
-    - name: Define libvirt network xml without assigned IP addresses
-      community.libvirt.virt_net:
-        name: "{{ libvirt.name }}"
-        state: present
-        xml: |
-          <network>
-            <name>{{ libvirt.name }}</name>
-            <bridge name="{{ libvirt.interface }}" />
-            <ip address="{{ libvirt.base_ip }}.{{ libvirt_first_address }}" netmask="255.255.255.240">
-              <dhcp>
-                <range start="{{ libvirt.base_ip }}.{{ libvirt_first_address }}" end="{{ libvirt.base_ip }}.{{ libvirt_last_address }}" />
-              </dhcp>
-            </ip>
-            <dns>
-              <forwarder addr="8.8.8.8"/>
-              <forwarder addr="8.8.4.4"/>
-            </dns>
-          </network>
-      when: false
+        - name: Define libvirt network XML with MAC-to-IP mappings
+          community.libvirt.virt_net:
+            name: "{{ libvirt.name }}"
+            state: present
+            xml: |
+              <network>
+                <name>{{ libvirt.name }}</name>
+                <bridge name="{{ libvirt.interface }}" />
+                <ip address="{{ libvirt.base_ip }}.{{ libvirt_first_address }}" netmask="255.255.255.240">
+                  <dhcp>
+                    <range start="{{ libvirt.base_ip }}.{{ libvirt_first_address }}" end="{{ libvirt.base_ip }}.{{ libvirt_last_address }}" />
+                    {% for vm, mapping in vm_mappings.items() %}
+                    <host mac="{{ mapping.mac }}" name="{{ vm }}" ip="{{ mapping.ip }}" />
+                    {% endfor %}
+                  </dhcp>
+                </ip>
+                <dns>
+                  <forwarder addr="8.8.8.8"/>
+                  <forwarder addr="8.8.4.4"/>
+                </dns>
+              </network>
+          register: libvirt_network_result
 
-    - name: Define libvirt network XML with MAC-to-IP mappings
-      community.libvirt.virt_net:
-        name: "{{ libvirt.name }}"
-        state: present
-        xml: |
-          <network>
-            <name>{{ libvirt.name }}</name>
-            <bridge name="{{ libvirt.interface }}" />
-            <ip address="{{ libvirt.base_ip }}.{{ libvirt_first_address }}" netmask="255.255.255.240">
-              <dhcp>
-                <range start="{{ libvirt.base_ip }}.{{ libvirt_first_address }}" end="{{ libvirt.base_ip }}.{{ libvirt_last_address }}" />
-                {% for vm, mapping in vm_mappings.items() %}
-                <host mac="{{ mapping.mac }}" name="{{ vm }}" ip="{{ mapping.ip }}" />
-                {% endfor %}
-              </dhcp>
-            </ip>
-            <dns>
-              <forwarder addr="8.8.8.8"/>
-              <forwarder addr="8.8.4.4"/>
-            </dns>
-          </network>
-      register: libvirt_network_result
+        - name: Create libvirt network
+          community.libvirt.virt_net:
+            name: "{{ libvirt.name }}"
+            state: active
 
-    - name: Create libvirt network
-      community.libvirt.virt_net:
-        name: "{{ libvirt.name }}"
-        state: active
+        - name: Set libvirt network to autostart
+          community.libvirt.virt_net:
+            name: "{{ libvirt.name }}"
+            autostart: true
 
-    - name: Set libvirt network to autostart
-      community.libvirt.virt_net:
-        name: "{{ libvirt.name }}"
-        autostart: true
+        - name: Allow traffic from WireGuard to VM network
+          ansible.builtin.command:
+            cmd: "iptables -I LIBVIRT_FWI 1 -i {{ wireguard.interface }} -o {{ libvirt.interface }} -j ACCEPT"
 
-    - name: Allow traffic from WireGuard to VM network
-      ansible.builtin.command:
-        cmd: "iptables -I LIBVIRT_FWI 1 -i {{ wireguard.interface }} -o {{ libvirt.interface }} -j ACCEPT"
+        - name: Allow traffic from VM network to WireGuard
+          ansible.builtin.command:
+            cmd: "iptables -I LIBVIRT_FWO 1 -i {{ libvirt.interface }} -o {{ wireguard.interface }} -j ACCEPT"
 
-    - name: Allow traffic from VM network to WireGuard
-      ansible.builtin.command:
-        cmd: "iptables -I LIBVIRT_FWO 1 -i {{ libvirt.interface }} -o {{ wireguard.interface }} -j ACCEPT"
+        - name: Add route to VM networks via WireGuard
+          ansible.builtin.command:
+            cmd: "ip route add {{ item.libvirt_addresses }} dev {{ wireguard.interface }}"
+          with_items: "{{ host_data | selectattr('hostname', 'ne', inventory_hostname) | list }}"
 
-    - name: Add route to VM networks via WireGuard
-      ansible.builtin.command:
-        cmd: "ip route add {{ item.libvirt_addresses }} dev {{ wireguard.interface }}"
-      with_items: "{{ host_data | selectattr('hostname', 'ne', inventory_hostname) | list }}"
+    - name: Create the autogenerated system description file that opentofu uses to create the VMs
+      block:
+        - name: Combine VM mappings from all hosts into a single dictionary
+          ansible.builtin.set_fact:
+            consolidated_vm_mappings: >-
+              {{
+                ansible_play_hosts_all
+                | map('extract', hostvars, 'vm_mappings')
+                | map('combine')
+                | list | combine
+              }}
+          delegate_to: localhost
+          run_once: true
 
-    # Collect all VM mappings into a consolidated dictionary
-    - name: Combine VM mappings from all hosts into a single dictionary
-      ansible.builtin.set_fact:
-        consolidated_vm_mappings: >-
-          {{
-            ansible_play_hosts_all
-            | map('extract', hostvars, 'vm_mappings')
-            | map('combine')
-            | list | combine
-          }}
-      delegate_to: localhost
-      run_once: true
+        # Debug the final consolidated VM mappings
+        - name: Debug final consolidated VM mappings
+          debug:
+            var: consolidated_vm_mappings
+          delegate_to: localhost
+          run_once: true
 
-    # Debug the final consolidated VM mappings
-    - name: Debug final consolidated VM mappings
-      debug:
-        var: consolidated_vm_mappings
-      delegate_to: localhost
-      run_once: true
+        - name: Capture playbook command line for the autogenerated opentofu file 
+          set_fact:
+            playbook_command: "{{ lookup('file', '/proc/self/cmdline') | regex_replace('\u0000', ' ') }}"
 
-    - name: Capture playbook command line for the autogenerated opentofu file 
-      set_fact:
-        playbook_command: "{{ lookup('file', '/proc/self/cmdline') | regex_replace('\u0000', ' ') }}"
+        - name: Generate the autogenerated opentofu file (system_description.tf)
+          template:
+            src: templates/system_description.tf.j2
+            dest: /tmp/system_description.tf
+          delegate_to: localhost
+          run_once: true
 
-    - name: Generate the autogenerated opentofu file (system_description.tf)
-      template:
-        src: templates/system_description.tf.j2
-        dest: /tmp/system_description.tf
-      delegate_to: localhost
-      run_once: true
+        - name: Format the autogenerated opentofu file 
+          ansible.builtin.command:
+            cmd: tofu fmt /tmp/system_description.tf
+          delegate_to: localhost
+          run_once: true
 
-    - name: Format the autogenerated opentofu file 
-      ansible.builtin.command:
-        cmd: tofu fmt /tmp/system_description.tf
-      delegate_to: localhost
-      run_once: true
-
-    - name: Dump hostvars to a file for debugging
-      copy:
-        content: |
-          {{ hostvars | to_nice_json }}
-        dest: /tmp/hostvars.json
-      delegate_to: localhost
-      run_once: true
+        - name: Dump hostvars to a file for debugging
+          copy:
+            content: |
+              {{ hostvars | to_nice_json }}
+            dest: /tmp/hostvars.json
+          delegate_to: localhost
+          run_once: true
