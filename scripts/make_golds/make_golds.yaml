@@ -1,54 +1,29 @@
-- name: makeclean if --tags makeclean was passed
+- name: Clean up if so requested 
   hosts: localhost
   gather_facts: no
   tasks:
-    - block:    # needs to be in a block for tags inheritance to work
+    - block:    
         - name: makeclean each VM 
           include_tasks: makeclean.yaml
-          with_items: "{{ vms.individual }}"
+          with_items: "{{ gold_vms }}"
           loop_control:
             label: "{{ item.name }}"
       when: "'makeclean' in ansible_run_tags" # don't run unless makeclean was passed
       tags: makeclean
 
-- name: Create Gold VM Images if they don't exist and ensure they are running
+- name: Make Gold VMs 
   hosts: localhost
   gather_facts: no
   tasks:
-    - name: Create VM definitions for gold VMs combining individual values with defaults 
-      set_fact:
-        vm_definitions: "{{ vms.individual | map('combine', vms.defaults) | list }}"
-
     - name: Install each VM from a stock iso (if ENOENT)
       include_tasks: install_vm.yaml
-      with_items: "{{ vm_definitions }}"
+      with_items: "{{ gold_vms }}"
       loop_control:
         label: "{{ item.name }}"
 
-    - name: Add VMs to ansible inventory
-      add_host:
-        name: "{{ item.name }}"
-        groups: "{{ item.group }}"
-      with_items: "{{ vm_definitions }}"
-      loop_control:
-        label: "{{ item.name }}"
-
-    - name: Ensure each VM is running
-      community.libvirt.virt:
-        name: "{{ item.name }}"
-        state: running
-        uri: qemu:///system
-      with_items: "{{ vm_definitions }}"
-      loop_control:
-        label: "{{ item.name }}"
-
-    - name: Wait for SSH on VM {{ item.name }}
-      wait_for:
-        host: "{{ item.name }}"
-        port: 22
-        state: started
-        timeout: 300
-      with_items: "{{ vm_definitions }}"
+    - name: Add VMs to inventory and ensure they are running
+      include_tasks: run_vms_add_to_inventory.yaml
+      with_items: "{{ gold_vms }}"
       loop_control:
         label: "{{ item.name }}"
 
@@ -56,17 +31,17 @@
   hosts: all
   gather_facts: no
   tasks:
-    - name: Debug task to test whether VMs are now in ansible hosts 
-      debug:
-        msg: "This task is running on host: {{ inventory_hostname }}"
-
     - block:
+        - name: Debug task to test whether VMs are now in ansible hosts 
+          debug:
+            msg: "This task is running on host: {{ inventory_hostname }}"
+
         - name: Actually install custom software using {{ install_playbook }} 
           include_tasks: "{{ install_playbook }}"
 
-        - name: Remove hosts from inventory
+        - name: Remove VMs from inventory
           meta: end_host
-      when: inventory_hostname != 'localhost'
+      when: inventory_hostname != 'localhost' 
 
 - name: Save VM images to qcow format
   hosts: localhost
@@ -74,6 +49,6 @@
   tasks:
     - name: Save each VM to qcow format
       include_tasks: vm_to_qcow.yaml
-      with_items: "{{ vm_definitions }}"
+      with_items: "{{ gold_vms }}"
       loop_control:
         label: "{{ item.name }}"
