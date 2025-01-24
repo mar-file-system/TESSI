@@ -1,4 +1,4 @@
-#!/bin/bash -e
+#!/bin/bash 
 
 # Define phases and their directories
 declare -A phases
@@ -66,4 +66,6 @@ done
 for phase_name in "${phase_order[@]}"; do
   process_phase "$phase_name" "create"
 done
+
+echo "All done!"
 
