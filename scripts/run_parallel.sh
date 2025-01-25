@@ -13,10 +13,10 @@ commands[gold_vms_clean]="ansible-playbook -i inventory.yaml make_golds.yaml --t
 commands[gold_vms_create]="ansible-playbook -i inventory.yaml make_golds.yaml"
 
 commands[network_clean]="ansible-playbook -i inventory.yaml create_wireguard_tunnels.yaml --tags makeclean"
-commands[network_create]="ansible-playbook -i inventory.yaml create_wireguard_tunnels.yaml"
+commands[network_create]='ansible-playbook -i inventory.yaml create_wireguard_tunnels.yaml -e "cluster.description_file=`pwd`/${phases[vms]}/system_description.tf"'
 
 commands[vms_clean]="tofu destroy --auto-approve"
-commands[vms_create]="cp /tmp/system_description.tf . && tofu apply --auto-approve"
+commands[vms_create]="tofu apply --auto-approve"
 
 commands[artifacts_clean]="\rm -f artifacts/*png"
 commands[artifacts_create]="ansible-playbook -i inventory.yaml make_network_graph.yaml && ansible-playbook -i inventory.yaml debug_network.yaml && ls -ltr artifacts/*png"

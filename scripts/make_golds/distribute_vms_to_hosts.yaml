@@ -1,0 +1,85 @@
+- name: Get the list of all hosts
+  set_fact:
+    all_hosts: "{{ groups['all'] }}"
+
+- name: Debug List of all hosts
+  debug:
+    var: all_hosts
+
+- name: Count the number of VMs and hosts
+  set_fact:
+    num_vms: "{{ gold_vms | length }}"
+    num_hosts: "{{ all_hosts | length }}"
+- name: Debug Number of VMs and hosts
+  debug:
+    msg: "There are {{ num_vms }} VMs and {{ num_hosts }} hosts."
+
+- name: Calculate VMs per host and remainder
+  set_fact:
+    vms_per_host: "{{ (num_vms | int) // (num_hosts | int) }}"
+    remainder: "{{ (num_vms | int) % (num_hosts | int) }}"
+- name: Debug VMs per host and remainder
+  debug:
+    msg: "Each host gets {{ vms_per_host }} VMs, and {{ remainder }} extra VMs need to be distributed."
+
+- name: Create an empty list for each host
+  set_fact:
+    vm_assignment: "{{ vm_assignment | default({}) | combine({item: []}) }}"
+  with_items: "{{ all_hosts }}"
+- name: Debug Empty VM assignment
+  debug:
+    var: vm_assignment
+
+- name: Assign VMs to each host
+  set_fact:
+    vm_assignment: >-
+     {{
+        vm_assignment | combine({
+          item: (
+            vm_assignment[item] +
+            gold_vms[
+              (
+                (all_hosts.index(item) | int) * (vms_per_host | int) +
+                (
+                  (all_hosts.index(item) | int)
+                  if (all_hosts.index(item) | int) < (remainder | int)
+                  else (remainder | int)
+                )
+              ) :
+              (
+                ((all_hosts.index(item) | int) + 1) * (vms_per_host | int) +
+                (
+                  ((all_hosts.index(item) | int) + 1)
+                  if ((all_hosts.index(item) | int) + 1) <= (remainder | int)
+                  else (remainder | int)
+                )
+              )
+            ]
+          )
+        })
+      }}
+  with_items: "{{ all_hosts }}"
+
+- name: Debug Final VM assignment
+  debug:
+    var: vm_assignment
+
+- name: Distribute VM assignments to each host
+  set_fact:
+    assigned_vms: "{{ vm_assignment[item] }}"
+  with_items: "{{ all_hosts }}"
+
+- name: Distribute VM assignments to each host
+  set_fact:
+    assigned_vms: "{{ vm_assignment[inventory_hostname] }}"
+
+- name: Display assigned VMs
+  debug:
+    msg: "Host {{ inventory_hostname }} was assigned the following VMs: {{ assigned_vms | map(attribute='name') | list }}"
+
+- name: Add physical_host to assigned VMs
+  set_fact:
+    assigned_vms: >-
+      {{
+        assigned_vms | map('combine', {'physical_host': inventory_hostname}) | list
+      }}
