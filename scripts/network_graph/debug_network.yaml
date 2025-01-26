@@ -61,7 +61,7 @@
     - name: Ping VMs on the same host by hostname (local)
       ansible.builtin.shell: |
         ping -c {{ ping_count }} {{ item }}
-      with_items: "{{ hostvars[inventory_hostname].matching_vms.stdout_lines }}"
+      with_items: "{{ matching_vms.stdout_lines }}"
       register: vm_local_hostname_ping_results
       ignore_errors: yes
 
@@ -69,16 +69,6 @@
       include_tasks: record_ping_results.yaml
       vars:
         ping_results_data: "{{ vm_local_hostname_ping_results.results }}"
-
-    # Remote pings
-    
-    # this one is not working right. The wireguard_peer_map key is the default IP of the host and not the IP of the wg tunnel
-    - name: Ping WireGuard endpoints on other hosts (remote)
-      ansible.builtin.shell: |
-        ping -c {{ ping_count }} {{ item }}
-      with_items: "{{ hostvars[inventory_hostname].wireguard_peer_map.keys() }}"
-      register: wireguard_peer_ping_results
-      when: false
 
     # Remote pings using WireGuard IPs of other hosts
     - name: Ping WireGuard endpoints on other hosts (remote)
@@ -124,16 +114,21 @@
     - name: Ping VMs on other hosts by hostname (remote)
       ansible.builtin.shell: |
         ping -c {{ ping_count }} {{ item }}
-      with_items: "{{ groups['all'] | map('extract', hostvars, 'matching_vms.stdout_lines') | sum(start=[]) | difference(hostvars[inventory_hostname].matching_vms.stdout_lines) }}"
+      with_items: >-
+        {{
+          groups['all']
+          | map('extract', hostvars, 'matching_vms')
+          | map(attribute='stdout_lines')
+          | sum(start=[])
+          | difference(hostvars[inventory_hostname].matching_vms.stdout_lines)
+        }}
       register: vm_peer_hostname_ping_results
       ignore_errors: yes
-      when: false
 
     - name: Record VM ping results for other hosts by hostname
       include_tasks: record_ping_results.yaml
       vars:
         ping_results_data: "{{ vm_peer_hostname_ping_results.results }}"
-      when: false
 
     # Aggregate ping results globally
     - name: Aggregate all ping results
@@ -144,12 +139,6 @@
             | map('extract', hostvars, 'ping_results')
             | sum(start=[])
           }}  
-      delegate_to: localhost
-      run_once: true
-
-    - name: Debug aggregated ping results
-      debug:
-        var: aggregated_ping_results
       delegate_to: localhost
       run_once: true
 
@@ -173,6 +162,82 @@
     - name: Convert DOT file to PNG
       ansible.builtin.shell: |
         dot -Tpng artifacts/ping_results.dot -o artifacts/ping_results.png
+      args:
+        executable: /bin/bash
+      delegate_to: localhost
+      run_once: true
+
+    # Add VMs to inventory
+    - name: Add VMs to inventory
+      add_host:
+        name: "{{ item }}"  # Add each VM hostname
+        groups: "dynamic_hosts"  # Assign to dynamic_hosts group
+        ansible_ssh_common_args: "-o StrictHostKeyChecking=no"  
+      with_items: "{{ aggregated_matching_vms }}"
+      delegate_to: localhost
+      run_once: true
+
+- name: Verify dynamic_hosts group
+  hosts: dynamic_hosts
+  gather_facts: no
+  tasks:
+    - debug:
+        msg: "Hostname: {{ inventory_hostname }}"
+
+    - name: Re-initialize ping results
+      set_fact:
+        ping_results: []
+
+    - name: All VMs ping each other 
+      ansible.builtin.shell: |
+        ping -c {{ ping_count | default(3) }} {{ item }}
+      # to get list of other vms, use aggregated_matching_vms from the first in the list of original hosts
+      with_items: >-
+        {{
+          hostvars[
+            (groups['all'] | difference(groups['dynamic_hosts']) | first)
+          ].aggregated_matching_vms
+          | difference([inventory_hostname])  
+        }}
+      register: vm_vm_ping_results 
+      ignore_errors: yes
+
+    - name: Record VM-VM ping results 
+      include_tasks: record_ping_results.yaml
+      vars:
+        ping_results_data: "{{  vm_vm_ping_results.results }}"
+        dont_use_ip: true
+
+    - name: Aggregate vm-vm ping results
+      ansible.builtin.set_fact:
+        aggregated_ping_results: >-
+          {{
+            ansible_play_hosts_all
+            | map('extract', hostvars, 'ping_results')
+            | sum(start=[])
+          }}
+      delegate_to: localhost
+      run_once: true
+
+    - name: Debug vm-vm ping results
+      debug:
+        var: aggregated_ping_results
+      delegate_to: localhost
+      run_once: true
+
+    # TODO: create a taskfile for these two tasks and share it with the above dot to png tasks
+    # Generate a DOT file for the vm-vm ping results
+    - name: Render ping results in DOT format
+      ansible.builtin.template:
+        src: templates/ping_results_vm_vm.dot.j2
+        dest: artifacts/ping_results_vm_vm.dot
+      delegate_to: localhost
+      run_once: true
+
+    # Convert DOT file to PNG
+    - name: Convert DOT file to PNG
+      ansible.builtin.shell: |
+        dot -Kcirco -Tpng artifacts/ping_results_vm_vm.dot -o artifacts/ping_results_vm_vm.png
       args:
         executable: /bin/bash
       delegate_to: localhost
