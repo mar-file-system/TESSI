@@ -1,5 +1,9 @@
 #!/bin/bash 
 
+# Define the ordered list of phases
+# Note that cleaning goes in reverse
+phase_order=("gold_vms" "network" "vms" "artifacts")
+
 # Define phases and their directories
 declare -A phases
 phases[gold_vms]="make_golds"
@@ -21,8 +25,6 @@ commands[vms_create]="tofu apply --auto-approve"
 commands[artifacts_clean]="\rm -f artifacts/*png"
 commands[artifacts_create]="ansible-playbook -i inventory.yaml make_network_graph.yaml && ansible-playbook -i inventory.yaml debug_network.yaml && ls -ltr artifacts/*png"
 
-# Define the ordered list of phases
-phase_order=("gold_vms" "network" "vms" "artifacts")
 
 # Define a function for phase messages
 phase() {
