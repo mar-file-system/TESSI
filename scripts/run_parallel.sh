@@ -13,8 +13,8 @@ phases[artifacts]="network_graph"
 
 # Define cleanup and create commands for each phase
 declare -A commands
-commands[gold_vms_clean]="ansible-playbook -i inventory.yaml make_golds.yaml --tags makeclean"
-commands[gold_vms_create]="ansible-playbook -i inventory.yaml make_golds.yaml"
+commands[gold_vms_clean]="ansible-playbook -i inventory/beegfs_7.4.3.yaml make_golds.yaml --tags makeclean"
+commands[gold_vms_create]="ansible-playbook -i inventory/beegfs_7.4.3.yaml make_golds.yaml"
 
 commands[network_clean]="ansible-playbook -i inventory.yaml create_wireguard_tunnels.yaml --tags makeclean"
 commands[network_create]='ansible-playbook -i inventory.yaml create_wireguard_tunnels.yaml -e "cluster.description_file=`pwd`/${phases[vms]}/system_description.tf"'
