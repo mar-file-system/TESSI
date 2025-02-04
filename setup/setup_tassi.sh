@@ -25,28 +25,32 @@ dnf update -y
 echo "Installing required system packages..."
 dnf install -y $(cat installed_packages.txt)
 
-# Detect Ansible's Python version dynamically
-echo "Detecting Ansible's Python version..."
-ANSIBLE_PYTHON=$(ansible-playbook --version | awk '/python version/ {print $NF}' | tr -d '[]')
+# Extract Python version from installed_packages.txt (e.g., python3.8)
+PYTHON_PACKAGE=$(grep -E '^python[0-9]+\.[0-9]+' installed_packages.txt | head -n 1)
 
-if [ -z "$ANSIBLE_PYTHON" ]; then
-    echo "Error: Could not determine Ansible's Python version!"
+if [ -z "$PYTHON_PACKAGE" ]; then
+    echo "Error: No Python version found in installed_packages.txt!"
     exit 1
 fi
 
-echo "Ansible is using Python at: $ANSIBLE_PYTHON"
+# Extract version number from the package name (e.g., 3.8 from python3.8)
+PYTHON_VERSION=$(echo "$PYTHON_PACKAGE" | grep -oP '[0-9]+\.[0-9]+')
 
-# Ensure this Python version is installed and set it as default
-PYTHON_PATH=$(readlink -f $(which $ANSIBLE_PYTHON) || true)
+# Set ANSIBLE_PYTHON and PYTHON_PATH
+ANSIBLE_PYTHON="python${PYTHON_VERSION}"
+PYTHON_PATH=$(readlink -f "$(which $ANSIBLE_PYTHON)" || true)
 
 if [ -n "$PYTHON_PATH" ]; then
-    echo "Setting $ANSIBLE_PYTHON as the default Python3..."
-    alternatives --set python3 "$PYTHON_PATH"
+    echo "Setting $ANSIBLE_PYTHON ($PYTHON_PATH) as the default Python3..."
+    sudo alternatives --set python3 "$PYTHON_PATH"
 else
     echo "Warning: $ANSIBLE_PYTHON not found! Python3 may not be set correctly."
+    exit 1
 fi
 
-echo "Installing required Python packages..."
+# Install required Python packages using the detected Python version
+echo "Installing required Python packages with $ANSIBLE_PYTHON..."
+$ANSIBLE_PYTHON -m ensurepip --upgrade
 $ANSIBLE_PYTHON -m pip install --upgrade pip
 $ANSIBLE_PYTHON -m pip install -r requirements.txt
 
