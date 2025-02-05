@@ -1,3 +1,7 @@
+    - name: Initialize ip_to_label_map
+      set_fact:
+        ip_to_label_map: {}
+
     - name: Get list of VMs matching regex
       shell: >
         virsh list --name | grep {{ vm_regex }}
@@ -5,6 +9,31 @@
         | grep -v "{{ vm_anti_regex }}"
         {% endif %}
       register: matching_vms
+
+    - name: Aggregate matching VMs globally
+      ansible.builtin.set_fact:
+        aggregated_matching_vms: >-
+          {{
+            (ansible_play_hosts_all
+            | map('extract', hostvars, 'matching_vms')  
+            | map(attribute='stdout_lines')            
+            | sum(start=[]))                          
+          }}
+
+    - name: Debug aggregated matching VMs
+      debug:
+        var: aggregated_matching_vms
+      tags: debug
+
+    - name: Save each VM hostname into ip_to_label_map
+      set_fact:
+        ip_to_label_map: >-
+          {{
+            ip_to_label_map | combine({
+              (item): ("VM: " ~ item ~ " (hostname)")
+            })
+          }}
+      with_items: "{{ matching_vms.stdout_lines }}"
 
     - name: Get interface address details for each VM
       shell: >
@@ -42,6 +71,19 @@
           - "Extracted VM IPs: {{ vm_ips }}"
           - "Extracted VM Interfaces: {{ vm_interfaces }}"
       tags: debug
+
+    - name: Save each VM IP into ip_to_label_map
+      set_fact:
+        ip_to_label_map: >-
+          {{
+            ip_to_label_map | combine({
+              (item.stdout.split()[3].split('/')[0]): ("VM: " ~ matching_vms.stdout_lines[index] ~ " (" ~ item.stdout.split()[3].split('/')[0]) ~ ")"
+            })
+          }}
+      with_items: "{{ vm_ifaddr.results }}"
+      loop_control:
+        index_var: index
+      when: item.stdout is defined
 
     - name: Get list of all libvirt networks
       shell: >
@@ -112,6 +154,16 @@
         msg: "Bridge IP details: {{ bridge_ip }}"
       tags: debug
 
+    - name: Save bridge IP into ip_to_label_map
+      set_fact:
+        ip_to_label_map: >-
+          {{
+            ip_to_label_map | combine({
+              bridge_ip: ("Bridge (" ~ bridge_ip ~ ")")
+            })
+          }}
+      when: bridge_ip is defined
+
     - name: Get bridge configuration
       shell: >
         brctl show {{ bridge_name }}
@@ -158,9 +210,19 @@
 
     - name: Debug WireGuard IP address
       debug:
-        msg: "WireGuard IP address: {{ wireguard_ip_address.stdout }} {{ wireguard_ip }}"
+        msg: "WireGuard IP address: {{ wireguard_ip }}"
       tags: debug
       when: selected_wireguard is defined
+
+    - name: Save WireGuard IP into ip_to_label_map
+      set_fact:
+        ip_to_label_map: >-
+          {{
+            ip_to_label_map | combine({
+              wireguard_ip: ("WireGuard (" ~ wireguard_ip ~ ")")
+            })
+          }}
+      when: wireguard_ip is defined
 
     - name: Generate fake WireGuard private key
       command: "wg genkey"
@@ -307,12 +369,6 @@
         msg: "WireGuard Peer Map: {{ wireguard_peer_map }}"
       tags: debug
 
-    - name: Debug hostvars for all hosts
-      debug:
-        var: hostvars[inventory_hostname]
-      tags: debug
-      when: false # gigantic output
-
     - name: Debug ansible_default_ipv4.address for each host
       debug:
         msg: "Default IPv4 address for {{ inventory_hostname }}: {{ hostvars[inventory_hostname]['ansible_default_ipv4']['address'] | default('Not defined') }}"
@@ -327,3 +383,24 @@
         msg: "Sanitized IPv4 address for {{ inventory_hostname }}: {{ sanitized_ipv4_address }}"
       tags: debug
 
+    - name: Save sanitized IPv4 address into ip_to_label_map
+      set_fact:
+        ip_to_label_map: >-
+          {{
+            ip_to_label_map | combine({
+              ansible_default_ipv4.address: (inventory_hostname ~ " (" ~ ansible_default_ipv4.address ~ ")")
+            })
+          }}
+
+    - name: Debug ip_to_label maps 
+      debug:
+        msg: "{{ ip_to_label_map }}"
+      tags: debug
+
+    - name: Dump hostvars to a file for debugging
+      copy:
+        content: |
+          {{ hostvars | to_nice_json }}
+        dest: /tmp/hostvars.json
+      delegate_to: localhost
+      run_once: true

@@ -1,0 +1,69 @@
+- name: Clean and/or Install Empty Gold VM images
+  hosts: all
+  gather_facts: no
+  strategy: free    # allow independent processing for parallel execution
+  tasks:
+    - block:
+      - name: Distribute work
+        include_tasks: distribute_vms_to_hosts.yaml
+      tags: always
+
+    - block:    
+        - name: makeclean each VM if makeclean was passed
+          include_tasks: makeclean.yaml
+          with_items: "{{ assigned_vms }}"
+          loop_control:
+            label: "{{ item.name }}"
+      when: "'makeclean' in ansible_run_tags" # don't run unless makeclean was passed
+      tags: makeclean
+
+    - name: Install each VM from a stock iso (if ENOENT) and ensure they are running
+      include_tasks: install_vm.yaml
+      with_items: "{{ assigned_vms }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+- name: Add gold VMs to inventory  #new play because free strategy might not work well w/ adding hosts
+  hosts: all
+  gather_facts: no
+  tasks:
+    - add_host:
+        name: "{{ vm.name }}"
+        groups: "{{ vm.group }},dynamic_hosts"  # add them to a dynamic_hosts group also for easier filtering
+        ansible_ssh_common_args: "-o ProxyCommand='ssh -W %h:%p -q {{ physical_host }}'"
+      with_dict: "{{ vm_assignment }}"
+      loop_control:
+        label: "{{ item.key }}"
+      vars:
+        physical_host: "{{ item.key }}"
+        vm: "{{ item.value | first }}"
+      run_once: true
+
+- name: Install Custom Software onto the Gold VMs 
+  hosts: "{{ groups['dynamic_hosts'] | default([]) }}"
+  gather_facts: no
+  strategy: free    # allow independent processing for parallel execution
+  tasks:
+    - include_tasks: "{{ install_playbook }}"
+
+- name: Play to remove gold VMs from inventory # new play because free strategy might not work well w/ removing hosts
+  hosts: "{{ groups['dynamic_hosts'] | default([]) }}"
+  gather_facts: no
+  tasks:
+    - meta: end_host
+
+- name: Play to refresh inventory after excluding the dynamic hosts 
+  hosts: all
+  gather_facts: no
+  tasks:
+    - meta: refresh_inventory
+
+- name: Save each gold VM to qcow2 
+  hosts: all
+  gather_facts: no
+  strategy: free    # allow independent processing for parallel execution
+  tasks:
+    - include_tasks: vm_to_qcow.yaml
+      with_items: "{{ assigned_vms }}"
+      loop_control:
+        label: "{{ item.name }}"
