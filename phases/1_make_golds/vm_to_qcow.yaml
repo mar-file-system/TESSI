@@ -1,0 +1,62 @@
+- name: Check if VM {{ item.name }} is running
+  community.libvirt.virt:
+    name: "{{ item.name }}"
+    command: list_vms
+    state: running
+    uri: qemu:///system
+  register: running_vms
+  check_mode: no
+
+- name: Shut down VM {{ item.name }} if running
+  community.libvirt.virt:
+    name: "{{ item.name }}"
+    state: shutdown
+    uri: qemu:///system
+  register: shutdown_result
+  when: item.name in running_vms.list_vms 
+
+- name: Wait for VM {{ item.name }} to shut down
+  community.libvirt.virt:
+    command: list_vms
+    state: shutdown
+    uri: qemu:///system
+  register: vm_state
+  until: item.name in vm_state.list_vms
+  retries: 10
+  delay: 5
+  when: not ansible_check_mode # this fails in --check mode so disable it
+
+- name: Set fact for {{ item.qcow_file }} for {{ item.name }}
+  set_fact:
+    qcow2_file: "{{ item.qcow_file }}"
+
+- name: Check if QCOW2 image for VM {{ item.name }} exists
+  stat:
+    path: "{{ qcow2_file }}"
+  register: qcow2_image
+
+- block:
+    - name: Skip image creation for {{ qcow2_file }} if it already exists
+      debug:
+        msg: "{{ qcow2_file }} already exists. Not recreating it. Pass --tags makeclean to force recreation."
+
+    - name: Sleep for 2 seconds if image creation is skipped
+      wait_for:
+        timeout: 2
+  when: qcow2_image.stat.exists
+
+# Block to handle image creation if it doesn't exist
+- block:
+    # would be nice to replace this with the virt module, but it puts it into an ugly structure
+    - name: Extract disk path for VM {{ item.name }} 
+      shell: "virsh dumpxml {{ item.name }} | awk -F\"'\" '/<source file=/ {print $2}'"
+      register: disk_path
+
+    - name: Copy QCOW2 image for VM {{ item.name }} to target directory
+      command: "qemu-img convert -O qcow2 {{ disk_path.stdout.strip() }} {{ qcow2_file }}"
+
+    - name: Debug QCOW2 image for VM {{ item.name }} creation
+      debug:
+        msg: "{{ item.name }} stored from {{ disk_path.stdout.strip() }} into {{ qcow2_file }}"
+  when: not qcow2_image.stat.exists
+
