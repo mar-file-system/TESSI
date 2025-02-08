@@ -1,0 +1,85 @@
+#!/bin/bash 
+
+# Define the ordered list of phases
+# Note that cleaning goes in reverse
+phase_order=("prepare" "gold_vms" "network" "vms" "artifacts")
+
+# Define phases and their directories
+0_prepare  1_make_golds  2_create_network  3_create_cluster  4_test_network  5_configure_cluster  6_test_cluster  run_tassi.sh
+
+declare -A phases
+phases[prepare]="0_prepare"
+phases[gold_vms]="1_make_golds"
+phases[network]="2_create_network"
+phases[vms]="3_create_cluster"
+phases[artifacts]="4_test_network"
+
+config="../../configs/beegfs_7.4.3.yaml"
+artifacts="../../artifacts/beegfs743"
+inventory="$artifacts/inventory"
+tfvars="$artifacts/phase3_vms.tfvars"
+
+# note that clean might not work unless we first do prepare
+
+# Define cleanup and create commands for each phase
+declare -A commands
+commands[prepare_clean]="rm -rf ../../artifacts/beegfs743"
+commands[prepare_create]="ansible-playbook -i $config tassi_prepare.yaml"
+
+commands[gold_vms_clean]="ansible-playbook -i $inventory tassi_phase_make_golds.yaml --tags makeclean"
+commands[gold_vms_clean]="ansible-playbook -i $inventory tassi_phase_make_golds.yaml"
+
+commands[network_clean]="ansible-playbook -i $inventory  tassi_phase2_create_networks.yaml --tags makeclean"
+commands[network_create]="ansible-playbook -i $inventory tassi_phase2_create_networks.yaml" 
+
+commands[vms_clean]="tofu destroy -var-file $tfvars --auto-approve"
+commands[vms_create]="tofu apply -var-file $tfvars --auto-approve"
+
+commands[artifacts_clean]="\rm -f artifacts/*png"
+commands[artifacts_create]="ansible-playbook -i inventory.yaml tassi_phase4_test_network.yaml" 
+
+# Define a function for phase messages
+phase() {
+  local message="$1"
+  local length=${#message}
+  local border=$(printf '#%.0s' $(seq 1 $((length + 10))))
+
+  echo
+  echo "$border"
+  echo "#####  $message  #####"
+  echo "$border"
+  echo
+}
+
+# Function to process a phase
+process_phase() {
+  local phase_name="$1"
+  local action="$2" # clean or create
+  local command_key="${phase_name}_${action}"
+  local dry_run=0 # Set to 1 for dry-run, 0 for execution
+
+  if [[ -n "${commands[$command_key]}" ]]; then
+    pushd . > /dev/null
+    cd "${phases[$phase_name]}"
+    phase "${action^} $phase_name"
+    if [[ $dry_run -eq 1 ]]; then
+      echo "[Dry Run] cd ${phases[$phase_name]} && ${commands[$command_key]}"
+    else
+      sudo bash -c "${commands[$command_key]}"
+    fi
+    popd > /dev/null
+  fi
+}
+
+# Execute all cleanup phases in reverse order
+for (( idx=${#phase_order[@]}-1 ; idx>=0 ; idx-- )); do
+  process_phase "${phase_order[idx]}" "clean"
+done
+
+# Execute all creation phases
+for phase_name in "${phase_order[@]}"; do
+  process_phase "$phase_name" "create"
+done
+
+echo "All done!"
+
