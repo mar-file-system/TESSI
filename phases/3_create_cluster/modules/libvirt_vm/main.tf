@@ -5,29 +5,27 @@ terraform {
     }
   }
 }
-
+  
 variable "name" {}
 variable "memory" {}
 variable "vcpu" {}
 variable "machine" {}
-variable "primary" {}
-variable "secondary" {}
+variable "primary" {}         // Primary disk volume ID
+variable "secondary" {}       // Secondary disk volume ID (optional)
 variable "netone" {}
 variable "nettwo" {}
 variable "mac_address" {}
-variable "cloudinit_user_data" {}
-
-resource "libvirt_cloudinit_disk" "cloudinit" {
-  name      = "${var.name}-cloudinit.iso"
-  user_data = var.cloudinit_user_data
+variable "cloud_vol" {      // New variable to receive the cloud‑init volume (if any)
+  type    = string
+  default = null
 }
 
 resource "libvirt_domain" "domain" {
   name       = var.name 
-  memory     = var.memory 
-  vcpu       = var.vcpu 
+  memory     = var.memory
+  vcpu       = var.vcpu
   machine    = var.machine
-
+  
   running    = true
   autostart  = true
 
@@ -35,21 +33,19 @@ resource "libvirt_domain" "domain" {
   disk {
     volume_id = var.primary 
   }
-
+  
   # Attach secondary disk if it exists
   dynamic "disk" {
     for_each = var.secondary != null ? [1] : []
-    content {
+    content { 
       volume_id = var.secondary
     }
   }
-
-  # Attach cloudinit disk the proper way which fails because q35 machine doesn't support ide
-  cloudinit = libvirt_cloudinit_disk.cloudinit.id
-
-  # weird thing. need to transform the XML to address the ide problem noted above. Refer to:
-  # https://gist.github.com/dariush/7405cbf62835e03d0b5c953d798a87cd and
-  # https://github.com/dmacvicar/terraform-provider-libvirt/issues/667
+  
+  # Attach the cloud-init disk if provided
+  cloudinit = var.cloud_vol
+  
+  # Adjust XML to work around Q35 IDE issues
   xml {
     xslt = file("${path.module}/nodes-adjust.xslt")
   }
@@ -58,14 +54,14 @@ resource "libvirt_domain" "domain" {
     dev = ["cdrom", "hd"]
   }
 
-  # primary default network
+  # Primary network interface
   network_interface {
     network_name = var.netone
   }
 
-  # secondary storage network
+  # Secondary network interface
   network_interface {
-    network_name = var.nettwo 
+    network_name = var.nettwo
     mac          = var.mac_address
   }
 
@@ -74,12 +70,6 @@ resource "libvirt_domain" "domain" {
     target_type = "serial"
     target_port = "0"
   }
-
-  depends_on = [
-    var.primary,
-    var.secondary,
-  ]
-
 }
 
 output "vm_id" {
@@ -93,3 +83,4 @@ output "vm_name" {
 output "vm_state" {
   value = libvirt_domain.domain.running
 }
+
