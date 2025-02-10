@@ -9,6 +9,7 @@
         | grep -v "{{ vm_anti_regex }}"
         {% endif %}
       register: matching_vms
+      when: false
 
     - name: Aggregate matching VMs globally
       ansible.builtin.set_fact:
@@ -19,6 +20,21 @@
             | map(attribute='stdout_lines')            
             | sum(start=[]))                          
           }}
+      when: false
+
+    - name: Set aggregated matching_vms from inventory
+      set_fact:
+        aggregated_matching_vms: "{{ groups['vms'] }}"
+
+    - name: Initialize matching_vms as empty list
+      set_fact:
+        matching_vms: []
+
+    - name: Build matching_vms list for current physical host
+      set_fact:
+        matching_vms: "{{ matching_vms + [ item ] }}"
+      loop: "{{ aggregated_matching_vms }}"
+      when: hostvars[item].physical_host == inventory_hostname
 
     - name: Debug aggregated matching VMs
       debug:
@@ -33,12 +49,29 @@
               (item): ("VM: " ~ item ~ " (hostname)")
             })
           }}
-      with_items: "{{ matching_vms.stdout_lines }}"
+      with_items: "{{ matching_vms }}"
+
+    - name: Get libvirt network IP address from XML
+      shell: >
+        sudo virsh net-dumpxml vmwgbr-beegfs743 |
+        grep 'ip address' |
+        awk '{print $2}' |
+        awk -F= '{print $2}' |
+        sed "s/'//g"
+      register: network_ip_cmd
+
+    - name: Derive IP prefix (first three octets)
+      set_fact:
+        ip_prefix: "{{ network_ip_cmd.stdout.split('.')[:3] | join('.') }}"
+
+    - name: Debug IP prefix
+      debug:
+        msg: "The IP prefix is {{ ip_prefix }}"
 
     - name: Get interface address details for each VM
       shell: >
-        virsh domifaddr {{ item }} | grep '{{ network }}'
-      with_items: "{{ matching_vms.stdout_lines }}"
+        virsh domifaddr {{ item }} | grep '{{ ip_prefix }}'
+      with_items: "{{ matching_vms }}"
       register: vm_ifaddr
 
     - name: Debug VM domifaddr
@@ -77,7 +110,7 @@
         ip_to_label_map: >-
           {{
             ip_to_label_map | combine({
-              (item.stdout.split()[3].split('/')[0]): ("VM: " ~ matching_vms.stdout_lines[index] ~ " (" ~ item.stdout.split()[3].split('/')[0]) ~ ")"
+              (item.stdout.split()[3].split('/')[0]): ("VM: " ~ matching_vms[index] ~ " (" ~ item.stdout.split()[3].split('/')[0]) ~ ")"
             })
           }}
       with_items: "{{ vm_ifaddr.results }}"
@@ -85,28 +118,9 @@
         index_var: index
       when: item.stdout is defined
 
-    - name: Get list of all libvirt networks
-      shell: >
-        virsh net-list --all | awk '{print $1}' | grep -v Name | grep -v '^[-]*$'
-      register: all_networks
-
-    - name: Debug list of all networks
-      debug:
-        msg: "Networks found: {{ all_networks.stdout_lines }}"
-      tags: debug
-
-    - name: Find libvirt network containing the IP range 
-      shell: > 
-        virsh net-dumpxml {{ item }} | grep -q '{{ network }}' && echo {{ item }}
-      with_items: "{{ all_networks.stdout_lines }}"
-      register: libvirt_network_name
-      ignore_errors: yes
-        
-    - name: Extract valid libvirt network name
+    - name: Set fact for valid libvirt network name
       set_fact:
-        valid_libvirt_network: "{{ item.item }}" 
-      with_items: "{{ libvirt_network_name.results }}" 
-      when: item.rc == 0
+        valid_libvirt_network: "{{ libvirt.name }}" 
 
     - name: Query libvirt network for bridge and DHCP range
       shell: >
@@ -175,22 +189,9 @@
         msg: "Bridge configuration: {{ bridge_config.stdout }}"
       tags: debug
 
-    - name: Get list of WireGuard interfaces
-      shell: wg show | grep interface | awk '{print $2}'
-      register: wireguard_interfaces
-
-    - name: Identify relevant WireGuard interface
-      shell: >
-        wg show {{ item }} | grep 'allowed ips' | grep '{{ network }}'
-      with_items: "{{ wireguard_interfaces.stdout_lines }}"
-      register: matching_wireguard
-      ignore_errors: yes
-
-    - name: Set the correct WireGuard interface
+    - name: Set fact for the relevant WireGuard interface
       set_fact:
-        selected_wireguard: "{{ item.item }}"
-      with_items: "{{ matching_wireguard.results }}"
-      when: item.rc == 0
+        selected_wireguard: "{{ wireguard.interface }}"
 
     - name: Debug selected WireGuard interface
       debug:
@@ -223,29 +224,6 @@
             })
           }}
       when: wireguard_ip is defined
-
-    - name: Generate fake WireGuard private key
-      command: "wg genkey"
-      register: fake_private_key
-      when: testing_with_fake_peer | default(false)
-      tags: testing
-
-    - name: Generate fake WireGuard public key
-      shell: "echo {{ fake_private_key.stdout }} | wg pubkey"
-      register: fake_public_key
-      when: testing_with_fake_peer | default(false)
-      tags: testing
-
-    - name: Debug fake WireGuard public key
-      debug:
-        msg: "Fake WireGuard public key: {{ fake_public_key.stdout }}"
-      when: testing_with_fake_peer | default(false)
-      tags: debug
-
-    - name: Add fake WireGuard peer for testing
-      shell: wg set {{ selected_wireguard }} peer {{ fake_public_key.stdout }} endpoint {{ FAKE_ENDPOINT }} allowed-ips {{ FAKE_ALLOWED_IPS }}
-      when: testing_with_fake_peer | default(false)
-      tags: testing
 
     - name: Get WireGuard details for the selected interface
       shell: wg show {{ selected_wireguard }}
@@ -284,7 +262,7 @@
       tags: debug
 
     - name: Gather routing table for the network
-      shell: ip r | grep '{{ network }}'
+      shell: ip r | grep '{{ libvirt.interface }}'
       register: routing_table
 
     - name: Set routing information fact
@@ -318,13 +296,6 @@
       register: wireguard_peer_mapping
       when: selected_wireguard is defined
 
-    - name: Remove fake WireGuard peer after testing
-      shell: >
-        wg set {{ item }} peer {{ fake_public_key.stdout }} remove
-      with_items: "{{ wireguard_interfaces.stdout_lines }}"
-      when: testing_with_fake_peer | default(false)
-      tags: testing
-
     - name: Debug wireguard peers 
       debug:
         msg: "Wireguard peers: {{ wireguard_peer_mapping.stdout_lines }}"
@@ -357,7 +328,7 @@
           {{
             wireguard_peer_map | combine({
               item.split()[0]: (
-                item.split(' ', 1)[1].split(',') | select("search", '^' ~ network) | list | join(',')
+                item.split(' ', 1)[1].split(',') | select("search", '^' ~ ip_prefix) | list | join(',')
               )
             }) 
           }}

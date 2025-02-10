@@ -1,12 +1,9 @@
 # Ansible Playbook for Dynamic Network Graph and Validation
-- hosts: all
+- hosts: physical_hosts
   gather_facts: yes
   gather_subset:
     - network
   vars:
-    testing_with_fake_peer: false   # we have three nodes now!
-    FAKE_ENDPOINT: "192.192.192.192:51820"
-    FAKE_ALLOWED_IPS: "192.192.192.0/24"
     ping_count: 3
   tasks:
     - name: Collect network information
@@ -96,7 +93,7 @@
     - name: Ping VMs on the same host by hostname (local)
       ansible.builtin.shell: |
         ping -c {{ ping_count }} {{ item }}
-      with_items: "{{ matching_vms.stdout_lines }}"
+      with_items: "{{ matching_vms }}"
       register: vm_local_hostname_ping_results
       ignore_errors: yes
 
@@ -105,14 +102,13 @@
       vars:
         ping_results_data: "{{ vm_local_hostname_ping_results.results }}"
 
-    # Remote pings using WireGuard IPs of other hosts
     - name: Ping WireGuard endpoints on other hosts (remote)
       ansible.builtin.shell: |
         ping -c {{ ping_count }} {{ item }}
       with_items: >-
         {{
-          hostvars.keys()
-          | reject('equalto', inventory_hostname)  
+          groups['physical_hosts']
+          | reject('equalto', inventory_hostname)
           | map('extract', hostvars, 'wireguard_ip')
           | list
         }}
@@ -126,7 +122,7 @@
     - name: Ping bridges on other hosts (remote)
       ansible.builtin.shell: |
         ping -c {{ ping_count }} {{ item }}
-      with_items: "{{ groups['all'] | map('extract', hostvars, 'bridge_ip') | difference([hostvars[inventory_hostname].bridge_ip]) }}"
+      with_items: "{{ groups['physical_hosts'] | map('extract', hostvars, 'bridge_ip') | difference([hostvars[inventory_hostname].bridge_ip]) }}"
       register: bridge_peer_ping_results
 
     - name: Record bridge ping results for other hosts
@@ -137,7 +133,7 @@
     - name: Ping VMs on other hosts by IP address (remote)
       ansible.builtin.shell: |
         ping -c {{ ping_count }} {{ item }}
-      with_items: "{{ groups['all'] | map('extract', hostvars, 'vm_ips') | sum(start=[]) | difference(hostvars[inventory_hostname].vm_ips) }}"
+      with_items: "{{ groups['physical_hosts'] | map('extract', hostvars, 'vm_ips') | sum(start=[]) | difference(hostvars[inventory_hostname].vm_ips) }}"
       register: vm_peer_ping_results
       ignore_errors: yes
 
@@ -151,11 +147,10 @@
         ping -c {{ ping_count }} {{ item }}
       with_items: >-
         {{
-          groups['all']
+          groups['physical_hosts']
           | map('extract', hostvars, 'matching_vms')
-          | map(attribute='stdout_lines')
           | sum(start=[])
-          | difference(hostvars[inventory_hostname].matching_vms.stdout_lines)
+          | difference(hostvars[inventory_hostname].matching_vms)
         }}
       register: vm_peer_hostname_ping_results
       ignore_errors: yes
