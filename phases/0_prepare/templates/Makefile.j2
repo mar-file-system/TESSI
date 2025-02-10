@@ -1,0 +1,74 @@
+{# Jinja2 template to generate a Makefile for the Tassi workflow (excluding prepare) #}
+{% include 'header.j2' %}
+
+{# Define the phases and their commands #}
+{% set phases = [
+    {
+      'name': 'gold_vms',
+      'dir': '1_make_golds',
+      'clean': 'ansible-playbook -i $(INVENTORY) tassi_phase_make_golds.yaml --tags makeclean',
+      'create': 'ansible-playbook -i $(INVENTORY) tassi_phase_make_golds.yaml'
+    },
+    {
+      'name': 'network',
+      'dir': '2_create_network',
+      'clean': 'ansible-playbook -i $(INVENTORY) tassi_phase2_create_networks.yaml --tags makeclean',
+      'create': 'ansible-playbook -i $(INVENTORY) tassi_phase2_create_networks.yaml'
+    },
+    {
+      'name': 'vms',
+      'dir': '3_create_cluster',
+      'clean': 'tofu destroy -var-file $(TFVARS) --auto-approve',
+      'create': 'tofu apply -var-file $(TFVARS) --auto-approve'
+    },
+    {
+      'name': 'nettest',
+      'dir': '4_test_network',
+      'clean': 'rm -f artifacts/*png',
+      'create': 'ansible-playbook -i $(INVENTORY) tassi_phase4_test_network.yaml'
+    }
+] %}
+
+.PHONY: help all clean {% for phase in phases %}{{ phase.name }} {{ phase.name }}-clean {% endfor %}
+
+# Define common variables (adjust paths as needed)
+ARTIFACTS := {{ artifact_dir }}
+INVENTORY := $(ARTIFACTS)/inventory
+TFVARS := $(ARTIFACTS)/phase3_vms.tfvars
+PHASE_DIR := {{ playbook_dir }}/..
+
+help:
+	@echo "Available targets:"
+	@echo "  all             - Run the entire TASSI workflow for {{ UNIQUE_TAG }}"
+	@echo "  clean           - Clean the entire TASSI workflow for {{ UNIQUE_TAG }} (in reverse order)"
+	@echo "  gold_vms        - Phase 1: Build gold_vms phase"
+	@echo "  network         - Phase 2: Build network phase"
+	@echo "  vms             - Phase 3: Build vms phase"
+	@echo "  nettest         - Phase 4: Debug the network"
+	@echo "  gold_vms-clean  - Clean gold_vms phase"
+	@echo "  network-clean   - Clean network phase"
+	@echo "  vms-clean       - Clean vms phase"
+	@echo "  nettest-clean   - Clean network debug phase"
+
+# The "all" target runs the creation commands for all phases (in order)
+all: {% for phase in phases %}{{ phase.name }} {% endfor %}
+	@echo ""
+	@echo "All phases created!"
+
+# The "clean" target runs the clean commands in reverse order
+clean: {% for phase in phases | reverse %}{{ phase.name }}-clean {% endfor %}
+	@echo ""
+	@echo "All phases cleaned!"
+
+{# Define individual phase targets. Each target changes into its directory, echoes a message, and runs the appropriate command with sudo. #}
+{% for phase in phases %}
+{{ phase.name }}:
+	@echo "==> Creating phase: {{ phase.name }}"
+	@cd $(PHASE_DIR)/{{ phase.dir }} && sudo bash -c '{{ phase.create }}'
+
+{{ phase.name }}-clean:
+	@echo "==> Cleaning phase: {{ phase.name }}"
+	@cd $(PHASE_DIR)/{{ phase.dir }} && sudo bash -c '{{ phase.clean }}'
+
+{% endfor %}
+
