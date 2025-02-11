@@ -14,8 +14,8 @@ The motivation and some additional information about TASSI can be found in our [
 2. These instructions correspond to tag _v1.0.0_.
 
 ## Install
-1. The required packages can be installed by running [scripts/dnf_install.sh](scripts/dnf_install.sh).
-2. The required python modules can be installed by running _pip3.8 install -r [scripts/requirements.txt](scripts/requirements.txt)_.
+1. cd setup
+2. sudo ./setup_tassi.sh 
 
 ## Running
 1. To run TASSI for the first time, make sure you are in the sudoers file.
