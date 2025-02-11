@@ -1,4 +1,4 @@
-{# Jinja2 template to generate a Makefile for the Tassi workflow (excluding prepare) #}
+{# Jinja2 template to generate a Makefile for the Tassi workflow (excluding prepare) with incremental builds via status files #}
 {% include 'header.j2' %}
 {# ------------------------------------------------------------------------------------ #}
 {# Define the phases and their commands #}
@@ -37,7 +37,9 @@
     }
 ] %}
 
-.PHONY: help all clean status {% for phase in phases %}{{ phase.name }} {{ phase.name }}-clean {% endfor %}
+{# Note: We do not mark the creation targets as phony so that Make can track file timestamps.
+   We still mark help, all, clean, status, and the clean targets as phony. #}
+.PHONY: help all clean status {% for phase in phases %}{{ phase.name }}-clean {% endfor %}
 
 # Define common variables (adjust paths as needed)
 ARTIFACTS := {{ artifact_dir }}
@@ -57,43 +59,45 @@ help:
 {% endfor %}
 	@echo "  status        - Show status of each phase (timestamp or 'Not yet run')"
 
-# The "all" target runs the creation commands for all phases (in order)
+# The "all" target runs all phases in order.
 all: {% for phase in phases %}{{ phase.name }} {% endfor %}
 
 	@echo "All phases created!"
 
-# The "clean" target runs the clean commands in reverse order and removes status files
+# The "clean" target runs the clean commands in reverse order and removes all status files.
 clean: {% for phase in phases | reverse %}{{ phase.name }}-clean {% endfor %}
 
-	@rm -f status.phase*
+	@sudo rm -f status.phase*
 	@echo "All phases cleaned!"
 
-# Pattern rule: if a status file is missing, build the corresponding phase.
-status.%:
-	@$(MAKE) $*
-
+# "status" target reports the status for each phase.
 status:
 	@echo "Phase statuses:"
 {% for phase in phases %}
 	@if [ -f status.{{ phase.name }} ]; then \
-	  echo "    {{ phase.name }}:" `stat -c %y status.{{ phase.name }}`; \
+	  echo "{{ phase.name }}:" `stat -c %y status.{{ phase.name }}`; \
 	else \
-	  echo "    {{ phase.name }}: Not yet run"; \
+	  echo "{{ phase.name }}: Not yet run"; \
 	fi
 {% endfor %}
 
-{# Define individual phase targets. Each target depends on the previous phase's status file (if any) #}
+{# Define each phase as a file target that creates a status file upon successful completion.
+   Also, set up dependencies so that each phase depends on the previous one. #}
 {% for phase in phases %}
-{{ phase.name }}:{% if not loop.first %} status.{{ phases[loop.index0 - 1].name }}{% endif %}
+status.{{ phase.name }}:{% if not loop.first %} status.{{ phases[loop.index0 - 1].name }}{% endif %}
 
 	@echo "==> Creating phase: {{ phase.name }}"
 	@cd $(PHASE_DIR)/{{ phase.dir }} && sudo bash -c '{{ phase.create }}'
-	@touch status.{{ phase.name }}
+	@sudo touch $@
 
+{{ phase.name }}: status.{{ phase.name }}
+{% endfor %}
+
+{# Define the clean targets for each phase (which also remove the corresponding status file) #}
+{% for phase in phases %}
 {{ phase.name }}-clean:
 	@echo "==> Cleaning phase: {{ phase.name }}"
 	@cd $(PHASE_DIR)/{{ phase.dir }} && sudo bash -c '{{ phase.clean }}'
-	@rm -f status.{{ phase.name }}
-
+	@sudo rm -f status.{{ phase.name }}
 {% endfor %}
 
