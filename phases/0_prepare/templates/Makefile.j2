@@ -37,7 +37,7 @@
     }
 ] %}
 
-.PHONY: help all clean {% for phase in phases %}{{ phase.name }} {{ phase.name }}-clean {% endfor %}
+.PHONY: help all clean status {% for phase in phases %}{{ phase.name }} {{ phase.name }}-clean {% endfor %}
 
 # Define common variables (adjust paths as needed)
 ARTIFACTS := {{ artifact_dir }}
@@ -55,26 +55,45 @@ help:
 {% for phase in phases %}
 	@echo "  {{ phase.name }}-clean  - {{ phase.helpclean }}"
 {% endfor %}
+	@echo "  status        - Show status of each phase (timestamp or 'Not yet run')"
 
 # The "all" target runs the creation commands for all phases (in order)
 all: {% for phase in phases %}{{ phase.name }} {% endfor %}
 
 	@echo "All phases created!"
 
-# The "clean" target runs the clean commands in reverse order
+# The "clean" target runs the clean commands in reverse order and removes status files
 clean: {% for phase in phases | reverse %}{{ phase.name }}-clean {% endfor %}
 
+	@rm -f status.phase*
 	@echo "All phases cleaned!"
 
-{# Define individual phase targets. Each target changes into its directory, echoes a message, and runs the appropriate command with sudo. #}
+# Pattern rule: if a status file is missing, build the corresponding phase.
+status.%:
+	@$(MAKE) $*
+
+status:
+	@echo "Phase statuses:"
 {% for phase in phases %}
-{{ phase.name }}:
+	@if [ -f status.{{ phase.name }} ]; then \
+	  echo "    {{ phase.name }}:" `stat -c %y status.{{ phase.name }}`; \
+	else \
+	  echo "    {{ phase.name }}: Not yet run"; \
+	fi
+{% endfor %}
+
+{# Define individual phase targets. Each target depends on the previous phase's status file (if any) #}
+{% for phase in phases %}
+{{ phase.name }}:{% if not loop.first %} status.{{ phases[loop.index0 - 1].name }}{% endif %}
+
 	@echo "==> Creating phase: {{ phase.name }}"
 	@cd $(PHASE_DIR)/{{ phase.dir }} && sudo bash -c '{{ phase.create }}'
+	@touch status.{{ phase.name }}
 
 {{ phase.name }}-clean:
 	@echo "==> Cleaning phase: {{ phase.name }}"
 	@cd $(PHASE_DIR)/{{ phase.dir }} && sudo bash -c '{{ phase.clean }}'
+	@rm -f status.{{ phase.name }}
 
 {% endfor %}
 
