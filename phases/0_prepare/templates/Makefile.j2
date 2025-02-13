@@ -5,33 +5,30 @@
 {% set phases = [
     { 
       'name': 'phase1',
-      'dir': '1_make_golds',
-      'clean': 'ansible-playbook -i $(INVENTORY) tassi_phase1_create_gold_vms.yaml --tags makeclean',
-      'create': 'ansible-playbook -i $(INVENTORY) tassi_phase1_create_gold_vms.yaml',
+      'clean': 'ansible-playbook -i $(PHYS_INVENTORY) $(PHASE_DIR)/1_make_golds/tassi_phase1_create_gold_vms.yaml --tags makeclean',
+      'creat': 'ansible-playbook -i $(PHYS_INVENTORY) $(PHASE_DIR)/1_make_golds/tassi_phase1_create_gold_vms.yaml',
       'help': 'Phase 1: Create gold VMs and stash them as qcow2 images',
       'helpclean': 'Delete the gold VMs and their qcow2 images'
     },
     { 
       'name': 'phase2',
-      'dir': '2_create_network',
-      'clean': 'ansible-playbook -i $(INVENTORY) tassi_phase2_create_networks.yaml --tags makeclean',
-      'create': 'ansible-playbook -i $(INVENTORY) tassi_phase2_create_networks.yaml',
+      'clean': 'ansible-playbook -i $(PHYS_INVENTORY) $(PHASE_DIR)/2_create_network/tassi_phase2_create_networks.yaml --tags makeclean',
+      'creat': 'ansible-playbook -i $(PHYS_INVENTORY) $(PHASE_DIR)/2_create_network/tassi_phase2_create_networks.yaml',
       'help': 'Phase 2: Create and configure the wireguard tunnels, the libvirt bridges, and update /etc/hosts',
       'helpclean': 'Remove the wireguard tunnels, the libvirt bridges, and the updates in /etc/hosts'
     },
     { 
       'name': 'phase3',
-      'dir': '3_create_cluster',
-      'clean': 'tofu destroy -var-file $(TFVARS) --auto-approve',
-      'create': 'tofu apply -var-file $(TFVARS) --auto-approve',
+      'clean': '$(TOFU_WORKSPACE) && tofu $(TOFU_CHDIR) destroy $(TFVARS) --auto-approve',
+      'creat': '$(TOFU_WORKSPACE) && tofu $(TOFU_CHDIR) apply   $(TFVARS) --auto-approve',
       'help': 'Phase 3: Create VMs from the stashed gold images',
       'helpclean': 'Remove the VMs and free all their associated resources'
     },
     { 
       'name': 'phase4',
       'dir': '4_test_network',
-      'clean': 'ansible-playbook -i $(INVENTORY) tassi_phase4_test_network.yaml --tags makeclean',
-      'create': 'ansible-playbook -i $(INVENTORY) tassi_phase4_test_network.yaml',
+      'clean': 'ansible-playbook -i $(PHYS_INVENTORY) $(PHASE_DIR)/4_test_network/tassi_phase4_test_network.yaml --tags makeclean',
+      'creat': 'ansible-playbook -i $(PHYS_INVENTORY) $(PHASE_DIR)/4_test_network/tassi_phase4_test_network.yaml',
       'help': 'Phase 4: Debug the network and produce some graphs',
       'helpclean': 'Remove the network graphs'
     }
@@ -41,13 +38,15 @@
    We still mark help, all, clean, status, and the clean targets as phony. #}
 .PHONY: help all clean status {% for phase in phases %}{{ phase.name }}-clean {% endfor %}
 
-# Define common variables (adjust paths as needed)
 ARTIFACTS := {{ artifact_dir }}
-INVENTORY := $(ARTIFACTS)/inventory
-TFVARS := {{ tfvars_file }} 
-PHASE_DIR := {{ playbook_dir }}/..
+PHYS_INVENTORY := {{ physical_inventory_dir }}
+VIRT_INVENTORY := {{ virtual_inventory_dir }}
+TFVARS := -var-file {{ tfvars_file }} 
+PHASE_DIR := {{ phase_dir }} 
+TOFU_CHDIR := {{ tofu_chdir }} 
 STATUS_DIR := {{ make_status_dir }}
 LOG_DIR := {{ make_log_dir }}
+TOFU_WORKSPACE := tofu $(TOFU_CHDIR) workspace select {{ tofu_workspace }}
 
 help:
 	@echo "Available targets:"
@@ -88,10 +87,10 @@ status:
 {% for phase in phases %}
 $(STATUS_DIR)/status.{{ phase.name }}:{% if not loop.first %} $(STATUS_DIR)/status.{{ phases[loop.index0 - 1].name }}{% endif %}
 
-	@echo "==> `date` Running {{ phase.name }}. Logging into $(LOG_DIR)/log.{{ phase.name }}"
-	cd $(PHASE_DIR)/{{ phase.dir }} && sudo bash -c '{{ phase.create }} > $(LOG_DIR)/log.{{ phase.name }} 2>&1'
+	@echo "==> $(shell date) Running {{ phase.name }}. Logging into $(LOG_DIR)/log.{{ phase.name }}"
+	sudo bash -c '{{ phase.creat }} > $(LOG_DIR)/log.{{ phase.name }} 2>&1'
 	@sudo touch $@
-	@echo "==> `date` Ran {{ phase.name }}. Logged into $(LOG_DIR)/log.{{ phase.name }}"
+	@echo "==> $(shell date) Ran {{ phase.name }}. Logged into $(LOG_DIR)/log.{{ phase.name }}"
 
 {{ phase.name }}: $(STATUS_DIR)/status.{{ phase.name }}
 {% endfor %}
@@ -99,9 +98,9 @@ $(STATUS_DIR)/status.{{ phase.name }}:{% if not loop.first %} $(STATUS_DIR)/stat
 {# Define the clean targets for each phase (which also remove the corresponding status file) #}
 {% for phase in phases %}
 {{ phase.name }}-clean:
-	@echo "==> `date` Cleaning {{ phase.name }}"
-	@cd $(PHASE_DIR)/{{ phase.dir }} && sudo bash -c '{{ phase.clean }}'
+	@echo "==> $(shell date) Cleaning {{ phase.name }}"
+	sudo bash -c '{{ phase.clean }}'
 	@sudo rm -f $(STATUS_DIR)/status.{{ phase.name }}
-	@echo "==> `date` Cleaned {{ phase.name }}"
+	@echo "==> $(shell date) Cleaned {{ phase.name }}"
 {% endfor %}
 

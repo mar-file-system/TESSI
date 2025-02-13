@@ -3,14 +3,16 @@
   tasks:
     - name: Define and ensure relevant directories 
       block:
-      - name: Define an artifact directory and a qcow2 directory
+      - name: Define an artifact directory and a qcow2 directory and the dir that holds all the base phases
         set_fact: 
           artifact_dir: "{{ lookup('pipe', 'realpath {{ playbook_dir }}/../../artifacts/{{ UNIQUE_TAG }}') }}"
           qcow2_dir: "{{ image_storage.qcow }}/{{ UNIQUE_TAG }}"
+          phase_dir: "{{ playbook_dir }}/.." 
 
       - name: Define multiple children of the artifact directory
         set_fact: 
-          inventory_dir: "{{ artifact_dir }}/inventory"
+          physical_inventory_dir: "{{ artifact_dir }}/inventory_physical"
+          virtual_inventory_dir: "{{ artifact_dir }}/inventory_virtual"
           make_log_dir: "{{ artifact_dir }}/logs"
           make_status_dir: "{{ artifact_dir }}/status"
           tfvars_file: "{{ artifact_dir }}/phase3.tfvars"
@@ -22,18 +24,24 @@
           mode: '0755'
         loop:
           - "{{ artifact_dir }}"
-          - "{{ inventory_dir }}"
+          - "{{ physical_inventory_dir }}"
+          - "{{ virtual_inventory_dir }}"
           - "{{ make_log_dir }}"
           - "{{ make_status_dir }}"
           - "{{ qcow2_dir }}"
 
     - name: Define necessary variables
       block:
+      - name: Define some stuff needed by the tofu in phase 3
+        set_fact:
+          tofu_chdir: "-chdir={{ phase_dir }}/3_create_cluster"
+          tofu_workspace: "{{ UNIQUE_TAG }}"
+
       - name: Define qcow2 paths for each role
         set_fact:
           gold_qcow2_paths: >-
             {{
-              dict(vm_roles.values() | zip(vm_roles.values() | map('regex_replace', '^', qcow2_dir ~ '/') | map('regex_replace', '$', '.qcow2')))
+              dict(vm_groups.values() | zip(vm_groups.values() | map('regex_replace', '^', qcow2_dir ~ '/') | map('regex_replace', '$', '.qcow2')))
               | dict2items | items2dict
             }}
 
@@ -45,7 +53,7 @@
           
           - debug:
               var: gold_qcow2_paths
-        when: false
+        when: true
 
       - name: Compute final_gold_vms dictionary with recursive merging of default gold with individual
         set_fact:
@@ -65,7 +73,7 @@
       - name: Debug final_gold_vms structure
         debug:
           var: final_gold_vms
-        when: false
+        when: true
 
       - name: Set common network interface variables
         set_fact:
@@ -119,7 +127,7 @@
           current_date: "{{ lookup('pipe', 'date \"+%Y-%m-%d %H:%M:%S\"') }}"
           ansible_hostname: "{{ lookup('pipe', 'hostname') }}"
 
-    - name: Generate inventory and var files for subsequent phases
+    - name: Generate inventory and tofu var files for subsequent phases and the Makefile driver
       block:
       - block:
         - name: Generate Makefile for subsequent phases 
@@ -127,15 +135,16 @@
             src: templates/Makefile.j2
             dest: "{{ artifact_dir }}/Makefile"
 
-        - name: Generate inventory files from templates
+        - name: Generate ansible inventory and variable files for ansible phases 
           template:
-            src: "templates/{{ item }}.j2"
-            dest: "{{ inventory_dir }}/{{ item }}.yaml"
+            src: "templates/{{ item.0 }}.j2"
+            dest: "{{ item.1 }}/{{ item.0 }}.yaml"
           loop:
-            - all
-            - phase1_gold_inventory
-            - phase2_networking
-            - phase4_nettest
+            - [ "all", "{{ physical_inventory_dir }}" ]
+            - [ "phase1_gold_inventory", "{{ physical_inventory_dir }}" ]
+            - [ "phase2_networking", "{{ physical_inventory_dir }}" ]
+            - [ "phase4_nettest", "{{ physical_inventory_dir }}" ]
+            - [ "phase5_config_cluster", "{{ virtual_inventory_dir }}" ]
         vars:
           comment_style: "hash"
 
@@ -151,6 +160,26 @@
         ansible.builtin.command:
           cmd: tofu fmt "{{ phase3_tfvars_result.dest }}" 
 
+      - name: Make sure the tofu modules have been initialized
+        ansible.builtin.command:
+          cmd: tofu {{ tofu_chdir }} init 
+
+      - name: List current tofu workspaces
+        ansible.builtin.command: tofu {{ tofu_chdir }} workspace list
+        register: tofu_workspace_list
+
+      - name: Create tofu workspace if it doesn't exist
+        ansible.builtin.command: tofu {{ tofu_chdir }} workspace new -var-file {{ tfvars_file }} {{ tofu_workspace }}
+        when: tofu_workspace not in tofu_workspace_list.stdout
+
+      - name: Run 'make -C {{ artifact_dir }} help'
+        command: make -C "{{ artifact_dir }}" help
+        register: make_help_output
+
+      - name: Display output of 'make -C {{ artifact_dir }} help' 
+        debug:
+          var: make_help_output.stdout_lines 
+
     - debug:
-        msg: "Next steps for TASSI {{ UNIQUE_TAG }}: cd {{ artifact_dir }} && make help"
+        msg: "Next steps for TASSI {{ UNIQUE_TAG }}: make -C {{ artifact_dir }} all"
 
