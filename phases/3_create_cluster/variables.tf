@@ -14,4 +14,5 @@ variable "vm_name" {
     mac_address      = string
     cloudinit        = optional(string, "")
   }))
+  default = []  # try to set an empty default so that init works without a var-file passed 
 }
