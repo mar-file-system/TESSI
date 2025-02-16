@@ -1,0 +1,134 @@
+---
+- name: Configure passwordless ssh on {{ target_hosts }}
+  hosts: all 
+  any_errors_fatal: true
+  gather_facts: false # do it later so we can wait for ssh
+  vars:
+    nameserver: "{{ network.addr }}.1"
+
+  tasks:
+    - name: Remove old SSH key for host
+      become: yes
+      command: ssh-keygen -R "{{ inventory_hostname }}"
+      ignore_errors: true
+
+    - name: Include wait_ssh task
+      include_tasks: wait_ssh.yaml
+
+    - name: Gather facts
+      setup:
+      tags:
+        - always
+
+    - name: Read /etc/resolv.conf
+      slurp:
+        src: /etc/resolv.conf
+      register: resolv_conf_content
+      tags:
+        - resolve
+
+    - name: Remove specified nameserver from /etc/resolv.conf
+      replace:
+        path: /etc/resolv.conf
+        regexp: '^nameserver {{ nameserver }}\n'
+        replace: ''
+      when: network is defined and nameserver is defined
+      tags:
+        - resolve
+
+    - name: Add specified nameserver to the top of /etc/resolv.conf
+      lineinfile:
+        path: /etc/resolv.conf
+        line: "nameserver {{ nameserver }}"
+        insertbefore: BOF
+      when: network is defined and nameserver is defined
+      tags:
+        - resolve
+
+    - name: Ensure no duplicate specified nameserver entries
+      replace:
+        path: /etc/resolv.conf
+        regexp: '(nameserver {{ nameserver }}\n)+'
+        replace: 'nameserver {{ nameserver }}\n'
+      when: network is defined and nameserver is defined
+      tags:
+        - resolve
+
+    - name: Generate SSH key on each host if they do not already exist
+      ansible.builtin.openssh_keypair:
+        path: "{{ ansible_env.HOME }}/.ssh/id_rsa"
+        size: 2048
+      delegate_to: "{{ inventory_hostname }}"
+      tags:
+        - sshkeys
+
+    - name: Fetch public key from each host
+      fetch:
+        src: "{{ ansible_env.HOME }}/.ssh/id_rsa.pub"
+        dest: "/tmp/{{ inventory_hostname }}.pub"
+        flat: yes
+      tags:
+        - sshkeys
+
+    - name: Distribute each host's public key to all other hosts' authorized keys
+      authorized_key:
+        user: "{{ ansible_user_id }}"
+        state: present
+        key: "{{ lookup('file', item) }}"
+        manage_dir: yes
+      loop: "{{ query('fileglob', '/tmp/*.pub') }}"
+      delegate_to: "{{ inventory_hostname }}"
+      tags:
+        - sshkeys
+
+    - name: Get SSH host keys from each host
+      shell: ssh-keyscan -H {{ inventory_hostname }}
+      register: host_keys
+      delegate_to: "{{ inventory_hostname }}"
+      tags:
+        - sshkeys
+
+    - name: Add SSH host keys to known_hosts
+      known_hosts:
+        path: "{{ ansible_env.HOME }}/.ssh/known_hosts"
+        name: "{{ hostvars[item].ansible_facts.hostname }}"
+        key: "{{ hostvars[item].host_keys.stdout }}"
+      loop: "{{ ansible_play_hosts }}"
+      delegate_to: "{{ inventory_hostname }}"
+      tags:
+        - sshkeys
+
+    - name: Ping other nodes to ensure network is working
+      command: "ping -c 3 {{ item }}" 
+      with_items: "{{ groups['all'] }}"
+      when: "inventory_hostname != item"
+      ignore_errors: true
+      register: ping_result
+      tags:
+        - test
+
+    - name: Test SSH connection to other nodes using ansible built-ins
+      ansible.builtin.ping:
+      delegate_to: "{{ item }}"
+      with_items: "{{ groups['all'] }}"
+      when: inventory_hostname != item
+      ignore_errors: true
+      register: ssh_ping_result
+      tags:
+        - test
+
+    - name: Test SSH to other nodes manually
+      shell: ssh -o StrictHostKeyChecking=no {{ ansible_user_id }}@{{ item }} echo SSH Success
+      with_items: "{{ groups['all'] }}"
+      when: inventory_hostname != item
+      ignore_errors: true
+      register: ssh_result
+      tags:
+        - test
+
+    - name: Display results
+      debug:
+        var: ssh_result
+      tags:
+        - test
+      when: false # disable this because output is copious
