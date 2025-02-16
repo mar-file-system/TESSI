@@ -1,0 +1,185 @@
+- hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Define and ensure relevant directories 
+      block:
+      - name: Define an artifact directory and a qcow2 directory and the dir that holds all the base phases
+        set_fact: 
+          artifact_dir: "{{ lookup('pipe', 'realpath {{ playbook_dir }}/../../artifacts/{{ UNIQUE_TAG }}') }}"
+          qcow2_dir: "{{ image_storage.qcow }}/{{ UNIQUE_TAG }}"
+          phase_dir: "{{ playbook_dir }}/.." 
+
+      - name: Define multiple children of the artifact directory
+        set_fact: 
+          physical_inventory_dir: "{{ artifact_dir }}/inventory_physical"
+          virtual_inventory_dir: "{{ artifact_dir }}/inventory_virtual"
+          make_log_dir: "{{ artifact_dir }}/logs"
+          make_status_dir: "{{ artifact_dir }}/status"
+          tfvars_file: "{{ artifact_dir }}/phase3.tfvars"
+
+      - name: Ensure necessary directories exist
+        file:
+          path: "{{ item }}"
+          state: directory
+          mode: '0755'
+        loop:
+          - "{{ artifact_dir }}"
+          - "{{ physical_inventory_dir }}"
+          - "{{ virtual_inventory_dir }}"
+          - "{{ make_log_dir }}"
+          - "{{ make_status_dir }}"
+          - "{{ qcow2_dir }}"
+
+    - name: Define necessary variables
+      block:
+      - name: Define some stuff needed by the tofu in phase 3
+        set_fact:
+          tofu_chdir: "-chdir={{ phase_dir }}/3_create_cluster"
+          tofu_workspace: "{{ UNIQUE_TAG }}"
+
+      - name: Define qcow2 paths for each role
+        set_fact:
+          gold_qcow2_paths: >-
+            {{
+              dict(vm_groups.values() | zip(vm_groups.values() | map('regex_replace', '^', qcow2_dir ~ '/') | map('regex_replace', '$', '.qcow2')))
+              | dict2items | items2dict
+            }}
+
+      - name: Debug qcow2 paths 
+        block:
+          - debug:
+              msg: "VM: {{ item.0 }}, Role: {{ item.1 }}, Resolved Path: {{ gold_qcow2_paths.get(item.1, 'MISSING_PATH') }}"
+            loop: "{{ groups['all'] | map('extract', hostvars, 'vms') | select('defined') | list | flatten(1) }}"
+          
+          - debug:
+              var: gold_qcow2_paths
+        when: true
+
+      - name: Compute final_gold_vms dictionary with recursive merging of default gold with individual
+        set_fact:
+          final_gold_vms: "{{ computed_final_gold_vms }}"
+        vars:
+          computed_final_gold_vms: >-
+            {%- set result = {} -%}
+            {%- for vm in (gold_vms.individual | default([])) -%}
+              {%- set merged_vm = gold_vms.defaults | combine(vm, recursive=True) -%}
+              {%- set _ = result.update({merged_vm.group: merged_vm}) -%}
+            {%- endfor -%}
+            {%- if (gold_vms.individual | default([])) | length == 0 -%}
+              {%- set _ = result.update({gold_vms.defaults.group: gold_vms.defaults}) -%}
+            {%- endif -%}
+            {{ result }}
+
+      - name: Debug final_gold_vms structure
+        debug:
+          var: final_gold_vms
+        when: true
+
+      - name: Set common network interface variables
+        set_fact:
+          wireguard:
+            interface: "wg-{{ UNIQUE_TAG }}"
+            cidr: "{{ network.wireguard.cidr }}"
+          libvirt:
+            interface: "wgbr-{{ UNIQUE_TAG }}"
+            name: "vmwgbr-{{ UNIQUE_TAG }}"
+
+      - name: Define a ton of derived stuff for each VM to make later templating easier 
+        set_fact:
+          vm_info: "{{ computed_vm_info }}"
+        vars:
+          network_data: "{{ hostvars['localhost'].network }}"  # Explicitly fetch network
+          computed_vm_info: >
+            {%- set ns = namespace(mac_counter=0, result=[]) -%}
+            {%- for phys in groups['all'] if hostvars[phys].vms is defined -%}
+              {%- for vm in hostvars[phys].vms -%}
+                {%- set mac = "52:54:00:" ~ ("%02x" | format(ns.mac_counter //(256*256))) ~ ":" ~ ("%02x" | format((ns.mac_counter // 256) % 256)) ~ ":" ~ ("%02x" | format(ns.mac_counter % 256)) -%}
+                {%- set _ = ns.result.append({
+                      'name': vm[0],
+                      'ansible_host': hostvars[phys].network.libvirt.base_ip ~ '.' ~ vm[4],
+                      'group': vm[1],
+                      'hdd1_size': vm[2],
+                      'hdd2_size': vm[3],
+                      'libvirt_bridge': network.libvirt.base_ip ~ '.' ~ (hostvars[phys].libvirt_suffix | int + 1),
+                      'mac_address': mac,
+                      'machine': final_gold_vms.get(vm[1]).machine, 
+                      'memory': final_gold_vms.get(vm[1]).memory, 
+                      'netone': network.libvirt.default, 
+                      'nettwo': libvirt.name, 
+                      'physical_host': phys,
+                      'source_image': gold_qcow2_paths.get(vm[1]), 
+                      'storage_pool': "{{ UNIQUE_TAG }}-pool", 
+                      'vcpu': final_gold_vms.get(vm[1]).vcpu, 
+                    }) -%}
+                {%- set ns.mac_counter = ns.mac_counter + 1 -%}
+              {%- endfor -%}
+            {%- endfor -%}
+            {{ ns.result }}
+
+      - name: Debug VM info structure
+        debug:
+          var: vm_info
+        when: false
+
+      - name: Capture variables for the template provenance headers 
+        set_fact:
+          playbook_command: "{{ lookup('file', '/proc/self/cmdline') | regex_replace('\u0000', ' ') }}"
+          current_date: "{{ lookup('pipe', 'date \"+%Y-%m-%d %H:%M:%S\"') }}"
+          ansible_hostname: "{{ lookup('pipe', 'hostname') }}"
+
+    - name: Generate inventory and tofu var files for subsequent phases and the Makefile driver
+      block:
+      - block:
+        - name: Generate Makefile for subsequent phases 
+          template:
+            src: templates/Makefile.j2
+            dest: "{{ artifact_dir }}/Makefile"
+
+        - name: Generate ansible inventory and variable files for ansible phases 
+          template:
+            src: "templates/{{ item.0 }}.j2"
+            dest: "{{ item.1 }}/{{ item.0 }}.yaml"
+          loop:
+            - [ "all", "{{ physical_inventory_dir }}" ]
+            - [ "phase1_gold_inventory", "{{ physical_inventory_dir }}" ]
+            - [ "phase2_networking", "{{ physical_inventory_dir }}" ]
+            - [ "phase4_nettest", "{{ physical_inventory_dir }}" ]
+            - [ "phase5_config_cluster", "{{ virtual_inventory_dir }}" ]
+        vars:
+          comment_style: "hash"
+
+      - name: Generate phase 3 opentofu vars file
+        template:
+          src: templates/phase3_vms.j2
+          dest: "{{ tfvars_file }}" 
+        register: phase3_tfvars_result
+        vars:
+          comment_style: "hcl"
+
+      - name: Format the autogenerated opentofu file 
+        ansible.builtin.command:
+          cmd: tofu fmt "{{ phase3_tfvars_result.dest }}" 
+
+      - name: Make sure the tofu modules have been initialized
+        ansible.builtin.command:
+          cmd: tofu {{ tofu_chdir }} init 
+
+      - name: List current tofu workspaces
+        ansible.builtin.command: tofu {{ tofu_chdir }} workspace list
+        register: tofu_workspace_list
+
+      - name: Create tofu workspace if it doesn't exist
+        ansible.builtin.command: tofu {{ tofu_chdir }} workspace new -var-file {{ tfvars_file }} {{ tofu_workspace }}
+        when: tofu_workspace not in tofu_workspace_list.stdout
+
+      - name: Run 'make -C {{ artifact_dir }} help'
+        command: make -C "{{ artifact_dir }}" help
+        register: make_help_output
+
+      - name: Display output of 'make -C {{ artifact_dir }} help' 
+        debug:
+          var: make_help_output.stdout_lines 
+
+    - debug:
+        msg: "Next steps for TASSI {{ UNIQUE_TAG }}: make -C {{ artifact_dir }} all"
+

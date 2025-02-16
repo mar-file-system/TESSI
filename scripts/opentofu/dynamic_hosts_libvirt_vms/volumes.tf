@@ -13,6 +13,8 @@ module "volumes" {
   size        = strcontains(each.key, "secondary") ? each.value.second_disk_size * 1024 * 1024 * 1024 : null
   format      = strcontains(each.key, "primary") ? "qcow2" : "raw"
 
+  depends_on = [module.pools]
+
   providers = {
     libvirt = libvirt.by_host[each.value.host]
   }

@@ -1,0 +1,107 @@
+{# Jinja2 template to generate a Makefile for the Tassi workflow (excluding prepare) with incremental builds via status files #}
+{% include 'header.j2' %}
+{# ------------------------------------------------------------------------------------ #}
+{# Define the phases and their commands #}
+{% set phases = [
+    { 
+      'name': 'phase1',
+      'clean': 'ansible-playbook -i $(PHYS_INVENTORY) $(PHASE_DIR)/1_make_golds/tassi_phase1_create_gold_vms.yaml --tags makeclean',
+      'creat': 'ansible-playbook -i $(PHYS_INVENTORY) $(PHASE_DIR)/1_make_golds/tassi_phase1_create_gold_vms.yaml',
+      'help': 'Phase 1: Create gold VMs and stash them as qcow2 images',
+      'helpclean': 'Delete the gold VMs and their qcow2 images'
+    },
+    { 
+      'name': 'phase2',
+      'clean': 'ansible-playbook -i $(PHYS_INVENTORY) $(PHASE_DIR)/2_create_network/tassi_phase2_create_networks.yaml --tags makeclean',
+      'creat': 'ansible-playbook -i $(PHYS_INVENTORY) $(PHASE_DIR)/2_create_network/tassi_phase2_create_networks.yaml',
+      'help': 'Phase 2: Create and configure the wireguard tunnels, the libvirt bridges, and update /etc/hosts',
+      'helpclean': 'Remove the wireguard tunnels, the libvirt bridges, and the updates in /etc/hosts'
+    },
+    { 
+      'name': 'phase3',
+      'clean': '$(TOFU_WORKSPACE) && tofu $(TOFU_CHDIR) destroy $(TFVARS) --auto-approve',
+      'creat': '$(TOFU_WORKSPACE) && tofu $(TOFU_CHDIR) apply   $(TFVARS) --auto-approve',
+      'help': 'Phase 3: Create VMs from the stashed gold images',
+      'helpclean': 'Remove the VMs and free all their associated resources'
+    },
+    { 
+      'name': 'phase4',
+      'dir': '4_test_network',
+      'clean': 'ansible-playbook -i $(PHYS_INVENTORY) $(PHASE_DIR)/4_test_network/tassi_phase4_test_network.yaml --tags makeclean',
+      'creat': 'ansible-playbook -i $(PHYS_INVENTORY) $(PHASE_DIR)/4_test_network/tassi_phase4_test_network.yaml',
+      'help': 'Phase 4: Debug the network and produce some graphs',
+      'helpclean': 'Remove the network graphs'
+    }
+] %}
+
+{# Note: We do not mark the creation targets as phony so that Make can track file timestamps.
+   We still mark help, all, clean, status, and the clean targets as phony. #}
+.PHONY: help all clean status {% for phase in phases %}{{ phase.name }}-clean {% endfor %}
+
+# define a bunch of variables. Use strip to make sure extra white-space doesn't get entered since it can break a path
+ARTIFACTS := $(strip {{ artifact_dir }})
+PHYS_INVENTORY := $(strip {{ physical_inventory_dir }})
+VIRT_INVENTORY := $(strip {{ virtual_inventory_dir }})
+TFVARS := -var-file $(strip {{ tfvars_file }})
+PHASE_DIR := $(strip {{ phase_dir }})
+TOFU_CHDIR := $(strip {{ tofu_chdir }})
+STATUS_DIR := $(strip {{ make_status_dir }})
+LOG_DIR := $(strip {{ make_log_dir }})
+TOFU_WORKSPACE := tofu $(TOFU_CHDIR) workspace select $(strip {{ tofu_workspace }})
+
+help:
+	@echo "Available targets:"
+	@echo "  all           - Run the entire TASSI workflow for {{ UNIQUE_TAG }}"
+	@echo "  clean         - Clean the entire TASSI workflow for {{ UNIQUE_TAG }} (in reverse order)"
+{% for phase in phases %}
+	@echo "  {{ phase.name }}        - {{ phase.help }}"
+{% endfor %}
+{% for phase in phases %}
+	@echo "  {{ phase.name }}-clean  - {{ phase.helpclean }}"
+{% endfor %}
+	@echo "  status        - Show status of each phase (timestamp or 'Not yet run')"
+
+# The "all" target runs all phases in order.
+all: {% for phase in phases %}{{ phase.name }} {% endfor %}
+
+	@echo "All phases created!"
+
+# The "clean" target runs the clean commands in reverse order and removes all status files.
+clean: {% for phase in phases | reverse %}{{ phase.name }}-clean {% endfor %}
+
+	@sudo rm -f status.phase*
+	@echo "All phases cleaned!"
+
+# "status" target reports the status for each phase.
+status:
+	@echo "Phase statuses:"
+{% for phase in phases %}
+	@if [ -f $(STATUS_DIR)/status.{{ phase.name }} ]; then \
+	  echo "{{ phase.name }}:" `stat -c %y $(STATUS_DIR)/status.{{ phase.name }}`; \
+	else \
+	  echo "{{ phase.name }}: Not yet run"; \
+	fi
+{% endfor %}
+
+{# Define each phase as a file target that creates a status file upon successful completion.
+   Also, set up dependencies so that each phase depends on the previous one. #}
+{% for phase in phases %}
+$(STATUS_DIR)/status.{{ phase.name }}:{% if not loop.first %} $(STATUS_DIR)/status.{{ phases[loop.index0 - 1].name }}{% endif %}
+
+	@echo "==> $(shell date) Running {{ phase.name }}. Logging into $(LOG_DIR)/log.{{ phase.name }}"
+	sudo bash -c '{{ phase.creat }} > $(LOG_DIR)/log.{{ phase.name }} 2>&1'
+	@sudo touch $@
+	@echo "==> $(shell date) Ran {{ phase.name }}. Logged into $(LOG_DIR)/log.{{ phase.name }}"
+
+{{ phase.name }}: $(STATUS_DIR)/status.{{ phase.name }}
+{% endfor %}
+
+{# Define the clean targets for each phase (which also remove the corresponding status file) #}
+{% for phase in phases %}
+{{ phase.name }}-clean:
+	@echo "==> $(shell date) Cleaning {{ phase.name }}"
+	sudo bash -c '{{ phase.clean }}'
+	@sudo rm -f $(STATUS_DIR)/status.{{ phase.name }}
+	@echo "==> $(shell date) Cleaned {{ phase.name }}"
+{% endfor %}
+

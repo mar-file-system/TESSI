@@ -2,6 +2,8 @@
 ---
 - name: Set up wireguard tunnels
   hosts: physical_hosts
+  vars:
+    etchosts_mark: "# {mark} TASSI {{ UNIQUE_TAG }} VMs - managed by Ansible"
   tasks:
 
     - name: Cleanup block
@@ -69,23 +71,30 @@
 
     - name: Create the wireguard tunnels and do some rudimentary testing
       block:
-        - name: Compute subnet base and CIDR
+        - name: Discover libvirt cidr 
           set_fact:
-            subnet_base: "{{ libvirt_addresses.split('.')[3].split('/')[0] | int }}"
             cidr: "{{ libvirt_addresses.split('/')[1] }}"
 
-        - name: Compute usable addresses and first addresses
+        - name: Compute libvirt usable addresses 
           set_fact:
             usable_addresses: "{{ (2 ** (32 - cidr | int)) - 2 }}"
-            libvirt_first_address: "{{ subnet_base | int + 1 }}"
 
-        - name: Compute last addresses
+        - name: Compute libvirt first and last addresses
           set_fact:
-            libvirt_last_address: "{{ subnet_base | int + usable_addresses | int }}"
+            libvirt_first_address: >-
+              {{
+                libvirt_addresses.split('/')[0].split('.')[:3] | join('.') ~ '.' ~
+                (libvirt_addresses.split('/')[0].split('.')[3] | int + 1)
+              }}
+            libvirt_last_address: >-
+              {{
+                libvirt_addresses.split('/')[0].split('.')[:3] | join('.') ~ '.' ~
+                (libvirt_addresses.split('/')[0].split('.')[3] | int + (usable_addresses | int))
+              }}
 
-        - name: Debug IP ranges
+        - name: Debug various IP values
           debug:
-            msg: "{{ inventory_hostname }}: WGuard {{ wireguard_ip }}, lvirt {{ libvirt_addresses }} {{ libvirt_first_address }}-{{ libvirt_last_address }}, sub {{ subnet_base }}, cidr {{ cidr }}, "
+            msg: "{{ inventory_hostname }}: WG {{ wireguard_ip }}, lv {{ libvirt_addresses }} {{ libvirt_first_address }}-{{ libvirt_last_address }}, cidr {{ cidr }}"
 
         - name: Create wireguard interface
           ansible.builtin.command:
@@ -107,11 +116,15 @@
           ansible.builtin.command:
             cmd: "wg genkey"
           register: private_key_result
+  
+        - name: Set fact for path to private key file
+          set_fact:
+            priv_key_path: "/tmp/wg_{{ UNIQUE_TAG }}_priv_key"
 
         - name: Save private key to file
           ansible.builtin.copy:
             content: "{{ private_key_result.stdout }}"
-            dest: "{{ wireguard.priv_key }}"
+            dest: "{{ priv_key_path }}"
 
         - name: Generate public key
           ansible.builtin.command:
@@ -126,11 +139,11 @@
 
         - name: Set WireGuard private key
           ansible.builtin.command:
-            cmd: "wg set {{ wireguard.interface }} private-key {{ wireguard.priv_key }}"
+            cmd: "wg set {{ wireguard.interface }} private-key {{ priv_key_path }}"
 
         - name: Delete private key file
           ansible.builtin.file:
-            path: "{{ wireguard.priv_key }}"
+            path: "{{ priv_key_path }}"
             state: absent
 
         - name: Bring up WireGuard interface
@@ -154,7 +167,7 @@
           ansible.builtin.set_fact:
             host_data: >
               {%- set data = [] -%}
-              {%- for host in hostvars -%}
+              {%- for host in groups['physical_hosts'] -%}
               {%- set info = {
                   'hostname': hostvars[host]['inventory_hostname'],
                   'public_key': hostvars[host]['public_key_result']['stdout'] | default(''),
@@ -194,18 +207,16 @@
         - name: Debug each VM definition
           debug:
             msg: "Processing VM: {{ item }}"
-          loop: "{{ vms }}"  # note that vms is a list of lists. Using 'with_items:' will iterate over the sub-elements
-          # see this discussion: https://stackoverflow.com/questions/35662388/ansible-with-items-list-of-lists-is-flattening
+          loop: "{{ groups['vms'] }}"
 
         - name: Debug VM item structure
           debug:
             msg: >
               VM item: {{ item }},
-              VM Name: {{ item[0] | default('undefined') }},
-              Last Octet: {{ item[1] | default('undefined') }},
-              Casted Last Octet: {{ (item[1] | int) | default('undefined') }},
+              VM Name: {{ hostvars[item].inventory_hostname | default('undefined') }},
+              VM IP: {{ hostvars[item].ansible_host | default('undefined') }},
               Loop Index: {{ loop_index | default('undefined') }}
-          loop: "{{ vms }}"
+          loop: "{{ groups['vms'] }}"
           loop_control:
             index_var: loop_index
 
@@ -218,15 +229,14 @@
             vm_mappings: >-
               {{
                 vm_mappings | combine({
-                  item[0]: {
-                    'ip': "{}.{}".format(libvirt.base_ip, item[1]),
-                    'mac': "52:54:00:00:{:02x}:{:02x}".format(loop_index, item[1])
+                  item: {
+                    'ip': "{}".format(hostvars[item].ansible_host),
+                    'mac': "{}".format(hostvars[item].mac_address), 
                   }
                 })
               }}
-          loop: "{{ vms }}"
+          loop: "{{ groups['vms'] }}"
           loop_control:
-            label: "{{ item[0] }}"
             index_var: loop_index
 
         - name: Debug the VM mappings
@@ -245,9 +255,9 @@
               <network>
                 <name>{{ libvirt.name }}</name>
                 <bridge name="{{ libvirt.interface }}" />
-                <ip address="{{ libvirt.base_ip }}.{{ libvirt_first_address }}" netmask="255.255.255.240">
+                <ip address="{{ libvirt_first_address }}" netmask="255.255.255.240">
                   <dhcp>
-                    <range start="{{ libvirt.base_ip }}.{{ libvirt_first_address }}" end="{{ libvirt.base_ip }}.{{ libvirt_last_address }}" />
+                    <range start="{{ libvirt_first_address }}" end="{{ libvirt_last_address }}" />
                     {% for vm, mapping in vm_mappings.items() %}
                     <host mac="{{ mapping.mac }}" name="{{ vm }}" ip="{{ mapping.ip }}" />
                     {% endfor %}
@@ -385,22 +395,24 @@
               {{ details.ip }} {{ hostname }}
               {% endfor %}
 
-        - name: Capture playbook command line for the autogenerated opentofu file 
-          set_fact:
-            playbook_command: "{{ lookup('file', '/proc/self/cmdline') | regex_replace('\u0000', ' ') }}"
+        - block:
+          - name: Capture playbook command line for the autogenerated opentofu file 
+            set_fact:
+              playbook_command: "{{ lookup('file', '/proc/self/cmdline') | regex_replace('\u0000', ' ') }}"
 
-        - name: Generate the autogenerated opentofu file (system_description.tf)
-          template:
-            src: templates/system_description.tf.j2
-            dest: "{{ cluster.description_file }}"
-          delegate_to: localhost
-          run_once: true
+          - name: Generate the autogenerated opentofu file (system_description.tf)
+            template:
+              src: templates/system_description.tf.j2
+              dest: "{{ cluster.description_file }}"
+            delegate_to: localhost
+            run_once: true
 
-        - name: Format the autogenerated opentofu file 
-          ansible.builtin.command:
-            cmd: tofu fmt "{{ cluster.description_file }}" 
-          delegate_to: localhost
-          run_once: true
+          - name: Format the autogenerated opentofu file 
+            ansible.builtin.command:
+              cmd: tofu fmt "{{ cluster.description_file }}" 
+            delegate_to: localhost
+            run_once: true
+          when: false # turn this block off
 
         - name: Dump hostvars to a file for debugging
           copy:
