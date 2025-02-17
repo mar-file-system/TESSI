@@ -14,19 +14,25 @@
             state: absent
             marker: "{{ etchosts_mark }}"
 
-        - name: Delete network interface and bridge
+        - name: Delete wireguard interface if it exists
           ansible.builtin.command:
-            cmd: "ip link delete {{ item }}"
-          with_items:
-            - "{{ wireguard.interface }}"
-          ignore_errors: true
+            cmd: "ip link delete {{ wireguard.interface }}"
+          when: wireguard.interface in ansible_facts['interfaces']
 
-        - name: Destroy and undefine the libvirt network
+        - name: Gather libvirt network facts
+          community.libvirt.virt_net:
+            command: facts
+          register: libvirt_facts
+
+        - debug:
+            var: libvirt_facts
+
+        - name: Destroy and undefine libvirt network if it exists
           command: "virsh net-{{ item }} {{ libvirt.name }}"
           with_items:
             - destroy
             - undefine
-          ignore_errors: true
+          when: libvirt.name in (libvirt_facts.ansible_facts.ansible_libvirt_networks)
 
         - name: Gather routes referencing specific interfaces
           ansible.builtin.command:
@@ -47,7 +53,7 @@
           ansible.builtin.shell: |
             iptables -S | grep -E '{{ wireguard.interface }}|{{ libvirt.interface }}'
           register: matching_rules
-          ignore_errors: true
+          failed_when: matching_rules.rc not in [0, 1]  # don't fail if grep returns nothing
 
         - name: Debug matching iptables rules
           debug:
