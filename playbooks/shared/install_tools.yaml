@@ -1,0 +1,145 @@
+- name: Gather facts
+  setup:
+
+- name: Include set_hostname 
+  include_tasks: set_hostname.yaml
+
+- name: Enable EPEL repository
+  ansible.builtin.package:
+    name: epel-release
+    state: present
+
+- name: Ensure Development Tools are installed
+  ansible.builtin.dnf: # it's not clear that package will work for group tools so use dnf
+    name: "@Development Tools"
+    state: present
+
+- name: Install qemu-guest-agent 
+  ansible.builtin.package:
+    name: qemu-guest-agent
+    state: present
+
+- name: Enable qemu-guest-agent service
+  systemd:
+    name: qemu-guest-agent
+    enabled: yes
+    state: started
+
+- name: Install pdsh on target machines
+  ansible.builtin.package:
+    name: pdsh-rcmd-ssh
+    state: present
+
+- name: Install pdsh on target machines
+  ansible.builtin.package:
+    name: pdsh
+    state: present
+
+- name: Install rsync on target machines
+  ansible.builtin.package:
+    name: rsync
+    state: present
+
+- name: Install nslookup on target machines
+  ansible.builtin.package:
+    name: bind-utils
+    state: present
+
+- name: Ensure cloud-init is installed
+  ansible.builtin.package:
+    name: cloud-init
+    state: present
+
+- name: Enable and start cloud-init service
+  ansible.builtin.systemd:
+    name: cloud-init
+    enabled: yes
+    state: started
+
+- name: Enable cloud-init-local service
+  ansible.builtin.systemd:
+    name: cloud-init-local
+    enabled: yes
+
+- name: Enable cloud-config service
+  ansible.builtin.systemd:
+    name: cloud-config
+    enabled: yes
+
+- name: Enable cloud-final service
+  ansible.builtin.systemd:
+    name: cloud-final
+    enabled: yes
+
+- block:
+  - name: Install OpenMPI and development packages
+    ansible.builtin.package:
+      name:
+        - openmpi
+        - openmpi-devel
+      state: present
+
+  - name: Ensure Environment Modules are initialized in /etc/bashrc
+    lineinfile:
+      path: /etc/bashrc
+      line: 'source /etc/profile.d/modules.sh'
+      create: yes
+
+  - name: Create profile script to auto-load Open MPI module 
+    lineinfile:
+      path: /etc/profile.d/openmpi.sh
+      line: 'module load mpi/openmpi-x86_64'
+      create: yes
+
+  - name: Reboot the system to apply changes
+    reboot:
+
+  - name: Install necessary packages for IOR
+    ansible.builtin.package:
+      name:
+        - git
+        - autoconf
+        - automake
+        - libtool
+        - make
+        - gcc
+      state: present
+
+  - name: Clone IOR repository
+    git:
+      repo: 'https://github.com/hpc/ior'
+      dest: '/usr/local/src/ior'
+      clone: yes
+      update: yes
+      version: '54fd197c56dbb7a7706221acbe80198903405456'
+
+  - name: Run IOR bootstrap
+    command:
+      cmd: ./bootstrap
+      chdir: /usr/local/src/ior
+
+  - name: Configure IOR 
+    command:
+      cmd: ./configure {{ ior_config_option | default('') }} --prefix=/usr/local
+      chdir: /usr/local/src/ior
+
+  - name: Make and install IOR
+    command:
+      cmd: make clean all install
+      chdir: /usr/local/src/ior
+
+  - name: Check that /usr/local/bin/ior is a valid executable
+    stat:
+      path: /usr/local/bin/ior
+    register: ior_stat
+
+  - name: Assert /usr/local/bin/ior is a valid executable
+    assert:
+      that:
+        - ior_stat.stat.exists
+        - ior_stat.stat.isreg
+        - ior_stat.stat.mode | regex_replace('^0([0-7]+)$', '\\1') | int(base=8) is odd
+      fail_msg: "/usr/local/bin/ior is not a valid executable"
+      success_msg: "/usr/local/bin/ior is a valid executable"
+  when: "'clients' in group_names"
+
