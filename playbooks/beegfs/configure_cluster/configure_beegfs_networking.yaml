@@ -1,0 +1,40 @@
+- name: Find the interface with the ansible_host IP address 
+  set_fact:
+    interface_with_ansible_host_ip: >-
+      {{
+        ansible_interfaces
+        | map('extract', ansible_facts)
+        | selectattr('ipv4.address', 'defined')
+        | selectattr('ipv4.address', 'equalto', ansible_host)
+        | map(attribute='device')
+        | first
+      }}
+
+- name: Display the interface name
+  debug:
+    msg: The network interface with IP {{ ansible_host }} is {{ interface_with_ansible_host_ip }}.
+
+- name: Create {{ conninterfacefile }} with the interface name
+  ansible.builtin.copy:
+    dest: "{{ conninterfacefile }}"
+    content: "{{ interface_with_ansible_host_ip }}\n"
+    owner: root
+    group: root
+    mode: '0644'
+  when: interface_with_ansible_host_ip is defined
+
+- name: Ensure connInterfacesFile is set in all configuration files
+  ansible.builtin.lineinfile:
+    path: "{{ item }}"
+    regexp: '^(connInterfacesFile\s*=\s*).*$'
+    line: 'connInterfacesFile = {{ conninterfacefile }}'
+    create: yes
+  loop: "{{ conf_files }}"
+
+- name: Verify connInterfacesFile parameter in configuration files
+  ansible.builtin.shell: |
+    grep -v '^#' {{ item }} | grep 'connInterfacesFile'
+  register: config_check
+  loop: "{{ conf_files }}"
+  failed_when: config_check.stdout.find(conninterfacefile) == -1
+

@@ -1,109 +1,104 @@
----
-- name: Configure BeeGFS servers
-  hosts: all
-  become: yes
-  gather_facts: false # may be needed for {{ ansible_architecture }}, do it later so we can wait for ssh
-  vars:
-    connauthfile: /etc/beegfs/connauthfile
-    loglevel: 5
-  tasks:
-    - name: Include wait_ssh task
-      include_tasks: ../../shared/wait_ssh.yaml
+- name: Ensure beegfs service are stopped 
+  ansible.builtin.service:
+    name: "{{ item }}"
+    state: stopped
+  loop: "{{ services }}"
 
-    - name: Gather facts
-      setup:
+- name: Ensure BeeGFS directories exist
+  ansible.builtin.file:
+    path: "{{ target_directory }}"
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
 
-    - name: Ensure BeeGFS directories exist
-      ansible.builtin.file:
-        path: "{{ target_directory }}"
-        state: directory
-        owner: root
-        group: root
-        mode: '0755'
+- block: 
+  - name: Create BeeGFS connection auth file on mgmtd 
+    ansible.builtin.command:
+      cmd: "dd if=/dev/random of={{ connauthfile }} bs=128 count=1"
 
-    - block: 
-      - name: Create BeeGFS connection auth file on mgmtd 
-        ansible.builtin.command:
-          cmd: "dd if=/dev/random of={{ connauthfile }} bs=128 count=1"
+  - name: Set ownership of connection auth file on mgmtd
+    ansible.builtin.command:
+      cmd: "chown root:root {{ connauthfile }}"
 
-      - name: Set ownership of connection auth file on mgmtd
-        ansible.builtin.command:
-          cmd: "chown root:root {{ connauthfile }}"
+  - name: Set permissions of connection auth file on mgmtd
+    ansible.builtin.command:
+      cmd: "chmod 400 {{ connauthfile }}"
+  when: inventory_hostname == groups['mservers'][0]
 
-      - name: Set permissions of connection auth file on mgmtd
-        ansible.builtin.command:
-          cmd: "chmod 400 {{ connauthfile }}"
-      when: inventory_hostname == groups['mservers'][0]
+- name: Copy connection auth file to other nodes
+  ansible.builtin.synchronize:
+    src: "{{ connauthfile }}"
+    dest: "{{ connauthfile }}"
+    mode: push
+    owner: yes
+    group: yes
+    perms: yes
+  delegate_to: "{{ groups['mservers'][0] }}"
+  when: inventory_hostname != groups['mservers'][0]
 
-    - name: Copy connection auth file to other nodes
-      ansible.builtin.synchronize:
-        src: "{{ connauthfile }}"
-        dest: "{{ connauthfile }}"
-        mode: push
-        owner: yes
-        group: yes
-        perms: yes
-      delegate_to: "{{ groups['mservers'][0] }}"
-      when: inventory_hostname != groups['mservers'][0]
+- name: Verify connection auth file exists
+  ansible.builtin.stat:
+    path: "{{ connauthfile }}"
+  register: authfile_stat
 
-    - name: Verify connection auth file exists
-      ansible.builtin.stat:
-        path: "{{ connauthfile }}"
-      register: authfile_stat
+- name: Fail if connection auth file does not exist
+  ansible.builtin.fail:
+    msg: "Connection auth file does not exist on {{ inventory_hostname }}"
+  when: not authfile_stat.stat.exists
 
-    - name: Fail if connection auth file does not exist
-      ansible.builtin.fail:
-        msg: "Connection auth file does not exist on {{ inventory_hostname }}"
-      when: not authfile_stat.stat.exists
+- name: Ensure connAuthFile is set in all configuration files
+  ansible.builtin.lineinfile:
+    path: "{{ item }}"
+    regexp: '^(connAuthFile\s*=\s*).*$'
+    line: 'connAuthFile = {{ connauthfile }}'
+    create: yes
+  loop: "{{ conf_files }}"
 
-    - name: Ensure connAuthFile is set in all configuration files
-      ansible.builtin.lineinfile:
-        path: "{{ item }}"
-        regexp: '^(connAuthFile\s*=\s*).*$'
-        line: 'connAuthFile = {{ connauthfile }}'
-        create: yes
-      loop: "{{ conf_files }}"
+- name: Verify connAuthFile parameter in configuration files
+  ansible.builtin.shell: |
+    grep -v '^#' {{ item }} | grep 'connAuthFile'
+  register: config_check
+  loop: "{{ conf_files }}"
+  failed_when: config_check.stdout.find(connauthfile) == -1
 
-    - name: Verify connAuthFile parameter in configuration files
-      ansible.builtin.shell: |
-        grep -v '^#' {{ item }} | grep 'connAuthFile'
-      register: config_check
-      loop: "{{ conf_files }}"
-      failed_when: config_check.stdout.find(connauthfile) == -1
+- name: Change logLevel in all configuration files
+  ansible.builtin.lineinfile:
+    path: "{{ item }}"
+    regexp: '^(logLevel\s*=\s*).*$'
+    line: "logLevel = {{ loglevel }}"
+    create: yes
+  loop: "{{ conf_files }}"
 
-    - name: Change logLevel in all configuration files
-      ansible.builtin.lineinfile:
-        path: "{{ item }}"
-        regexp: '^(logLevel\s*=\s*).*$'
-        line: "logLevel = {{ loglevel }}"
-        create: yes
-      loop: "{{ conf_files }}"
+- block:
+  - name: Check if setup marker exists
+    ansible.builtin.stat:
+      path: "{{ setup_marker }}"
+    register: marker_status
 
-    - block:
-      - name: Check if setup marker exists
-        ansible.builtin.stat:
-          path: "{{ setup_marker }}"
-        register: marker_status
+  - name: Print setup marker status
+    ansible.builtin.debug:
+      msg: "Setup marker file {{ 'exists' if marker_status.stat.exists else 'does NOT exist' }} at {{ setup_marker }}."
 
-      - name: Print setup marker status
-        ansible.builtin.debug:
-          msg: "Setup marker file {{ 'exists' if marker_status.stat.exists else 'does NOT exist' }} at {{ setup_marker }}."
+  - name: Configure BeeGFS services
+    ansible.builtin.command:
+      cmd: "{{ setup_command }}"
+    args:
+      creates: "{{ setup_marker }}"
 
-      - name: Configure BeeGFS services
-        ansible.builtin.command:
-          cmd: "{{ setup_command }}"
-        args:
-          creates: "{{ setup_marker }}"
+  - name: Restart and enable BeeGFS services
+    ansible.builtin.service:
+      name: "{{ item }}"
+      enabled: yes
+      state: restarted
+    loop: "{{ services }}"
 
-      - name: Restart and enable BeeGFS services
-        ansible.builtin.systemd:
-          name: "{{ services }}"
-          enabled: yes
-          state: restarted
+  - name: Check status of each service
+    ansible.builtin.command: systemctl is-active {{ item }}
+    register: service_status
+    changed_when: false
+    failed_when: service_status.stdout.strip() != "active"
+    loop: "{{ services }}"
+    ignore_errors: true
 
-      - name: Check BeeGFS service status
-        ansible.builtin.command: systemctl is-active {{ services }}
-        register: service_status
-        changed_when: false
-        failed_when: service_status.stdout.strip() != "active"
-      when: inventory_hostname not in groups['clients']
+  when: inventory_hostname not in groups['clients']
