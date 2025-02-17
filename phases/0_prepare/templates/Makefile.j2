@@ -7,38 +7,49 @@
       'name': 'phase1',
       'clean': 'ansible-playbook -i $(PHYS_INVENTORY) $(PHASE_DIR)/1_make_golds/tassi_phase1_create_gold_vms.yaml --tags makeclean',
       'creat': 'ansible-playbook -i $(PHYS_INVENTORY) $(PHASE_DIR)/1_make_golds/tassi_phase1_create_gold_vms.yaml',
-      'help': 'Phase 1: Create gold VMs and stash them as qcow2 images',
+      'help': 'Create gold VMs using $(INSTALL_PLAYBOOK); stash as qcow2 images',
       'helpclean': 'Delete the gold VMs and their qcow2 images'
     },
     { 
       'name': 'phase2',
       'clean': 'ansible-playbook -i $(PHYS_INVENTORY) $(PHASE_DIR)/2_create_network/tassi_phase2_create_networks.yaml --tags makeclean',
       'creat': 'ansible-playbook -i $(PHYS_INVENTORY) $(PHASE_DIR)/2_create_network/tassi_phase2_create_networks.yaml',
-      'help': 'Phase 2: Create and configure the wireguard tunnels, the libvirt bridges, and update /etc/hosts',
+      'help': 'Create and configure the wireguard tunnels, the libvirt bridges, and update /etc/hosts',
       'helpclean': 'Remove the wireguard tunnels, the libvirt bridges, and the updates in /etc/hosts'
     },
     { 
       'name': 'phase3',
       'clean': '$(TOFU_WORKSPACE) && tofu $(TOFU_CHDIR) destroy $(TFVARS) --auto-approve',
       'creat': '$(TOFU_WORKSPACE) && tofu $(TOFU_CHDIR) apply   $(TFVARS) --auto-approve',
-      'help': 'Phase 3: Create VMs from the stashed gold images',
+      'help': 'Create VMs from the stashed gold images',
       'helpclean': 'Remove the VMs and free all their associated resources'
     },
     { 
       'name': 'phase4',
       'clean': 'ansible-playbook -i $(PHYS_INVENTORY) $(PHASE_DIR)/4_test_network/tassi_phase4_test_network.yaml --tags makeclean',
       'creat': 'ansible-playbook -i $(PHYS_INVENTORY) $(PHASE_DIR)/4_test_network/tassi_phase4_test_network.yaml',
-      'help': 'Phase 4: Debug the network and produce some graphs',
+      'help': 'Debug the network and create some graphs',
       'helpclean': 'Remove the network graphs'
     },
     { 
       'name': 'phase5',
       'clean': 'echo Cannot clean this phase. NOOP.',
       'creat': 'ansible-playbook -i $(VIRT_INVENTORY) $(PHASE_DIR)/5_config_cluster/tassi_phase5_config_cluster.yaml -e "user_config_playbook=$(CONFIG_PLAYBOOK)"',
-      'help': "Phase 5: Configure the cluster using the user-provided config playbook $(CONFIG_PLAYBOOK)",
+      'help': "Configure the cluster using $(CONFIG_PLAYBOOK)",
       'helpclean': 'NOOP. This phase cannot be undone. Redo phase3 if necessary to repeat this.'
-    }
+    },
 ] %}
+
+{% if playbooks.get('cluster_test') and playbooks.cluster_test not in [None, "", "null", "NULL"] %}
+  {% set _ = phases.append({
+      'name': 'phase6',
+      'clean': 'echo Cannot clean this phase. NOOP.',
+      'creat': 'ansible-playbook -i $(VIRT_INVENTORY) $(PHASE_DIR)/6_test_cluster/tassi_phase6_test_cluster.yaml',
+      'help': "Test the cluster using $(TEST_PLAYBOOK)",
+      'helpclean': 'NOOP. This phase cannot be undone. Redo phase3 if necessary to repeat this.'
+  }) %}
+{% endif %}
+
 
 {# Note: We do not mark the creation targets as phony so that Make can track file timestamps.
    We still mark help, all, clean, status, and the clean targets as phony. #}
@@ -55,11 +66,13 @@ STATUS_DIR := $(strip {{ make_status_dir }})
 LOG_DIR := $(strip {{ make_log_dir }})
 TOFU_WORKSPACE := tofu $(TOFU_CHDIR) workspace select $(strip {{ tofu_workspace }})
 CONFIG_PLAYBOOK := $(strip {{ playbooks.cluster_config }})
+INSTALL_PLAYBOOK := $(strip {{ playbooks.gold_install }})
+TEST_PLAYBOOK := $(strip {{ playbooks.cluster_test | default('') }})
 
 help:
-	@echo "Available targets:"
-	@echo "  all           - Run the entire TASSI workflow for {{ UNIQUE_TAG }}"
-	@echo "  clean         - Clean the entire TASSI workflow for {{ UNIQUE_TAG }} (in reverse order)"
+	@echo "TASSI Workflow {{ UNIQUE_TAG }}. Available targets:"
+	@echo "  all           - Run the entire {{ UNIQUE_TAG }} workflow"
+	@echo "  clean         - Clean the entire {{ UNIQUE_TAG }} workflow"
 {% for phase in phases %}
 	@echo "  {{ phase.name }}        - {{ phase.help }}"
 {% endfor %}
