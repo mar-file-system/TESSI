@@ -71,27 +71,42 @@
     name: cloud-final
     enabled: yes
 
+# client only block to install MPI and IOR
 - block:
-  - name: Install OpenMPI and development packages
+  - name: Set which MPI to install (openmpi or mpich)
+    set_fact:
+      which_mpi: "mpich"   # openmpi or mpich are supported 
+
+  - name: Set MPI configuration facts
+    set_fact:
+      module_name: "{{ 'mpi/openmpi-x86_64' if which_mpi == 'openmpi' else 'mpi/mpich-x86_64' }}"
+      mpi_package: "{{ 'openmpi openmpi-devel' if which_mpi == 'openmpi' else 'mpich mpich-devel' }}"
+      env_vars: >-
+        {% if which_mpi == 'openmpi' %}
+        export OMPI_MCA_pml=ob1
+        export OMPI_MCA_btl=tcp,self
+        {% elif which_mpi == 'mpich' %}
+        # Set any MPICH-specific environment variables here if required.
+        {% endif %}
+
+  - name: Install MPI packages
     ansible.builtin.package:
-      name:
-        - openmpi
-        - openmpi-devel
+      name: "{{ mpi_package.split() }}"
       state: present
 
-  - name: Ensure Environment Modules are initialized in /etc/bashrc
-    lineinfile:
-      path: /etc/bashrc
-      line: 'source /etc/profile.d/modules.sh'
-      create: yes
+  - name: Create profile script for MPI
+    copy:
+      dest: /etc/profile.d/mpi.sh
+      content: |
+        #!/bin/bash
+        source /etc/profile.d/modules.sh
+        module load {{ module_name }}
+        {{ env_vars }}
+      owner: root
+      group: root
+      mode: '0755'
 
-  - name: Create profile script to auto-load Open MPI module 
-    lineinfile:
-      path: /etc/profile.d/openmpi.sh
-      line: 'module load mpi/openmpi-x86_64'
-      create: yes
-
-  - name: Reboot the system to apply changes
+  - name: Reboot the system to apply MPI changes
     reboot:
 
   - name: Install necessary packages for IOR
