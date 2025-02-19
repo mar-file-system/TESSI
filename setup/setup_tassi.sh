@@ -1,5 +1,6 @@
 #!/bin/bash
 set -e
+set -x
 
 # Ensure the script is run with root privileges
 if [ "$(id -u)" -ne 0 ]; then
@@ -19,11 +20,28 @@ if [[ "$OS_VERSION" != "8" ]]; then
     fi
 fi
 
+sudo dnf -y config-manager --set-enabled extras
+sudo dnf -y config-manager --set-enabled powertools
+
+# Install the extra release packages:
+sudo dnf -y install centos-release-advanced-virtualization centos-release-ceph-nautilus centos-release-rabbitmq-38 epel-release
+
+# Install ELRepo (this adds the ELRepo repo):
+sudo dnf -y install https://www.elrepo.org/elrepo-release-8.el8.elrepo.noarch.rpm
+
+sudo dnf config-manager --set-enabled elrepo-kernel
+
+# Enable the PowerTools repository:
+sudo dnf config-manager --set-enabled powertools
+
+# Add the opentofu repository (which should also include opentofu-source if configured in the repo file):
+#sudo dnf -y config-manager --add-repo https://rpm.opentofu.org/opentofu.repo
+
 echo "Updating system package list..."
 dnf update -y
 
 echo "Installing required system packages..."
-dnf install -y $(cat installed_packages.txt)
+dnf install -y $(cat installed_packages.txt) || true
 
 # Extract Python version from installed_packages.txt (e.g., python3.8)
 PYTHON_PACKAGE=$(grep -E '^python[0-9]+\.[0-9]+' installed_packages.txt | head -n 1)
@@ -103,6 +121,8 @@ sudo sed -i '/^hosts:/ {
 
 # (Optional) Display the updated hosts line
 grep '^hosts:' /etc/nsswitch.conf
+
+python3.8 -m pip install lxml
 
 echo "Setup complete."
 
