@@ -82,5 +82,27 @@ else
     exit 1
 fi
 
+echo "Starting and enabling libvirt"
+sudo systemctl start libvirtd
+sudo systemctl enable libvirtd
+sudo systemctl start virtlogd
+sudo systemctl enable virtlogd
+
+echo "Adding libvirt to nss resolve"
+sudo dnf install -y libvirt-nss
+
+# Back up /etc/nsswitch.conf with a timestamp
+sudo cp /etc/nsswitch.conf /etc/nsswitch.conf.bak.$(date +%F_%T)
+
+# Add "libvirt_guest" to the hosts line if not already present.
+# This sed command looks for a line starting with "hosts:" and, if "libvirt" isn’t found,
+# it appends it right after "files". (Change "files" to "dns" if you prefer a different ordering.)
+sudo sed -i '/^hosts:/ {
+  /libvirt_guest/! s/\(hosts:[[:space:]]*files\)/\1 libvirt libvirt_guest/
+}' /etc/nsswitch.conf
+
+# (Optional) Display the updated hosts line
+grep '^hosts:' /etc/nsswitch.conf
+
 echo "Setup complete."
 
