@@ -1,222 +1,236 @@
----
-- name: Install and Build Lustre
-  hosts: all
-  gather_facts: false # needed for {{ ansible_architecture }}, do it later so we can wait for ssh
-  any_errors_fatal: true
-  vars:
+- name: Set up local variables needed
+  set_fact:
     lustre_repo: /usr/local/src/lustre-release
     selinux: disabled  # or permissive, enforcing
+    patch_name: lustre.patch
 
-  tasks:
-    - name: Wait for SSH to become ready
-      wait_for:
-        host: "{{ inventory_hostname }}"
-        port: 22
-        state: started
-        timeout: 300
-      delegate_to: localhost
-      become: false
+- name: Gather facts
+  setup:
 
-    - name: Gather facts
-      setup:
+- name: Include kernel installation tasks
+  include_tasks: install_kernel_rpms.yaml
+  tags:
+    - lustre
+    - kernel
+    - dependencies
 
-    - name: Include kernel installation tasks
-      import_tasks: install_kernel_rpms.yaml
-      tags:
-        - lustre
-        - kernel
-        - dependencies
+- name: Install Lustre dependencies - epel and kernel-devel 
+  dnf:
+    name:
+      - epel-release
+      - kernel-rpm-macros
+      - kernel-abi-whitelists
+    enablerepo:
+      - epel
+    state: present
+    skip_broken: true
+  tags: 
+    - dependencies
+    - lustre
+    - kernel
 
-    - name: Install Lustre dependencies - epel and kernel-devel 
-      dnf:
-        name:
-          - epel-release
-          - kernel-rpm-macros
-          - kernel-abi-whitelists
-        enablerepo:
-          - epel
-        state: present
-        skip_broken: true
-      tags: 
-        - dependencies
-        - lustre
-        - kernel
+- name: Update dnf cache
+  dnf:
+    update_cache: yes
+  tags: 
+    - dependencies
+    - lustre
 
-    - name: Update dnf cache
-      dnf:
-        update_cache: yes
-      tags: 
-        - dependencies
-        - lustre
+# if this runs before installing kernel-devel, it changes the installed kernel version so it must run after
+- name: Install Lustre dependencies - Development Tools
+  dnf:
+    name: '@Development Tools'
+    state: latest
+  tags: 
+    - dependencies
+    - lustre
 
-    # if this runs before installing kernel-devel, it changes the installed kernel version so it must run after
-    - name: Install Lustre dependencies - Development Tools
-      dnf:
-        name: '@Development Tools'
-        state: latest
-      tags: 
-        - dependencies
-        - lustre
+- name: Install Lustre dependencies - General packages
+  dnf:
+    name:
+      - xmlto
+      - asciidoc
+      - elfutils-libelf-devel
+      - zlib-devel
+      - libyaml-devel
+      - binutils-devel
+      - newt-devel
+      - python3-devel
+      - hmaccalc
+      - perl-ExtUtils-Embed
+      - bison
+      - elfutils-devel
+      - audit-libs-devel
+      - python3-docutils
+      - sg3_utils
+      - expect
+      - attr
+      - lsof
+      - quilt
+      - libselinux-devel
+      - libmount-devel
+      - libnl3-cli
+      - libnl3-devel
+      - resource-agents
+    state: latest
+    enablerepo: 
+      - powertools
+      - ha
+  tags: 
+    - dependencies
+    - lustre
 
-    - name: Install Lustre dependencies - General packages
-      dnf:
-        name:
-          - xmlto
-          - asciidoc
-          - elfutils-libelf-devel
-          - zlib-devel
-          - libyaml-devel
-          - binutils-devel
-          - newt-devel
-          - python3-devel
-          - hmaccalc
-          - perl-ExtUtils-Embed
-          - bison
-          - elfutils-devel
-          - audit-libs-devel
-          - python3-docutils
-          - sg3_utils
-          - expect
-          - attr
-          - lsof
-          - quilt
-          - libselinux-devel
-          - libmount-devel
-          - libnl3-cli
-          - libnl3-devel
-          - resource-agents
-        state: latest
-        enablerepo: 
-          - powertools
-          - ha
-      tags: 
-        - dependencies
-        - lustre
+- name: Install Git
+  dnf:
+    name: git
+    state: present
+  tags: 
+    - dependencies
+    - lustre
 
-    - name: Install Git
-      dnf:
-        name: git
-        state: present
-      tags: 
-        - dependencies
-        - lustre
+- name: Clone and checkout Lustre 
+  git:
+    repo: "{{ lustre_source_repo }}"
+    dest: "{{ lustre_repo }}"
+    version: "tags/{{ lustre_version }}"
+    clone: yes
+    update: yes
+    force: yes  # in case we are running this a second time and the patch has been applied 
+  # some network issue kills the git clone so add retry
+  register: git_clone
+  until: git_clone is succeeded
+  retries: 5
+  delay: 10
+  tags: 
+    - build
+    - lustre
 
-    - name: Clone and checkout Lustre 
-      git:
-        repo: "{{ system.repo }}"
-        dest: "{{ lustre_repo }}"
-        version: "tags/{{ system.version }}"
-        clone: yes
-        update: yes
-      # some network issue kills the git clone so add retry
-      register: git_clone
-      until: git_clone is succeeded
-      retries: 5
-      delay: 10
-      tags: 
-        - build
-        - lustre
+- block: 
+  - name: Copy Lustre patch from control node to worker nodes
+    copy:
+      src: "{{ lustre_patch }}"
+      dest: "{{ lustre_repo }}/{{ patch_name }}"
 
-    - name: Copy Lustre patch from control node to worker nodes
-      copy:
-        src: "{{ system.patch }}"
-        dest: "{{ lustre_repo }}/system.patch"
-      when: system.patch is defined
-      tags:
-        - build
-        - patch
-        - lustre
+  - name: Apply patch to Lustre source
+    shell: |
+      cd "{{ lustre_repo }}"
+      git apply "{{ patch_name }}"
+  when: lustre_patch is defined
+  tags:
+    - build
+    - patch
+    - lustre
 
-    - name: Apply patch to Lustre source
-      shell: |
-        cd "{{ lustre_repo }}"
-        git apply system.patch
-      when: system.patch is defined
-      tags:
-        - build
-        - patch
-        - lustre
+- name: Set configure options for clients
+  set_fact:
+    configure_args: '--disable-server --enable-client'
+  when: "'clients' in group_names" 
 
-    - name: Configure Lustre
-      shell: |
-        cd "{{ lustre_repo }}"
-        sh autogen.sh
-        ./configure {{configure_args}} --with-linux=/usr/src/kernels/$(uname -r)
-        make -j$(nproc)
-      args:
-        executable: /bin/bash
-      tags: 
-        - build
-        - lustre
+- name: Set configure options for servers
+  set_fact:
+    configure_args: '--with-zfs --disable-ldiskfs --enable-server'
+  when: "'clients' not in group_names" 
 
-    - name: Build Lustre
-      shell: |
-        cd "{{ lustre_repo }}"
-        make -j$(nproc) 
-      args:
-        executable: /bin/bash
-      tags: 
-        - build
-        - lustre
+- name: Configure Lustre
+  shell: |
+    cd "{{ lustre_repo }}"
+    sh autogen.sh
+    ./configure {{ configure_args }} --with-linux=/usr/src/kernels/$(uname -r)
+    make -j$(nproc)
+    touch "{{ task_marker }}"
+  args:
+    executable: /bin/bash
+    creates: "{{ task_marker }}"
+  vars:
+    task_marker: "{{ marker_dir | default('/tmp') }}/configure_luster.marker"
+  tags: 
+    - build
+    - lustre
 
-    - name: Run llmountcleanup.sh
-      command: "{{ lustre_repo }}/lustre/tests/llmountcleanup.sh"
-      when: "'servers' in group_names"
-      tags: 
-        - cleanup
-        - lustre
+- name: Build Lustre
+  shell: |
+    cd "{{ lustre_repo }}"
+    make -j$(nproc) 
+    touch "{{ task_marker }}"
+  args:
+    executable: /bin/bash
+    creates: "{{ task_marker }}"
+  vars:
+    task_marker: "{{ marker_dir | default('/tmp') }}/build_luster.marker"
+  tags: 
+    - build
+    - lustre
 
-    - name: Remove /sbin/mount.lustre if it exists
-    # sometimes make install fails due to errors with this file
-      file:
-        path: /sbin/mount.lustre
-        state: absent
-      register: result
-      ignore_errors: true
-      failed_when: >
-        result.failed and ('No such file or directory' not in result.msg)
-      tags: 
-        - cleanup
-        - lustre
+- name: Run llmountcleanup.sh
+  command: "{{ lustre_repo }}/lustre/tests/llmountcleanup.sh && touch {{ task_marker }}"
+  when: "'oss' in group_names or 'mds' in group_names"
+  args:
+    creates: "{{ task_marker }}"
+  vars:
+    task_marker: "{{ marker_dir | default('/tmp') }}/llmountcleanup.marker"
+  tags: 
+    - cleanup
+    - lustre
 
-    - name: Install Lustre
-      shell: |
-        cd "{{ lustre_repo }}"
-        make -j$(nproc) install
-      args:
-        executable: /bin/bash
-      tags: 
-        - install
-        - lustre
+- name: Remove /sbin/mount.lustre if it exists
+# sometimes make install fails due to errors with this file
+  file:
+    path: /sbin/mount.lustre
+    state: absent
+  register: result
+  ignore_errors: true
+  failed_when: >
+    result.failed and ('No such file or directory' not in result.msg)
+  tags: 
+    - cleanup
+    - lustre
 
-    - name: Build Lustre RPMS
-      shell: |
-        cd "{{ lustre_repo }}"
-        make -j$(nproc) rpms
-      args:
-        executable: /bin/bash
-      tags: 
-        - build
-        - lustre
-        - rpms 
+- name: Install Lustre
+  shell: |
+    cd "{{ lustre_repo }}"
+    make -j$(nproc) install
+    touch "{{ task_marker }}"
+  args:
+    executable: /bin/bash
+    creates: "{{ task_marker }}"
+  vars:
+    task_marker: "{{ marker_dir | default('/tmp') }}/install_lustre.marker"
+  tags: 
+    - install
+    - lustre
 
-    - name: Find Lustre RPM files 
-      find:
-        paths: "{{ lustre_repo }}"
-        patterns: "*.rpm"
-        excludes: "*.src.rpm"  # Exclude source RPM files
-      register: rpm_files
-      tags: 
-        - install
-        - lustre
-        - rpms
+- name: Build Lustre RPMS
+  shell: |
+    cd "{{ lustre_repo }}"
+    make -j$(nproc) rpms
+    touch "{{ task_marker }}"
+  args:
+    executable: /bin/bash
+    creates: "{{ task_marker }}"
+  vars:
+    task_marker: "{{ marker_dir | default('/tmp') }}/build_lustre_rpms.marker"
+  tags: 
+    - build
+    - lustre
+    - rpms 
 
-    - name: Install Lustre RPMs
-      dnf:
-        name: "{{ rpm_files.files | map(attribute='path') | list }}"
-        state: present
-        disable_gpg_check: yes
-      tags: 
-        - install
-        - lustre
-        - rpms
+- name: Find Lustre RPM files 
+  find:
+    paths: "{{ lustre_repo }}"
+    patterns: "*.rpm"
+    excludes: "*.src.rpm"  # Exclude source RPM files
+  register: rpm_files
+  tags: 
+    - install
+    - lustre
+    - rpms
+
+- name: Install Lustre RPMs
+  dnf:
+    name: "{{ rpm_files.files | map(attribute='path') | list }}"
+    state: present
+    disable_gpg_check: yes
+  tags: 
+    - install
+    - lustre
+    - rpms

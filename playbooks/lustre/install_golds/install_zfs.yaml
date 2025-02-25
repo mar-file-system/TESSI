@@ -1,174 +1,124 @@
----
-- name: Install ZFS on Lustre system 
-  hosts: all
-  any_errors_fatal: true
-  gather_facts: false # needed for {{ ansible_architecture }}, do it later so we can wait for ssh
-  vars:
+- name: Set facts for local variables needed
+  set_fact:
     zfs_repo: /usr/local/src/zfs
 
-  tasks:
-    - name: Include wait_ssh task
-      include_tasks: wait_ssh.yaml
+- name: Gather facts
+  setup:
 
-    - name: Gather facts
-      setup:
+- name: Include kernel rpms installation tasks
+  include_tasks: install_kernel_rpms.yaml
+  tags:
+    - zfs
 
-    - name: Include kernel rpms installation tasks
-      import_tasks: install_kernel_rpms.yaml
-      tags:
-        - zfs
+- block:
+  - name: Install EPEL repository and ZFS dependencies phase 1
+    dnf:
+      name:
+        # from https://openzfs.github.io/openzfs-docs/Developer%20Resources/Custom%20Packages.html
+        - epel-release
+        - gcc
+        - make
+        - autoconf
+        - automake
+        - libtool
+        - rpm-build
+        - kernel-rpm-macros
+        - libtirpc-devel
+        - libblkid-devel
+        - libuuid-devel
+        - libudev-devel
+        - openssl-devel
+        - zlib-devel
+        - libaio-devel
+        - libattr-devel
+        - elfutils-libelf-devel
+        - python3
+        - python3-devel
+        - python3-setuptools
+        - python3-cffi
+        - libffi-devel
+        - ncompress
+      enablerepo:
+        - epel
+      state: present
+      skip_broken: true
 
-    - name: Install EPEL repository and ZFS dependencies phase 1
-      dnf:
-        name:
-          # from https://openzfs.github.io/openzfs-docs/Developer%20Resources/Custom%20Packages.html
-          - epel-release
-          - gcc
-          - make
-          - autoconf
-          - automake
-          - libtool
-          - rpm-build
-          - kernel-rpm-macros
-          - libtirpc-devel
-          - libblkid-devel
-          - libuuid-devel
-          - libudev-devel
-          - openssl-devel
-          - zlib-devel
-          - libaio-devel
-          - libattr-devel
-          - elfutils-libelf-devel
-          - python3
-          - python3-devel
-          - python3-setuptools
-          - python3-cffi
-          - libffi-devel
-          - ncompress
-        enablerepo:
-          - epel
-        state: present
-        skip_broken: true
-      when: "'servers' in group_names"
-      tags: 
-        - dependencies
-        - zfs
+  - name: Install EPEL repository and ZFS dependencies phase 2
+    dnf:
+      name:
+        - python3-packaging
+        - dkms
+      enablerepo:
+        - epel
+        - powertools
+      state: present
+      skip_broken: true
 
-    - name: Install EPEL repository and ZFS dependencies phase 2
-      dnf:
-        name:
-          - python3-packaging
-          - dkms
-        enablerepo:
-          - epel
-          - powertools
-        state: present
-        skip_broken: true
-      when: "'servers' in group_names"
-      tags: 
-        - dependencies
-        - zfs
+  - name: Install Git
+    dnf:
+      name: git
+      state: present
 
-    - name: Install Git
-      dnf:
-        name: git
-        state: present
-      when: "'servers' in group_names"
-      tags: 
-        - dependencies
-        - zfs
+  - name: Clone ZFS repository
+    git:
+      repo: "{{ backend_source_repo }}"
+      dest: "{{ zfs_repo }}"
+      version: tags/{{ backend_version }} 
+      clone: yes
+      update: yes
+      force: yes
+    # some network issue kills the git clone so add retry
+    register: git_clone
+    until: git_clone is succeeded
+    retries: 5
+    delay: 10
 
-    - name: Clone ZFS repository
-      git:
-        repo: "{{ system.backend.repo }}"
-        dest: "{{ zfs_repo }}"
-        version: tags/{{ system.backend.version }} 
-        clone: yes
-        update: yes
-        force: yes
-      # some network issue kills the git clone so add retry
-      register: git_clone
-      until: git_clone is succeeded
-      retries: 5
-      delay: 10
-      when: "'servers' in group_names"
-      tags: 
-        - build
-        - zfs
-
+  - block:
     - name: Copy ZFS patch from control node to worker nodes
       copy:
-        src: "{{ system.backend.patch }}"
+        src: "{{ backend_patch }}"
         dest: "{{ zfs_repo }}/zfs.patch"
-      when: 
-        - "'servers' in group_names"
-        - system.backend.patch is defined
-      tags:
-        - build
-        - patch
-        - zfs
 
     - name: Apply patch to ZFS source
       shell: |
         cd "{{ zfs_repo }}"
         git apply zfs.patch
-      when: 
-        - "'servers' in group_names"
-        - system.backend.patch is defined
-      tags:
-        - build
-        - patch
-        - zfs
+    when: backend_patch is defined
+    tags:
+      - build
+      - patch
+      - zfs
 
-    - name: Build and install ZFS
-      shell: |
-        cd "{{ zfs_repo }}"
-        ./autogen.sh
-        ./configure --with-spec=redhat
-        make pkg-utils pkg-kmod
-      args:
-        executable: /bin/bash
-      when: "'servers' in group_names"
-      tags: 
-        - build
-        - zfs
+  - name: Build and install ZFS
+    shell: |
+      cd "{{ zfs_repo }}"
+      ./autogen.sh
+      ./configure --with-spec=redhat
+      make pkg-utils pkg-kmod
+      touch "{{ build_marker }}"
+    args:
+      executable: /bin/bash
+      creates: "{{ build_marker }}"
+    vars:
+      build_marker: "{{ marker_dir | default('/tmp') }}/build_zfs.marker"
 
-    - name: Mysteriously Broken Task to Install ZFS RPMs
-      shell: dnf localinstall *.{{ ansible_architecture }}.rpm
-      args:
-        executable: /bin/bash
-        chdir: "{{ zfs_repo }}"
-      when: False # this doesn't work for some reason. Just hangs. The next two tasks do the same thing but differently and work for some reason.
-      tags: 
-        - install
-        - zfs
-        - rpms
+  - name: Find RPM files in zfs installation
+    find:
+      paths: "{{ zfs_repo }}"
+      patterns: "*.{{ ansible_architecture }}.rpm"
+    register: rpm_files
 
-    - name: Find RPM files in zfs installation
-      find:
-        paths: "{{ zfs_repo }}"
-        patterns: "*.{{ ansible_architecture }}.rpm"
-      register: rpm_files
-      when: "'servers' in group_names"
-      tags: 
-        - install
-        - zfs
-        - rpms
+  - name: Install ZFS RPMs
+    dnf:
+      name: "{{ rpm_files.files | map(attribute='path') | list }}"
+      state: present
+      disable_gpg_check: yes
 
-    - name: Install ZFS RPMs
-      dnf:
-        name: "{{ rpm_files.files | map(attribute='path') | list }}"
-        state: present
-        disable_gpg_check: yes
-      when: "'servers' in group_names"
-      tags: 
-        - install
-        - zfs
-        - rpms
+  - name: Rebuild module dependency map
+    shell: depmod -a && touch "{{ build_marker }}"
+    args:
+      creates: "{{ build_marker }}" 
+    vars:
+      build_marker: "{{ marker_dir | default('/tmp') }}/depmod_a.marker"
+  when: "'oss' in group_names or 'mds' in group_names"
 
-    - name: Rebuild module dependency map
-      command: depmod -a
-      when: "'servers' in group_names"
-      tags: 
-        - install
-        - zfs
