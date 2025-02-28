@@ -1,29 +1,47 @@
-- name: Set the hostname
-  ansible.builtin.hostname:
-    name: "{{ inventory_hostname }}"
+- name: Define task marker variable
+  set_fact:
+    task_marker: "{{ (marker_dir | default('/tmp')) }}/config_hostname_set.task"
 
-- name: Update /etc/hostname
-  lineinfile:
-    path: /etc/hostname
-    line: "{{ inventory_hostname }}"
+- name: Check if tasks have already been completed via existence of {{ task_marker }} 
+  stat:
+    path: "{{ task_marker }}"
+  register: marker_stat
 
-- name: Update /etc/hosts
-  lineinfile:
-    path: /etc/hosts
-    regexp: '^(127\\.0\\.1\\.1\\s+).*'
-    line: "127.0.1.1 {{ inventory_hostname }}"
-    state: present
-    backup: yes
+- name: Set the hostname and make persistent if necessary
+  block:
+  - name: Set the hostname
+    ansible.builtin.hostname:
+      name: "{{ inventory_hostname }}"
+    register: hostname_result
 
-- name: Verify /etc/hosts update
-  shell: "grep '^127\\.0\\.1\\.1\\s{{ inventory_hostname }}$' /etc/hosts"
-  register: grep_result
-  ignore_errors: yes
+  - name: Update /etc/hostname
+    ansible.builtin.lineinfile:
+      path: /etc/hostname
+      line: "{{ inventory_hostname }}"
+      create: yes
+    register: hostname_file_result
 
-- name: Fail if /etc/hosts update did not work
-  fail:
-    msg: "/etc/hosts update failed"
-  when: grep_result.rc != 0
+  - name: Ensure the hostname entry exists in /etc/hosts
+    ansible.builtin.lineinfile:
+      path: /etc/hosts
+      regexp: '^(127\.0\.1\.1\s+).*'
+      line: "127.0.1.1 {{ inventory_hostname }}"
+      state: present
+      backup: yes
+    register: hosts_file_result
 
-- name: Reboot the machine to apply hostname changes
-  ansible.builtin.reboot:
+  - name: Determine if a reboot is needed
+    set_fact:
+      reboot_required: "{{ hostname_result.changed or hostname_file_result.changed or hosts_file_result.changed }}"
+
+  - name: Reboot the machine if hostname changes were made
+    ansible.builtin.reboot:
+    when: reboot_required | bool
+
+  - name: Create task marker file {{ task_marker }}
+    ansible.builtin.file:
+      path: "{{ task_marker }}"
+      state: touch
+
+  when: not marker_stat.stat.exists
+
