@@ -48,3 +48,12 @@ output "debug_size" {
   value = var.size
 }
 
+output "volume_path" {
+  value = var.cloudinit_user_data == null ? libvirt_volume.volume[0].path : null
+  description = "The path to the libvirt volume (if no cloud-init data is used)"
+}
+
+output "cloudinit_path" {
+  value = var.cloudinit_user_data != null ? libvirt_cloudinit_disk.cloudinit[0].path : null
+  description = "The path to the cloud-init disk (if cloud-init data is used)"
+}
