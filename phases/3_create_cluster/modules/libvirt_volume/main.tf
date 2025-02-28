@@ -8,8 +8,14 @@ terraform {
 
 variable "name" {}
 variable "pool" {}
-variable "source_img" {}
-variable "size" {}
+variable "source_img" {
+  type    = string
+  default = null  # Optional, only used for primary disks
+}
+variable "size" {
+  type    = number
+  default = null  # Optional, only used for extra disks
+}
 variable "format" {}
 variable "cloudinit_user_data" {
   type    = string
@@ -22,8 +28,8 @@ resource "libvirt_volume" "volume" {
 
   name   = var.name
   pool   = var.pool
-  source = var.source_img
-  size   = var.size
+  source = var.source_img != null ? var.source_img : null  # Use source image only if provided
+  size   = var.source_img == null ? var.size * 1024 * 1024 * 1024 : null  # Use size only for extra disks
   format = var.format
 }
 
@@ -36,10 +42,12 @@ resource "libvirt_cloudinit_disk" "cloudinit" {
   user_data = var.cloudinit_user_data
 }
 
+# Output the correct volume ID (either cloud-init or standard volume)
 output "volume_id" {
   value = var.cloudinit_user_data == null ? libvirt_volume.volume[0].id : libvirt_cloudinit_disk.cloudinit[0].id
 }
 
+# Debug Outputs
 output "debug_source" {
   value = var.source_img
 }
@@ -48,12 +56,6 @@ output "debug_size" {
   value = var.size
 }
 
-output "volume_path" {
-  value = var.cloudinit_user_data == null ? libvirt_volume.volume[0].path : null
-  description = "The path to the libvirt volume (if no cloud-init data is used)"
-}
-
-output "cloudinit_path" {
-  value = var.cloudinit_user_data != null ? libvirt_cloudinit_disk.cloudinit[0].path : null
-  description = "The path to the cloud-init disk (if cloud-init data is used)"
+output "debug_volume_size" {
+  value = var.source_img == null ? var.size : "USED_SOURCE_IMG"
 }
