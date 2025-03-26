@@ -21,6 +21,10 @@ variable "cloudinit_user_data" {
   type    = string
   default = null
 }
+variable "cloudinit_network" {
+  type    = string
+  default = null
+}
 
 # Create a regular volume if no cloudinit_user_data is provided.
 resource "libvirt_volume" "volume" {
@@ -37,9 +41,10 @@ resource "libvirt_volume" "volume" {
 resource "libvirt_cloudinit_disk" "cloudinit" {
   count     = var.cloudinit_user_data != null ? 1 : 0
 
-  name      = var.name
-  pool      = var.pool
-  user_data = var.cloudinit_user_data
+  name           = var.name
+  pool           = var.pool
+  user_data      = var.cloudinit_user_data
+  network_config = var.cloudinit_network
 }
 
 # Output the correct volume ID (either cloud-init or standard volume)

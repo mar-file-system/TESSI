@@ -20,8 +20,12 @@ locals {
   extra_disks_flat = merge(flatten([for v in values(local.extra_disks) : v])...)
 
   ci_volumes = {
-    for vm in var.vm_name : "${vm.name}-cloudinit" => merge(vm, { pool_key = "${vm.storage_pool}-${vm.host}" })
-    if vm.cloudinit != null
+    for vm in var.vm_name : "${vm.name}-cloudinit" => merge(vm, {
+      pool_key            = "${vm.storage_pool}-${vm.host}"
+      cloudinit_user_data = vm.cloudinit_user_data
+      cloudinit_network   = vm.cloudinit_network  
+    })
+    if vm.cloudinit_user_data != null
   }
 
   # Merge everything properly
@@ -46,7 +50,8 @@ module "volumes" {
   size       = strcontains(each.key, "primary") ? null : lookup(each.value, "disk_size", 0) 
 
   format     = strcontains(each.key, "primary") ? "qcow2" : "raw"
-  cloudinit_user_data = strcontains(each.key, "cloudinit") ? each.value.cloudinit : null
+  cloudinit_user_data = strcontains(each.key, "cloudinit") ? each.value.cloudinit_user_data : null
+  cloudinit_network   = strcontains(each.key, "cloudinit") ? each.value.cloudinit_network   : null
 
   depends_on = [module.pools]
 }

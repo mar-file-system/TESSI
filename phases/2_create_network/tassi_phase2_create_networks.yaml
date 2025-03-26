@@ -1,128 +1,147 @@
----
-- name: Set up TASSI virtual networking 
+- name: Set up TASSI virtual networking using NetworkManager
   hosts: physical_hosts
+  become: yes
   any_errors_fatal: yes
   vars:
     etchosts_mark: "# {mark} TASSI {{ UNIQUE_TAG }} VMs - managed by Ansible"
+    libvirt_network_xml: "/etc/libvirt/qemu/networks/{{ libvirt.name }}.xml"
+
   tasks:
-
-    # This setup involves three key networking components:
-    # 1. A bridge interface (bridge.interface) - Acts as a central connection point for the virtual network.
-    # 2. A libvirt network (libvirt.name) - Defines a virtual network in libvirt, referencing the bridge.
-    # 3. A VXLAN interface (vxlan.interface) - A virtual Layer 2 overlay network that connects distributed nodes.
-
-    - name: Check if interface names exceed 15 characters
-      ansible.builtin.fail:
-        msg: "Interface name '{{ item }}' is too long (max 15 characters)."
-      when: item | length > 15
-      with_items:
-        - "{{ libvirt.name }}"
-        - "{{ vxlan.interface }}"
-        - "{{ bridge.interface }}"
-
-    - name: Cleanup block
-      block:
-        - name: Remove VM mappings from /etc/hosts
-          blockinfile:
-            path: /etc/hosts
-            state: absent
-            marker: "{{ etchosts_mark }}"
-
-        - name: Remove network interface connection (nmcli)
-          community.general.nmcli:
-            conn_name: "{{ item }}"
-            state: absent
-          ignore_errors: yes
-          with_items:
-            - "{{ vxlan.interface }}"
-            - "{{ bridge.interface }}"
-
-        # Fallback: Ensure the interface is deleted manually
-        - name: Ensure interface is deleted in case nmcli doesn't remove
-          command: ip link del {{ item }}
-          ignore_errors: yes
-          with_items:
-            - "{{ vxlan.interface }}"
-            - "{{ bridge.interface }}"
-
-        - name: Gather libvirt network facts
-          community.libvirt.virt_net:
-            command: facts
-          register: libvirt_facts
-
-        - debug:
-            var: libvirt_facts
-
-        - block:
-          - name: Destroy libvirt network if it is active
+  # -------------------------------------------
+  #  Cleanup block
+  # -------------------------------------------
+  - name: Cleanup old networking setup
+    block:
+      - name: Gather libvirt network facts
+        community.libvirt.virt_net:
+          command: facts
+        register: libvirt_facts
+      - name: Remove VM mappings from /etc/hosts
+        blockinfile:
+          path: /etc/hosts
+          state: absent
+          marker: "{{ etchosts_mark }}"
+      - name: Delete old bridge connections
+        community.general.nmcli:
+          conn_name: "{{ libvirt.interface }}"
+          state: absent
+        ignore_errors: yes
+      - name: Get current routes for interface {{ libvirt.interface }}
+        ansible.builtin.command: ip route show dev {{ libvirt.interface }}
+        register: route_output
+        changed_when: false
+        failed_when: route_output.rc != 0 and 'Cannot find device' not in route_output.stderr
+      - name: Remove all routes on {{ libvirt.interface }}
+        ansible.builtin.command:
+          cmd: "ip route del {{ item }}"
+        loop: "{{ route_output.stdout_lines }}"
+        when: item is match('^\\d')  # skip non-IP lines just in case
+      - name: Destroy and undefine libvirt network if it exists
+        block:
+          - name: Destroy libvirt network if active
             command: "virsh net-destroy {{ libvirt.name }}"
-            when:
-              - libvirt_facts.ansible_facts.ansible_libvirt_networks[libvirt.name].state == "active"
-
+            when: libvirt_facts.ansible_facts.ansible_libvirt_networks[libvirt.name] is defined and libvirt_facts.ansible_facts.ansible_libvirt_networks[libvirt.name].state == 'active'
           - name: Undefine libvirt network if it exists
             command: "virsh net-undefine {{ libvirt.name }}"
-          when: libvirt.name in libvirt_facts.ansible_facts.ansible_libvirt_networks
+        when: libvirt.name in libvirt_facts.ansible_facts.ansible_libvirt_networks
+    tags: makeclean
 
-      tags: makeclean
+  # -------------------------------------------
+  #  Create libvirt bridge and network
+  # -------------------------------------------
+  - name: Debug bridge setup variables
+    ansible.builtin.debug:
+      msg:
+        - "libvirt.interface: {{ libvirt.interface }}"
+        - "network_interface: {{ network_interface }}"
+        - "network_base_ip: {{ libvirt.base_ip }}"
+        - "bridge_ip: {{ bridge_ip }}"
 
-    - name: Create probabilistically unique vxlan ID and multicast group IP 
-      block:
-        - name: Generate numeric hashes from UNIQUE_TAG
-          set_fact:
-            hash1: "{{ UNIQUE_TAG | hash('md5')    | int(base=16) }}"
-            hash2: "{{ UNIQUE_TAG | hash('sha256') | int(base=16) }}"
+  - name: Create bridge interface for libvirt
+    community.general.nmcli:
+      conn_name: "{{ libvirt.interface }}"
+      ifname: "{{ libvirt.interface }}"
+      type: bridge
+      state: present
+      autoconnect: yes
+      ip4: "{{ bridge_ip }}" 
+    register: bridge_creation
 
-        - name: Compute VXLAN ID (1 - 16,777,215)
-          set_fact:
-            vxlan_id: "{{ (hash1 | int) % 16777215 + 1 }}"
+  - name: Attach physical interface to bridge
+    community.general.nmcli:
+      conn_name: "{{ network_interface }}"
+      ifname: "{{ network_interface }}"
+      type: ethernet
+      master: "{{ libvirt.interface }}"
+      slave_type: bridge
+      state: present
+      autoconnect: yes
 
-        - name: Compute Multicast Group (239.1.X.Y)
-          set_fact:
-            multicast_group: "239.1.{{ (hash2 | int) % 255 }}.{{ (hash1 | int) % 255 }}"
+  - name: Bring up slave interface
+    ansible.builtin.command: "nmcli connection up {{ network_interface }}"
 
-        - name: Display computed values
-          debug:
-            msg:
-              - "Computed VXLAN ID: {{ vxlan_id }}"
-              - "Computed Multicast Group: {{ multicast_group }}"
+  - name: Bring up the bridge interface
+    ansible.builtin.command: "ip link set {{ libvirt.interface }} up"
 
-    - name: Create the libvirt networks and the bridges and the vxlan interfaces 
-      block:
-        - name: Add bridge connection
-          command: nmcli connection add type bridge con-name {{ bridge.interface }} ifname {{ bridge.interface }} ipv4.method disabled ipv6.method disabled
+  - name: Wait for bridge to get carrier
+    ansible.builtin.command: "cat /sys/class/net/{{ libvirt.interface }}/carrier"
+    register: bridge_carrier
+    changed_when: false
+    until: bridge_carrier.stdout == "1"
+    retries: 20
+    delay: 7
+    failed_when: bridge_carrier.stdout != "1"
 
-        - name: Add VXLAN interface
-          command: ip link add {{ vxlan.interface }} type vxlan id {{ vxlan_id }} group {{ multicast_group }} dev {{ ansible_default_ipv4.interface }} dstport 4789 
+  - name: Print bridge carrier status
+    ansible.builtin.debug:
+      msg: "Bridge {{ libvirt.interface }} carrier: {{ bridge_carrier.stdout }}"
 
-        - name: Bring up VXLAN interface
-          command: ip link set {{ vxlan.interface }} up
+  - name: Add route to {{ libvirt.base_ip }}.0/{{ libvirt.cidr }} via {{ libvirt.interface }}
+    ansible.builtin.command:
+      argv:
+        - ip
+        - route
+        - add
+        - "{{ libvirt.base_ip }}.0/{{ libvirt.cidr }}"
+        - dev
+        - "{{ libvirt.interface }}"
+    args:
+      warn: false
 
-        - name: Attach VXLAN interface to bridge
-          command: ip link set {{ vxlan.interface }} master {{ bridge.interface }}
-            
-        - name: Bring up bridge connection
-          command: nmcli connection up {{ bridge.interface }}
+  - name: Create libvirt network definition
+    copy:
+      dest: "{{ libvirt_network_xml }}"
+      content: |
+        <network>
+          <name>{{ libvirt.name }}</name>
+          <forward mode='bridge'/>
+          <bridge name='{{ libvirt.interface }}'/>
+        </network>
 
-        - name: Define libvirt network XML for L2 passthrough
-          community.libvirt.virt_net:
-            name: "{{ libvirt.name }}"
-            state: present
-            xml: |
-              <network>
-                  <name>{{ libvirt.name }}</name>
-                  <forward mode="bridge" />
-                  <bridge name="{{ bridge.interface }}" />
-              </network>
-          register: libvirt_network_result
+  # comment to fix vim autocoloring '
 
-        # put a quote " to fix vim formatting which is broken here for some reason by the above task
+  - name: Define libvirt network {{ libvirt.name }} using {{ libvirt_network_xml }}
+    command: "virsh net-define {{ libvirt_network_xml }}"
 
-        - name: Create libvirt network
-          community.libvirt.virt_net:
-            name: "{{ libvirt.name }}"
-            state: active
+  - name: Start and autostart libvirt network
+    block:
+      - name:
+        command: "virsh net-start {{ libvirt.name }}"
+        register: net_start
+        changed_when: "'is already active' not in net_start.stderr"
+      - name: Enable autostart
+        command: "virsh net-autostart {{ libvirt.name }}"
+        register: net_autostart
+        changed_when: "'marked as autostart' in net_autostart.stdout"
 
-        - name: Set libvirt network to autostart
-          community.libvirt.virt_net:
-            name: "{{ libvirt.name }}"
-            autostart: true
+  # -------------------------------------------
+  #  Add VM /etc/hosts entries
+  # -------------------------------------------
+  - name: Add VMs to /etc/hosts for debugging
+    blockinfile:
+      path: /etc/hosts
+      marker: "{{ etchosts_mark }}"
+      block: |
+        {% for vm in groups['vms'] %}
+        {{ hostvars[vm]['ansible_host'] }}  {{ vm }}
+        {% endfor %}
