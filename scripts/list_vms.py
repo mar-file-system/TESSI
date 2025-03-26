@@ -95,7 +95,7 @@ def print_networks(domain):
         mac_address = mac_element.getAttribute('address')
         print(f"\tMAC Address: {mac_address}")
 
-    # Extract and print the IP address
+    # Extract and print the IP addresses
     for (name, val) in addresses.items():
         for addr in val['addrs']:
             if addr['type'] == libvirt.VIR_IP_ADDR_TYPE_IPV4:

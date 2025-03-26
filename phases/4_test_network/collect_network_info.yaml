@@ -51,73 +51,6 @@
           }}
       with_items: "{{ matching_vms }}"
 
-    - name: Get libvirt network {{ libvirt.name }} IP address from XML
-      shell: >
-        sudo virsh net-dumpxml {{ libvirt.name }} |
-        grep 'ip address' |
-        awk '{print $2}' |
-        awk -F= '{print $2}' |
-        sed "s/'//g"
-      register: network_ip_cmd
-
-    - name: Derive IP prefix (first three octets)
-      set_fact:
-        ip_prefix: "{{ network_ip_cmd.stdout.split('.')[:3] | join('.') }}"
-
-    - name: Debug IP prefix
-      debug:
-        msg: "The IP prefix is {{ ip_prefix }}"
-
-    - name: Get interface address details for each VM
-      shell: >
-        virsh domifaddr {{ item }} | grep '{{ ip_prefix }}'
-      with_items: "{{ matching_vms }}"
-      register: vm_ifaddr
-
-    - name: Debug VM domifaddr
-      debug:
-        msg:
-          - "Extracted VM domifaddr: {{ vm_ifaddr }}"
-      tags: debug
-
-    - name: Debug each VM domifaddr
-      debug:
-        msg:
-          - "Item: {{ item.item }}"
-          - "stdout: {{ item.stdout }}"
-      with_items: "{{ vm_ifaddr.results }}"
-      when: item.stdout is defined
-      tags: debug
-
-    - name: Extract IP address and interface name for each VM
-      set_fact:
-        vm_ips: >-
-          {{ (vm_ips | default([])) + [item.stdout.split()[3].split('/')[0]] }}
-        vm_interfaces: >-
-          {{ (vm_interfaces | default([])) + [item.stdout.split()[0]] }}
-      with_items: "{{ vm_ifaddr.results }}"
-      when: item.stdout is defined
-
-    - name: Debug extracted VM details
-      debug:
-        msg:
-          - "Extracted VM IPs: {{ vm_ips }}"
-          - "Extracted VM Interfaces: {{ vm_interfaces }}"
-      tags: debug
-
-    - name: Save each VM IP into ip_to_label_map
-      set_fact:
-        ip_to_label_map: >-
-          {{
-            ip_to_label_map | combine({
-              (item.stdout.split()[3].split('/')[0]): ("VM: " ~ matching_vms[index] ~ " (" ~ item.stdout.split()[3].split('/')[0]) ~ ")"
-            })
-          }}
-      with_items: "{{ vm_ifaddr.results }}"
-      loop_control:
-        index_var: index
-      when: item.stdout is defined
-
     - name: Set fact for valid libvirt network name
       set_fact:
         valid_libvirt_network: "{{ libvirt.name }}" 
@@ -135,11 +68,9 @@
             
     - name: Extract bridge name from libvirt network
       shell: >
-        virsh net-dumpxml {{ valid_libvirt_network }} | 
-        grep 'bridge name' |
-        awk -F= '{print $2}' |
-        awk '{print $1}' |
-        sed "s/'//g"
+        virsh net-dumpxml {{ valid_libvirt_network }} |
+        grep "bridge name" |
+        sed -E "s/.*bridge name='([^']+)'.*/\1/"
       when: valid_libvirt_network is defined
       register: bridge_name_result
         
@@ -188,78 +119,75 @@
       debug:
         msg: "Bridge configuration: {{ bridge_config.stdout }}"
       tags: debug
+      when: false
 
-    - name: Set fact for the relevant WireGuard interface
+    - name: Derive IP prefix (first three octets) from bridge IP (assumes bridge is on same network as VMs)
       set_fact:
-        selected_wireguard: "{{ wireguard.interface }}"
+        ip_prefix: "{{ bridge_ip.split('.')[:3] | join('.') }}"
 
-    - name: Debug selected WireGuard interface
+    - name: Debug IP prefix
       debug:
-        msg: "Selected WireGuard interface: {{ selected_wireguard }}"
-      tags: debug
+        msg: "The IP prefix is {{ ip_prefix }}"
 
-    - name: Get IP address for selected WireGuard interface
-      shell: >
-        ip -4 addr show {{ selected_wireguard }} | grep -oP 'inet \K[\d.]+'
-      register: wireguard_ip_address
-      when: selected_wireguard is defined
+    - name: Get MAC address from bridge interface
+      shell: |
+        sudo virsh dumpxml "{{ item }}" | grep "<interface type='bridge'" -A 5 | grep 'mac address' | awk -F\' '{print $2}'
+      register: mac_address_output
+      with_items: "{{ matching_vms }}"
 
-    - name: Save WireGuard IP address as a fact
-      set_fact:
-        wireguard_ip: "{{ wireguard_ip_address.stdout }}"
-      when: wireguard_ip_address.stdout is defined
-
-    - name: Debug WireGuard IP address
+    - name: Display MAC addresses (optional)
       debug:
-        msg: "WireGuard IP address: {{ wireguard_ip }}"
-      tags: debug
-      when: selected_wireguard is defined
+        var: mac_address_output
+      when: false
 
-    - name: Save WireGuard IP into ip_to_label_map
+    - name: Set MAC address fact
       set_fact:
-        ip_to_label_map: >-
+        vm_mac_addresses: "{{ vm_mac_addresses | default({}) | combine({ item.item: item.stdout }) }}"
+      with_items: "{{ mac_address_output.results }}"
+
+    - name: Display MAC addresses (optional)
+      debug:
+        var: vm_mac_addresses
+
+    - name: SSH into VM and get IP info
+      command: ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null {{ item }} ip -j a
+      register: vm_ip_output
+      with_items: "{{ matching_vms }}"
+      loop_control:
+        label: "{{ item }}"
+      changed_when: false
+
+    - name: Extract IP for MAC from ip -j a
+      set_fact:
+        vm_ips: >-
           {{
-            ip_to_label_map | combine({
-              wireguard_ip: ("WireGuard (" ~ wireguard_ip ~ ")")
+            vm_ips | default({}) | combine({
+              item.item: (
+                (item.stdout | from_json)
+                | selectattr('address', 'equalto', vm_mac_addresses[item.item])
+                | map(attribute='addr_info')
+                | map('selectattr', 'family', 'equalto', 'inet')
+                | map('map', attribute='local')
+                | list
+                | flatten
+                | first
+              )
             })
           }}
-      when: wireguard_ip is defined
+      with_items: "{{ vm_ip_output.results }}"
 
-    - name: Get WireGuard details for the selected interface
-      shell: wg show {{ selected_wireguard }}
-      register: wireguard_info
-      when: selected_wireguard is defined
-
-    - name: Debug WireGuard info
+    - name: Debug extracted IPs
       debug:
-        msg: "WireGuard info: {{ wireguard_info.stdout }}"
-      tags: debug
+        msg: "VM {{ item }} has IP(s) {{ vm_ips[item] }}"
+      with_items: "{{ matching_vms }}"
 
-    - name: Extract WireGuard Allowed IPs and Endpoint
+    - name: Save each VM IP into ip_to_label_map
       set_fact:
-        wireguard_allowed_ips: "{{ wireguard_info.stdout | regex_search('allowed ips: (.*)', '\\1') }}"
-        wireguard_endpoint: "{{ wireguard_info.stdout | regex_search('endpoint: (.*)', '\\1') }}"
-
-    - name: Debug WireGuard allowed IPs and endpoint
-      debug:
-        msg: "Allowed IPs: {{ wireguard_allowed_ips }}, Endpoint: {{ wireguard_endpoint }}"
-      tags: debug
-
-    - name: Extract Libvirt Network Range
-      shell: >
-        echo "{{ libvirt_network.stdout }}" | grep -oP "range start='[^']+' end='[^']+'" |
-        sed -E "s/range start='([^']+)' end='([^']+)'/\\1 - \\2/"
-      register: libvirt_network_range_result
-      when: libvirt_network.stdout is defined
-
-    - name: Set Libvirt Network Range fact
-      set_fact:
-        libvirt_network_range: "{{ libvirt_network_range_result.stdout.strip() }}"
-
-    - name: Debug Libvirt Network Range
-      debug:
-        msg: "Libvirt network range: {{ libvirt_network_range }}"
-      tags: debug
+        ip_to_label_map: "{{ ip_to_label_map | default({}) | combine({
+            vm_ips[item]: ('VM: ' ~ item ~ ' (' ~ vm_ips[item] ~ ')')
+          }) }}"
+      with_items: "{{ matching_vms }}"
+      when: vm_ips[item] is defined and (vm_ips[item] | length) > 0
 
     - name: Gather routing table for the network
       shell: ip r | grep '{{ libvirt.interface }}'
@@ -272,72 +200,6 @@
     - name: Debug routing information
       debug:
         msg: "Routing Info: {{ routing_info }}"
-      tags: debug
-
-    - name: Save collected data to a JSON file
-      copy:
-        content: "{{ hostvars | to_json }}"
-        dest: /tmp/hostvars1.json
-      run_once: true
-      delegate_to: localhost
-      when: true 
-      tags: debug
-
-    - name: Collect WireGuard peer mappings
-      shell: >
-        wg show {{ selected_wireguard }} | awk '
-          /peer/ {if (peer) print substr(endpoint, 1, index(endpoint, ":") - 1), allowed_ips; peer=$2; allowed_ips=""} 
-          /endpoint/ {endpoint=$2} 
-          /allowed ips/ {
-            allowed_ips = allowed_ips ? allowed_ips "," : "";
-            for (i=3; i<=NF; i++) allowed_ips = allowed_ips $i
-          } 
-          END {if (peer) print substr(endpoint, 1, index(endpoint, ":") - 1), allowed_ips}'
-      register: wireguard_peer_mapping
-      when: selected_wireguard is defined
-
-    - name: Debug wireguard peers 
-      debug:
-        msg: "Wireguard peers: {{ wireguard_peer_mapping.stdout_lines }}"
-      tags: debug
-      when: selected_wireguard is defined
-
-    - name: Initialize WireGuard peer map
-      set_fact:
-        wireguard_peer_map: {}
-
-    - name: Populate WireGuard peer map
-      set_fact:
-        wireguard_peer_map: >-
-          {{
-            wireguard_peer_map | combine({
-              item.split()[0]: item.split(' ', 1)[1]
-            })
-          }}
-      with_items: "{{ wireguard_peer_mapping.stdout_lines }}"
-      when: wireguard_peer_mapping.stdout_lines is defined
-
-    - name: Debug structured WireGuard peer map (unfiltered)
-      debug:
-        msg: "WireGuard Peer Map: {{ wireguard_peer_map }}"
-      tags: debug
-
-    - name: Populate WireGuard peer map
-      set_fact: 
-        wireguard_peer_map: >-
-          {{
-            wireguard_peer_map | combine({
-              item.split()[0]: (
-                item.split(' ', 1)[1].split(',') | select("search", '^' ~ ip_prefix) | list | join(',')
-              )
-            }) 
-          }}
-      with_items: "{{ wireguard_peer_mapping.stdout_lines }}"
-      when: wireguard_peer_mapping.stdout_lines is defined
-
-    - name: Debug structured WireGuard peer map (filtered)
-      debug:
-        msg: "WireGuard Peer Map: {{ wireguard_peer_map }}"
       tags: debug
 
     - name: Debug ansible_default_ipv4.address for each host

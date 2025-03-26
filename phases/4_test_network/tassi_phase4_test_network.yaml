@@ -68,22 +68,6 @@
             }]
           }}
 
-    - name: Ping the WireGuard tunnel on each host (local)
-      ansible.builtin.shell: |
-        ping -c {{ ping_count }} {{ hostvars[inventory_hostname].wireguard_ip_address.stdout }}
-      register: wireguard_ping_results
-
-    - name: Record WireGuard tunnel ping result
-      set_fact:
-        ping_results: >-
-          {{
-            ping_results + [{
-              'src': ansible_default_ipv4.address,
-              'dst': hostvars[inventory_hostname].wireguard_ip_address.stdout,
-              'success': (wireguard_ping_results.rc == 0)
-            }]
-          }}
-
     - name: Ping VMs on the same host by IP address (local)
       ansible.builtin.shell: |
         ping -c {{ ping_count }} {{ item }}
@@ -108,23 +92,6 @@
       vars:
         ping_results_data: "{{ vm_local_hostname_ping_results.results }}"
 
-    - name: Ping WireGuard endpoints on other hosts (remote)
-      ansible.builtin.shell: |
-        ping -c {{ ping_count }} {{ item }}
-      with_items: >-
-        {{
-          groups['physical_hosts']
-          | reject('equalto', inventory_hostname)
-          | map('extract', hostvars, 'wireguard_ip')
-          | list
-        }}
-      register: wireguard_peer_ping_results
-
-    - name: Record WireGuard endpoint ping results
-      include_tasks: record_ping_results.yaml
-      vars:
-        ping_results_data: "{{ wireguard_peer_ping_results.results }}"
-
     - name: Ping bridges on other hosts (remote)
       ansible.builtin.shell: |
         ping -c {{ ping_count }} {{ item }}
@@ -139,9 +106,21 @@
     - name: Ping VMs on other hosts by IP address (remote)
       ansible.builtin.shell: |
         ping -c {{ ping_count }} {{ item }}
-      with_items: "{{ groups['physical_hosts'] | map('extract', hostvars, 'vm_ips') | sum(start=[]) | difference(hostvars[inventory_hostname].vm_ips) }}"
+      with_items: >-
+        {{
+          groups['physical_hosts']
+          | map('extract', hostvars, 'vm_ips')
+          | map('dict2items')
+          | sum(start=[])
+          | map(attribute='value')
+          | list
+          | difference(
+              hostvars[inventory_hostname].vm_ips | dict2items | map(attribute='value') | list
+            )
+        }}
       register: vm_peer_ping_results
       ignore_errors: yes
+
 
     - name: Record VM ping results for other hosts by IP address
       include_tasks: record_ping_results.yaml
