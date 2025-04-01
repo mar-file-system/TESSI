@@ -1,0 +1,106 @@
+# build_ior_and_mpi_hello.yml
+
+- name: Ensure MPI packages are installed
+  package:
+    name: "{{ mpi.mpi_packages.split() }}"
+    state: present
+
+- name: Add env vars to modulefile
+  blockinfile:
+    path: "/usr/share/modulefiles/{{ mpi.module }}"
+    marker: "# {mark} MPI-specific environment variables"
+    block: "{{ mpi.env_vars }}"
+  when: mpi.env_vars | length > 0
+
+- name: Discover mpi_bin path 
+  shell: |
+    module load {{ mpi.module }}
+    echo $MPI_BIN
+    module unload {{ mpi.module }}
+  args:
+    executable: /bin/bash
+  register: mpi_bin_result
+
+- name: Set MPI_BIN path and other paths
+  set_fact:
+    mpi_bin_path: "{{ mpi_bin_result.stdout_lines[-1] }}"
+    ior_src_path: "/usr/local/src/ior_{{ mpi.module | basename }}"
+    hello_path: "/usr/local/src/mpi_hello_{{ mpi.module | basename }}"
+
+- name: Ensure build tools are present
+  package:
+    name:
+      - git
+      - autoconf
+      - automake
+      - libtool
+      - make
+      - gcc
+    state: present
+
+- name: Clone IOR
+  git:
+    repo: 'https://github.com/hpc/ior'
+    dest: "{{ ior_src_path }}"
+    clone: yes
+    update: yes
+    version: '54fd197c56dbb7a7706221acbe80198903405456'
+
+- name: Bootstrap IOR
+  command:
+    cmd: ./bootstrap
+    chdir: "{{ ior_src_path }}"
+
+- name: Set IOR install path using {{ mpi_bin_path }}
+  set_fact:
+    ior_install: "{{ mpi_bin_path | regex_replace('/bin/?$', '') }}"
+
+- name: Configure IOR with MPI installing into {{ ior_install }}
+  shell: |
+    set -e
+    module load {{ mpi.module }}
+    ./configure --prefix={{ ior_install }} {{ ior_config_option | default('') }}
+    module unload {{ mpi.module }}
+  args:
+    chdir: "{{ ior_src_path }}"
+    creates: "{{ ior_src_path }}/config.status"
+    executable: /bin/bash
+
+- name: Build and install IOR
+  shell: |
+    module load {{ mpi.module }} 
+    make clean all install 
+    module unload {{ mpi.module }}
+  args:
+    chdir: "{{ ior_src_path }}"
+    creates: "{{ mpi_bin_path }}/ior"
+
+- name: Create mpi_hello.c
+  copy:
+    dest: "{{ hello_path }}.c"
+    content: |
+      #include <mpi.h> 
+      #include <stdio.h> 
+      int main(int argc, char** argv) 
+      { 
+          MPI_Init(NULL, NULL); 
+          int world_size; 
+          MPI_Comm_size(MPI_COMM_WORLD, &world_size); 
+          int world_rank;
+          MPI_Comm_rank(MPI_COMM_WORLD, &world_rank);
+          char processor_name[MPI_MAX_PROCESSOR_NAME];
+          int name_len;
+          MPI_Get_processor_name(processor_name, &name_len);
+          printf("Hello world from processor %s, rank %d out of %d processors\n",
+                 processor_name, world_rank, world_size);
+          MPI_Finalize();
+      }
+
+- name: Compile mpi_hello using MPI
+  shell: |
+    module load {{ mpi.module }}
+    mpicc {{ hello_path }}.c -o {{ mpi_bin_path }}/mpi_hello
+    module unload {{ mpi.module }}
+  args:
+    executable: /bin/bash
+    creates: "{{ mpi_bin_path }}/mpi_hello"

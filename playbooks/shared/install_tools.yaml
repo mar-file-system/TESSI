@@ -71,98 +71,19 @@
     name: cloud-final
     enabled: yes
 
-# client only block to install MPI and IOR
-- block:
-  - name: Set which MPI to install (openmpi or mpich)
-    set_fact:
-      which_mpi: "mpich"   # openmpi doesn't work because of weird subnet issues 
-
-  - name: Set MPI configuration facts
-    set_fact:
-      module_name: "{{ 'mpi/openmpi-x86_64' if which_mpi == 'openmpi' else 'mpi/mpich-x86_64' }}"
-      mpi_package: "{{ 'openmpi openmpi-devel' if which_mpi == 'openmpi' else 'mpich mpich-devel' }}"
-      env_vars: >-
-        {% if which_mpi == 'openmpi' %}
-        export OMPI_MCA_pml=ob1
-        export OMPI_MCA_btl=tcp,self
-        {% elif which_mpi == 'mpich' %}
-        # Set any MPICH-specific environment variables here if required.
-        {% endif %}
-
-  - name: Install MPI packages
-    ansible.builtin.package:
-      name: "{{ mpi_package.split() }}"
-      state: present
-
-  - name: Create profile script for MPI
-    copy:
-      dest: /etc/profile.d/mpi.sh
-      content: |
-        #!/bin/bash
-        source /etc/profile.d/modules.sh
-        module load {{ module_name }}
-        {{ env_vars }}
-      owner: root
-      group: root
-      mode: '0755'
-
-  - name: Reboot the system to apply MPI changes
-    reboot:
-
-  - name: Install necessary packages for IOR
-    ansible.builtin.package:
-      name:
-        - git
-        - autoconf
-        - automake
-        - libtool
-        - make
-        - gcc
-      state: present
-
-  - name: Clone IOR repository
-    git:
-      repo: 'https://github.com/hpc/ior'
-      dest: '/usr/local/src/ior'
-      clone: yes
-      update: yes
-      version: '54fd197c56dbb7a7706221acbe80198903405456'
-
-  - name: Run IOR bootstrap
-    command:
-      cmd: ./bootstrap
-      chdir: /usr/local/src/ior
-
-  - name: Configure IOR
-    shell: ./configure {{ ior_config_option | default('') }} --prefix=/usr/local && touch "{{ ior_config_task_marker }}"
-    args:
-      chdir: /usr/local/src/ior
-      executable: /bin/bash
-      creates: "{{ ior_config_task_marker }}"
-    vars:
-      ior_config_task_marker: "{{ marker_dir | default('/tmp') }}/config_ior.marker"
-
-  - name: Make and install IOR
-    shell: make clean all install && touch "{{ install_ior_task_marker }}"
-    args:
-      chdir: /usr/local/src/ior
-      executable: /bin/bash
-      creates: "{{ install_ior_task_marker }}"
-    vars:
-      install_ior_task_marker: "{{ marker_dir | default('/tmp') }}/install_ior.marker"
-
-  - name: Check that /usr/local/bin/ior is a valid executable
-    stat:
-      path: /usr/local/bin/ior
-    register: ior_stat
-
-  - name: Assert /usr/local/bin/ior is a valid executable
-    assert:
-      that:
-        - ior_stat.stat.exists
-        - ior_stat.stat.isreg
-        - ior_stat.stat.mode | regex_replace('^0([0-7]+)$', '\\1') | int(base=8) is odd
-      fail_msg: "/usr/local/bin/ior is not a valid executable"
-      success_msg: "/usr/local/bin/ior is a valid executable"
+# install_and_build_mpi.yml
+- name: Install and build IOR + MPI Hello for each MPI implementation
+  include_tasks: install_ior.yaml
+  loop:
+    - module: mpi/openmpi-x86_64
+      mpi_packages: "openmpi openmpi-devel"
+      env_vars: |
+        setenv OMPI_MCA_pml ob1
+        setenv OMPI_MCA_btl tcp,self
+    - module: mpi/mpich-x86_64
+      mpi_packages: "mpich mpich-devel"
+      env_vars: ""
+  loop_control:
+    loop_var: mpi
   when: "'clients' in group_names"
 
