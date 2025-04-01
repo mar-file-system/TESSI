@@ -1,0 +1,87 @@
+- name: Create sorted lists of group members
+  set_fact:
+    sorted_clients: "{{ groups['clients'] | sort }}"
+    sorted_mds: "{{ groups['mds'] | sort }}"
+    sorted_oss: "{{ groups['oss'] | sort }}"
+  run_once: true  # Ensure lists are only set once globally
+
+- name: Determine group index using sorted lists
+  set_fact:
+    group_index: "{{ hostvars[inventory_hostname][sorted_group].index(inventory_hostname) }}"
+  loop: "{{ ['clients', 'mds', 'oss'] | select('in', group_names) | list }}"
+  loop_control:
+    loop_var: inventory_group
+  vars:
+    sorted_group: "sorted_{{ inventory_group }}"  # Dynamically reference sorted lists
+
+- name: set target_mount for clients
+  set_fact:
+    target_mount: '/mnt/lustre'
+  when: "'clients' in group_names"
+
+- name: Set mgs_node fact with sorted MDS IPs from inventory (ansible_host)
+  set_fact:
+    mgs_node: "{{ sorted_mds | map('extract', hostvars, 'ansible_host') | join('@tcp:') ~ '@tcp' }}"
+  run_once: true
+
+- name: Set last octet of ansible_host as 'ip' fact, also replicate group_index as index
+  set_fact:
+    ip: "{{ ansible_host.split('.')[-1] }}"
+    index: "{{ group_index }}"
+
+- name: Set target_type to 'mdt' for MDS hosts
+  set_fact:
+    target_type: "mdt"
+  when: "'mds' in group_names"
+
+- name: Set MGT facts for first MDS host (group_index 0)
+  set_fact:
+    mgt_mount: "/mnt/lustre/mgt"
+    mgt_target: "lustre-mgs"
+  when: "'mds' in group_names and group_index | int == 0"
+
+- name: Set target_type to 'ost' for OSS hosts
+  set_fact:
+    target_type: "ost"
+  when: "'oss' in group_names"
+
+- name: Set target and target_mount for MDS and OSS nodes
+  set_fact:
+    target: "lustre-{{ inventory_group }}{{ '%02d' | format(group_index | int) }}/{{ target_type }}0"
+    target_mount: "/mnt/lustre/{{ inventory_group }}{{ '%02d' | format(group_index | int) }}.{{ target_type }}0"
+  loop: "{{ ['mds', 'oss'] | select('in', group_names) | list }}"
+  loop_control:
+    loop_var: inventory_group
+
+- name: Ensure an even number of MDS and OSS nodes
+  fail:
+    msg: "Failover requires an even number of MDS and OSS nodes!"
+  when: 
+    - sorted_mds | length is odd
+    - sorted_oss | length is odd
+  run_once: true  # Only check this once across all hosts
+
+- name: Assign failover partners for MDS and OSS
+  set_fact:
+    failnode: "{{ hostvars[sorted_group[(idx | int) + 1]]['ansible_host'] if (idx | int) % 2 == 0 else hostvars[sorted_group[(idx | int) - 1]]['ansible_host'] }}"
+  loop: "{{ ['mds', 'oss'] | select('in', group_names) | list }}"
+  loop_control:
+    loop_var: inventory_group
+  vars:
+    sorted_group: "{{ hostvars[inventory_hostname]['sorted_' ~ inventory_group] }}"
+    idx: "{{ sorted_group.index(inventory_hostname) | int }}"
+
+- name: Debug the key facts that the configure tasks assume 
+  debug:
+    msg:
+      group_index: "{{ group_index }}"
+      mgs_node: "{{ mgs_node }}"
+      index: "{{ index }}"
+      ip_addr: "{{ ansible_host }}"
+      ip: "{{ ip | default('none') }}"
+      target_type: "{{ target_type | default('none') }}"
+      mgt_mount: "{{ mgt_mount | default('none') }}"
+      mgt_target: "{{ mgt_target | default('none') }}"
+      failnode: "{{ failnode | default('none') }}"
+      target: "{{ target | default('none') }}"
+      target_mount: "{{ target_mount }}"
