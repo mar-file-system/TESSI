@@ -15,45 +15,32 @@
           segmentCount:     16       
           transferSize:     1048576   
           blockSize:        10485760        
-          outputPath:       "/mnt/beegfs/ior.{{ UNIQUE_TAG }}"
           summaryFormat:    "JSON"
           summaryFile:      "/tmp/ior_{{ UNIQUE_TAG }}.json"
+
+      - name: Set fstype based on UNIQUE_TAG
+        set_fact:
+          fstype: "{{ 'lustre' if UNIQUE_TAG == 'l2154p1' else 'beegfs' if UNIQUE_TAG == 'beegfs743' else undef(hint='Invalid or missing UNIQUE_TAG') }}"
+
+      - name: Set outputPath using fstype and UNIQUE_TAG
+        set_fact:
+          outputPath: "/mnt/{{ fstype }}/ior.{{ UNIQUE_TAG }}"
 
       - name: Write the list of client hostnames to the hostfile
         copy:
           content: "{{ groups['clients'] | join('\n') }}"
           dest: "{{ hostfile }}"
 
-      - name: Execute mpirun command to run IOR
-        command: >
-          mpirun -np {{ client_count }} -hostfile {{ hostfile }}
-          ior -F -k -s {{ segmentCount }} -t {{ transferSize }} -b {{ blockSize }} -o {{ outputPath }} -O summaryFormat=JSON -O summaryFile={{ summaryFile }}
-        register: mpirun_output
-
-      - name: Load JSON from summary file using slurp
-        slurp:
-          src: "{{ summaryFile }}"
-        register: json_file
-
-      - name: Parse JSON content from the summary file
-        set_fact:
-          mpirun_json: "{{ json_file.content | b64decode | from_json }}"
-
-      - name: Extract write bandwidth (bwMeanMIB) from summary
-        set_fact:
-          write_bw: "{{ mpirun_json.summary | selectattr('operation', 'equalto', 'write') | map(attribute='bwMeanMIB') | first }}"
-
-      - name: Extract read bandwidth (bwMeanMIB) from summary
-        set_fact:
-          read_bw: "{{ mpirun_json.summary | selectattr('operation', 'equalto', 'read') | map(attribute='bwMeanMIB') | first }}"
-
-      - name: Display IOR bandwidth results
-        debug:
-          msg: "IOR Results: Write Bandwidth = {{ write_bw }} MiB/s, Read Bandwidth = {{ read_bw }} MiB/s"
-
-      - name: Show the full IOR output
-        debug:
-          var: mpirun_output
-        when: false
+      - name: Run IOR tests for multiple MPI implementations
+        vars:
+          mpi_configs:
+            - mpi_module: mpi/mpich-x86_64
+              mpirun_args: ""
+            - mpi_module: mpi/openmpi-x86_64
+              mpirun_args: "--allow-run-as-root --prefix $MPI_HOME"
+        include_tasks: run_ior.yaml
+        loop: "{{ mpi_configs }}"
+        loop_control:
+          loop_var: mpi_config
     delegate_to: "{{ groups['clients'][0] }}"
     run_once: true
