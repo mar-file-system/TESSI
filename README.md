@@ -27,7 +27,7 @@ The motivation and some additional information about TESSI can be found in our [
 1. To run TESSI for the first time, make sure you are in the sudoers file.
 2. Modify either of the configurations in the configs/ folder. 
 3. \> sudo ansible-playbook -i configs/[your_file] ./phases/0_prepare/tassi_prepare.yaml 
-4. This will produce a Makefile and will output instructions about how to use that Makefile to proceed through the remainder of the phases.
+4. This will create a Makefile and instructions on using it for the rest of the phases. 
 
 Note that a demo video showing how to run TESSI can be found in our [documents](doc) folder.
 
