@@ -12,7 +12,8 @@ The motivation and some additional information about TESSI can be found in our [
 
 1. TESSI has been tested on CentOS 8 running kernel 6.12.5-1.el8.elrepo.x86_64.
 2. These instructions correspond to tag _v2.0.0_.
-3. TESSI can create a cluster of VMs across a single physical host. For wider scaling, multiple physical hosts can be used but they need a secondary private network dedicated to TESSI.
+3. TESSI can create a cluster of VMs across a single physical host. 
+   - For wider scaling, multiple physical hosts can be used but they need a secondary private network dedicated to TESSI.
 
 ## Install
 1. Ansible
@@ -22,7 +23,7 @@ The motivation and some additional information about TESSI can be found in our [
 ## Running
 1. To run TESSI for the first time, make sure you are in the sudoers file.
 2. Modify either of the configurations in the configs/ folder. 
-3. > sudo ansible-playbook -i configs/[your_file] ./phases/0_prepare/tassi_prepare.yaml 
+3. \> sudo ansible-playbook -i configs/[your_file] ./phases/0_prepare/tassi_prepare.yaml 
 4. This will produce a Makefile and will output instructions about how to use that Makefile to proceed through the remainder of the phases.
 
 Note that a demo video showing how to run TESSI can be found in our [documents](doc) folder.
