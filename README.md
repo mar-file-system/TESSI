@@ -11,7 +11,7 @@ The motivation and some additional information about TESSI can be found in our [
 ## Requirements
 
 1. TESSI has been tested on CentOS 8 running kernel 6.12.5-1.el8.elrepo.x86_64.
-2. These instructions correspond to tag _v2.0.0_.
+2. These instructions correspond to tag _v3.0.0_.
 3. TESSI can create a cluster of VMs across a single physical host. 
    - For wider scaling, multiple physical hosts can be used but they need a secondary private network dedicated to TESSI.
 
@@ -21,6 +21,7 @@ The motivation and some additional information about TESSI can be found in our [
 3. Python 3.8
 4. \> git clone git@gitlab.newmexicoconsortium.org:jbent/tassi.git
 5. \> cd tassi 
+6. \> git checkout v3.0.0
 4. \> pip3.8 install -r requirements.txt
 
 ## Running
