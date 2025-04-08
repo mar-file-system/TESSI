@@ -6,7 +6,7 @@ TESSI (Tool for Extensible Scalable Storage Infrastructure) is designed to assis
 
 Additionally, TESSI is intended to work with a variety of physical infrastructures but currently only supports virtual clusters installed using [libvirt](https://libvirt.org/).
 
-The motivation and some additional information about TESSI can be found in our [documents](doc) folder.
+The motivation and some additional information about TESSI can be found in our [documents](doc) folder. [Direct link to video](doc/tessi_demo.mov).
 
 ## Requirements
 
