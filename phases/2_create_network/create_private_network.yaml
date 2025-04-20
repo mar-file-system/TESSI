@@ -1,7 +1,7 @@
 # -------------------------------------------
 #  Cleanup block
 # -------------------------------------------
-- name: Cleanup old networking setup
+- name: Cleanup old TASSI networking for {{ UNIQUE_TAG }} 
   block:
     - name: Gather libvirt network facts
       community.libvirt.virt_net:
@@ -12,21 +12,13 @@
         path: /etc/hosts
         state: absent
         marker: "{{ etchosts_mark }}"
-    - name: Delete old bridge connections
-      community.general.nmcli:
-        conn_name: "{{ libvirt.interface }}"
-        state: absent
-      ignore_errors: yes
-    - name: Get current routes for interface {{ libvirt.interface }}
-      ansible.builtin.command: ip route show dev {{ libvirt.interface }}
-      register: route_output
-      changed_when: false
-      failed_when: route_output.rc != 0 and 'Cannot find device' not in route_output.stderr
-    - name: Remove all routes on {{ libvirt.interface }}
-      ansible.builtin.command:
-        cmd: "ip route del {{ item }}"
-      loop: "{{ route_output.stdout_lines }}"
-      when: item is match('^\\d')  # skip non-IP lines just in case
+    - name: Remove routes from interfaces
+      include_tasks: remove_interface.yaml
+      loop:
+        - "{{ libvirt.interface }}"
+        - "{{ bridge.interface }}"
+      loop_control:
+        loop_var: iface
     - name: Destroy and undefine libvirt network if it exists
       block:
         - name: Destroy libvirt network if active
@@ -40,99 +32,102 @@
 # -------------------------------------------
 #  Create libvirt bridge and network
 # -------------------------------------------
-- name: Debug bridge setup variables
-  ansible.builtin.debug:
-    msg:
-      - "libvirt.interface: {{ libvirt.interface }}"
-      - "network.interface: {{ network.interface }}"
-      - "network_base_ip: {{ libvirt.base_ip }}"
-      - "bridge_ip: {{ bridge_ip }}"
-
-- name: Create bridge interface for libvirt
-  community.general.nmcli:
-    conn_name: "{{ libvirt.interface }}"
-    ifname: "{{ libvirt.interface }}"
-    type: bridge
-    state: present
-    autoconnect: yes
-    ip4: "{{ bridge_ip }}" 
-  register: bridge_creation
-
-- name: Attach physical interface to bridge
-  community.general.nmcli:
-    conn_name: "{{ network.interface }}"
-    ifname: "{{ network.interface }}"
-    type: ethernet
-    master: "{{ libvirt.interface }}"
-    slave_type: bridge
-    state: present
-    autoconnect: yes
-
-- name: Bring up slave interface
-  ansible.builtin.command: "nmcli connection up {{ network.interface }}"
-
-- name: Bring up the bridge interface
-  ansible.builtin.command: "ip link set {{ libvirt.interface }} up"
-
-- name: Wait for bridge to get carrier
-  ansible.builtin.command: "cat /sys/class/net/{{ libvirt.interface }}/carrier"
-  register: bridge_carrier
-  changed_when: false
-  until: bridge_carrier.stdout == "1"
-  retries: 20
-  delay: 7
-  failed_when: bridge_carrier.stdout != "1"
-
-- name: Print bridge carrier status
-  ansible.builtin.debug:
-    msg: "Bridge {{ libvirt.interface }} carrier: {{ bridge_carrier.stdout }}"
-
-- name: Add route to {{ libvirt.base_ip }}.0/{{ libvirt.cidr }} via {{ libvirt.interface }}
-  ansible.builtin.command:
-    argv:
-      - ip
-      - route
-      - add
-      - "{{ libvirt.base_ip }}.0/{{ libvirt.cidr }}"
-      - dev
-      - "{{ libvirt.interface }}"
-  args:
-    warn: false
-
-- name: Create libvirt network definition
-  copy:
-    dest: "{{ libvirt_network_xml }}"
-    content: |
-      <network>
-        <name>{{ libvirt.name }}</name>
-        <forward mode='bridge'/>
-        <bridge name='{{ libvirt.interface }}'/>
-      </network>
-
-# comment to fix vim autocoloring '
-
-- name: Define libvirt network {{ libvirt.name }} using {{ libvirt_network_xml }}
-  command: "virsh net-define {{ libvirt_network_xml }}"
-
-- name: Start and autostart libvirt network
+- name: Configure TASSI networking for {{ UNIQUE_TAG }}
   block:
-    - name:
-      command: "virsh net-start {{ libvirt.name }}"
-      register: net_start
-      changed_when: "'is already active' not in net_start.stderr"
-    - name: Enable autostart
-      command: "virsh net-autostart {{ libvirt.name }}"
-      register: net_autostart
-      changed_when: "'marked as autostart' in net_autostart.stdout"
+  - name: Debug bridge setup variables
+    ansible.builtin.debug:
+      msg:
+        - "libvirt.interface: {{ libvirt.interface }}"
+        - "network.interface: {{ network.interface }}"
+        - "network_base_ip: {{ libvirt.base_ip }}"
+        - "bridge_ip: {{ bridge_ip }}"
 
-# -------------------------------------------
-#  Add VM /etc/hosts entries
-# -------------------------------------------
-- name: Add VMs to /etc/hosts for debugging
-  blockinfile:
-    path: /etc/hosts
-    marker: "{{ etchosts_mark }}"
-    block: |
-      {% for vm in groups['vms'] %}
-      {{ hostvars[vm]['ansible_host'] }}  {{ vm }}
-      {% endfor %}
+  - name: Create bridge interface for libvirt
+    community.general.nmcli:
+      conn_name: "{{ libvirt.interface }}"
+      ifname: "{{ libvirt.interface }}"
+      type: bridge
+      state: present
+      autoconnect: yes
+      ip4: "{{ bridge_ip }}" 
+    register: bridge_creation
+
+  - name: Attach physical interface to bridge
+    community.general.nmcli:
+      conn_name: "{{ network.interface }}"
+      ifname: "{{ network.interface }}"
+      type: ethernet
+      master: "{{ libvirt.interface }}"
+      slave_type: bridge
+      state: present
+      autoconnect: yes
+
+  - name: Bring up slave interface
+    ansible.builtin.command: "nmcli connection up {{ network.interface }}"
+
+  - name: Bring up the bridge interface
+    ansible.builtin.command: "ip link set {{ libvirt.interface }} up"
+
+  - name: Wait for bridge to get carrier
+    ansible.builtin.command: "cat /sys/class/net/{{ libvirt.interface }}/carrier"
+    register: bridge_carrier
+    changed_when: false
+    until: bridge_carrier.stdout == "1"
+    retries: 20
+    delay: 7
+    failed_when: bridge_carrier.stdout != "1"
+
+  - name: Print bridge carrier status
+    ansible.builtin.debug:
+      msg: "Bridge {{ libvirt.interface }} carrier: {{ bridge_carrier.stdout }}"
+
+  - name: Add route to {{ libvirt.base_ip }}.0/{{ libvirt.cidr }} via {{ libvirt.interface }}
+    ansible.builtin.command:
+      argv:
+        - ip
+        - route
+        - add
+        - "{{ libvirt.base_ip }}.0/{{ libvirt.cidr }}"
+        - dev
+        - "{{ libvirt.interface }}"
+    args:
+      warn: false
+
+  - name: Create libvirt network definition
+    copy:
+      dest: "{{ libvirt_network_xml }}"
+      content: |
+        <network>
+          <name>{{ libvirt.name }}</name>
+          <forward mode='bridge'/>
+          <bridge name='{{ libvirt.interface }}'/>
+        </network>
+
+  # comment to fix vim autocoloring '
+
+  - name: Define libvirt network {{ libvirt.name }} using {{ libvirt_network_xml }}
+    command: "virsh net-define {{ libvirt_network_xml }}"
+
+  - name: Start and autostart libvirt network
+    block:
+      - name:
+        command: "virsh net-start {{ libvirt.name }}"
+        register: net_start
+        changed_when: "'is already active' not in net_start.stderr"
+      - name: Enable autostart
+        command: "virsh net-autostart {{ libvirt.name }}"
+        register: net_autostart
+        changed_when: "'marked as autostart' in net_autostart.stdout"
+
+  # -------------------------------------------
+  #  Add VM /etc/hosts entries
+  # -------------------------------------------
+  - name: Add VMs to /etc/hosts for debugging
+    blockinfile:
+      path: /etc/hosts
+      marker: "{{ etchosts_mark }}"
+      block: |
+        {% for vm in groups['vms'] %}
+        {{ hostvars[vm]['ansible_host'] }}  {{ vm }}
+        {% endfor %}
+  when: "'makeclean' not in ansible_run_tags"
