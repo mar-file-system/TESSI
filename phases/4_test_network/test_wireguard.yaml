@@ -1,0 +1,303 @@
+- name: Set network testing facts
+  set_fact:
+    testing_with_fake_peer: false   # we have three nodes now!
+    FAKE_ENDPOINT: "192.192.192.192:51820"
+    FAKE_ALLOWED_IPS: "192.192.192.0/24"
+    ping_count: 3
+
+- name: Collect network information
+  include_tasks: wireguard_collect_network_info.yaml
+
+- name: Save collected data to a JSON file
+  copy:
+    content: "{{ hostvars | to_json }}"
+    dest: /tmp/hostvars.json
+  run_once: true
+  delegate_to: localhost
+  when: true 
+  tags: debug
+
+- name: Ensure required hostvars are defined
+  fail:
+    msg: "{{ item }} is missing required keys"
+  when: hostvars[item].ansible_default_ipv4 is not defined or
+        hostvars[item].vm_ips is not defined or
+        hostvars[item].matching_vms is not defined
+  loop: "{{ ansible_play_hosts }}"
+
+- name: Debug available hostvars for each host
+  debug:
+    msg: "{{ item }}: {{ hostvars[item] | dict2items | map(attribute='key') | list }}"
+  loop: "{{ ansible_play_hosts }}"
+
+- name: Render graph in DOT format
+  template:
+    src: templates/wireguard_graph.dot.j2
+    dest: "{{ image_dir }}/graph.dot"
+  run_once: true
+  delegate_to: localhost
+
+- name: Convert DOT file to PNG
+  shell: "dot -Tpng {{ image_dir }}/graph.dot -o {{ image_dir }}/graph.png"
+  args:
+    executable: /bin/bash
+  register: dot_to_png_result
+  run_once: true
+  delegate_to: localhost
+
+- name: Initialize ping results
+  set_fact:
+    ping_results: []
+
+# Local pings
+- name: Ping the bridge interface on each host (local)
+  ansible.builtin.shell: |
+    ping -c {{ ping_count }} {{ hostvars[inventory_hostname].bridge_ip }}
+  register: bridge_ping_results
+
+- name: Record bridge ping result
+  set_fact:
+    ping_results: >-
+      {{
+        ping_results + [{
+          'src': ansible_default_ipv4.address,
+          'dst': hostvars[inventory_hostname].bridge_ip,
+          'success': (bridge_ping_results.rc == 0)
+        }]
+      }}
+
+- name: Ping the WireGuard tunnel on each host (local)
+  ansible.builtin.shell: |
+    ping -c {{ ping_count }} {{ hostvars[inventory_hostname].wireguard_ip_address.stdout }}
+  register: wireguard_ping_results
+
+- name: Record WireGuard tunnel ping result
+  set_fact:
+    ping_results: >-
+      {{
+        ping_results + [{
+          'src': ansible_default_ipv4.address,
+          'dst': hostvars[inventory_hostname].wireguard_ip_address.stdout,
+          'success': (wireguard_ping_results.rc == 0)
+        }]
+      }}
+
+- name: Ping VMs on the same host by IP address (local)
+  ansible.builtin.shell: |
+    ping -c {{ ping_count }} {{ item }}
+  with_items: "{{ hostvars[inventory_hostname].vm_ips }}"
+  register: vm_local_ping_results
+  ignore_errors: yes
+
+- name: Record VM ping results by IP
+  include_tasks: record_ping_results.yaml
+  vars:
+    ping_results_data: "{{ vm_local_ping_results.results }}"
+
+- name: Ping VMs on the same host by hostname (local)
+  ansible.builtin.shell: |
+    ping -c {{ ping_count }} {{ item }}
+  with_items: "{{ matching_vms }}"
+  register: vm_local_hostname_ping_results
+  ignore_errors: yes
+
+- name: Record VM ping results by hostname
+  include_tasks: record_ping_results.yaml
+  vars:
+    ping_results_data: "{{ vm_local_hostname_ping_results.results }}"
+
+- name: Show resolved WireGuard IPs of other hosts
+  debug:
+    msg: >-
+      {{
+        hostvars
+        | dict2items
+        | rejectattr('key', 'equalto', inventory_hostname)
+        | selectattr('value.wireguard_ip', 'defined')
+        | map(attribute='value.wireguard_ip')
+        | list
+      }}
+
+- name: Gather wireguard_ip for all hosts
+  run_once: true
+  set_fact:
+    host_wireguard_ips: >-
+      {{
+        dict(
+          ansible_play_hosts_all
+          | map('extract', hostvars)
+          | selectattr('wireguard_ip', 'defined')
+          | map(attribute='inventory_hostname')
+          | zip(
+              ansible_play_hosts_all
+              | map('extract', hostvars)
+              | selectattr('wireguard_ip', 'defined')
+              | map(attribute='wireguard_ip')
+            )
+          | list
+        )
+      }}
+
+- name: Gather bridge_ip for all hosts
+  run_once: true
+  set_fact:
+    host_bridge_ips: >-
+      {{
+        dict(
+          ansible_play_hosts_all
+          | map('extract', hostvars)
+          | selectattr('bridge_ip', 'defined')
+          | map(attribute='inventory_hostname')
+          | zip(
+              ansible_play_hosts_all
+              | map('extract', hostvars)
+              | selectattr('bridge_ip', 'defined')
+              | map(attribute='bridge_ip')
+            )
+          | list
+        )
+      }}
+
+- name: Debug wireguard and bridge IP addresses
+  debug:
+    var: host_wireguard_ips 
+    var: host_bridge_ips 
+
+- name: Ping other hosts' WireGuard IPs
+  ansible.builtin.shell: |
+    ping -c {{ ping_count }} {{ item }}
+  loop: >-
+    {{
+      host_wireguard_ips
+      | dict2items
+      | rejectattr('key', 'equalto', inventory_hostname)
+      | map(attribute='value')
+      | list
+    }}
+  register: wireguard_peer_ping_results
+
+- name: Debug wireguard remote ping 
+  debug:
+    var: wireguard_peer_ping_results.results 
+
+- name: Record WireGuard endpoint ping results
+  include_tasks: record_ping_results.yaml
+  vars:
+    ping_results_data: "{{ wireguard_peer_ping_results.results }}"
+
+- name: Ping other hosts' Bridge IPs
+  ansible.builtin.shell: |
+    ping -c {{ ping_count }} {{ item }}
+  loop: >-
+    {{
+      host_bridge_ips
+      | dict2items
+      | rejectattr('key', 'equalto', inventory_hostname)
+      | map(attribute='value')
+      | list
+    }}
+  register: bridge_peer_ping_results
+
+- name: Record bridge ping results for other hosts
+  include_tasks: record_ping_results.yaml
+  vars:
+    ping_results_data: "{{ bridge_peer_ping_results.results }}"
+
+- name: Gather vm_ips for all hosts
+  run_once: true
+  set_fact:
+    host_vm_ips: >-
+      {{
+        dict(
+          ansible_play_hosts_all
+          | map('extract', hostvars)
+          | selectattr('vm_ips', 'defined')
+          | map(attribute='inventory_hostname')
+          | zip(
+              ansible_play_hosts_all
+              | map('extract', hostvars)
+              | selectattr('vm_ips', 'defined')
+              | map(attribute='vm_ips')
+            )
+          | list
+        )
+      }}
+
+- name: Gather flat list of VM IPs from other hosts
+  set_fact:
+    remote_vm_ips: >-
+      {{
+        host_vm_ips
+        | dict2items
+        | rejectattr('key', 'equalto', inventory_hostname)
+        | map(attribute='value')
+        | sum(start=[])
+      }}
+
+- name: Ping other hosts' VM IPs
+  ansible.builtin.shell: |
+    ping -c {{ ping_count }} {{ item }}
+  loop: "{{ remote_vm_ips }}"
+  register: vm_peer_ping_results
+
+- name: Record VM ping results for other hosts by IP address
+  include_tasks: record_ping_results.yaml
+  vars:
+    ping_results_data: "{{ vm_peer_ping_results.results }}"
+
+- name: Ping other hosts' VM IPs
+  ansible.builtin.shell: |
+    ping -c {{ ping_count }} {{ item }}
+  loop: >-
+    {{
+      host_vm_ips
+      | dict2items
+      | rejectattr('key', 'equalto', inventory_hostname)
+      | map(attribute='value')
+      | list
+    }}
+  register: vm_peer_ping_results
+  when: false
+
+- name: Ping VMs on other hosts by hostname (remote)
+  ansible.builtin.shell: |
+    ping -c {{ ping_count }} {{ item }}
+  loop: >-
+    {{
+      groups['all']
+      | map('extract', hostvars, 'matching_vms')
+      | select('defined')
+      | list
+      | sum(start=[])
+      | difference(hostvars[inventory_hostname].matching_vms)
+    }}
+  register: vm_peer_hostname_ping_results
+  ignore_errors: yes
+
+- name: Record VM ping results for other hosts by hostname
+  include_tasks: record_ping_results.yaml
+  vars:
+    ping_results_data: "{{ vm_peer_hostname_ping_results.results }}"
+
+# Aggregate ping results globally
+- name: Aggregate and graph ping results
+  block:
+  - name: Aggregate all ping results
+    ansible.builtin.set_fact:
+      aggregated_ping_results: >-
+        {{
+          ansible_play_hosts_all
+          | map('extract', hostvars, 'ping_results')
+          | sum(start=[])
+        }}  
+
+  # Generate a DOT file for the ping results
+  - name: Render ping results in DOT format into {{ image_dir }}
+    ansible.builtin.template:
+      src: templates/wireguard_ping_results.dot.j2
+      dest: "{{ image_dir }}/ping_results.dot"
+
+  - name: Convert DOT file to PNG
+    shell: dot -Tpng "{{ image_dir }}"/ping_results.dot -o "{{ image_dir }}"/ping_results.png
+  run_once: true
+  delegate_to: localhost
