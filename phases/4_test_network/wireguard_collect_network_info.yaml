@@ -31,28 +31,87 @@
           }}
       with_items: "{{ matching_vms }}"
 
-    - name: Extract IP and hostname from virsh net-dumpxml
-      ansible.builtin.shell: >
-        virsh net-dumpxml {{ libvirt.name }} |
-        grep '<host ' |
-        awk -F"[\"']" '/name=/{print $6, $4}'
-      register: ip_hostname_lines
+    - name: Get VM IP details for wireguard network 
+      block:
+      - name: Extract IP and hostname from virsh net-dumpxml
+        ansible.builtin.shell: >
+          virsh net-dumpxml {{ libvirt.name }} |
+          grep '<host ' |
+          awk -F"[\"']" '/name=/{print $6, $4}'
+        register: ip_hostname_lines
 
-    - name: Show raw IP and hostname lines
-      debug:
-        var: ip_hostname_lines.stdout_lines
+      - name: Show raw IP and hostname lines
+        debug:
+          var: ip_hostname_lines.stdout_lines
 
-    - name: Add VM mappings to ip_to_label_map and make a list of vm_ips
-      set_fact:
-        ip_to_label_map: "{{ ip_to_label_map | default({}) | combine({ (item.split()[0]): 'VM: ' ~ item.split()[1] }, recursive=True) }}"
-        vm_ips: "{{ (vm_ips | default([])) + [item.split()[0]] }}"
-      loop: "{{ ip_hostname_lines.stdout_lines }}"
-      when: item.split()[1] in matching_vms
+      - name: Add VM mappings to ip_to_label_map and make a list of vm_ips
+        set_fact:
+          ip_to_label_map: "{{ ip_to_label_map | default({}) | combine({ (item.split()[0]): 'VM: ' ~ item.split()[1] }, recursive=True) }}"
+          vm_ips: "{{ (vm_ips | default([])) + [item.split()[0]] }}"
+        loop: "{{ ip_hostname_lines.stdout_lines }}"
+        when: item.split()[1] in matching_vms
+
+      when: network_type == 'wireguard'
+
+    - name: Get VM IP details for private network 
+      block:
+      - name: Get MAC address from bridge interface
+        shell: |
+          sudo virsh dumpxml "{{ item }}" | grep "<interface type='bridge'" -A 5 | grep 'mac address' | awk -F\' '{print $2}'
+        register: mac_address_output
+        with_items: "{{ matching_vms }}"
+
+      - name: Set MAC address fact
+        set_fact:
+          vm_mac_addresses: "{{ vm_mac_addresses | default({}) | combine({ item.item: item.stdout }) }}"
+        with_items: "{{ mac_address_output.results }}"
+
+      - name: Get IP info from VMs
+        ansible.builtin.shell: ip -j a
+        register: vm_ip_output
+        delegate_to: "{{ item }}"
+        with_items: "{{ matching_vms }}"
+        changed_when: false
+
+      - name: Show which VMs failed to return IP info
+        debug:
+          msg: "VM {{ item.item }} failed: stdout={{ item.stdout | default('MISSING') }}"
+        loop: "{{ vm_ip_output.results }}"
+        when: item.stdout is not defined or item.stdout | length < 3
+        loop_control:
+          label: "{{ item.item }}"
+
+      - name: Show MACs seen by each VM (clean one-liner)
+        debug:
+          msg: "VM {{ item.item }} MACs: {{ (item.stdout | from_json | map(attribute='address') | list) | join(', ') }}"
+        loop: "{{ vm_ip_output.results }}"
+        loop_control:
+          label: "{{ item.item }}"
+
+      - name: Extract IP for MAC from ip -j a and build flat IP list
+        set_fact:
+          vm_ips: "{{ vm_ips | default([]) + [ip] }}"
+          ip_to_label_map: "{{ ip_to_label_map | default({}) | combine({ ip: 'VM: ' ~ item.item ~ ' (' ~ ip ~ ')' }) }}"
+        vars:
+          ip: >-
+            {{
+              (item.stdout | from_json)
+              | selectattr('address', 'equalto', vm_mac_addresses[item.item])
+              | map(attribute='addr_info')
+              | map('selectattr', 'family', 'equalto', 'inet')
+              | map('map', attribute='local')
+              | list
+              | flatten
+              | first
+            }}
+        with_items: "{{ vm_ip_output.results }}"
+        when: ip is defined and ip | length > 0
+
+      when: network_type == 'private'
 
     - name: Debug the ip_to_label_map
       debug:
         var: ip_to_label_map
-      when: true
 
     - name: Get list of all libvirt networks
       shell: >
@@ -63,10 +122,6 @@
       debug:
         msg: "Networks found: {{ all_networks.stdout_lines }}"
       tags: debug
-
-    - name: Set valid_libvirt_network from statically defined variable
-      set_fact:
-        valid_libvirt_network: "{{ bridge.interface }}" 
 
     - name: Query libvirt network for bridge and DHCP range
       shell: >
@@ -124,93 +179,86 @@
         msg: "Bridge configuration: {{ bridge_config.stdout }}"
       tags: debug
 
-    - name: Get list of WireGuard interfaces
-      shell: wg show | grep interface | awk '{print $2}'
-      register: wireguard_interfaces
+    - name: Block of tasks to get wireguard details 
+      block:
+      - name: Get list of WireGuard interfaces
+        shell: wg show | grep interface | awk '{print $2}'
+        register: wireguard_interfaces
 
-    - name: Debug the ip_to_label_map
-      debug:
-        var: ip_to_label_map
-      when: true
+      - name: Debug the ip_to_label_map
+        debug:
+          var: ip_to_label_map
+        when: true
 
-    - name: Set the correct WireGuard interface
-      set_fact:
-        selected_wireguard: "{{ wireguard.interface }}"
+      - name: Set the correct WireGuard interface
+        set_fact:
+          selected_wireguard: "{{ wireguard.interface }}"
 
-    - name: Debug selected WireGuard interface
-      debug:
-        msg: "Selected WireGuard interface: {{ selected_wireguard }}"
-      tags: debug
+      - name: Debug selected WireGuard interface
+        debug:
+          msg: "Selected WireGuard interface: {{ selected_wireguard }}"
+        tags: debug
 
-    - name: Get IP address for selected WireGuard interface
-      shell: >
-        ip -4 addr show {{ selected_wireguard }} | grep -oP 'inet \K[\d.]+'
-      register: wireguard_ip_address
-      when: selected_wireguard is defined
+      - name: Get IP address for selected WireGuard interface
+        shell: >
+          ip -4 addr show {{ selected_wireguard }} | grep -oP 'inet \K[\d.]+'
+        register: wireguard_ip_address
+        when: selected_wireguard is defined
 
-    - name: Save WireGuard IP address as a fact
-      set_fact:
-        wireguard_ip: "{{ wireguard_ip_address.stdout }}"
-      when: wireguard_ip_address.stdout is defined
+      - name: Save WireGuard IP address as a fact
+        set_fact:
+          wireguard_ip: "{{ wireguard_ip_address.stdout }}"
+        when: wireguard_ip_address.stdout is defined
 
-    - name: Debug WireGuard IP address
-      debug:
-        msg: "WireGuard IP address: {{ wireguard_ip }}"
-      tags: debug
-      when: selected_wireguard is defined
+      - name: Debug WireGuard IP address
+        debug:
+          msg: "WireGuard IP address: {{ wireguard_ip }}"
+        tags: debug
+        when: selected_wireguard is defined
 
-    - name: Save WireGuard IP into ip_to_label_map
-      set_fact:
-        ip_to_label_map: >-
-          {{
-            ip_to_label_map | combine({
-              wireguard_ip: ("WireGuard (" ~ wireguard_ip ~ ")")
-            })
-          }}
-      when: wireguard_ip is defined
+      - name: Save WireGuard IP into ip_to_label_map
+        set_fact:
+          ip_to_label_map: >-
+            {{
+              ip_to_label_map | combine({
+                wireguard_ip: ("WireGuard (" ~ wireguard_ip ~ ")")
+              })
+            }}
+        when: wireguard_ip is defined
 
-    - name: Generate fake WireGuard private key
-      command: "wg genkey"
-      register: fake_private_key
-      when: testing_with_fake_peer | default(false)
-      tags: testing
+      - name: Get WireGuard details for the selected interface
+        shell: wg show {{ selected_wireguard }}
+        register: wireguard_info
+        when: selected_wireguard is defined
 
-    - name: Generate fake WireGuard public key
-      shell: "echo {{ fake_private_key.stdout }} | wg pubkey"
-      register: fake_public_key
-      when: testing_with_fake_peer | default(false)
-      tags: testing
+      - name: Debug WireGuard info
+        debug:
+          msg: "WireGuard info: {{ wireguard_info.stdout }}"
+        tags: debug
 
-    - name: Debug fake WireGuard public key
-      debug:
-        msg: "Fake WireGuard public key: {{ fake_public_key.stdout }}"
-      when: testing_with_fake_peer | default(false)
-      tags: debug
+      - name: Extract WireGuard Allowed IPs and Endpoint
+        set_fact:
+          wireguard_allowed_ips: "{{ wireguard_info.stdout | regex_search('allowed ips: (.*)', '\\1') }}"
+          wireguard_endpoint: "{{ wireguard_info.stdout | regex_search('endpoint: (.*)', '\\1') }}"
 
-    - name: Add fake WireGuard peer for testing
-      shell: wg set {{ selected_wireguard }} peer {{ fake_public_key.stdout }} endpoint {{ FAKE_ENDPOINT }} allowed-ips {{ FAKE_ALLOWED_IPS }}
-      when: testing_with_fake_peer | default(false)
-      tags: testing
+      - name: Debug WireGuard allowed IPs and endpoint
+        debug:
+          msg: "Allowed IPs: {{ wireguard_allowed_ips }}, Endpoint: {{ wireguard_endpoint }}"
+        tags: debug
 
-    - name: Get WireGuard details for the selected interface
-      shell: wg show {{ selected_wireguard }}
-      register: wireguard_info
-      when: selected_wireguard is defined
+      - name: Gather routing table for the network
+        shell: ip r | grep '{{ wireguard.interface }}' | grep 'src'
+        register: routing_table
 
-    - name: Debug WireGuard info
-      debug:
-        msg: "WireGuard info: {{ wireguard_info.stdout }}"
-      tags: debug
+      - name: Set routing information fact
+        set_fact:
+          routing_info: "{{ routing_table.stdout_lines }}"
 
-    - name: Extract WireGuard Allowed IPs and Endpoint
-      set_fact:
-        wireguard_allowed_ips: "{{ wireguard_info.stdout | regex_search('allowed ips: (.*)', '\\1') }}"
-        wireguard_endpoint: "{{ wireguard_info.stdout | regex_search('endpoint: (.*)', '\\1') }}"
-
-    - name: Debug WireGuard allowed IPs and endpoint
-      debug:
-        msg: "Allowed IPs: {{ wireguard_allowed_ips }}, Endpoint: {{ wireguard_endpoint }}"
-      tags: debug
+      - name: Debug routing information
+        debug:
+          msg: "Routing Info: {{ routing_info }}"
+        tags: debug
+      when: network_type == "wireguard"
 
     - name: Extract Libvirt Network Range
       shell: >
@@ -226,19 +274,6 @@
     - name: Debug Libvirt Network Range
       debug:
         msg: "Libvirt network range: {{ libvirt_network_range }}"
-      tags: debug
-
-    - name: Gather routing table for the network
-      shell: ip r | grep '{{ wireguard.interface }}' | grep 'src'
-      register: routing_table
-
-    - name: Set routing information fact
-      set_fact:
-        routing_info: "{{ routing_table.stdout_lines }}"
-
-    - name: Debug routing information
-      debug:
-        msg: "Routing Info: {{ routing_info }}"
       tags: debug
 
     - name: Save collected data to a JSON file
@@ -262,13 +297,6 @@
           END {if (peer) print substr(endpoint, 1, index(endpoint, ":") - 1), allowed_ips}'
       register: wireguard_peer_mapping
       when: selected_wireguard is defined
-
-    - name: Remove fake WireGuard peer after testing
-      shell: >
-        wg set {{ item }} peer {{ fake_public_key.stdout }} remove
-      with_items: "{{ wireguard_interfaces.stdout_lines }}"
-      when: testing_with_fake_peer | default(false)
-      tags: testing
 
     - name: Debug wireguard peers 
       debug:
