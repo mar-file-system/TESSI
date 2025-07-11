@@ -25,13 +25,14 @@
         - destroy
         - undefine
       when: libvirt.name in (libvirt_facts.ansible_facts.ansible_libvirt_networks)
+      ignore_errors: true
 
     - name: Gather routes referencing specific interfaces
       ansible.builtin.command:
         cmd: "ip route show | grep '{{ item }}'"
       with_items:
         - "{{ wireguard.interface }}"
-        - "{{ libvirt.interface }}"
+        - "{{ bridge.interface }}"
       register: found_routes
       failed_when: found_routes.rc != 0 and found_routes.stdout != ""
 
@@ -41,9 +42,9 @@
       with_items: "{{ found_routes.results | map(attribute='stdout_lines') | flatten }}"
       ignore_errors: true
 
-    - name: List iptables rules matching WireGuard or libvirt interfaces
+    - name: List iptables rules matching WireGuard or bridge interfaces
       ansible.builtin.shell: |
-        iptables -S | grep -E '{{ wireguard.interface }}|{{ libvirt.interface }}'
+        iptables -S | grep -E '{{ wireguard.interface }}|{{ bridge.interface }}'
       register: matching_rules
       failed_when: matching_rules.rc not in [0, 1]  # don't fail if grep returns nothing
 
@@ -52,7 +53,7 @@
         var: matching_rules.stdout_lines
       when: false
 
-    - name: Delete iptables rules matching WireGuard or libvirt interfaces
+    - name: Delete iptables rules matching WireGuard or bridge interfaces
       ansible.builtin.shell: |
         iptables {{ item | regex_replace('^-A', '-D') }}
       loop: "{{ matching_rules.stdout_lines }}"
@@ -65,6 +66,10 @@
       debug:
         var: remaining_rules.stdout_lines
       when: false
+
+    - name: Exit after cleanup
+      ansible.builtin.meta: end_play
+      when: "'makeclean' in ansible_run_tags"
   tags: makeclean
 
 - name: Create the wireguard tunnels and do some rudimentary testing
@@ -256,7 +261,7 @@
         xml: |
           <network>
             <name>{{ libvirt.name }}</name>
-            <bridge name="{{ libvirt.interface }}" />
+            <bridge name="{{ bridge.interface }}" />
             <ip address="{{ libvirt_first_address }}" netmask="255.255.255.240">
               <dhcp>
                 <range start="{{ libvirt_first_address }}" end="{{ libvirt_last_address }}" />
@@ -301,23 +306,23 @@
 
     - name: Allow traffic from WireGuard to VM network
       ansible.builtin.command:
-        cmd: "iptables -I LIBVIRT_FWI 1 -i {{ wireguard.interface }} -o {{ libvirt.interface }} -j ACCEPT"
+        cmd: "iptables -I LIBVIRT_FWI 1 -i {{ wireguard.interface }} -o {{ bridge.interface }} -j ACCEPT"
 
     - name: Allow traffic from VM network to WireGuard
       ansible.builtin.command:
-        cmd: "iptables -I LIBVIRT_FWO 1 -i {{ libvirt.interface }} -o {{ wireguard.interface }} -j ACCEPT"
+        cmd: "iptables -I LIBVIRT_FWO 1 -i {{ bridge.interface }} -o {{ wireguard.interface }} -j ACCEPT"
 
     - name: Allow forwarding between VM networks (all libvirt bridges)
       ansible.builtin.command:
-        cmd: "iptables -I FORWARD 1 -i {{ libvirt.interface }} -o {{ libvirt.interface }} -j ACCEPT"
+        cmd: "iptables -I FORWARD 1 -i {{ bridge.interface }} -o {{ bridge.interface }} -j ACCEPT"
 
     - name: Allow forwarding between WireGuard and VM bridge
       ansible.builtin.command: 
-        cmd: "iptables -I FORWARD 1 -i {{ wireguard.interface }} -o {{ libvirt.interface }} -j ACCEPT"
+        cmd: "iptables -I FORWARD 1 -i {{ wireguard.interface }} -o {{ bridge.interface }} -j ACCEPT"
 
     - name: Allow forwarding between VM bridge and WireGuard
       ansible.builtin.command:
-        cmd: "iptables -I FORWARD 1 -i {{ libvirt.interface }} -o {{ wireguard.interface }} -j ACCEPT"
+        cmd: "iptables -I FORWARD 1 -i {{ bridge.interface }} -o {{ wireguard.interface }} -j ACCEPT"
 
     - name: Allow all VM subnets to communicate (if not already added)
       ansible.builtin.shell: |
@@ -330,7 +335,7 @@
 
     - name: Get all REJECT rules affecting libvirt or WireGuard interfaces
       ansible.builtin.shell: |
-        iptables -S | grep -E 'REJECT.*({{ libvirt.interface }}|{{ wireguard.interface }})' || true
+        iptables -S | grep -E 'REJECT.*({{ bridge.interface }}|{{ wireguard.interface }})' || true
       register: reject_rules
       changed_when: false
 
@@ -340,8 +345,8 @@
 
     - name: Ensure restrictive REJECT rules are removed from relevant chains
       ansible.builtin.shell: |
-        while iptables -L {{ item }} --line-numbers | grep -q 'REJECT.*({{ libvirt.interface }}|{{ wireguard.interface }})'; do
-          rule=$(iptables -L {{ item }} --line-numbers | grep -E 'REJECT.*({{ libvirt.interface }}|{{ wireguard.interface }})' | awk '{print $1}' | head -n1)
+        while iptables -L {{ item }} --line-numbers | grep -q 'REJECT.*({{ bridge.interface }}|{{ wireguard.interface }})'; do
+          rule=$(iptables -L {{ item }} --line-numbers | grep -E 'REJECT.*({{ bridge.interface }}|{{ wireguard.interface }})' | awk '{print $1}' | head -n1)
           iptables -D {{ item }} $rule
         done
       with_items: "{{ reject_chains }}"
@@ -396,25 +401,6 @@
           {% for hostname, details in consolidated_vm_mappings.items() %}
           {{ details.ip }} {{ hostname }}
           {% endfor %}
-
-    - block:
-      - name: Capture playbook command line for the autogenerated opentofu file 
-        set_fact:
-          playbook_command: "{{ lookup('file', '/proc/self/cmdline') | regex_replace('\u0000', ' ') }}"
-
-      - name: Generate the autogenerated opentofu file (system_description.tf)
-        template:
-          src: templates/system_description.tf.j2
-          dest: "{{ cluster.description_file }}"
-        delegate_to: localhost
-        run_once: true
-
-      - name: Format the autogenerated opentofu file 
-        ansible.builtin.command:
-          cmd: tofu fmt "{{ cluster.description_file }}" 
-        delegate_to: localhost
-        run_once: true
-      when: false # turn this block off
 
     - name: Dump hostvars to a file for debugging
       copy:
