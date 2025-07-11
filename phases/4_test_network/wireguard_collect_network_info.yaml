@@ -31,67 +31,9 @@
           }}
       with_items: "{{ matching_vms }}"
 
-    - name: Debug the ip_to_label_map
-      debug:
-        var: ip_to_label_map
-      when: false
-
-    - name: Get interface address details for each VM
-      shell: >
-        virsh domifaddr {{ item }} | grep 'ipv4'
-      with_items: "{{ matching_vms }}"
-      register: vm_ifaddr
-      when: false
-
-    - name: Debug VM domifaddr
-      debug:
-        msg:
-          - "Extracted VM domifaddr: {{ vm_ifaddr }}"
-      tags: debug
-      when: false
-
-    - name: Debug each VM domifaddr
-      debug:
-        msg:
-          - "Item: {{ item.item }}"
-          - "stdout: {{ item.stdout }}"
-      with_items: "{{ vm_ifaddr.results }}"
-      when: item.stdout is defined and false
-      tags: debug
-
-    - name: Extract IP address and interface name for each VM
-      set_fact:
-        vm_ips: >-
-          {{ (vm_ips | default([])) + [item.stdout.split()[3].split('/')[0]] }}
-        vm_interfaces: >-
-          {{ (vm_interfaces | default([])) + [item.stdout.split()[0]] }}
-      with_items: "{{ vm_ifaddr.results }}"
-      when: item.stdout is defined and false
-
-    - name: Debug extracted VM details
-      debug:
-        msg:
-          - "Extracted VM IPs: {{ vm_ips }}"
-          - "Extracted VM Interfaces: {{ vm_interfaces }}"
-      tags: debug
-      when: false
-
-    - name: Save each VM IP into ip_to_label_map
-      set_fact:
-        ip_to_label_map: >-
-          {{
-            ip_to_label_map | combine({
-              (item.stdout.split()[3].split('/')[0]): ("VM: " ~ matching_vms[index] ~ " (" ~ item.stdout.split()[3].split('/')[0]) ~ ")"
-            })
-          }}
-      with_items: "{{ vm_ifaddr.results }}"
-      loop_control:
-        index_var: index
-      when: item.stdout is defined and false
-
     - name: Extract IP and hostname from virsh net-dumpxml
       ansible.builtin.shell: >
-        virsh net-dumpxml {{ libvirt.interface }} |
+        virsh net-dumpxml {{ libvirt.name }} |
         grep '<host ' |
         awk -F"[\"']" '/name=/{print $6, $4}'
       register: ip_hostname_lines
@@ -122,46 +64,23 @@
         msg: "Networks found: {{ all_networks.stdout_lines }}"
       tags: debug
 
-    - name: Find libvirt network containing the IP range 
-      shell: > 
-        virsh net-dumpxml {{ item }} | grep -q '{{ network }}' && echo {{ item }}
-      with_items: "{{ all_networks.stdout_lines }}"
-      register: libvirt_network_name
-      ignore_errors: yes
-      when: false
-        
-    - name: Extract valid libvirt network name
-      set_fact:
-        valid_libvirt_network: "{{ item.item }}" 
-      with_items: "{{ libvirt_network_name.results }}" 
-      when: false and item.rc == 0 
-
     - name: Set valid_libvirt_network from statically defined variable
       set_fact:
-        valid_libvirt_network: "{{ libvirt.interface }}" 
+        valid_libvirt_network: "{{ bridge.interface }}" 
 
     - name: Query libvirt network for bridge and DHCP range
       shell: >
-        virsh net-dumpxml {{ libvirt.interface }}
+        virsh net-dumpxml {{ libvirt.name }}
       register: libvirt_network
             
     - name: Debug libvirt network output
       debug:
         msg: "Libvirt network XML: {{ libvirt_network }}"
       tags: debug
-            
-    - name: Extract bridge name from libvirt network
-      shell: >
-        virsh net-dumpxml {{ libvirt.interface }} | 
-        grep 'bridge name' |
-        awk -F= '{print $2}' |
-        awk '{print $1}' |
-        sed "s/'//g"
-      register: bridge_name_result
-        
-    - name: Set bridge name fact 
+
+    - name: Set bridge name fact from libvirt XML
       set_fact:
-        bridge_name: "{{ bridge_name_result.stdout.strip() }}"
+        bridge_name: "{{ (libvirt_network.stdout | regex_search(\"<bridge name='([^']+)'\", '\\1'))[0] }}"
 
     - name: Debug bridge name
       debug:
@@ -213,14 +132,6 @@
       debug:
         var: ip_to_label_map
       when: true
-
-    - name: Identify relevant WireGuard interface
-      shell: >
-        wg show {{ item }} | grep 'allowed ips' | grep '{{ network }}'
-      with_items: "{{ wireguard_interfaces.stdout_lines }}"
-      register: matching_wireguard
-      ignore_errors: yes
-      when: false
 
     - name: Set the correct WireGuard interface
       set_fact:
