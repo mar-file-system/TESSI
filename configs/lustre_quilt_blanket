@@ -1,0 +1,104 @@
+all:
+
+  vars:
+
+    # define a tag for this system to avoid cache collisions (e.g. on the gold VM images)
+    UNIQUE_TAG: "lquilt1"
+
+    # define paths to user-custom playbooks used in the 'install gold VMs' phase and the 'configure cluster' phase 
+    playbooks:
+      gold_install: "/home/jbent/tassi/playbooks/lustre/install_golds/install_lustre_all.yaml"  
+      cluster_config: "/home/jbent/tassi/playbooks/lustre/configure_cluster/configure_lustre_all.yaml"
+      cluster_test: "/home/jbent/tassi/playbooks/shared/ior_tester.yaml" # this one is optional
+
+    # The different types of groups that VMs can have in this system.
+    # These will become ansible groups in the auto-generated inventories 
+    # subsequently used with your user-custom playbooks. 
+    vm_groups:
+      cli_group: "clients"
+      mds_group: "mds"
+      oss_group: "oss"
+
+    # define where images are stored
+    image_storage:
+      qcow: "/mnt/usrc-storage-nfs/jbent/images"
+      libvirt: "/var/lib/libvirt/images"
+
+    # define the networking
+    # networking needs to either have a private network or define wireguard values
+    network:
+      type: 'wireguard' # can be 'private' or 'wireguard'. If 'private', then 'interface' must be defined. If 'wireguard', then 'wg_base_ip' and 'wg_cidr' must be defined
+      libvirt:
+        base_ip: "192.68.5"
+        cidr: "28" # if type is wireguard, this must allow a single network to span multiple hosts 
+        default: "default" 
+      interface: "eno2"
+      wg_base_ip: "192.68.6"
+      wg_cidr: 24
+
+    # define what the gold VMs look like
+    # note that you need to define an individual gold vm for each of your vm_groups
+    gold_vms:
+      defaults: # each default value can be overwritten in the individual entries
+        iso: "{{ image_storage.qcow }}/alma/AlmaLinux-8.10-x86_64-minimal.iso"
+        machine: "pc-q35-rhel8.2.0"
+        memory: 2048
+        network:
+          bootproto: "dhcp"
+          default: "{{ network.libvirt.default }}" 
+          device: "enp1s0"
+          ipv6: "noipv6"
+          ntpservers:
+            - "0.pool.ntp.org"
+            - "1.pool.ntp.org"
+            - "2.pool.ntp.org"
+            - "3.pool.ntp.org"
+          onboot: "yes"
+        os_variant: "almalinux8"
+        root_pwd: "password"
+        ssh_keys: '/home/jbent/.ssh/authorized_keys'
+        system:
+          type: 'lustre'
+          version: '2.15.4'
+          loglevel: '5'
+        timezone: "US/Mountain"
+        vcpu: 1
+      individual:
+        - name: "gold-{{ UNIQUE_TAG }}-{{ vm_groups.oss_group }}"
+          disk_size: 12
+          group: "{{ vm_groups.oss_group }}"
+          vcpu: 2
+        - name: "gold-{{ UNIQUE_TAG }}-{{ vm_groups.mds_group }}"
+          disk_size: 12
+          group: "{{ vm_groups.mds_group }}"
+          vcpu: 2
+        - name: "gold-{{ UNIQUE_TAG }}-{{ vm_groups.cli_group }}"
+          disk_size: 8
+          group: "{{ vm_groups.cli_group }}"
+  
+  # specify the lists of physical hosts across which the VMs will run
+  # and the VMs which will run on each
+  #
+  # NOTE that EXTRA_HDDs will subsequently appear in /dev/disk/by-id/virtio-{{ $HOSTAME }}.{{ b-z }} 
+  # where b means the first extra disk, c the second, etc.
+  # This can be used in the config playbooks to know which devices to use for which mounts.
+  hosts:
+    quilt01:
+      libvirt_suffix: "0" # the beginning of the IP space used by these VMs
+      bridge_last_octet: 6 # the IP to give to the bridge
+      vms:
+      # - [ NAME,            ROLE,                        [EXTRA_HDDs], IP_LAST_OCTET ]
+        - [ lustre-cli00, "{{ vm_groups.cli_group }}", [],   2 ]
+        - [ lustre-mds01, "{{ vm_groups.mds_group }}", [6,6], 3 ]
+    quilt05:
+      libvirt_suffix: "16" 
+      bridge_last_octet: 22
+      vms:
+        - [ lustre-oss00, "{{ vm_groups.oss_group }}", [3], 19 ]
+        - [ lustre-oss01, "{{ vm_groups.oss_group }}", [3], 20 ]
+    blanket03:
+      libvirt_suffix: "32" 
+      bridge_last_octet: 38
+      vms:
+        - [ lustre-mds00, "{{ vm_groups.mds_group }}", [6,6],  35 ]
+        - [ lustre-cli01, "{{ vm_groups.cli_group }}", [],     36 ]

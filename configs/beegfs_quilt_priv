@@ -1,0 +1,102 @@
+all:
+
+  vars:
+
+    # define a tag for this system to avoid cache collisions (e.g. on the gold VM images)
+    UNIQUE_TAG: "bquilt_priv"
+
+    # define paths to user-custom playbooks used in the 'install gold VMs' phase and the 'configure cluster' phase 
+    playbooks:
+      gold_install: "/home/jbent/tassi/playbooks/beegfs/install_golds/install_beegfs_all.yaml"  
+      cluster_config: "/home/jbent/tassi/playbooks/beegfs/configure_cluster/configure_beegfs.yaml"
+      cluster_test: "/home/jbent/tassi/playbooks/shared/ior_tester.yaml" # this one is optional
+
+    # The different types of groups that VMs can have in this system.
+    # These will become ansible groups in the auto-generated inventories 
+    # subsequently used with your user-custom playbooks. 
+    vm_groups:
+      client_group: "clients"
+      mserver_group: "mservers"
+      dserver_group: "dservers"
+
+    # define where images are stored
+    image_storage:
+      qcow: "/mnt/usrc-storage-nfs/jbent/images"
+      libvirt: "/var/lib/libvirt/images"
+
+    # define the networking
+    # networking needs to either have a private network or define wireguard values
+    network:
+      libvirt:
+        base_ip: "192.68.3"
+        cidr: "24" # if type is wireguard, this must allow a single network to span multiple hosts (e.g. 28), if type is private, 24 is a good value
+        default: "default" 
+      type: 'private' # can be 'private' or 'wireguard'. If 'private', then 'interface' must be defined. If 'wireguard', then 'wg_base_ip' and 'wg_cidr' must be defined
+      interface: "eno2"
+      wg_base_ip: "192.68.6"
+      wg_cidr: 24
+
+    # define what the gold VMs look like
+    # note that you need to define an individual gold vm for each of your vm_groups
+    gold_vms:
+      defaults: # each default value can be overwritten in the individual entries
+        iso: "{{ image_storage.qcow }}/alma/AlmaLinux-8.10-x86_64-minimal.iso"
+        machine: "pc-q35-rhel8.2.0"
+        memory: 2048
+        network:
+          bootproto: "dhcp"
+          default: "{{ network.libvirt.default }}" 
+          device: "enp1s0"
+          ipv6: "noipv6"
+          ntpservers:
+            - "0.pool.ntp.org"
+            - "1.pool.ntp.org"
+            - "2.pool.ntp.org"
+            - "3.pool.ntp.org"
+          onboot: "yes"
+        os_variant: "almalinux8"
+        root_pwd: "password"
+        ssh_keys: '/home/jbent/.ssh/authorized_keys'
+        system:
+          type: 'beegfs'
+          version: '7.4.3'
+          loglevel: '5'
+        timezone: "US/Mountain"
+        vcpu: 1
+      individual:
+        - name: "gold-{{ UNIQUE_TAG }}-{{ vm_groups.mserver_group }}"
+          disk_size: 8
+          group: "{{ vm_groups.mserver_group }}"
+          vcpu: 2
+        - name: "gold-{{ UNIQUE_TAG }}-{{ vm_groups.dserver_group }}"
+          disk_size: 8
+          group: "{{ vm_groups.dserver_group }}"
+          vcpu: 2
+        - name: "gold-{{ UNIQUE_TAG }}-{{ vm_groups.client_group }}"
+          disk_size: 6
+          group: "{{ vm_groups.client_group }}"
+          memory: 1024
+  
+  # specify the lists of physical hosts across which the VMs will run
+  # and the VMs which will run on each
+  #
+  # NOTE that EXTRA_HDDs will subsequently appear in /dev/disk/by-id/virtio-{{ $HOSTAME }}.{{ b-z }} 
+  # where b means the first extra disk, c the second, etc.
+  # This can be used in the config playbooks to know which devices to use for which mounts.
+  hosts:
+    quilt01:
+      libvirt_suffix: "0" # the beginning of the IP space used by these VMs
+      bridge_last_octet: 6 # the IP to give to the bridge
+      vms:
+      # - [ NAME,            ROLE,                        [EXTRA_HDDs], IP_LAST_OCTET ]
+        - [ beegfs-client00, "{{ vm_groups.client_group }}",  [],   2 ]
+        - [ beegfs-client01, "{{ vm_groups.client_group }}",  [],   3 ]
+        - [ beegfs-meta00,   "{{ vm_groups.mserver_group }}", [5],  5 ]
+    quilt05:
+      libvirt_suffix: "16" 
+      bridge_last_octet: 22
+      vms:
+        - [ beegfs-data00,   "{{ vm_groups.dserver_group }}", [6], 18 ]
+        - [ beegfs-data01,   "{{ vm_groups.dserver_group }}", [6], 19 ]
+        - [ beegfs-meta01,   "{{ vm_groups.mserver_group }}", [3], 20 ]
+        - [ beegfs-meta02,   "{{ vm_groups.mserver_group }}", [3], 21 ]
