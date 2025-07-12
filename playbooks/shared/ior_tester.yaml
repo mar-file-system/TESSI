@@ -2,7 +2,16 @@
 - name: Hello World Playbook
   hosts: clients
   gather_facts: false
+  vars:
+    ior_result_file: "/tmp/ior_results.json"
+
   tasks:
+  - name: Create empty IOR results file on control node
+    copy:
+      content: ""
+      dest: "{{ ior_result_file }}"
+    delegate_to: localhost
+
   - name: Run IOR on clients using mpirun with delegated tasks
     block:
       - name: Count the hosts in the clients group
@@ -42,5 +51,57 @@
         loop: "{{ mpi_configs }}"
         loop_control:
           loop_var: mpi_config
+        register: ior_task_results
+
     delegate_to: "{{ groups['clients'][0] }}"
     run_once: true
+
+- name: Generate IOR DOT graph and PNG
+  hosts: localhost
+  gather_facts: false
+  vars:
+    image_path_dot: "{{ image_dir }}/ior_results.dot"
+    image_path_png: "{{ image_dir }}/ior_results.png"
+  tasks:
+    - name: Ensure image_dir exists
+      file:
+        path: "{{ image_dir }}"
+        state: directory
+
+    - name: Slurp IOR results JSONL file
+      slurp:
+        src: "/tmp/ior_results.json"
+      register: ior_raw
+      delegate_to: localhost
+      run_once: true
+
+    - name: Decode raw content from IOR result file
+      set_fact:
+        ior_result_lines: "{{ ior_raw.content | b64decode }}"
+
+    - name: Debug individual JSONL lines
+      debug:
+        msg: "{{ item | from_json }}"
+      loop: "{{ ior_result_lines | split('\n') | reject('equalto', '') }}"
+
+    - name: Show raw IOR lines (as text)
+      debug:
+        var: ior_result_lines
+
+    - name: Parse decoded IOR lines into list of dicts
+      set_fact:
+        ior_results: "{{ ior_result_lines | split('\n') | reject('equalto', '') | map('from_json') | list }}"
+
+    - name: Show parsed IOR results
+      debug:
+        var: ior_results
+
+    - name: Write DOT graph to file
+      template:
+        src: templates/ior_results.dot.j2
+        dest: "{{ image_path_dot }}"
+
+    - name: Convert DOT to PNG
+      shell: "dot -Tpng {{ image_path_dot }} -o {{ image_path_png }}"
+      args:
+        executable: /bin/bash
