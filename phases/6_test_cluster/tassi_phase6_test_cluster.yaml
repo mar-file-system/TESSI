@@ -2,3 +2,65 @@
 - import_playbook: "{{ user_test_playbook }}"
   vars:
     user_test_playbook: "foo.yml" # give it a default which the auto-generated Makefile will override
+
+---
+- name: Generate report PDF from text and PNGs
+  hosts: localhost
+  gather_facts: true
+  vars:
+    output_pdf: "{{ image_dir }}/summary.pdf"
+    cover_txt: "/tmp/{{ UNIQUE_TAG }}_cover.txt"
+    cover_ps: "/tmp/{{ UNIQUE_TAG }}_cover.ps"
+    cover_pdf: "/tmp/{{ UNIQUE_TAG }}_cover.pdf"
+
+  tasks:
+    - name: Ensure required Python and system tools are installed
+      package:
+        name:
+          - enscript
+          - ghostscript  # provides ps2pdf
+          - ImageMagick  # optional if used for other conversions
+          - poppler-utils
+        state: present
+
+    - name: Ensure img2pdf is installed
+      pip:
+        name: img2pdf
+        executable: pip3.8
+      when: false
+
+    - name: Render text summary file from template
+      template:
+        src: "templates/report_cover.txt.j2"
+        dest: "{{ cover_txt }}"
+
+    - name: Convert text summary to PostScript
+      command: enscript -B -f Courier10 -o "{{ cover_ps }}" "{{ cover_txt }}"
+
+    - name: Convert PostScript to PDF
+      command: ps2pdf "{{ cover_ps }}" "{{ cover_pdf }}"
+
+    - name: Find all PNGs in image_dir
+      find:
+        paths: "{{ image_dir }}"
+        patterns: "*.png"
+        use_regex: false
+        file_type: file
+      register: pngs
+
+    - name: Convert RGBA PNGs to RGB
+      shell: >
+        convert "{{ item.path }}"
+        -background white -alpha remove -alpha off "{{ item.path }}"
+      loop: "{{ pngs.files }}"
+
+    - name: Convert PNGs to single PDF
+      command: >
+        /usr/local/bin/img2pdf
+        {{ pngs.files | map(attribute='path') | join(' ') }}
+        -o /tmp/images_only.pdf
+
+    - name: Merge cover and image PDFs
+      command: >
+        pdfunite "{{ cover_pdf }}" /tmp/images_only.pdf "{{ output_pdf }}"
+
