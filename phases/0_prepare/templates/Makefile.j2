@@ -2,6 +2,16 @@
 {% include 'header.j2' %}
 {# ------------------------------------------------------------------------------------ #}
 {# Define the phases and their commands #}
+{# --- Choose phase3 commands depending on network.type --- #}
+{% if network.type == "mvpnet" %}
+  {% set phase3_clean = "cd $(PHASE_DIR)/3_create_cluster/mvpnet && ansible-playbook -i $(PHYS_INVENTORY) $(PHASE_DIR)/3_create_cluster/mvpnet/tassi_phase3_create_vms.yaml --tags makeclean" %}
+  {% set phase3_creat = "cd $(PHASE_DIR)/3_create_cluster/mvpnet && ansible-playbook -i $(PHYS_INVENTORY) $(PHASE_DIR)/3_create_cluster/mvpnet/tassi_phase3_create_vms.yaml" %}
+{% else %}
+  {% set phase3_clean = "$(TOFU_WORKSPACE) && tofu $(TOFU_CHDIR) destroy $(TFVARS) --auto-approve" %}
+  {% set phase3_creat = "$(TOFU_WORKSPACE) && tofu $(TOFU_CHDIR) apply   $(TFVARS) --auto-approve" %}
+{% endif %}
+
+
 {% set phases = [
     { 
       'name': 'phase1',
@@ -19,8 +29,8 @@
     },
     { 
       'name': 'phase3',
-      'clean': '$(TOFU_WORKSPACE) && tofu $(TOFU_CHDIR) destroy $(TFVARS) --auto-approve',
-      'creat': '$(TOFU_WORKSPACE) && tofu $(TOFU_CHDIR) apply   $(TFVARS) --auto-approve',
+      'clean': phase3_clean, 
+      'creat': phase3_creat,
       'help': 'Create VMs from the stashed gold images',
       'helpclean': 'Remove the VMs and free all their associated resources'
     },
@@ -101,7 +111,7 @@ all: {% for phase in phases %}{{ phase.name }} {% endfor %}
 # The "clean" target runs the clean commands in reverse order and removes all status files.
 clean: {% for phase in phases | reverse %}{{ phase.name }}-clean {% endfor %}
 
-	@sudo rm -f status.phase*
+	@rm -f status.phase*
 	@echo "All phases cleaned!"
 
 # "status" target reports the status for each phase.
@@ -122,11 +132,11 @@ $(STATUS_DIR)/status.{{ phase.name }}:{% if not loop.first %} $(STATUS_DIR)/stat
 
 	@echo "==> $$(date) Running {{ phase.name }}. Logging into $(LOG_DIR)/log.{{ phase.name }}"
 ifeq ($(VERBOSE),1)
-	@sudo bash -c 'set -o pipefail; {{ phase.creat }} 2>&1 | tee $(LOG_DIR)/log.{{ phase.name }}'
+	@bash -c 'set -o pipefail; {{ phase.creat }} 2>&1 | tee $(LOG_DIR)/log.{{ phase.name }}'
 else
-	@sudo bash -c '{{ phase.creat }} > $(LOG_DIR)/log.{{ phase.name }} 2>&1'
+	@bash -c '{{ phase.creat }} > $(LOG_DIR)/log.{{ phase.name }} 2>&1'
 endif
-	@sudo touch $@
+	@touch $@
 	@echo "==> $$(date) Ran {{ phase.name }}. Logged into $(LOG_DIR)/log.{{ phase.name }}"
 
 {{ phase.name }}: $(STATUS_DIR)/status.{{ phase.name }}
@@ -137,7 +147,7 @@ endif
 {{ phase.name }}-clean:{% if not loop.last %} {{ phases[loop.index0 + 1].name }}-clean{% endif %}
 
 	@echo "==> $(shell date) Cleaning {{ phase.name }}"
-	@sudo bash -c '{{ phase.clean }}'
-	@sudo rm -f $(STATUS_DIR)/status.{{ phase.name }}
+	@bash -c '{{ phase.clean }}'
+	@rm -f $(STATUS_DIR)/status.{{ phase.name }}
 	@echo "==> $(shell date) Cleaned {{ phase.name }}"
 {% endfor %}

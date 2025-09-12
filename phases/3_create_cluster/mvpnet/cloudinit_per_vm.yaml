@@ -1,0 +1,92 @@
+# cloudinit_per_vm.yaml
+- name: Debug cloudinit for {{ inventory_hostname }}
+  debug:
+    msg: Building cloudinit directory for {{ inventory_hostname }}
+
+- name: Ensure per-VM cloud-init dir exists
+  ansible.builtin.file:
+    path: "{{ cloudinit_dir }}/{{ vm }}"
+    state: directory
+    mode: "0755"
+
+- name: Write meta-data
+  ansible.builtin.copy:
+    dest: "{{ cloudinit_dir }}/{{ vm }}/meta-data"
+    mode: "0644"
+    content: |
+      {
+        "instance-id": "{{ vm }}-{{ lookup('pipe','date +%s') }}",
+        "dsmode": "local"
+      }
+
+- name: Assert required per-VM vars exist (nice error if missing)
+  ansible.builtin.assert:
+    that:
+      - hostvars[vm].ssh_keys is defined
+      - hostvars[vm].ansible_host is defined
+      - (hostvars[vm].network_device | default('')) != ''
+    fail_msg: "Missing one of: ssh_keys, ansible_host, network_device for {{ vm }}"
+
+- name: Write network-config
+  ansible.builtin.copy:
+    dest: "{{ cloudinit_dir }}/{{ vm }}/network-config"
+    mode: "0644"
+    content: |
+      version: 2
+      ethernets:
+        {{ hostvars[vm].network_device }}:
+          dhcp4: false
+          addresses:
+            - {{ hostvars[vm].ansible_host }}/8
+          renderer: NetworkManager
+  when: false # NetworkManager isn't supported on Alma8 which is what the VMs are running
+
+- name: Write network-config
+  ansible.builtin.copy:
+    dest: "{{ cloudinit_dir }}/{{ vm }}/network-config"
+    mode: "0644"
+    content: |
+      version: 1
+      config:
+        - type: physical
+          name: {{ hostvars[vm].network_device }}
+          subnets:
+            - type: static
+              address: {{ hostvars[vm].ansible_host }}
+              netmask: 255.0.0.0
+  when: true # NetworkManager isn't supported on Alma8 which is what the VMs are running
+
+
+- name: Write user-data
+  ansible.builtin.copy:
+    dest: "{{ cloudinit_dir }}/{{ vm }}/user-data"
+    mode: "0644"
+    content: |
+      #cloud-config
+      preserve_hostname: false
+      hostname: {{ vm }}
+
+      users:
+        - name: {{ hostvars[vm].mvpnet_user }}
+          sudo: ALL=(ALL) NOPASSWD:ALL
+          shell: /bin/bash
+          ssh_authorized_keys:
+      {% for k in lookup('file', hostvars[vm].ssh_keys).splitlines() %}
+            - "{{ k }}"
+      {% endfor %}
+    
+      # Have cloud-init write a complete /etc/hosts for all VMs
+      write_files:
+        - path: /etc/hosts
+          permissions: '0644'
+          owner: root:root
+          content: |
+            127.0.0.1 localhost
+            ::1       localhost
+      {% for h in groups['vms'] %}
+            {{ hostvars[h].ansible_host }} {{ h }}
+      {% endfor %}
+
+      runcmd:
+        - [ hostnamectl, set-hostname, "{{ vm }}" ]
+

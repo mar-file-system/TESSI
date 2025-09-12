@@ -127,8 +127,8 @@
 
         - name: Fail if network.type is unsupported
           fail:
-            msg: "'network.type' must be either 'private' or 'wireguard'. Got: {{ network.type }}"
-          when: network.type is defined and network.type not in ['private', 'wireguard']
+            msg: "'network.type' must be either 'private' or 'wireguard' or 'mvpnet'. Got: {{ network.type }}"
+          when: network.type is defined and network.type not in ['private', 'wireguard', 'mvpnet']
 
         - name: Validate private network configuration if type is private
           when: network.type == 'private'
@@ -137,6 +137,14 @@
               assert:
                 that: network.interface is defined
                 fail_msg: "'network.interface' must be defined for private networks"
+
+        - name: Validate mvpnet network configuration if type is private
+          when: network.type == 'mvpnet'
+          block:
+            - name: Assert 'network.mvpnet_base_ip' is defined
+              assert:
+                that: network.mvpnet_base_ip is defined and network.mvpnet_device is defined and network.mvpnet_user
+                fail_msg: "'network.mvpnet_base_ip' and 'network.mvpnet_device' and 'network.mvpnet_user' must be defined for mvpnet networks"
 
         - name: Validate wireguard configuration if type is wireguard
           when: network.type == 'wireguard'
@@ -149,21 +157,46 @@
                 fail_msg: "'network.wg_base_ip' and 'network.wg_cidr' must be defined for wireguard networks"
 
       - name: Validate VM definitions
-        run_once: true  # Only one host needs to run this check
         fail:
           msg: >
-            "VM {{ vm }} has an invalid format.
-            Expected: [string, string, [integers], int (2-254)],
+            "VM {{ vm }} has an invalid format.\n
+            Expected: [string, string, [integers], int (0-254)],\n
             Got: [{{ vm[0] | type_debug }}, {{ vm[1] | type_debug }}, {{ vm[2] | type_debug }}, {{ vm[3] | type_debug }}]"
         when: >
           vm | length != 4 or
           vm[0] is not string or
           vm[1] is not string or
-          vm[2] is not iterable or vm[2] is mapping or vm[2] is string or not (vm[2] | map('regex_search', '^-?\d+$') | list == vm[2] | map('string') | list) or
-          vm[3] is not number or vm[3] < 2 or vm[3] > 254
+          vm[2] is not iterable or vm[2] is mapping or vm[2] is string or not (vm[2] | map('regex_search', '^-?\d+$') | list == vm[2] | map('string') | list) 
         loop: "{{ groups['all'] | default([]) | map('extract', hostvars, 'vms') | select('defined') | list | flatten(1) }}"
         loop_control:
           loop_var: vm
+
+      - name: Validate VM[3] range for non-mvpnet networks
+        fail:
+          msg: >
+            "VM {{ vm }} has invalid IP last octet {{ vm[3] }} for network.type != 'mvpnet'.\n
+            Expected: between 2 and 254."
+        when: network.type != 'mvpnet' and (vm[3] < 2 or vm[3] > 254)
+        loop: "{{ groups['all'] | default([]) | map('extract', hostvars, 'vms') | select('defined') | list | flatten(1) }}"
+        loop_control:
+          loop_var: vm
+
+      - name: Validate VM[3] range for mvpnet networks
+        fail:
+          msg: >
+            "VM {{ vm }} has invalid IP last octet {{ vm[3] }} for network.type == 'mvpnet'.\n
+            Expected: between 0 and 254."
+        when: network.type == 'mvpnet' and (vm[3] < 0 or vm[3] > 254)
+        loop: "{{ groups['all'] | default([]) | map('extract', hostvars, 'vms') | select('defined') | list | flatten(1) }}"
+        loop_control:
+          loop_var: vm
+
+      - name: Set base_ip depending on network.type
+        set_fact:
+          base_ip: >-
+            {{ hostvars['localhost'].network.mvpnet_base_ip
+               if hostvars['localhost'].network.type == 'mvpnet'
+               else hostvars['localhost'].network.libvirt.base_ip }}
 
       - name: Define a ton of derived stuff for each VM to make later templating easier 
         set_fact:
@@ -177,16 +210,18 @@
                 {%- set mac = "52:54:00:" ~ ("%02x" | format(ns.mac_counter //(256*256))) ~ ":" ~ ("%02x" | format((ns.mac_counter // 256) % 256)) ~ ":" ~ ("%02x" | format(ns.mac_counter % 256)) -%}
                 {%- set _ = ns.result.append({
                       'name': vm[0],
-                      'ansible_host': hostvars[phys].network.libvirt.base_ip ~ '.' ~ vm[3],
+                      'ansible_host': base_ip ~ '.' ~ vm[3],
+                      'mvpnet_port' : 2200 + vm[3] - 1,
                       'group': vm[1],
                       'hdd_sizes': vm[2],
-                      'libvirt_bridge': network.libvirt.base_ip ~ '.' ~ (hostvars[phys].libvirt_suffix | int + 1),
+                      'libvirt_bridge': network.libvirt.base_ip ~ '.' ~ ((hostvars[phys].libvirt_suffix | default(0)) | int + 1),
                       'mac_address': mac,
                       'machine': final_gold_vms.get(vm[1]).machine, 
                       'memory': final_gold_vms.get(vm[1]).memory, 
                       'netone': network.libvirt.default, 
                       'nettwo': libvirt.name, 
                       'physical_host': phys,
+                      'ssh_keys': final_gold_vms.get(vm[1]).ssh_keys, 
                       'source_image': gold_qcow2_paths.get(vm[1]), 
                       'storage_pool': "{{ UNIQUE_TAG }}-pool", 
                       'vcpu': final_gold_vms.get(vm[1]).vcpu, 
@@ -228,33 +263,35 @@
         vars:
           comment_style: "hash"
 
-      - name: Generate phase 3 opentofu vars file
-        template:
-          src: templates/phase3_vms.j2
-          dest: "{{ tfvars_file }}" 
-        register: phase3_tfvars_result
-        vars:
-          comment_style: "hcl"
+      - block:
+        - name: Generate phase 3 opentofu vars file
+          template:
+            src: templates/phase3_vms.j2
+            dest: "{{ tfvars_file }}" 
+          register: phase3_tfvars_result
+          vars:
+            comment_style: "hcl"
 
-      - name: Format the autogenerated opentofu file 
-        ansible.builtin.command:
-          cmd: tofu fmt "{{ phase3_tfvars_result.dest }}" 
+        - name: Format the autogenerated opentofu file 
+          ansible.builtin.command:
+            cmd: tofu fmt "{{ phase3_tfvars_result.dest }}" 
 
-      - name: Make sure the tofu modules have been initialized
-        ansible.builtin.command:
-          cmd: tofu {{ tofu_chdir }} init 
+        - name: Make sure the tofu modules have been initialized
+          ansible.builtin.command:
+            cmd: tofu {{ tofu_chdir }} init 
 
-      - name: List current tofu workspaces
-        ansible.builtin.command: tofu {{ tofu_chdir }} workspace list
-        register: tofu_workspace_list
+        - name: List current tofu workspaces
+          ansible.builtin.command: tofu {{ tofu_chdir }} workspace list
+          register: tofu_workspace_list
 
-      - name: Debug tofu workspace list
-        ansible.builtin.debug:
-          var: tofu_workspace_list.stdout_lines
+        - name: Debug tofu workspace list
+          ansible.builtin.debug:
+            var: tofu_workspace_list.stdout_lines
 
-      - name: Create tofu workspace {{ tofu_workspace }} if it doesn't exist
-        ansible.builtin.command: tofu {{ tofu_chdir }} workspace new -var-file {{ tfvars_file }} {{ tofu_workspace }}
-        when: tofu_workspace not in tofu_workspace_list.stdout_lines | map('regex_replace', '^\\*?\\s*', '') | list
+        - name: Create tofu workspace {{ tofu_workspace }} if it doesn't exist
+          ansible.builtin.command: tofu {{ tofu_chdir }} workspace new -var-file {{ tfvars_file }} {{ tofu_workspace }}
+          when: tofu_workspace not in tofu_workspace_list.stdout_lines | map('regex_replace', '^\\*?\\s*', '') | list
+        when: network.type != 'mvpnet'
 
       - name: Run 'make -C {{ artifact_dir }} help'
         command: make -C "{{ artifact_dir }}" help

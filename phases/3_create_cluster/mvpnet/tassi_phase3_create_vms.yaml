@@ -1,0 +1,208 @@
+---
+- name: Launch mvpnet cluster in background (user mode) and wait for RUN
+  hosts: physical_hosts
+  gather_facts: false
+
+  # TODO: need to grep across physical hosts to count the RUN lines
+  # TODO: need to delete the /tmp/mvpnet directory
+  # TODO: need to stop hard-coding path to mpirun
+  # TODO: need to go through and replace almost everything with values from config
+  # TODO: need to individualize the MPI ranks cloud-init and images
+  # TODO: kill any mpijob using the PID file if it exists
+
+  vars:
+    mvpnet_verbosity: DBUG 
+    mvpnet_image: /mnt/usrc-storage-nfs/jbent/images/lquilt1/oss.qcow2
+    mvpnet_workdir: "{{ artifact_dir }}/mvpnet"
+    mvpnet_log: "{{ mvpnet_workdir }}/mpirun.log"
+    mpi_hostfile: "{{ mvpnet_workdir }}/hosts"
+    pid_file: "{{ mvpnet_workdir }}/mpirun.pid"
+    cloudinit_dir: "{{ mvpnet_workdir }}/cloudinit"
+    sshconfig: "{{ lookup('env','HOME') }}/.ssh/config"
+    sshconfigmark: "# {mark} {{ UNIQUE_TAG }}"
+
+  tasks:
+
+    - block:
+      # --- Check for pid_file ---
+      - name: Check for existing pid_file {{ pid_file }} 
+        run_once: true
+        delegate_to: "{{ groups['physical_hosts'][0] }}"
+        stat:
+          path: "{{ pid_file }}"
+        register: pidfile_stat
+
+      - block: 
+        - name: Kill mvpnet by pid_file {{ pid_file }}
+          run_once: true
+          delegate_to: "{{ groups['physical_hosts'][0] }}"
+          shell: "kill $(cat {{ pid_file }}) || true"
+          args:
+            executable: /bin/bash
+          when: pidfile_stat.stat.exists
+
+        - name: Remove pid_file {{ pid_file }}
+          run_once: true
+          delegate_to: "{{ groups['physical_hosts'][0] }}"
+          file:
+            path: "{{ pid_file }}"
+            state: absent
+        when: pidfile_stat.stat.exists
+
+      - name: Remove mvpnet_workdir
+        file:
+          path: "{{ mvpnet_workdir }}"
+          state: absent
+
+      - name: Remove mvpnet SSH entries (workstation/controller)
+        blockinfile:
+          path: "{{ sshconfig }}"
+          state: absent
+          marker: "{{ sshconfigmark }}"
+        ignore_errors: true
+
+      - name: Exit early when makeclean is requested
+        meta: end_play
+        when: "'makeclean' in ansible_run_tags"
+      tags: [always]
+
+    - name: Ensure work and cloud-init dirs exist on each host
+      file:
+        path: "{{ item }}"
+        state: directory
+        mode: "0755"
+      loop:
+        - "{{ mvpnet_workdir }}"
+        - "{{ cloudinit_dir }}"
+
+    - name: Build per-VM cloud-init via include
+      ansible.builtin.include_tasks:
+        file: cloudinit_per_vm.yaml
+        apply:
+          delegate_to: "{{ hostvars[vm].physical_host }}"
+          vars:
+            vm: "{{ item }}"
+      loop: "{{ groups['vms'] }}"
+      loop_control:
+        label: "{{ item }}"
+
+    - name: Build MPI hostfile from physical hosts (on launcher); assume MPICH (add slots)
+      run_once: true
+      delegate_to: "{{ groups['physical_hosts'][0] }}"
+      copy:
+        dest: "{{ mpi_hostfile }}"
+        mode: "0644"
+        content: |
+          {% for h in groups['physical_hosts'] %}
+          {{ h }}:{{ (hostvars[h].vms | default([])) | length }}
+          {% endfor %}
+
+    - name: Set fact for number of vms
+      set_fact:
+        num_vms: "{{ groups['vms'] | length }}"
+
+    - block:
+      - name: Build per-rank -c flag list (prefers vm.mpi_rank, falls back to order)
+        set_fact:
+          mvpnet_c_flags: >-
+            {%- set parts = [] -%}
+            {%- set pairs = [] -%}
+            {%- for h in groups['vms'] -%}
+              {%- set r = (hostvars[h].mpi_rank | default(loop.index0)) | int -%}
+              {%- set _ = pairs.append([r, h]) -%}
+            {%- endfor -%}
+            {%- for p in pairs | sort -%}
+              {%- set _ = parts.append("-c %s:%s/%s" | format(p[0], cloudinit_dir, p[1])) -%}
+            {%- endfor -%}
+            {{ parts | join(' ') }}
+
+      - name: Construct mpirun command line
+        set_fact:
+          mpirun_cmd: >-
+            /opt/mpich-4.1.1/bin/mpirun -n {{ num_vms }} -hostfile {{ mpi_hostfile }}
+            mvpnet -C 1
+            {{ mvpnet_c_flags }}
+            -i {{ mvpnet_image }},mvpctl=s
+            -l {{ mvpnet_workdir }}
+            -w 1
+            -M monwrap -r {{ mvpnet_workdir }} -s {{ mvpnet_workdir }}
+            -g -L 1 -D {{ mvpnet_verbosity }} -S {{ mvpnet_verbosity }}
+            -n dgram
+
+
+      - name: Show mpirun command (copy/paste friendly)
+        debug:
+          msg: | 
+            {{ mpirun_cmd }}
+
+      - name: Show log path and tail hint (on launcher)
+        run_once: true
+        delegate_to: "{{ groups['physical_hosts'][0] }}"
+        debug:
+          msg:
+            - "Log files:      {{ mvpnet_log }}"
+            - "PID file:       {{ pid_file }}"
+            - "mpirun command: {{ mpirun_cmd }}"
+
+      # --- Launch mpirun asynchronously (24h timeout), nothing fancy ---
+      - name: Start mvpnet with async (24h) on launcher logging to {{ mvpnet_log }}
+        shell: |
+          nohup {{ mpirun_cmd }} >> {{ mvpnet_log }} 2>&1 & 
+          echo $! > "{{ pid_file }}"
+        async: 86400
+        poll: 0
+        register: mvpnet_async
+
+        # Immediately fetch async status once — if it already died, you’ll see why
+      - name: Check async job status right after launch
+        async_status:
+          jid: "{{ mvpnet_async.ansible_job_id }}"
+        register: launch_status
+
+      - name: Debug launch status (rc/stdout/stderr)
+        debug:
+          var: launch_status
+        when: launch_status.finished | default(false)
+
+      - name: Wait until all {{ num_vms }} ranks report RUN in {{ mvpnet_log }} 
+        shell: |
+          cnt=$(grep -c 'BOOT_QN => RUN' "{{ mvpnet_log }}" 2>/dev/null || true)
+          echo "$cnt"
+        register: run_count
+        changed_when: false
+        retries: 120           # ~10 minutes
+        delay: 5
+        until: (run_count.stdout | int) >= (num_vms | int)
+
+      - name: Ensure SSH config file exists on physical hosts
+        ansible.builtin.file:
+          path: "{{ sshconfig }}"
+          state: touch
+          mode: "0600"
+
+      - name: Install mvpnet SSH entries for easy ssh access 
+        blockinfile:
+          path: "{{ sshconfig }}" 
+          create: true
+          mode: "0600"
+          marker: "{{ sshconfigmark }}"
+          block: |
+            {% for vm in groups['vms'] %}
+            Host {{ vm }}
+              HostName localhost
+              Port {{ hostvars[vm].mvpnet_port }}
+              User {{ hostvars[vm].mvpnet_user | default('jbent') }}
+              ProxyJump {{ hostvars[vm].physical_host }}
+              StrictHostKeyChecking no
+              UserKnownHostsFile /dev/null
+            {% endfor %}
+
+      - name: Report success
+        when: run_count.stdout | int >= num_vms | int
+        debug:
+          msg:
+            - "mvpnet is up: saw {{ num_vms }} 'BOOT_QN => RUN' lines."
+            - "Log file: {{ mvpnet_log }}"
+            - "Tip: grep -n \"BOOT_QN => RUN\" {{ mvpnet_log }}"
+      run_once: true
+      delegate_to: "{{ groups['physical_hosts'][0] }}"
