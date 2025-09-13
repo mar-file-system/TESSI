@@ -1,131 +1,133 @@
+- name: Block of tasks to collect pings across the physical network 
+  block:
+  # Local pings
+  - name: Ping the bridge interface on each host (local)
+    ansible.builtin.shell: |
+      ping -c {{ ping_count }} {{ hostvars[inventory_hostname].bridge_ip }}
+    register: bridge_ping_results
 
-# Local pings
-- name: Ping the bridge interface on each host (local)
-  ansible.builtin.shell: |
-    ping -c {{ ping_count }} {{ hostvars[inventory_hostname].bridge_ip }}
-  register: bridge_ping_results
+  - name: Record bridge ping result
+    set_fact:
+      ping_results: >-
+        {{
+          ping_results + [{
+            'src': ansible_default_ipv4.address,
+            'dst': hostvars[inventory_hostname].bridge_ip,
+            'success': (bridge_ping_results.rc == 0)
+          }]
+        }}
 
-- name: Record bridge ping result
-  set_fact:
-    ping_results: >-
-      {{
-        ping_results + [{
-          'src': ansible_default_ipv4.address,
-          'dst': hostvars[inventory_hostname].bridge_ip,
-          'success': (bridge_ping_results.rc == 0)
-        }]
-      }}
+  - name: Ping bridges on other hosts (remote)
+    ansible.builtin.shell: |
+      ping -c {{ ping_count }} {{ item }}
+    with_items: "{{ groups['physical_hosts'] | map('extract', hostvars, 'bridge_ip') | difference([hostvars[inventory_hostname].bridge_ip]) }}"
+    register: bridge_peer_ping_results
 
-- name: Ping bridges on other hosts (remote)
-  ansible.builtin.shell: |
-    ping -c {{ ping_count }} {{ item }}
-  with_items: "{{ groups['physical_hosts'] | map('extract', hostvars, 'bridge_ip') | difference([hostvars[inventory_hostname].bridge_ip]) }}"
-  register: bridge_peer_ping_results
+  - name: Record bridge ping results for other hosts
+    include_tasks: record_ping_results.yaml
+    vars:
+      ping_results_data: "{{ bridge_peer_ping_results.results }}"
 
-- name: Record bridge ping results for other hosts
-  include_tasks: record_ping_results.yaml
-  vars:
-    ping_results_data: "{{ bridge_peer_ping_results.results }}"
+  - name: Ping VMs on the same host by IP address (local)
+    ansible.builtin.shell: |
+      ping -c {{ ping_count }} {{ item }}
+    with_items: "{{ hostvars[inventory_hostname].vm_ips }}"
+    register: vm_local_ping_results
+    ignore_errors: yes
 
-- name: Ping VMs on the same host by IP address (local)
-  ansible.builtin.shell: |
-    ping -c {{ ping_count }} {{ item }}
-  with_items: "{{ hostvars[inventory_hostname].vm_ips }}"
-  register: vm_local_ping_results
-  ignore_errors: yes
+  - name: Record VM ping results by IP
+    include_tasks: record_ping_results.yaml
+    vars:
+      ping_results_data: "{{ vm_local_ping_results.results }}"
+   
+  - name: Ping VMs on the same host by hostname (local)
+    ansible.builtin.shell: |
+      ping -c {{ ping_count }} {{ item }}
+    with_items: "{{ matching_vms }}"
+    register: vm_local_hostname_ping_results
+    ignore_errors: yes
 
-- name: Record VM ping results by IP
-  include_tasks: record_ping_results.yaml
-  vars:
-    ping_results_data: "{{ vm_local_ping_results.results }}"
- 
-- name: Ping VMs on the same host by hostname (local)
-  ansible.builtin.shell: |
-    ping -c {{ ping_count }} {{ item }}
-  with_items: "{{ matching_vms }}"
-  register: vm_local_hostname_ping_results
-  ignore_errors: yes
+  - name: Record VM ping results by hostname
+    include_tasks: record_ping_results.yaml
+    vars:
+      ping_results_data: "{{ vm_local_hostname_ping_results.results }}"
 
-- name: Record VM ping results by hostname
-  include_tasks: record_ping_results.yaml
-  vars:
-    ping_results_data: "{{ vm_local_hostname_ping_results.results }}"
+  - name: Gather vm_ips for all hosts
+    run_once: true
+    set_fact:
+      host_vm_ips: >-
+        {{
+          dict(
+            ansible_play_hosts_all
+            | map('extract', hostvars)
+            | selectattr('vm_ips', 'defined')
+            | map(attribute='inventory_hostname')
+            | zip(
+                ansible_play_hosts_all
+                | map('extract', hostvars)
+                | selectattr('vm_ips', 'defined')
+                | map(attribute='vm_ips')
+              )
+            | list
+          )
+        }}
 
-- name: Gather vm_ips for all hosts
-  run_once: true
-  set_fact:
-    host_vm_ips: >-
-      {{
-        dict(
-          ansible_play_hosts_all
-          | map('extract', hostvars)
-          | selectattr('vm_ips', 'defined')
-          | map(attribute='inventory_hostname')
-          | zip(
-              ansible_play_hosts_all
-              | map('extract', hostvars)
-              | selectattr('vm_ips', 'defined')
-              | map(attribute='vm_ips')
-            )
-          | list
-        )
-      }}
+  - name: Gather flat list of VM IPs from other hosts
+    set_fact:
+      remote_vm_ips: >-
+        {{
+          host_vm_ips
+          | dict2items
+          | rejectattr('key', 'equalto', inventory_hostname)
+          | map(attribute='value')
+          | sum(start=[])
+        }}
 
-- name: Gather flat list of VM IPs from other hosts
-  set_fact:
-    remote_vm_ips: >-
+  - name: Ping other hosts' VM IPs
+    ansible.builtin.shell: |
+      ping -c {{ ping_count }} {{ item }}
+    loop: "{{ remote_vm_ips }}"
+    register: vm_peer_ping_results
+
+  - name: Record VM ping results for other hosts by IP address
+    include_tasks: record_ping_results.yaml
+    vars:
+      ping_results_data: "{{ vm_peer_ping_results.results }}"
+
+  - name: Ping other hosts' VM IPs
+    ansible.builtin.shell: |
+      ping -c {{ ping_count }} {{ item }}
+    loop: >-
       {{
         host_vm_ips
         | dict2items
         | rejectattr('key', 'equalto', inventory_hostname)
         | map(attribute='value')
-        | sum(start=[])
+        | list
       }}
+    register: vm_peer_ping_results
+    when: false
 
-- name: Ping other hosts' VM IPs
-  ansible.builtin.shell: |
-    ping -c {{ ping_count }} {{ item }}
-  loop: "{{ remote_vm_ips }}"
-  register: vm_peer_ping_results
+  - name: Ping VMs on other hosts by hostname (remote)
+    ansible.builtin.shell: |
+      ping -c {{ ping_count }} {{ item }}
+    loop: >-
+      {{
+        groups['all']
+        | map('extract', hostvars, 'matching_vms')
+        | select('defined')
+        | list
+        | sum(start=[])
+        | difference(hostvars[inventory_hostname].matching_vms)
+      }}
+    register: vm_peer_hostname_ping_results
+    ignore_errors: yes
 
-- name: Record VM ping results for other hosts by IP address
-  include_tasks: record_ping_results.yaml
-  vars:
-    ping_results_data: "{{ vm_peer_ping_results.results }}"
+  - name: Record VM ping results for other hosts by hostname
+    include_tasks: record_ping_results.yaml
+    vars:
+      ping_results_data: "{{ vm_peer_hostname_ping_results.results }}"
 
-- name: Ping other hosts' VM IPs
-  ansible.builtin.shell: |
-    ping -c {{ ping_count }} {{ item }}
-  loop: >-
-    {{
-      host_vm_ips
-      | dict2items
-      | rejectattr('key', 'equalto', inventory_hostname)
-      | map(attribute='value')
-      | list
-    }}
-  register: vm_peer_ping_results
-  when: false
-
-- name: Ping VMs on other hosts by hostname (remote)
-  ansible.builtin.shell: |
-    ping -c {{ ping_count }} {{ item }}
-  loop: >-
-    {{
-      groups['all']
-      | map('extract', hostvars, 'matching_vms')
-      | select('defined')
-      | list
-      | sum(start=[])
-      | difference(hostvars[inventory_hostname].matching_vms)
-    }}
-  register: vm_peer_hostname_ping_results
-  ignore_errors: yes
-
-- name: Record VM ping results for other hosts by hostname
-  include_tasks: record_ping_results.yaml
-  vars:
-    ping_results_data: "{{ vm_peer_hostname_ping_results.results }}"
-
-- name: Aggregate and graph ping results
-  ansible.builtin.include_tasks: graph_physical_pings.yaml
+  - name: Aggregate and graph ping results
+    ansible.builtin.include_tasks: graph_physical_pings.yaml
+  when: network_type != 'mvpnet'

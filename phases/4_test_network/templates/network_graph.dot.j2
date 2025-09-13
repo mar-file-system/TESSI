@@ -1,43 +1,63 @@
 // Jinja2 Template for DOT Graph
 digraph VM_Network {
     {% for host, host_data in hostvars.items() if 'matching_vms' in host_data %}
+
+    // Precompute per-host netname once (visible to whole subgraph)
+    {% set netname = (
+        'mvpnet_' ~ host
+        if host_data.network.type == 'mvpnet'
+        else (host_data.libvirt.name ~ '_' ~ host)
+    ) %}
+
     subgraph cluster_{{ host }} {
         label = <<B><U>Host: {{ host }} ({{ host_data.ansible_default_ipv4.address | default('MISSING') }})</U></B>>;
         style = filled;
         color = lightgrey;
 
-        // Define VMs and connections to Libvirt networks
-        {% for idx in range(host_data.matching_vms | length) %}
-        {% set vm = host_data.matching_vms[idx] %}
-        {% set ip = host_data.vm_ips[idx] %}
-        "{{ vm }}_{{ host }}" [label="VM: {{ vm }}\n{{ ip }}", shape=box];
-        "{{ vm }}_{{ host }}" -> "{{ host_data.libvirt.name }}_{{ host }}" [style=solid, label=""];
+        // Define VMs and connections to (Libvirt or MVP) network
+        {% set vm_ip_pairs = (host_data.matching_vms | default([])) | zip(host_data.vm_ips | default([])) %}
+        {% for pair in vm_ip_pairs %}
+            {% set vm = pair.0 %}
+            {% set ip = pair.1 %}
+            "{{ vm }}_{{ host }}" [label="VM: {{ vm }}\n{{ ip | default('NO IP') }}", shape=box];
+            "{{ vm }}_{{ host }}" -> "{{ netname }}" [style=solid, label=""];
         {% endfor %}
 
-        // Define WireGuard interface 
-	{% if host_data.network.type == 'wireguard' %} 
-        {{ host_data.sanitized_ipv4_address }} 
-            [label="WireGuard: {{ host_data.selected_wireguard }}\n{{ host_data.wireguard_ip_address.stdout }}", shape=ellipse, color=blue];
+        // Define WireGuard interface (only when using wireguard)
+        {% if host_data.network.type == 'wireguard' %}
+        {{ host_data.sanitized_ipv4_address }}
+            [label="WireGuard: {{ host_data.selected_wireguard }}\n{{ host_data.wireguard_ip_address.stdout }}",
+             shape=ellipse, color=blue];
         {% endif %}
-            
-        // Define Bridge and its connection to WireGuard
-        "{{ host_data.bridge_name }}_{{ host }}" [label="Bridge: {{ host_data.bridge_name }}\n{{ host_data.bridge_ip }}", shape=ellipse, color=darkgreen];
-        "{{ host_data.bridge_name }}_{{ host }}" -> {{ host_data.sanitized_ipv4_address }} [style=solid];
 
-        // Define Libvirt network and its connection to Bridge
-        "{{ host_data.libvirt.name }}_{{ host }}" [label="Libvirt: {{ host_data.libvirt.name }}\nRange: {{ host_data.libvirt_network_range }}", shape=note, color=orange];
-        "{{ host_data.libvirt.name }}_{{ host }}" -> "{{ host_data.bridge_name }}_{{ host }}" [style=dotted];
+        {% if host_data.network.type != 'mvpnet' %}
+            // Bridge and its connection to WireGuard
+            "{{ host_data.bridge_name }}_{{ host }}" [label="Bridge: {{ host_data.bridge_name }}\n{{ host_data.bridge_ip }}",
+                                                      shape=ellipse, color=darkgreen];
+            "{{ host_data.bridge_name }}_{{ host }}" -> {{ host_data.sanitized_ipv4_address }} [style=solid];
+
+            // Libvirt network
+            "{{ netname }}" [label="Libvirt: {{ host_data.libvirt.name }}\nRange: {{ host_data.libvirt_network_range }}",
+                             shape=note, color=orange];
+
+            // Connection from Libvirt “switch” to the libvirt network
+            "{{ host_data.libvirt.name }}_{{ host }}" -> "{{ netname }}" [style=dotted];
+        {% else %}
+            // MVPNet network node
+            "{{ netname }}" [label="MVP Net", shape=note, color=orange];
+            // No dotted edge from libvirt switch in MVPNet mode (no libvirt.name needed)
+        {% endif %}
     }
     {% endfor %}
 
-    // Define WireGuard tunnels in a separate loop to ensure all nodes are defined
-    // This avoids referencing undefined nodes when creating connections.
+    // WireGuard tunnels (after all nodes are defined)
     {% for host, host_data in hostvars.items() %}
     {% if host_data.wireguard_peer_map is defined %}
         {% for peer_ip, allowed_ips in host_data.wireguard_peer_map.items() %}
-        {% set portsrc = ['n', 'ne', 'nw', 's', 'se', 'sw', 'e', 'w'][range(0, 8) | random] %}
-        {% set portdst = ['n', 'ne', 'nw', 's', 'se', 'sw', 'e', 'w'][range(0, 8) | random] %}
-        {{ host_data.sanitized_ipv4_address }}:{{ portsrc }} -> {{ peer_ip | replace('.', '') }}:{{ portdst }} [style=dashed, label="{{ allowed_ips }}"];
+            {% set portsrc = ['n','ne','nw','s','se','sw','e','w'][range(0,8)|random] %}
+            {% set portdst = ['n','ne','nw','s','se','sw','e','w'][range(0,8)|random] %}
+            {{ host_data.sanitized_ipv4_address }}:{{ portsrc }} -> {{ peer_ip | replace('.', '') }}:{{ portdst }}
+                [style=dashed, label="{{ allowed_ips }}"];
         {% endfor %}
     {% endif %}
     {% endfor %}

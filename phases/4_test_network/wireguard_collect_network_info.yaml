@@ -106,78 +106,110 @@
             }}
         with_items: "{{ vm_ip_output.results }}"
         when: ip is defined and ip | length > 0
-
       when: network_type == 'private'
+
+    # Build vm_ips and ip_to_label_map from inventory for mvpnet
+    - name: Get VM IP details for mvpnet network (from inventory)
+      when: network_type == 'mvpnet'
+      run_once: true
+      delegate_to: localhost
+      block:
+        - name: Select VM host list (prefer aggregated_matching_vms if defined)
+          set_fact:
+            _mvpnet_host_list: "{{ aggregated_matching_vms | default(groups['vms'] | default([])) }}"
+
+        - name: Initialize vm_ips and ip_to_label_map
+          set_fact:
+            vm_ips: []
+            ip_to_label_map: {}
+
+        - name: Accumulate vm_ips and ip_to_label_map from hostvars
+          set_fact:
+            vm_ips: "{{ vm_ips + [ hostvars[item].ansible_host ] }}"
+            ip_to_label_map: >-
+              {{ ip_to_label_map
+                 | combine({ hostvars[item].ansible_host:
+                             'VM: ' ~ item ~ ' (' ~ hostvars[item].ansible_host ~ ')' }) }}
+          loop: "{{ _mvpnet_host_list }}"
+          loop_control:
+            label: "{{ item }}"
+          when:
+            - hostvars[item] is defined
+            - hostvars[item].ansible_host is defined
+            - hostvars[item].ansible_host | length > 0
 
     - name: Debug the ip_to_label_map
       debug:
         var: ip_to_label_map
 
-    - name: Get list of all libvirt networks
-      shell: >
-        virsh net-list --all | awk '{print $1}' | grep -v Name | grep -v '^[-]*$'
-      register: all_networks
+    - name: Block of tasks to get networking details when using a dedicated secondary NIC
+      block:
+      - name: Get list of all libvirt networks
+        shell: >
+          virsh net-list --all | awk '{print $1}' | grep -v Name | grep -v '^[-]*$'
+        register: all_networks
 
-    - name: Debug list of all networks
-      debug:
-        msg: "Networks found: {{ all_networks.stdout_lines }}"
-      tags: debug
+      - name: Debug list of all networks
+        debug:
+          msg: "Networks found: {{ all_networks.stdout_lines }}"
+        tags: debug
 
-    - name: Query libvirt network for bridge and DHCP range
-      shell: >
-        virsh net-dumpxml {{ libvirt.name }}
-      register: libvirt_network
-            
-    - name: Debug libvirt network output
-      debug:
-        msg: "Libvirt network XML: {{ libvirt_network }}"
-      tags: debug
+      - name: Query libvirt network for bridge and DHCP range
+        shell: >
+          virsh net-dumpxml {{ libvirt.name }}
+        register: libvirt_network
+              
+      - name: Debug libvirt network output
+        debug:
+          msg: "Libvirt network XML: {{ libvirt_network }}"
+        tags: debug
 
-    - name: Set bridge name fact from libvirt XML
-      set_fact:
-        bridge_name: "{{ (libvirt_network.stdout | regex_search(\"<bridge name='([^']+)'\", '\\1'))[0] }}"
+      - name: Set bridge name fact from libvirt XML
+        set_fact:
+          bridge_name: "{{ (libvirt_network.stdout | regex_search(\"<bridge name='([^']+)'\", '\\1'))[0] }}"
 
-    - name: Debug bridge name
-      debug:
-        msg: "Bridge name: {{ bridge_name }}"
-      tags: debug
+      - name: Debug bridge name
+        debug:
+          msg: "Bridge name: {{ bridge_name }}"
+        tags: debug
 
-    - name: Get IP details of the bridge
-      shell: |
-        ip -o -f inet addr show {{ bridge_name }} | awk '{print $4}' | cut -d/ -f1
-      register: bridge_ip_details
-      when: bridge_name is defined
+      - name: Get IP details of the bridge
+        shell: |
+          ip -o -f inet addr show {{ bridge_name }} | awk '{print $4}' | cut -d/ -f1
+        register: bridge_ip_details
+        when: bridge_name is defined
 
-    - name: Set bridge IP fact
-      set_fact:
-        bridge_ip: "{{ bridge_ip_details.stdout_lines[0] }}"
-      when: bridge_ip_details.stdout is defined
+      - name: Set bridge IP fact
+        set_fact:
+          bridge_ip: "{{ bridge_ip_details.stdout_lines[0] }}"
+        when: bridge_ip_details.stdout is defined
 
-    - name: Debug bridge IP details
-      debug:
-        msg: "Bridge IP details: {{ bridge_ip }}"
-      tags: debug
+      - name: Debug bridge IP details
+        debug:
+          msg: "Bridge IP details: {{ bridge_ip }}"
+        tags: debug
 
-    - name: Save bridge IP into ip_to_label_map
-      set_fact:
-        ip_to_label_map: >-
-          {{
-            ip_to_label_map | combine({
-              bridge_ip: ("Bridge (" ~ bridge_ip ~ ")")
-            })
-          }}
-      when: bridge_ip is defined
+      - name: Save bridge IP into ip_to_label_map
+        set_fact:
+          ip_to_label_map: >-
+            {{
+              ip_to_label_map | combine({
+                bridge_ip: ("Bridge (" ~ bridge_ip ~ ")")
+              })
+            }}
+        when: bridge_ip is defined
 
-    - name: Get bridge configuration
-      shell: >
-        brctl show {{ bridge_name }}
-      register: bridge_config
-      when: bridge_name is defined
+      - name: Get bridge configuration
+        shell: >
+          brctl show {{ bridge_name }}
+        register: bridge_config
+        when: bridge_name is defined
 
-    - name: Debug bridge configuration
-      debug:
-        msg: "Bridge configuration: {{ bridge_config.stdout }}"
-      tags: debug
+      - name: Debug bridge configuration
+        debug:
+          msg: "Bridge configuration: {{ bridge_config.stdout }}"
+        tags: debug
+      when: network_type == 'private'
 
     - name: Block of tasks to get wireguard details 
       block:
@@ -260,21 +292,24 @@
         tags: debug
       when: network_type == "wireguard"
 
-    - name: Extract Libvirt Network Range
-      shell: >
-        echo "{{ libvirt_network.stdout }}" | grep -oP "range start='[^']+' end='[^']+'" |
-        sed -E "s/range start='([^']+)' end='([^']+)'/\\1 - \\2/"
-      register: libvirt_network_range_result
-      when: libvirt_network.stdout is defined
+    - name: Block of tasks to get libvirt network range when using a dedicated secondary NIC
+      block:
+      - name: Extract Libvirt Network Range
+        shell: >
+          echo "{{ libvirt_network.stdout }}" | grep -oP "range start='[^']+' end='[^']+'" |
+          sed -E "s/range start='([^']+)' end='([^']+)'/\\1 - \\2/"
+        register: libvirt_network_range_result
+        when: libvirt_network.stdout is defined
 
-    - name: Set Libvirt Network Range fact
-      set_fact:
-        libvirt_network_range: "{{ libvirt_network_range_result.stdout.strip() }}"
+      - name: Set Libvirt Network Range fact
+        set_fact:
+          libvirt_network_range: "{{ libvirt_network_range_result.stdout.strip() }}"
 
-    - name: Debug Libvirt Network Range
-      debug:
-        msg: "Libvirt network range: {{ libvirt_network_range }}"
-      tags: debug
+      - name: Debug Libvirt Network Range
+        debug:
+          msg: "Libvirt network range: {{ libvirt_network_range }}"
+        tags: debug
+      when: network_type == 'private'
 
     - name: Save collected data to a JSON file
       copy:

@@ -27,8 +27,8 @@
 
       - name: Fail if network.type is unsupported
         fail:
-          msg: "'network.type' must be either 'private' or 'wireguard'. Got: {{ network.type }}"
-        when: network.type is defined and network.type not in ['private', 'wireguard']
+          msg: "'network.type' must be either 'private' 'wireguard' or 'mvpnet'. Got: {{ network.type }}"
+        when: network.type is defined and network.type not in ['private', 'wireguard', 'mvpnet']
 
       - name: Create artifacts directory {{ image_dir }}
         ansible.builtin.file:
@@ -39,14 +39,14 @@
 
       - name: include private network playbook
         include_tasks: test_private.yaml
-        when: network.type == 'private'
+        when: network.type == 'private' or network.type == 'mvpnet'
 
       - name: include wireguard network playbook
         when: network.type == 'wireguard'
         include_tasks: test_wireguard.yaml
       tags: always
 
-    # Add VMs to inventory
+    # Add VMs to inventory simply when networking is not mvpnet
     - name: Add VMs to inventory
       add_host:
         name: "{{ item }}"  # Add each VM hostname
@@ -55,6 +55,20 @@
       with_items: "{{ aggregated_matching_vms }}"
       delegate_to: localhost
       run_once: true
+      when: network.type != 'mvpnet'
+
+    # Add VMs to inventory a bit more complexly when networking is mvpnet
+    - name: Add VMs to inventory
+      add_host:
+        name: "{{ item }}"  # Add each VM hostname
+        groups: "dynamic_hosts"  # Assign to dynamic_hosts group
+        ansible_host: "127.0.0.1"                       # the VM is on localhost *from the bastion's POV*
+        ansible_port: "{{ hostvars[item].mvpnet_port }}"
+        ansible_ssh_common_args: "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ProxyJump={{ hostvars[item].physical_host }}"
+      with_items: "{{ aggregated_matching_vms }}"
+      delegate_to: localhost
+      run_once: true
+      when: network.type == 'mvpnet'
 
 - name: Verify dynamic_hosts group
   hosts: dynamic_hosts
