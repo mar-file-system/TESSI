@@ -2,24 +2,12 @@
 - name: Launch mvpnet cluster in background (user mode) and wait for RUN
   hosts: physical_hosts
   gather_facts: false
+  vars_files: vars.yaml
 
-  # TODO: need to grep across physical hosts to count the RUN lines
   # TODO: need to delete the /tmp/mvpnet directory
   # TODO: need to stop hard-coding path to mpirun
   # TODO: need to go through and replace almost everything with values from config
   # TODO: need to individualize the MPI ranks cloud-init and images
-  # TODO: kill any mpijob using the PID file if it exists
-
-  vars:
-    mvpnet_verbosity: DBUG 
-    mvpnet_image: /mnt/usrc-storage-nfs/jbent/images/lquilt1/oss.qcow2
-    mvpnet_workdir: "{{ artifact_dir }}/mvpnet"
-    mvpnet_log: "{{ mvpnet_workdir }}/mpirun.log"
-    mpi_hostfile: "{{ mvpnet_workdir }}/hosts"
-    pid_file: "{{ mvpnet_workdir }}/mpirun.pid"
-    cloudinit_dir: "{{ mvpnet_workdir }}/cloudinit"
-    sshconfig: "{{ lookup('env','HOME') }}/.ssh/config"
-    sshconfigmark: "# {mark} {{ UNIQUE_TAG }}"
 
   tasks:
 
@@ -78,6 +66,11 @@
           label: "{{ vm }}"
         changed_when: true
 
+      - name: Remove per-VM HDD image directory recursively
+        ansible.builtin.file:
+          path: "{{ hdd_image_dir }}"
+          state: absent
+
       - name: Exit early when makeclean is requested
         meta: end_play
         when: "'makeclean' in ansible_run_tags"
@@ -92,16 +85,34 @@
         - "{{ mvpnet_workdir }}"
         - "{{ cloudinit_dir }}"
 
+- name: Build cloud-init per VM on its physical host
+  hosts: physical_hosts
+  gather_facts: false
+  strategy: free
+  vars_files: vars.yaml
+
+  tasks:
+
     - name: Build per-VM cloud-init via include
       ansible.builtin.include_tasks:
         file: cloudinit_per_vm.yaml
-        apply:
-          delegate_to: "{{ hostvars[vm].physical_host }}"
-          vars:
-            vm: "{{ item }}"
-      loop: "{{ groups['vms'] }}"
+      loop: "{{ hostvars[inventory_hostname].vms | default([]) }}"
       loop_control:
-        label: "{{ item }}"
+        loop_var: vm
+        label: "{{ vm }}"
+      vars:
+        vm: "{{ vm }}"
+
+- name: Resume normal playbook after parallelizing the cloud-init construction 
+  hosts: physical_hosts
+  gather_facts: false
+  vars_files: vars.yaml
+
+  tasks:
+
+    - name: Barrier confirmation
+      debug:
+        msg: "All cloud-init renders complete. Proceeding."
 
     - name: Build MPI hostfile from physical hosts (on launcher); assume MPICH (add slots)
       run_once: true
@@ -174,6 +185,78 @@
            
       # ' just add a noop comment to fix vim's syntax coloring which gets confused by the ' ' above
 
+      # this works but doesn't create a nice link at /dev/disk/by-id/virtio-hdd0
+      - name: Build per-rank extra HDD -i flags
+        set_fact:
+          mvpnet_hdd_flags: >-
+            {%- set parts = [] -%}
+            {%- for h in groups['vms'] | default([]) -%}
+              {%- set r = (hostvars[h].mpi_rank | default(loop.index0)) | int -%}
+              {#-- Normalize hdd_sizes: accepts [], "[6,8]", "6,8", ["6","8"], "", etc. --#}
+              {%- set raw = hostvars[h].hdd_sizes | default([], true) -%}
+              {%- if raw is sequence and raw is not string -%}
+                {%- set sizes = raw -%}
+              {%- elif raw is string -%}
+                {%- set s = raw | trim -%}
+                {%- if s | length == 0 -%}
+                  {%- set sizes = [] -%}
+                {%- elif s.startswith('[') -%}
+                  {%- set sizes = (s | from_yaml) -%}
+                {%- else -%}
+                  {%- set sizes = (s.split(',')) -%}
+                {%- endif -%}
+              {%- else -%}
+                {%- set sizes = [] -%}
+              {%- endif -%}
+              {%- set sizes = sizes
+                    | map('string') | map('trim')
+                    | reject('equalto','')
+                    | select('match','^[0-9]+$')
+                    | map('int') | list -%}
+              {%- for idx in range(sizes | length) -%}
+                {%- set path = "%s/%s/hdd%s.qcow2" | format(hdd_image_dir, h, idx) -%}
+                {%- set _ = parts.append("-i %s:%s,mvpctl=s" | format(r, path)) -%}
+              {%- endfor -%}
+            {%- endfor -%}
+            {{ parts | join(' ') }}
+            
+      - name: Build per-rank HDD -i flags (virtio + serials, no file=) with deterministic labels in /dev/disk/by-id/
+        set_fact:
+          mvpnet_hdd_flags: >-
+            {%- set parts = [] -%}
+            {%- set base = (hdd_image_dir | regex_replace('/+$','')) -%}
+            {%- for h in groups['vms'] | default([]) -%}
+              {%- set r = (hostvars[h].mpi_rank | default(loop.index0)) | int -%}
+              {# normalize hdd_sizes -> list[int] #}
+              {%- set raw = hostvars[h].hdd_sizes | default([], true) -%}
+              {%- if raw is sequence and raw is not string -%}
+                {%- set sizes = raw -%}
+              {%- elif raw is string -%}
+                {%- set s = raw | trim -%}
+                {%- if s | length == 0 -%}{%- set sizes = [] -%}
+                {%- elif s.startswith('[') -%}{%- set sizes = (s | from_yaml) -%}
+                {%- else -%}{%- set sizes = (s.split(',')) -%}
+                {%- endif -%}
+              {%- else -%}
+                {%- set sizes = [] -%}
+              {%- endif -%}
+              {%- set sizes = sizes | map('string') | map('trim') | reject('equalto','') | map('int') | list -%}
+              {%- for idx in range(sizes | length) -%}
+                {%- set path = "%s/%s/hdd%s.qcow2" | format(base, h, idx) -%}
+                {%- set serial = "hdd%s" | format(idx) -%}
+                {# QEMU drive string: <path>,if=virtio,format=qcow2,serial=... #}
+                {%- set drv = "%s,if=virtio,format=qcow2,serial=%s" | format(path, serial) -%}
+                {%- set _ = parts.append("-i %s:%s,mvpctl=s" | format(r, drv)) -%}
+              {%- endfor -%}
+            {%- endfor -%}
+            {{ parts | join(' ') }}
+        when: false # this one isn't working now....      
+      # ' just add a noop comment to fix vim's syntax coloring which gets confused by the ' ' above
+
+      - name: Show extra HDD flags (sanity check)
+        debug:
+          var: mvpnet_hdd_flags
+
       - name: Construct mpirun command line
         set_fact:
           mpirun_cmd: >-
@@ -181,6 +264,7 @@
             mvpnet -C 1
             {{ mvpnet_c_flags }}
             {{ mvpnet_i_flags }}
+            {{ mvpnet_hdd_flags }}
             -l {{ mvpnet_workdir }}
             -w 1
             -M monwrap -r {{ mvpnet_workdir }} -s {{ mvpnet_workdir }}

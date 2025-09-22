@@ -1,7 +1,56 @@
 # cloudinit_per_vm.yaml
-- name: Debug cloudinit for {{ inventory_hostname }}
+- name: "{{ inventory_hostname }} constructing cloud-init structure for {{ vm }}"
   debug:
     msg: Building cloudinit directory for {{ inventory_hostname }}
+
+- name: Create data disks for {{ vm }}
+  block:
+  - name: Read hdd_sizes for {{ vm }}
+    ansible.builtin.set_fact:
+      _hdd_raw: "{{ hostvars[vm].hdd_sizes | default([], true) }}"
+
+  # Normalize to a clean list of positive integers (handles list, "[6,8]", "6,8", "", " ")
+  - name: Normalize hdd_sizes for {{ vm }}
+    ansible.builtin.set_fact:
+      hdd_sizes_list: >-
+        {%- set raw = _hdd_raw -%}
+        {%- if raw is sequence and raw is not string -%}
+        {{ raw | map('string') | map('trim') | select('match','^[0-9]+$') | map('int') | list }}
+        {%- elif raw is string -%}
+          {%- set s = raw | trim -%}
+          {%- if s | length == 0 -%}
+          []
+          {%- elif s.startswith('[') -%}
+          {{ (s | from_yaml) | map('string') | map('trim') | select('match','^[0-9]+$') | map('int') | list }}
+          {%- else -%}
+          {{ s.split(',') | map('trim') | reject('equalto','') | select('match','^[0-9]+$') | map('int') | list }}
+          {%- endif -%}
+        {%- else -%}
+        []
+        {%- endif -%}
+
+  # Your requested debug
+  - name: Planned data disks for {{ vm }}
+    ansible.builtin.debug:
+      msg: "Will create the following disks for {{ vm }}: {{ hdd_sizes_list }}"
+
+  # ' Ensure target dir exists: {{ hdd_image_dir }}/{{ vm }}
+  - name: Ensure data-disk directory exists for {{ vm }}
+    ansible.builtin.file:
+      path: "{{ hdd_image_dir }}/{{ vm }}"
+      state: directory
+      mode: "0755"
+
+  # Create qcow2 disks: {{ hdd_image_dir }}/{{ vm }}/hdd{{idx}}.qcow2 sized {{item}}G
+  - name: Create qcow2 data disks for {{ vm }}
+    ansible.builtin.command:
+      cmd: "qemu-img create -f qcow2 {{ hdd_image_dir }}/{{ vm }}/hdd{{ idx }}.qcow2 {{ item }}G"
+      creates: "{{ hdd_image_dir }}/{{ vm }}/hdd{{ idx }}.qcow2"
+    loop: "{{ hdd_sizes_list | list }}"
+    loop_control:
+      index_var: idx
+      label: "hdd{{ idx }}={{ item }}G"
+    when: (hdd_sizes_list | length) > 0
 
 - name: Ensure per-VM cloud-init dir exists
   ansible.builtin.file:
@@ -55,7 +104,6 @@
               address: {{ hostvars[vm].ansible_host }}
               netmask: 255.0.0.0
   when: true # NetworkManager isn't supported on Alma8 which is what the VMs are running
-
 
 - name: Create SSH key pair
   block:
