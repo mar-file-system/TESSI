@@ -57,6 +57,36 @@
   when: true # NetworkManager isn't supported on Alma8 which is what the VMs are running
 
 
+- name: Create SSH key pair
+  block:
+  - name: Set cluster key path
+    set_fact:
+      cluster_key_path: "{{ cloudinit_dir }}/keys/root_intervm"
+
+  - name: Ensure key directory exists
+    ansible.builtin.file:
+      path: "{{ hostvars['localhost'].cluster_key_path | dirname }}"
+      state: directory
+      mode: "0700"
+
+  - name: Create/OpenSSH keypair for inter-VM root SSH (idempotent)
+    ansible.builtin.openssh_keypair:
+      path: "{{ hostvars['localhost'].cluster_key_path }}"
+      type: rsa
+      size: 3072
+      mode: "0600"
+      comment: "root@intervm"
+      force: false                # do NOT overwrite if it already exists
+
+  - name: Load key material (base64 + line)
+    set_fact:
+      intervm_priv_b64: "{{ lookup('file', hostvars['localhost'].cluster_key_path) | b64encode }}"
+      intervm_pub_line: "{{ lookup('file', hostvars['localhost'].cluster_key_path ~ '.pub') | trim }}"
+      intervm_pub_b64:  "{{ lookup('file', hostvars['localhost'].cluster_key_path ~ '.pub') | b64encode }}"
+  delegate_facts: true
+  delegate_to: localhost
+  run_once: true
+
 - name: Write user-data
   ansible.builtin.copy:
     dest: "{{ cloudinit_dir }}/{{ vm }}/user-data"
@@ -86,6 +116,26 @@
       {% for h in groups['vms'] %}
             {{ hostvars[h].ansible_host }} {{ h }}
       {% endfor %}
+
+      {% if False %}
+        - path: /root/.ssh/id_rsa
+          permissions: '0600'
+          owner: root:root
+          encoding: b64
+          content: "{{ hostvars['localhost'].intervm_priv_b64 }}"
+
+        - path: /root/.ssh/id_rsa.pub
+          permissions: '0644'
+          owner: root:root
+          encoding: b64
+          content: "{{ hostvars['localhost'].intervm_pub_b64 }}"
+
+        - path: /root/.ssh/authorized_keys
+          permissions: '0600'
+          owner: root:root
+          append: true
+          content: "{{ hostvars['localhost'].intervm_pub_line }}\n"
+      {% endif %}
 
       runcmd:
         - [ hostnamectl, set-hostname, "{{ vm }}" ]

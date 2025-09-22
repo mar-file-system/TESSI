@@ -1,36 +1,46 @@
-- name: Find the interface with the ansible_host IP address 
+# 1) Choose which IP to target: mvpnet_ip when networking == "mvpnet", else ansible_host
+- name: Set target_ip based on networking mode
   set_fact:
-    interface_with_ansible_host_ip: >-
+    target_ip: "{{ ((networking | default('')) == 'mvpnet') | ternary(mvpnet_ip, ansible_host) }}"
+
+# 2) Find the interface that has target_ip
+- name: Find the interface with the target_ip address
+  set_fact:
+    interface_with_target_ip: >-
       {{
         ansible_interfaces
         | map('extract', ansible_facts)
         | selectattr('ipv4.address', 'defined')
-        | selectattr('ipv4.address', 'equalto', ansible_host)
+        | selectattr('ipv4.address', 'equalto', target_ip)
         | map(attribute='device')
         | first
       }}
 
+# 3) Show what we found
 - name: Display the interface name
   debug:
-    msg: The network interface with IP {{ ansible_host }} is {{ interface_with_ansible_host_ip }}.
+    msg: "The network interface with IP {{ target_ip }} is {{ interface_with_target_ip }}."
 
+# 4) Write the interface name into conninterfacefile
 - name: Create {{ conninterfacefile }} with the interface name
   ansible.builtin.copy:
     dest: "{{ conninterfacefile }}"
-    content: "{{ interface_with_ansible_host_ip }}\n"
+    content: "{{ interface_with_target_ip }}\n"
     owner: root
     group: root
     mode: '0644'
-  when: interface_with_ansible_host_ip is defined
+  when: interface_with_target_ip is defined
 
+# 5) Ensure connInterfacesFile is set in each config file
 - name: Ensure connInterfacesFile is set in all configuration files
   ansible.builtin.lineinfile:
     path: "{{ item }}"
     regexp: '^(connInterfacesFile\s*=\s*).*$'
-    line: 'connInterfacesFile = {{ conninterfacefile }}'
+    line: "connInterfacesFile = {{ conninterfacefile }}"
     create: yes
   loop: "{{ conf_files }}"
 
+# 6) Verify the parameter is present (non-commented)
 - name: Verify connInterfacesFile parameter in configuration files
   ansible.builtin.shell: |
     grep -v '^#' {{ item }} | grep 'connInterfacesFile'

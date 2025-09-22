@@ -61,6 +61,23 @@
           marker: "{{ sshconfigmark }}"
         ignore_errors: true
 
+      - name: Remove RAM-backed qcow2s in /dev/shm for all VMs
+        run_once: true
+        delegate_to: "{{ hostvars[vm].physical_host }}"
+        ansible.builtin.shell: |
+          set -euo pipefail
+          shopt -s nullglob
+          for f in /dev/shm/{{ vm }}-{{ UNIQUE_TAG }}-d*.qcow2; do
+            rm -f "$f"
+          done
+        args:
+          executable: /bin/bash
+        loop: "{{ groups['vms'] }}"
+        loop_control:
+          loop_var: vm
+          label: "{{ vm }}"
+        changed_when: true
+
       - name: Exit early when makeclean is requested
         meta: end_play
         when: "'makeclean' in ansible_run_tags"
@@ -100,6 +117,28 @@
     - name: Set fact for number of vms
       set_fact:
         num_vms: "{{ groups['vms'] | length }}"
+
+    - name: Create RAM-backed qcow2s in /dev/shm for all VMs
+      delegate_to: "{{ hostvars[vm].physical_host }}"
+      run_once: true
+      vars:
+        sizes: "{{ (hostvars[vm].hdd_sizes | default('[]') | from_yaml) }}"
+      ansible.builtin.shell: |
+        set -euo pipefail
+        vm="{{ vm }}"
+        i=1
+        for sz in {{ sizes | map('quote') | join(' ') }}; do
+          qemu-img create -f qcow2 "/dev/shm/${vm}-{{ UNIQUE_TAG }}-d${i}.qcow2" "${sz}G"
+          i=$((i+1))
+        done
+      args:
+        executable: /bin/bash
+      loop: "{{ groups['vms'] }}"
+      loop_control:
+        loop_var: vm
+        label: "{{ vm }}"
+      when: "(hostvars[vm].hdd_sizes | default('[]') | from_yaml | length) > 0"
+      changed_when: true
 
     - block:
       - name: Build per-rank -c flag list (prefers vm.mpi_rank, falls back to order)
