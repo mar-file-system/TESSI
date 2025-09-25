@@ -17,6 +17,13 @@
       when: "'makeclean' in ansible_run_tags" # don't run unless makeclean was passed
       tags: makeclean
 
+    - name: Show qcow_file for each assigned_vm
+      debug:
+        msg: "VM {{ item.name }} qcow_file: {{ item.qcow_file }}"
+      with_items: "{{ assigned_vms }}"
+      loop_control:
+        label: "{{ item.name }}"
+
     - name: Install each VM from a stock iso (if ENOENT) and ensure they are running
       include_tasks: install_vm.yaml
       with_items: "{{ assigned_vms }}"
@@ -27,6 +34,19 @@
   hosts: physical_hosts
   gather_facts: no
   tasks:
+    # Per-host short-circuit: no assigned work? stop this host now.
+    - meta: end_host
+      when: (assigned_vms | default([])) | length == 0
+
+    - name: Add each VM (that actually needs work) to dynamic inventory
+      add_host:
+        name: "{{ item.name }}"
+        groups: "{{ item.group }},dynamic_hosts"
+        ansible_ssh_common_args: "-o ProxyCommand='ssh -W %h:%p -q {{ inventory_hostname }}' -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
+      loop: "{{ assigned_vms }}"
+      loop_control:
+        label: "{{ item.name }}"
+
     - name: Add each VM to dynamic inventory
       add_host:
         name: "{{ vm.name }}"
@@ -40,13 +60,14 @@
       vars:
         physical_host: "{{ item.0.key }}"
         vm: "{{ item.1 }}"
-      when: vm is defined
+      when: vm is defined and false # this is the old way before we started trying to exit early if images already exist
       run_once: true
 
     - name: Show dynamic hosts that were added
       debug:
         var: groups['dynamic_hosts']
       run_once: true
+      when: (groups['dynamic_hosts'] | default([])) | length > 0
 
 - name: Debug dynamic host groups
   hosts: "{{ (groups['dynamic_hosts'] | default(['localhost'])) | join(',') }}"
@@ -69,6 +90,8 @@
   gather_facts: no
   strategy: free    # allow independent processing for parallel execution
   tasks:
+    - meta: end_host
+      when: (assigned_vms | default([])) | length == 0
 
     - name: Debug assigned VMs before including tasks
       debug:

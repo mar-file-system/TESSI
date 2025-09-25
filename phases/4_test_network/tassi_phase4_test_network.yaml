@@ -70,12 +70,63 @@
       run_once: true
       when: network.type == 'mvpnet'
 
-- name: Verify dynamic_hosts group
-  hosts: dynamic_hosts
+- name: Run tasks now on the VMs themselves (dynamic_hosts group)
+  hosts: vms
   gather_facts: no
+  vars:
+    network: "{{ hostvars[groups['physical_hosts'][0]].network | default(omit) }}"
   tasks:
     - debug:
         msg: "Hostname: {{ inventory_hostname }}"
+    
+    - name: Get MAC addresses when network is mvpnet
+      block:
+      - name: Gather network facts
+        ansible.builtin.setup:
+          gather_subset:
+            - network
+
+      - name: Pick first physical host
+        ansible.builtin.set_fact:
+          _phys0: "{{ (groups['physical_hosts'] | default([])) | first | default('') }}"
+
+      - name: Debug chosen _phys0
+        ansible.builtin.debug:
+          var: _phys0
+
+      - name: Debug network dict on _phys0
+        ansible.builtin.debug:
+          var: hostvars[_phys0]['network']
+
+      - name: Set target_device from canonical host
+        ansible.builtin.set_fact:
+          target_device: "{{ hostvars[_phys0]['network']['device'] }}"
+
+      - name: Debug target device 
+        ansible.builtin.debug:
+          var: target_device 
+
+      - name: Extract MAC/IP from facts
+        ansible.builtin.set_fact:
+          _iface: "{{ lookup('vars', 'ansible_' ~ target_device) | default({}) }}"
+          target_mac: "{{ (_iface.macaddress | default('')) | lower }}"
+          target_ipv4: "{{ _iface.ipv4.address | default('') }}"
+        when: false
+
+      - ansible.builtin.command: "cat /sys/class/net/{{ target_device }}/address"
+        register: _mac_out
+        changed_when: false
+      - ansible.builtin.shell: "ip -o -4 addr show dev {{ target_device }} | awk '{print $4}' | cut -d/ -f1"
+        register: _ip4_out
+        changed_when: false
+      - ansible.builtin.set_fact:
+          target_mac: "{{ (_mac_out.stdout|trim|lower) }}"
+          target_ipv4: "{{ (_ip4_out.stdout|trim) }}"
+
+      - name: Debug {{ target_device }} MAC/IP
+        ansible.builtin.debug:
+          msg: "Host {{ inventory_hostname }}  iface={{ target_device }}  MAC={{ target_mac | default('UNKNOWN') }}  IPv4={{ target_ipv4 | default('NONE') }}"
+      when: network.type == 'mvpnet'
 
     - name: Re-initialize ping results
       set_fact:
@@ -129,6 +180,11 @@
           dot -Kcirco -Tpng "{{ image_dir }}"/ping_results_vm_vm.dot -o "{{ image_dir }}"/ping_results_vm_vm.png
       delegate_to: localhost
       run_once: true
+
+    - name: Make network graph
+      include_tasks: make_network_graph.yaml
+      vars:
+        template_file: templates/network_graph.dot.j2
 
     - name: Message final status
       debug:

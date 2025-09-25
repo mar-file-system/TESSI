@@ -70,16 +70,45 @@
 - name: Distribute VM assignments to each host (skip if not assigned)
   set_fact:
     assigned_vms: "{{ vm_assignment[inventory_hostname] | default([]) }}"
-    
-- name: Add physical_host to assigned VMs
+
+- name: Determine if we're in makeclean mode
+  set_fact:
+    run_makeclean: "{{ 'makeclean' in ansible_run_tags }}"
+
+- name: Stat qcow_file for each candidate VM
+  stat:
+    path: "{{ item.qcow_file }}"
+  loop: "{{ assigned_vms }}"
+  register: qcow_stats
+  loop_control:
+    label: "{{ item.name }}"
+
+# Build lists of existing / missing based on stat.exists
+- name: Build existing/missing name lists
+  set_fact:
+    existing_vm_names: "{{ qcow_stats.results | selectattr('stat.exists') | map(attribute='item.name') | list }}"
+    missing_vm_names: "{{ qcow_stats.results | rejectattr('stat.exists') | map(attribute='item.name') | list }}"
+
+- name: Filter assigned_vms by phase
   set_fact:
     assigned_vms: >-
       {{
-        assigned_vms | map('combine', {'physical_host': inventory_hostname}) | list
+        assigned_vms
+        | selectattr(
+            'name', 'in',
+            (existing_vm_names if run_makeclean else missing_vm_names)
+          )
+        | list
       }}
+
+- name: Add physical_host to assigned VMs
+  set_fact:
+    assigned_vms: "{{ assigned_vms | map('combine', {'physical_host': inventory_hostname}) | list }}"
   when: assigned_vms | length > 0
 
-- name: Display assigned VMs
+- name: Display assigned VMs after filtering
   debug:
-    msg: "Host {{ inventory_hostname }} was assigned the following VMs: {{ assigned_vms | map(attribute='name') | list }}"
+    msg:
+      - "Mode: {{ 'makeclean' if run_makeclean else 'regular' }}"
+      - "Host {{ inventory_hostname }} assigned VMs: {{ assigned_vms | map(attribute='name') | list }}"
 
