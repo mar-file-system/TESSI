@@ -68,13 +68,25 @@
     - lustre
     - zfs
 
+- name: Pick the effective IP for this host
+  set_fact:
+    node_ip: >-
+      {{ mvpnet_ip
+         if (networking is defined and networking == 'mvpnet' and (mvpnet_ip is defined))
+         else node_ip }}
+  when: false # do I need to repeat this here?
+
+- name: Debug {{ node_ip }} for {{ hostname }}
+  debug:
+    var: node_ip
+
 - name: Extract the last octet of the IP address
   set_fact:
-    ip: "{{ ansible_host.split('.')[-1] }}"
+    ip: "{{ node_ip.split('.')[-1] }}"
 
 - name: Extract the first three octets of the IP address
   set_fact:
-    network_addr: "{{ ansible_host | regex_replace('\\.\\d+$', '') }}"
+    network_addr: "{{ node_ip | regex_replace('\\.\\d+$', '') }}"
 
 - name: Debug IP and Network Address
   debug:
@@ -117,6 +129,28 @@
     - configure
     - modules
     - lustre
+
+- name: Reconfigure LNet for mvpnet
+  when: networking == "mvpnet"
+  block:
+    - name: Unconfigure LNet
+      ansible.builtin.command: lnetctl lnet unconfigure
+      ignore_errors: true
+
+    - name: Load lnet kernel module
+      ansible.builtin.command: modprobe lnet
+
+    - name: Configure LNet
+      ansible.builtin.command: lnetctl lnet configure
+
+    - name: Remove existing tcp0 network if present
+      ansible.builtin.command: lnetctl net del --net tcp0
+      ignore_errors: true
+      register: remove_tcp0
+      changed_when: "'deleted' in remove_tcp0.stdout or remove_tcp0.rc == 0"
+
+    - name: Add tcp0 network interface
+      ansible.builtin.command: "lnetctl net add --net tcp0 --if {{ device }}"
 
 - block:
   - name: Load Lustre modules
@@ -255,12 +289,18 @@
   when: target_mount is defined
 
 - block:
-  - name: Set target disk identifier for first extra disk
+  - name: Set target_disk fact for first server disk based on networking type
     ansible.builtin.set_fact:
-      target_disk: "b"
+      target_disk: >-
+        {% if networking == 'mvpnet' %}
+        /dev/vdc
+        {% else %}
+        {{ lookup('pipe', 'ls /dev/disk/by-id/virtio-$(hostname).b') }}
+        {% endif %}
+    changed_when: false
 
   - name: Find the full path of the OST and MDT devices
-    ansible.builtin.shell: "ls /dev/disk/by-id/virtio-$(hostname).{{ target_disk }}"
+    ansible.builtin.shell: "ls {{ target_disk }}"
     register: device_path
     changed_when: false
 
@@ -274,12 +314,18 @@
   when: "'clients' not in group_names"
 
 - block:
-  - name: Set target disk identifier for mgs device (second extra disk on first MDS)
+  - name: Set target_disk fact for mgs device based on networking type
     ansible.builtin.set_fact:
-      mgs_disk: "c"
+      mgs_disk: >-
+        {% if networking == 'mvpnet' %}
+        /dev/vdd
+        {% else %}
+        {{ lookup('pipe', 'ls /dev/disk/by-id/virtio-$(hostname).c') }}
+        {% endif %}
+    changed_when: false
 
   - name: Find the full path of the mgs device 
-    ansible.builtin.shell: "ls /dev/disk/by-id/virtio-$(hostname).{{ mgs_disk }}"
+    ansible.builtin.shell: "ls {{ mgs_disk }}"
     register: mgs_device_path
     changed_when: false
 
@@ -366,15 +412,15 @@
 
 
 - block:
-  - name: Detect network interface for LNet based on `ansible_host`
+  - name: Detect network interface for LNet based on `node_ip`
     ansible.builtin.shell:
-      cmd: "ip -o addr show | awk '/{{ ansible_host | regex_escape }}/ {print $2; exit}'"
+      cmd: "ip -o addr show | awk '/{{ node_ip | regex_escape }}/ {print $2; exit}'"
     register: correct_interface
     changed_when: false
 
   - name: Debug detected interface
     ansible.builtin.debug:
-      msg: "LNet should use interface {{ correct_interface.stdout }} (IP: {{ ansible_host }})"
+      msg: "LNet should use interface {{ correct_interface.stdout }} (IP: {{ node_ip }})"
 
 ### Persist LNet Configuration (Only on MDS and OSS Nodes)**
 - block:
@@ -399,6 +445,7 @@
 
 # this block removes the lnet interface on the default network and adds one on the storage network
 # this must go after the previous because the previous overwrites /etc/modprobe.d/lustre.conf
+# this block maybe isn't needed when networking is mvpnet
 - block:
 
   ### Get the Currently Configured LNet Interface**
