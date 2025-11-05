@@ -3,13 +3,39 @@
   hosts: physical_hosts
   gather_facts: false
   vars_files: vars.yaml
+  any_errors_fatal: true
 
   # TODO: need to delete the /tmp/mvpnet directory
-  # TODO: need to stop hard-coding path to mpirun
   # TODO: need to go through and replace almost everything with values from config
   # TODO: need to individualize the MPI ranks cloud-init and images
 
   tasks:
+
+    - block:
+      - name: Check required binaries are in PATH
+        ansible.builtin.command: which {{ item }}
+        loop:
+          - mvpnet
+          - monwrap
+          - mpirun
+        register: path_check
+        changed_when: false
+        ignore_errors: true
+
+      - name: Fail if any required binaries are missing
+        ansible.builtin.fail:
+          msg: >
+            Missing executables: {{
+              path_check.results
+              | selectattr('rc', 'ne', 0)
+              | map(attribute='item')
+              | join(', ')
+            }}
+        when: >
+          path_check.results
+          | selectattr('rc', 'ne', 0)
+          | list
+          | length > 0
 
     - block:
       # --- Check for pid_file ---
@@ -114,6 +140,54 @@
       debug:
         msg: "All cloud-init renders complete. Proceeding."
 
+    - name: Detect MPI flavor
+      command: mpirun --version
+      register: mpi_version
+      changed_when: false
+      failed_when: false
+
+    - name: Set MPI flavor fact
+      set_fact:
+        mpi_flavor: >-
+          {% if 'Open MPI' in mpi_version.stdout %}
+          openmpi
+          {% elif 'MPICH' in mpi_version.stdout %}
+          mpich
+          {% else %}
+          unknown
+          {% endif %}
+
+    - name: Fail if MPI flavor could not be detected
+      fail:
+        msg: >
+          Unable to detect MPI flavor from 'mpirun --version' output:
+          {{ mpi_version.stdout | default('no output') }}
+      when: mpi_flavor == 'unknown'
+
+    - name: Normalize mpi_flavor (trim)
+      set_fact:
+        mpi_flavor: "{{ mpi_flavor | trim }}"
+
+    - name: Debug detected MPI flavor
+      debug:
+        msg: "Detected MPI flavor: {{ mpi_flavor }}"
+
+    - name: Build MPI hostfile from physical hosts
+      run_once: true
+      delegate_to: "{{ groups['physical_hosts'][0] }}"
+      copy:
+        dest: "{{ mpi_hostfile }}"
+        mode: "0644"
+        content: |
+          {% for h in groups['physical_hosts'] %}
+          {% set count = (hostvars[h].vms | default([])) | length %}
+          {% if mpi_flavor == 'openmpi' %}
+          {{ h }} slots={{ count }}
+          {% elif mpi_flavor == 'mpich' %}
+          {{ h }}:{{ count }}
+          {% endif %}
+          {% endfor %}
+
     - name: Build MPI hostfile from physical hosts (on launcher); assume MPICH (add slots)
       run_once: true
       delegate_to: "{{ groups['physical_hosts'][0] }}"
@@ -124,6 +198,7 @@
           {% for h in groups['physical_hosts'] %}
           {{ h }}:{{ (hostvars[h].vms | default([])) | length }}
           {% endfor %}
+      when: false # old way
 
     - name: Set fact for number of vms
       set_fact:
@@ -162,7 +237,7 @@
               {%- set _ = pairs.append([r, h]) -%}
             {%- endfor -%}
             {%- for p in pairs | sort -%}
-              {%- set _ = parts.append("-c %s:%s/%s" | format(p[0], cloudinit_dir, p[1])) -%}
+              {%- set _ = parts.append("-c %s:%s/%s.iso" | format(p[0], cloudinit_dir, p[1])) -%}
             {%- endfor -%}
             {{ parts | join(' ') }}
 
@@ -260,7 +335,7 @@
       - name: Construct mpirun command line
         set_fact:
           mpirun_cmd: >-
-            /opt/mpich-4.1.1/bin/mpirun -n {{ num_vms }} -hostfile {{ mpi_hostfile }}
+            mpirun -n {{ num_vms }} -hostfile {{ mpi_hostfile }}
             mvpnet -C 1
             {{ mvpnet_c_flags }}
             {{ mvpnet_i_flags }}

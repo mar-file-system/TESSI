@@ -19,10 +19,11 @@ The motivation and some additional information about TESSI can be found in our [
 1. Ansible
 2. Libvirt
 3. Python 3.8
-4. \> git clone git@gitlab.newmexicoconsortium.org:jbent/tassi.git
-5. \> cd tassi 
-6. \> git checkout v3.0.0
-4. \> pip3.8 install -r requirements.txt
+4. qemu-img
+5. \> git clone git@gitlab.newmexicoconsortium.org:jbent/tassi.git
+6. \> cd tassi 
+7. \> git checkout v3.0.0
+8. \> pip3.8 install -r requirements.txt
 
 ## Running
 1. To run TESSI for the first time, make sure you are in the sudoers file.
