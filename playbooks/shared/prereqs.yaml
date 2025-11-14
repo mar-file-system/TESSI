@@ -1,0 +1,203 @@
+---
+- name: Ensure /mnt/usrc-storage-nfs is mounted on all physical hosts
+  hosts: physical_hosts
+  become: false
+  gather_facts: no
+
+  vars:
+    ansible_ssh_common_args: "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ControlMaster=no -o ControlPersist=0"
+    ansible_remote_tmp: /tmp
+    mpihome: "/usr/lib64/openmpi"
+    mount_src: "10.15.1.11:/mnt/vol0/usrc-storage"
+    mount_path: "/mnt/usrc-storage-nfs"
+    mount_fstype: "nfs"
+    mount_opts: "vers=4.2,hard,noatime,_netdev,local_lock=all"
+    login_files:
+      - ~/.bashrc
+      - ~/.bash_profile
+
+  tasks:
+    - name: Tasks that need to be run as root 
+      block:
+      - name: Check if firewalld is active
+        command: systemctl is-active firewalld
+        register: firewalld_status
+        changed_when: false
+        failed_when: false
+
+      - block:
+        - name: Warn if firewalld is active
+          debug:
+            msg: "WARNING: firewalld is active and will be disabled."
+
+        - name: Disable and stop firewalld if active
+          service:
+            name: firewalld
+            state: stopped
+            enabled: false
+        when: firewalld_status.rc == 0
+
+
+      - name: Ensure qemu-system-x86_64 is installed and available plus others needed for making reports
+        block:
+          - name: Check if qemu-system-x86_64 is already present
+            command: which qemu-system-x86_64
+            register: qemu_check
+            ignore_errors: true
+            changed_when: false
+
+          - name: Install QEMU if missing
+            when: qemu_check.rc != 0
+            package:
+              name:
+                - qemu-kvm
+                - qemu-img
+                - libvirt
+                - virt-install
+                - virt-manager
+                - enscript
+                - ImageMagick
+                - python3-img2pdf
+                - poppler-utils
+              state: present
+
+
+          - name: Ensure qemu-system-x86_64 alias if necessary 
+            block:
+              - name: Check if /usr/bin/qemu-system-x86_64 exists
+                stat:
+                  path: /usr/bin/qemu-system-x86_64
+                register: qemu_stat
+
+              - name: Create symlink to /usr/libexec/qemu-kvm if missing
+                file:
+                  src: /usr/libexec/qemu-kvm
+                  dest: /usr/bin/qemu-system-x86_64
+                  state: link
+                when: not qemu_stat.stat.exists
+
+          - name: Verify qemu-system-x86_64 exists after install
+            command: which qemu-system-x86_64
+            register: qemu_path
+            changed_when: false
+
+          - name: Assert that qemu-system-x86_64 is now available
+            assert:
+              that:
+                - qemu_path.rc == 0
+              fail_msg: "qemu-system-x86_64 was not found even after installation!"
+
+      - name: Check current sshd LimitMEMLOCK setting
+        command: systemctl show sshd.service -p LimitMEMLOCK
+        register: memlock_check
+        changed_when: false
+
+      - name: Add LimitMEMLOCK=infinity override for sshd
+        block:
+          - name: Create systemd override directory
+            file:
+              path: /etc/systemd/system/sshd.service.d
+              state: directory
+              mode: '0755'
+
+          - name: Add LimitMEMLOCK=infinity override file
+            copy:
+              dest: /etc/systemd/system/sshd.service.d/override.conf
+              content: |
+                [Service]
+                LimitMEMLOCK=infinity
+              owner: root
+              group: root
+              mode: '0644'
+
+          - name: Reload systemd and restart sshd
+            block:
+              - name: Reload systemd daemon
+                command: systemctl daemon-reexec
+              - name: Reload systemd units
+                command: systemctl daemon-reload
+              - name: Restart sshd
+                service:
+                  name: sshd
+                  state: restarted
+        when: "'LimitMEMLOCK=infinity' not in memlock_check.stdout"
+
+      - name: Ensure mount point directory exists
+        file:
+          path: "{{ mount_path }}"
+          state: directory
+          mode: "0755"
+
+      - name: Ensure NFS mount is configured and mounted
+        ansible.builtin.mount:
+          path: "{{ mount_path }}"
+          src: "{{ mount_src }}"
+          fstype: "{{ mount_fstype }}"
+          opts: "{{ mount_opts }}"
+          state: mounted
+      become: true
+
+    - name: Ensure $HOME/bin and {{ mpihome }}/bin are in PATH
+      lineinfile:
+        path: "{{ item }}"
+        insertafter: EOF
+        line: 'export PATH="$HOME/bin:{{ mpihome }}/bin:$PATH"'
+        state: present
+      loop: "{{ login_files }}"
+
+    - name: Check whether mvpnet binaries are in PATH
+      shell: |
+        which mvpnet && which monwrap 
+      register: path_check
+      changed_when: false
+
+    - name: Git and build mvpnet if required
+      block:
+      - name: Set mvpnet directory fact
+        set_fact:
+          mvpnet_dir: /tmp/mvpnet
+          mvpnet_build: /tmp/mvpnet/build
+
+      - name: Ensure {{ mvpnet_dir }} directory doesn't exist 
+        file:
+          path: "{{ mvpnet_dir }}" 
+          state: absent
+
+      - name: Clone mvpnet repository
+        git:
+          repo: https://github.com/pnfs-storage/mvpnet.git
+          dest: "{{ mvpnet_dir }}" 
+
+      - name: Create build directory
+        file:
+          path: "{{ mvpnet_build }}" 
+          state: directory
+
+      - block:
+        - name: Configure CMake build
+          command: >
+            cmake -DCMAKE_INSTALL_PREFIX=$HOME
+                   -DCMAKE_PREFIX_PATH={{ mpihome }}
+                   ..
+
+        - name: Build mvpnet
+          command: make 
+
+        - name: Install mvpnet
+          command: make install
+        module_defaults:
+          command:
+            chdir: /tmp/mvpnet/build
+      when: path_check.rc != 0
+
+    - name: Verify binaries are in PATH
+      shell: |
+        which mvpnet && which monwrap && which mpirun
+      register: path_check
+      changed_when: false
+      failed_when: path_check.rc != 0
+
+    - name: Display PATH verification results
+      debug:
+        var: path_check.stdout_lines
+
