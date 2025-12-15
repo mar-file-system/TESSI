@@ -1,0 +1,28 @@
+- name: Full libvirt cleanup
+  hosts: physical_hosts
+  become: true
+  vars:
+    ansible_remote_tmp: /tmp
+  tasks:
+    - name: Stop and undefine all VMs
+      shell: |
+        virsh list --all --name | while read -r vm; do
+          [ -z "$vm" ] && continue
+          virsh destroy "$vm" 2>/dev/null || true
+          virsh undefine "$vm" --remove-all-storage --nvram 2>/dev/null || virsh undefine "$vm"
+        done
+    - name: Delete all volumes and pools
+      shell: |
+        for pool in $(virsh pool-list --all --name); do
+          virsh vol-list --pool "$pool" | awk 'NR>2 {print $1}' | while read -r vol; do
+            [ -z "$vol" ] && continue
+            virsh vol-delete --pool "$pool" "$vol" || true
+          done
+          virsh pool-destroy "$pool" 2>/dev/null || true
+          virsh pool-undefine "$pool" 2>/dev/null || true
+        done
+    - name: Remove leftover directories and restart
+      shell: |
+        rm -rf /var/lib/libvirt/*_pool /etc/libvirt/qemu/* /etc/libvirt/storage/* /var/lib/libvirt/images/*
+        systemctl restart libvirtd
+
