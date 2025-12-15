@@ -7,15 +7,17 @@ data "external" "vm_ips" {
   ]
 
   program = ["bash", "-c", <<EOT
-    for i in {1..10}; do
-      ips=$(ssh root@${each.value.host} virsh domifaddr ${each.key} | grep ipv4 | awk '{print $4}' | cut -d'/' -f1 | tr '\\n' ',' | sed 's/,$//')
-      if [ -n "$ips" ]; then
-        echo "{\"output\": \"$(echo $ips | sed 's/\"/\\\\\"/g')\"}"
-        exit 0
-      fi
-      sleep 60  # Wait before retrying
-    done
-    echo '{"output": ""}'  # Return an empty string if no IPs found after retries
+  for i in {1..10}; do
+    ok=$(ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+         root@${each.value.host} "nc -z -w3 ${each.key} 22 && echo ok" 2>/dev/null)
+    if [ "$ok" = "ok" ]; then
+      echo '{"output": "up"}'
+      exit 0
+    fi
+    sleep 60
+  done
+
+  echo '{"output": "error: unable to ssh into VM after 10 attempts"}'
   EOT
   ]
 }

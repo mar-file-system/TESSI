@@ -27,22 +27,31 @@
       when: libvirt.name in (libvirt_facts.ansible_facts.ansible_libvirt_networks)
       ignore_errors: true
 
-    - name: Gather routes referencing specific interfaces
-      ansible.builtin.command:
-        cmd: "ip route show | grep '{{ item }}'"
+    - name: Gather routes referencing specific interfaces in {{ wireguard.interface }} and {{ bridge.interface }}
+      shell: "ip route show | grep {{ item }}"
       with_items:
         - "{{ wireguard.interface }}"
         - "{{ bridge.interface }}"
       register: found_routes
-      failed_when: found_routes.rc != 0 and found_routes.stdout != ""
-
-    - name: Delete routes referencing specific interfaces
-      ansible.builtin.command:
-        cmd: "ip route del {{ item }}"
-      with_items: "{{ found_routes.results | map(attribute='stdout_lines') | flatten }}"
       ignore_errors: true
 
-    - name: List iptables rules matching WireGuard or bridge interfaces
+    - name: Debug found routes
+      debug:
+        msg: |
+          Interface: {{ item.item }}
+          Routes:
+          {{ item.stdout | default('NONE') }}
+      loop: "{{ found_routes.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+
+    - name: Delete routes referencing stale interfaces
+      shell: "ip route del {{ item.split()[0] }}"
+      when: item != ""
+      loop: "{{ found_routes.results | map(attribute='stdout_lines') | flatten }}"
+      ignore_errors: true
+
+    - name: List FILTER iptables rules matching WireGuard or bridge interfaces
       ansible.builtin.shell: |
         iptables -S | grep -E '{{ wireguard.interface }}|{{ bridge.interface }}'
       register: matching_rules
@@ -53,10 +62,21 @@
         var: matching_rules.stdout_lines
       when: false
 
-    - name: Delete iptables rules matching WireGuard or bridge interfaces
+    - name: Delete FILTER iptables rules matching WireGuard or bridge interfaces
       ansible.builtin.shell: |
         iptables {{ item | regex_replace('^-A', '-D') }}
       loop: "{{ matching_rules.stdout_lines }}"
+
+    - name: List NAT iptables rules matching WireGuard, bridge, or VM Subnets (NAT table)
+      ansible.builtin.shell: |
+        iptables -t nat -S | grep -E '{{ wireguard.interface }}|{{ bridge.interface }}|{{ libvirt_addresses }}'
+      register: matching_nat_rules
+      failed_when: matching_nat_rules.rc not in [0, 1]
+
+    - name: Delete NAT iptables rules matching WireGuard or bridge interfaces (NAT table)
+      ansible.builtin.shell: |
+        iptables -t nat {{ item | regex_replace('^-A', '-D') }}
+      loop: "{{ matching_nat_rules.stdout_lines }}"
 
     - name: Verify remaining iptables rules
       shell: iptables -L -v --line-numbers
@@ -162,9 +182,10 @@
       set_fact:
         WG_LISTENING_PORT: "{{ wg_listen_port_result.stdout }}"
 
-    - name: Set PUBLIC_IP fact using default Ansible variable
+    - name: Set PUBLIC_IP and PUBLIC_IF fact using default Ansible variable
       set_fact:
         PUBLIC_IP: "{{ ansible_default_ipv4.address }}"
+        PUBLIC_IF: "{{ ansible_default_ipv4.interface }}"
 
     - name: Gather public keys and IPs of all hosts
       ansible.builtin.set_fact:
@@ -177,7 +198,8 @@
               'wireguard_ip': hostvars[host]['wireguard_ip'] | default(''),
               'PUBLIC_IP': hostvars[host]['PUBLIC_IP'] | default(''),
               'WG_LISTENING_PORT': hostvars[host]['WG_LISTENING_PORT'] | default(''),
-              'libvirt_addresses': hostvars[host]['libvirt_addresses'] | default('')
+              'libvirt_addresses': hostvars[host]['libvirt_addresses'] | default(''),
+              'underlay_interface': hostvars[host]['PUBLIC_IF'] | default('')
             } -%}
           {{ data.append(info) }}
           {%- endfor -%}
@@ -187,6 +209,173 @@
       ansible.builtin.debug:
         msg: "Host data: {{ host_data }}"
 
+    - name: Check for existant networks that conflict with requested
+      block:
+      - name: Gather existing interface IPv4 subnets
+        shell: "ip -o -4 addr show | cut -d ' ' -f 4"
+        register: existing_subnets_raw
+        changed_when: false
+
+      - name: Store existing subnets
+        set_fact:
+          existing_subnets: "{{ existing_subnets_raw.stdout_lines }}"
+
+      - name: Compute required WireGuard CIDR
+        set_fact:
+          wg_required_cidr: "{{ wireguard_ip | regex_replace('\\.[0-9]+$', '.0') }}/{{ wireguard.cidr }}"
+
+      - name: Detect existing subnets overlapping WG subnet
+        set_fact:
+          wg_conflicts: "{{ existing_subnets | select('ipaddr', wg_required_cidr) | list }}"
+
+      - name: Fail if WireGuard subnet conflicts with existing interfaces
+        fail:
+          msg: |
+            WireGuard network conflict detected on host {{ inventory_hostname }}!
+
+            Requested WireGuard subnet:
+              {{ wg_required_cidr }}
+
+            Conflicting existing subnets:
+              {{ wg_conflicts | join('\n') }}
+
+            This usually means a stale WireGuard interface or an older MVPnet/WG configuration
+            still exists. Please remove or reconfigure the conflicting interface(s).
+        when: wg_conflicts | length > 1   # Own /32 is ok; more means conflict
+
+      - name: Fail if WireGuard IP is already assigned to another interface
+        fail:
+          msg: |
+            WireGuard IP {{ wireguard_ip }} is already present on an existing interface
+            on host {{ inventory_hostname }}.
+
+            This indicates a leftover old interface or stale configuration.
+
+            Existing subnets:
+              {{ existing_subnets | join('\n') }}
+        when: existing_subnets | select('regex', wireguard_ip) | list | length > 0
+
+      - name: DEBUG WG subnet conflict check
+        debug:
+          msg: |
+            [{{ inventory_hostname }}] Checking WG subnet {{ wg_required_cidr }}
+            Against:
+            {{ existing_subnets | join('\n') }}
+
+            Conflicts found:
+            {{ wg_conflicts | join('\n') if wg_conflicts else 'NONE' }}
+
+      - name: Detect existing subnets overlapping libvirt network
+        set_fact:
+          libvirt_conflicts: "{{ existing_subnets | select('ipaddr', libvirt_addresses) | list }}"
+
+      - name: Fail if libvirt subnet conflicts with existing interfaces
+        fail:
+          msg: |
+            Libvirt network conflict detected on host {{ inventory_hostname }}!
+
+            Requested libvirt subnet:
+              {{ libvirt_addresses }}
+
+            Conflicting existing subnets:
+              {{ libvirt_conflicts | join('\n') }}
+
+            This usually means a stale libvirt bridge or leftover network
+            from a previous test cluster run.
+        when: libvirt_conflicts | length > 0
+
+      - name: Gather existing IPv4 routes
+        shell: ip -4 route show
+        register: existing_routes_raw
+        changed_when: false
+
+      - name: Store existing routes
+        set_fact:
+          existing_routes: "{{ existing_routes_raw.stdout_lines }}"
+
+      - name: DEBUG existing routes
+        debug:
+          msg: |
+            [{{ inventory_hostname }}] Existing routes:
+            {{ existing_routes | join('\n') }}
+
+      - name: Detect WG route conflicts (wrong interface)
+        set_fact:
+          wg_route_conflicts: >-
+            {{
+              existing_routes
+              | select('search', wg_required_cidr)
+              | reject('search', wireguard.interface)
+              | list
+            }}
+
+      - name: DEBUG WG route conflict check
+        debug:
+          msg: |
+            [{{ inventory_hostname }}] Checking WG route for {{ wg_required_cidr }}
+            Conflicting routes:
+            {{ wg_route_conflicts | join('\n') if wg_route_conflicts else 'NONE' }}
+
+      - name: Fail if WG route conflicts exist
+        fail:
+          msg: |
+            WireGuard route conflict detected on {{ inventory_hostname }}!
+
+            Expected WG subnet:
+              {{ wg_required_cidr }}
+
+            Expected WG interface:
+              {{ wireguard.interface }}
+
+            But found conflicting routes:
+              {{ wg_route_conflicts | join('\n') }}
+
+            This is usually caused by stale interfaces from earlier network types.
+        when: wg_route_conflicts | length > 0
+
+      - name: DEBUG WG routes OK
+        debug:
+          msg: "[{{ inventory_hostname }}] WG route check OK — no conflicts."
+        when: wg_route_conflicts | length == 0
+
+      - name: Detect libvirt route conflicts
+        set_fact:
+          libvirt_route_conflicts: >-
+            {{
+              existing_routes
+              | select('search', libvirt_addresses)
+              | reject('search', bridge.interface)
+              | list
+            }}
+
+      - name: DEBUG libvirt route conflict check
+        debug:
+          msg: |
+            [{{ inventory_hostname }}] Checking libvirt route for {{ libvirt_addresses }}
+            Conflicting routes:
+            {{ libvirt_route_conflicts | join('\n') if libvirt_route_conflicts else 'NONE' }}
+
+      - name: Fail if libvirt route conflicts exist
+        fail:
+          msg: |
+            Libvirt route conflict detected on {{ inventory_hostname }}!
+
+            Expected libvirt subnet:
+              {{ libvirt_addresses }}
+
+            Expected bridge:
+              {{ bridge.interface }}
+
+            But found conflicting routes:
+              {{ libvirt_route_conflicts | join('\n') }}
+        when: libvirt_route_conflicts | length > 0
+
+      - name: DEBUG libvirt routes OK
+        debug:
+          msg: "[{{ inventory_hostname }}] Libvirt route check OK — no conflicts."
+        when: libvirt_route_conflicts | length == 0
+
+
     - name: Configure peers with PersistentKeepalive
       ansible.builtin.shell: |
         wg set {{ wireguard.interface }} peer {{ item.public_key }} \
@@ -194,6 +383,22 @@
           endpoint {{ item.PUBLIC_IP }}:{{ item.WG_LISTENING_PORT }} \
           persistent-keepalive 25
       with_items: "{{ host_data | selectattr('hostname', 'ne', inventory_hostname) | list }}"
+
+    - name: Create a file which can be used to debug the networking using tools/multidump.sh
+      block:
+
+      - name: Set facts needed for WireGuard multidump debug
+        set_fact:
+          underlay_interface: "{{ ansible_default_ipv4.interface }}"
+
+      - meta: flush_handlers   # THIS FORCES ALL HOSTS TO CATCH UP
+
+      - name: Generate multidump config for WireGuard debugging
+        template:
+          src: wg_multidump.txt.j2
+          dest: "{{ artifact_dir }}/wg_multidump.txt"
+        delegate_to: "{{ groups['all'][0] }}"
+        run_once: true
 
     - name: Ping WireGuard IPs of all other hosts
       ansible.builtin.shell: "ping -c 1 {{ item.wireguard_ip }}"
@@ -287,76 +492,155 @@
         name: "{{ libvirt.name }}"
         autostart: true
 
-    - name: Ensure IP forwarding is enabled
-      ansible.builtin.sysctl:
-        name: net.ipv4.ip_forward
-        value: '1'
-        state: present
-        sysctl_set: yes
-        reload: yes
+    - block:
+      - name: Add route to VM networks via WireGuard (if not already added)
+        ansible.builtin.shell: |
+          if ! ip route show | grep -q '{{ item.libvirt_addresses }}'; then
+            ip route add {{ item.libvirt_addresses }} dev {{ wireguard.interface }}
+          fi
+        with_items: "{{ host_data | selectattr('hostname', 'ne', inventory_hostname) | list }}"
+        args:
+          executable: /bin/bash
 
-    - name: Add route to VM networks via WireGuard (if not already added)
-      ansible.builtin.shell: |
-        if ! ip route show | grep -q '{{ item.libvirt_addresses }}'; then
-          ip route add {{ item.libvirt_addresses }} dev {{ wireguard.interface }}
-        fi
-      with_items: "{{ host_data | selectattr('hostname', 'ne', inventory_hostname) | list }}"
-      args:
-        executable: /bin/bash
+    - block:
+      - name: Remove libvirt REJECT blocking WG -> VM
+        ansible.builtin.iptables:
+          chain: LIBVIRT_FWI
+          out_interface: "{{ bridge.interface }}"
+          jump: REJECT
+          state: absent
 
-    - name: Allow traffic from WireGuard to VM network
-      ansible.builtin.command:
-        cmd: "iptables -I LIBVIRT_FWI 1 -i {{ wireguard.interface }} -o {{ bridge.interface }} -j ACCEPT"
+      - name: Remove libvirt REJECT blocking VM -> WG
+        ansible.builtin.iptables:
+          chain: LIBVIRT_FWO
+          in_interface: "{{ bridge.interface }}"
+          jump: REJECT
+          state: absent
 
-    - name: Allow traffic from VM network to WireGuard
-      ansible.builtin.command:
-        cmd: "iptables -I LIBVIRT_FWO 1 -i {{ bridge.interface }} -o {{ wireguard.interface }} -j ACCEPT"
+      - name: Allow WireGuard -> VM forwarding inside libvirt (FWI)
+        ansible.builtin.iptables:
+          chain: LIBVIRT_FWI
+          in_interface: "{{ wireguard.interface }}"
+          out_interface: "{{ bridge.interface }}"
+          jump: ACCEPT
+          comment: "Allow WG to reach VMs"
+          rule_num: 1
+          state: present
 
-    - name: Allow forwarding between VM networks (all libvirt bridges)
-      ansible.builtin.command:
-        cmd: "iptables -I FORWARD 1 -i {{ bridge.interface }} -o {{ bridge.interface }} -j ACCEPT"
+      - name: Allow VM -> WireGuard forwarding inside libvirt (FWO)
+        ansible.builtin.iptables:
+          chain: LIBVIRT_FWO
+          in_interface: "{{ bridge.interface }}"
+          out_interface: "{{ wireguard.interface }}"
+          jump: ACCEPT
+          comment: "Allow VMs to reach WG"
+          rule_num: 1
+          state: present
+      when: true # trying to fix networking after removing the default primary network
 
-    - name: Allow forwarding between WireGuard and VM bridge
-      ansible.builtin.command: 
-        cmd: "iptables -I FORWARD 1 -i {{ wireguard.interface }} -o {{ bridge.interface }} -j ACCEPT"
+    - block:
+      - name: Allow forwarding from backend network to VMs
+        ansible.builtin.iptables:
+          chain: FORWARD
+          in_interface: "{{ wireguard.interface }}"
+          out_interface: "{{ bridge.interface }}"
+          jump: ACCEPT
 
-    - name: Allow forwarding between VM bridge and WireGuard
-      ansible.builtin.command:
-        cmd: "iptables -I FORWARD 1 -i {{ bridge.interface }} -o {{ wireguard.interface }} -j ACCEPT"
+      - name: Allow forwarding from VMs to backend network
+        ansible.builtin.iptables:
+          chain: FORWARD
+          in_interface: "{{ bridge.interface }}"
+          out_interface: "{{ wireguard.interface }}"
+          jump: ACCEPT
+      when: false # trying to fix networking after removing the default primary network
 
-    - name: Allow all VM subnets to communicate (if not already added)
-      ansible.builtin.shell: |
-        if ! iptables -C FORWARD -s {{ item }} -d {{ item }} -j ACCEPT 2>/dev/null; then
-          iptables -I FORWARD 1 -s {{ item }} -d {{ item }} -j ACCEPT
-        fi
-      with_items: "{{ libvirt_addresses }}"
-      args:
-        executable: /bin/bash
 
-    - name: Get all REJECT rules affecting libvirt or WireGuard interfaces
-      ansible.builtin.shell: |
-        iptables -S | grep -E 'REJECT.*({{ bridge.interface }}|{{ wireguard.interface }})' || true
-      register: reject_rules
-      changed_when: false
+    - block:
+      - name: Ensure IP forwarding is enabled
+        ansible.builtin.sysctl:
+          name: net.ipv4.ip_forward
+          value: '1'
+          state: present
+          sysctl_set: yes
+          reload: yes
 
-    - name: Extract chains that contain REJECT rules
-      ansible.builtin.set_fact:
-        reject_chains: "{{ reject_rules.stdout_lines | map('regex_search', '-A ([^ ]+)', '\\1') | select('string') | list }}"
+      - name: Add route to VM networks via WireGuard (if not already added)
+        ansible.builtin.shell: |
+          if ! ip route show | grep -q '{{ item.libvirt_addresses }}'; then
+            ip route add {{ item.libvirt_addresses }} dev {{ wireguard.interface }}
+          fi
+        with_items: "{{ host_data | selectattr('hostname', 'ne', inventory_hostname) | list }}"
+        args:
+          executable: /bin/bash
 
-    - name: Ensure restrictive REJECT rules are removed from relevant chains
-      ansible.builtin.shell: |
-        while iptables -L {{ item }} --line-numbers | grep -q 'REJECT.*({{ bridge.interface }}|{{ wireguard.interface }})'; do
-          rule=$(iptables -L {{ item }} --line-numbers | grep -E 'REJECT.*({{ bridge.interface }}|{{ wireguard.interface }})' | awk '{print $1}' | head -n1)
-          iptables -D {{ item }} $rule
-        done
-      with_items: "{{ reject_chains }}"
-      args:
-        executable: /bin/bash
-      ignore_errors: yes
+      - name: Allow traffic from WireGuard to VM network
+        ansible.builtin.command:
+          cmd: "iptables -I LIBVIRT_FWI 1 -i {{ wireguard.interface }} -o {{ bridge.interface }} -j ACCEPT"
 
-    - name: Enable NAT for VM subnets
-      ansible.builtin.command:
-        cmd: "iptables -t nat -A POSTROUTING -s {{ libvirt_addresses }} ! -d {{ libvirt_addresses }} -j MASQUERADE"
+      - name: Allow traffic from VM network to WireGuard
+        ansible.builtin.command:
+          cmd: "iptables -I LIBVIRT_FWO 1 -i {{ bridge.interface }} -o {{ wireguard.interface }} -j ACCEPT"
+
+      - name: Allow forwarding between VM networks (all libvirt bridges)
+        ansible.builtin.command:
+          cmd: "iptables -I FORWARD 1 -i {{ bridge.interface }} -o {{ bridge.interface }} -j ACCEPT"
+
+      - name: Allow forwarding between WireGuard and VM bridge
+        ansible.builtin.command: 
+          cmd: "iptables -I FORWARD 1 -i {{ wireguard.interface }} -o {{ bridge.interface }} -j ACCEPT"
+
+      - name: Allow forwarding between VM bridge and WireGuard
+        ansible.builtin.command:
+          cmd: "iptables -I FORWARD 1 -i {{ bridge.interface }} -o {{ wireguard.interface }} -j ACCEPT"
+
+      - name: Allow all VM subnets to communicate (if not already added)
+        ansible.builtin.shell: |
+          if ! iptables -C FORWARD -s {{ item }} -d {{ item }} -j ACCEPT 2>/dev/null; then
+            iptables -I FORWARD 1 -s {{ item }} -d {{ item }} -j ACCEPT
+          fi
+        with_items: "{{ libvirt_addresses }}"
+        args:
+          executable: /bin/bash
+
+      - name: Get all REJECT rules affecting libvirt or WireGuard interfaces
+        ansible.builtin.shell: |
+          iptables -S | grep -E 'REJECT.*({{ bridge.interface }}|{{ wireguard.interface }})' || true
+        register: reject_rules
+        changed_when: false
+
+      - name: Extract chains that contain REJECT rules
+        ansible.builtin.set_fact:
+          reject_chains: "{{ reject_rules.stdout_lines | map('regex_search', '-A ([^ ]+)', '\\1') | select('string') | list }}"
+
+      - name: Ensure restrictive REJECT rules are removed from relevant chains
+        ansible.builtin.shell: |
+          while iptables -L {{ item }} --line-numbers | grep -q 'REJECT.*({{ bridge.interface }}|{{ wireguard.interface }})'; do
+            rule=$(iptables -L {{ item }} --line-numbers | grep -E 'REJECT.*({{ bridge.interface }}|{{ wireguard.interface }})' | awk '{print $1}' | head -n1)
+            iptables -D {{ item }} $rule
+          done
+        with_items: "{{ reject_chains }}"
+        args:
+          executable: /bin/bash
+        ignore_errors: yes
+
+        # Old method disabled: This rule incorrectly masqueraded traffic destined for remote VM nodes 
+        # (because they are outside the local subnet). This changed the source IP to the physical host's IP, 
+        # causing OpenMPI to drop inbound connections due to a sender IP mismatch.
+      - name: Enable NAT for VM subnets
+        ansible.builtin.command:
+          cmd: "iptables -t nat -A POSTROUTING -s {{ libvirt_addresses }} ! -d {{ libvirt_addresses }} -j MASQUERADE"
+        when: false 
+
+      - name: Enable NAT for VM subnets (Excluding internal cluster traffic)
+        ansible.builtin.command:
+          cmd: "iptables -t nat -A POSTROUTING -s {{ libvirt_addresses }} ! -d {{ libvirt.base_ip }}.0/24 -j MASQUERADE"
+      when: false # turn these off trying to solve NAT problems
+
+    - name: Configure Routing and NAT
+      include_tasks: configure_nat_routing.yaml
+      vars:
+        # Pass the WireGuard interface as the backend
+        backend_interface: "{{ wireguard.interface }}"
 
     - name: Get current Unix epoch time from system
       ansible.builtin.command: date +%s

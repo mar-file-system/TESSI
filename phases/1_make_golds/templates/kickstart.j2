@@ -19,12 +19,46 @@ timezone {{ item.timezone }} --isUtc --ntpservers={{ item.network.ntpservers | j
 rootpw --plaintext {{ item.root_pwd }}
 %addon com_redhat_kdump --enable --reserve-mb='auto'
 %end
+
 %post
+# Root SSH setup
 mkdir -p /root/.ssh
 chmod 700 /root/.ssh
 {% for key in lookup('file', item.ssh_keys).splitlines() %}
 echo "{{ key }}" >> /root/.ssh/authorized_keys
 {% endfor %}
 chmod 600 /root/.ssh/authorized_keys
+# Add shared cluster SSH keypair
+cat > /root/.ssh/id_rsa << 'EOFKEY'
+{{ lookup('file', item.ssh_keypair) }}
+EOFKEY
+chmod 600 /root/.ssh/id_rsa
+cat > /root/.ssh/id_rsa.pub << 'EOFKEY'
+{{ lookup('file', item.ssh_keypair + '.pub') }}
+EOFKEY
+chmod 644 /root/.ssh/id_rsa.pub
+# Create non-root user if requested
+{% set user = running_user | default('root') %}
+{% if user != "root" %}
+# Create the user and add to wheel group
+useradd -m -G wheel {{ user }}
+mkdir -p /home/{{ user }}/.ssh
+chmod 700 /home/{{ user }}/.ssh
+cp /root/.ssh/authorized_keys /home/{{ user }}/.ssh/authorized_keys
+chown -R {{ user }}:{{ user }} /home/{{ user }}/.ssh
+chmod 600 /home/{{ user }}/.ssh/authorized_keys
+# Keypair
+cp /root/.ssh/id_rsa      /home/{{ user }}/.ssh/id_rsa
+cp /root/.ssh/id_rsa.pub  /home/{{ user }}/.ssh/id_rsa.pub
+chown -R {{ user }}:{{ user }} /home/{{ user }}/.ssh
+chmod 600 /home/{{ user }}/.ssh/id_rsa
+chmod 644 /home/{{ user }}/.ssh/id_rsa.pub
+# Allow passwordless sudo for this user
+echo "{{ user }} ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/{{ user }}
+chmod 0440 /etc/sudoers.d/{{ user }}
+{% else %}
+# Not creating duplicate root user {{ user }} from {{ running_user }}
+{% endif %}
+
 %end
 reboot

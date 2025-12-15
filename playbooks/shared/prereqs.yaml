@@ -1,8 +1,97 @@
+# ansible-galaxy collection install community.general
+# ansible-galaxy collection install ansible.posix
+# ansible-galaxy collection install community.libvirt
 ---
-- name: Ensure /mnt/usrc-storage-nfs is mounted on all physical hosts
+
+- name: Refresh SSH known_hosts (Unified Loop)
+  hosts: physical_hosts
+  gather_facts: true
+  become: true
+  
+  vars:
+    ansible_ssh_common_args: '-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null'
+    ansible_remote_tmp: /tmp
+
+  tasks:
+    # ---------------------------------------------------------
+    # 1. SETUP: Detect User & Define Targets
+    # ---------------------------------------------------------
+    - name: Detect the actual connecting user
+      set_fact:
+        real_user: "{{ ansible_env.SUDO_USER | default(ansible_user_id) }}"
+
+    - name: Build target file list
+      set_fact:
+        # We build a list of objects. Each has a path and the owner user.
+        target_files: >-
+          {{
+            [
+              {'path': '/root/.ssh/known_hosts', 'owner': 'root'}
+            ] +
+            (
+              [{'path': '/home/' + real_user + '/.ssh/known_hosts', 'owner': real_user}]
+              if real_user != 'root' else []
+            )
+          }}
+
+    - name: Generate known_hosts content (Computed Once)
+      set_fact:
+        all_inventory_identifiers: >-
+          {%- for host in groups['physical_hosts'] -%}
+          {{ host }} {{ hostvars[host]['ansible_default_ipv4']['address'] }} 
+          {%- endfor -%}
+        
+        known_hosts_content: |
+          {% for host in groups['physical_hosts'] %}
+          {% if hostvars[host]['ansible_ssh_host_key_ed25519_public'] is defined %}
+          # {{ host }}
+          {{ host }},{{ hostvars[host]['ansible_default_ipv4']['address'] }} ssh-ed25519 {{ hostvars[host]['ansible_ssh_host_key_ed25519_public'] }}
+          {% endif %}
+          {% endfor %}
+      run_once: true
+
+    # ---------------------------------------------------------
+    # 2. EXECUTE: Single Loop for All Users
+    # ---------------------------------------------------------
+    - name: Ensure known_hosts files exist
+      file:
+        path: "{{ item.path }}"
+        state: touch
+        owner: "{{ item.owner }}"
+        mode: '0644'
+      become_user: "{{ item.owner }}"  # <--- THE MAGIC SWITCH
+      loop: "{{ target_files }}"
+
+    - name: Purge stale keys from files
+      shell: |
+        for target in {{ all_inventory_identifiers }}; do
+          ssh-keygen -R "$target" -f "{{ item.path }}" > /dev/null 2>&1
+        done
+      become_user: "{{ item.owner }}"  # <--- Executes as 'root' or 'jbent' dynamically
+      loop: "{{ target_files }}"
+      changed_when: false
+
+    - name: Add cluster keys to files
+      blockinfile:
+        path: "{{ item.path }}"
+        owner: "{{ item.owner }}"
+        mode: '0644'
+        marker: "# {mark} ANSIBLE MANAGED CLUSTER KEYS"
+        block: "{{ known_hosts_content }}"
+      become_user: "{{ item.owner }}"
+      loop: "{{ target_files }}"
+
+    - name: Cleanup backup files
+      file:
+        path: "{{ item.path }}.old"
+        state: absent
+      become_user: "{{ item.owner }}"
+      loop: "{{ target_files }}"
+
+- name: Ensure a bunch of TASSI prerequisites across all physical hosts 
   hosts: physical_hosts
   become: false
-  gather_facts: no
+  gather_facts: yes
 
   vars:
     ansible_ssh_common_args: "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ControlMaster=no -o ControlPersist=0"
@@ -37,6 +126,43 @@
             enabled: false
         when: firewalld_status.rc == 0
 
+      - name: Check if OpenTofu is already installed
+        command: which tofu
+        register: tofu_check
+        ignore_errors: yes
+
+      - block:
+        - name: Download OpenTofu installer script
+          get_url:
+            url: https://get.opentofu.org/install-opentofu.sh
+            dest: /tmp/install-opentofu.sh
+            mode: '0755'
+
+        - name: Run OpenTofu installer
+          command: ./install-opentofu.sh --install-method rpm
+          args:
+            chdir: /tmp
+
+        - name: Remove installer script
+          file:
+            path: /tmp/install-opentofu.sh
+            state: absent
+        when: tofu_check.rc != 0
+
+      - name: Remove OpenTofu repo file if present
+        ansible.builtin.file:
+          path: "{{ item }}"
+          state: absent
+        loop:
+          - /etc/yum.repos.d/opentofu.repo
+          - /etc/yum.repos.d/tofu.repo
+        ignore_errors: true
+
+      - name: Clean yum/dnf cache
+        ansible.builtin.command:
+          cmd: dnf clean all
+        register: clean_result
+        changed_when: "'Deleted' in clean_result.stdout or 'removed' in clean_result.stdout"
 
       - name: Ensure qemu-system-x86_64 is installed and available plus others needed for making reports
         block:
@@ -59,8 +185,9 @@
                 - ImageMagick
                 - python3-img2pdf
                 - poppler-utils
+                - rsync
+                - ghostscript
               state: present
-
 
           - name: Ensure qemu-system-x86_64 alias if necessary 
             block:
@@ -86,6 +213,89 @@
               that:
                 - qemu_path.rc == 0
               fail_msg: "qemu-system-x86_64 was not found even after installation!"
+
+          - name: Enable and start and configure libvirtd
+            block:
+            - name: Start libvirtd
+              service: 
+                name: libvirtd
+                state: started
+                enabled: yes
+
+            - name: Get username from environment
+              set_fact:
+                local_user: "{{ lookup('env', 'USER') }}"
+
+            - name: Add user to libvirt group
+              ansible.builtin.user:
+                name: "{{ local_user }}"
+                groups: libvirt
+                append: yes
+
+            - name: Install libvirt-nss
+              dnf:
+                name: libvirt-nss
+                state: present
+
+            - name: Ensure 'libvirt' is present in /etc/nsswitch.conf hosts line
+              ansible.builtin.lineinfile:
+                path: /etc/nsswitch.conf
+                regexp: '^(hosts:\s*)(?!.*\blibvirt\b)(.*)$'
+                line: '\1\2 libvirt'
+                backrefs: true
+
+            - name: Ensure 'libvirt_guest' is present in /etc/nsswitch.conf hosts line
+              ansible.builtin.lineinfile:
+                path: /etc/nsswitch.conf
+                regexp: '^(hosts:\s*)(?!.*\blibvirt_guest\b)(.*)$'
+                line: '\1\2 libvirt_guest'
+                backrefs: true
+
+            - name: Ensure working libvirt-nss on Rocky Linux 9
+              block:
+                - name: Add temporary CentOS Stream AppStream repo
+                  ansible.builtin.copy:
+                    dest: /etc/yum.repos.d/centos-stream-appstream.repo
+                    content: |
+                      [centos-stream-appstream]
+                      name=CentOS Stream 9 AppStream
+                      baseurl=https://mirror.stream.centos.org/9-stream/AppStream/x86_64/os/
+                      gpgcheck=0
+                      enabled=1
+
+                - name: Upgrade libvirt and libvirt-nss from CentOS Stream
+                  ansible.builtin.dnf:
+                    name:
+                      - libvirt
+                      - libvirt-daemon
+                      - libvirt-libs
+                      - libvirt-client
+                      - libvirt-nss
+                    state: latest
+                    enablerepo: centos-stream-appstream
+                    allowerasing: true
+
+                - name: Restart libvirtd service
+                  ansible.builtin.service:
+                    name: libvirtd
+                    state: restarted
+
+              when:
+                - ansible_distribution == "Rocky"
+                - ansible_distribution_major_version == "9"
+
+            - name: Restart libvirtd service
+              ansible.builtin.service:
+                name: libvirtd
+                state: restarted
+            when: network.type != 'mvpnet'
+
+          - name: Install Wireguard if necessary 
+            when: qemu_check.rc != 0 and network.type == 'wireguard'
+            package:
+              name:
+                - wireguard-tools 
+              state: present
 
       - name: Check current sshd LimitMEMLOCK setting
         command: systemctl show sshd.service -p LimitMEMLOCK
@@ -129,13 +339,90 @@
           mode: "0755"
 
       - name: Ensure NFS mount is configured and mounted
-        ansible.builtin.mount:
+        mount:
           path: "{{ mount_path }}"
           src: "{{ mount_src }}"
           fstype: "{{ mount_fstype }}"
           opts: "{{ mount_opts }}"
           state: mounted
+
+      - name: Ensure NVMe XFS mount and per-user directory
+        become: true
+        vars:
+          nvme_mount: /mnt/nvme0n1
+
+        block:
+          - name: Detect preferred storage device
+            set_fact:
+              storage_device: >-
+                {{ ansible_facts.devices['nvme1n1'] is defined
+                   | ternary('/dev/nvme1n1', '/dev/nvme0n1') }}
+
+          - name: Check if storage device {{ storage_device }} is mounted
+            ansible.builtin.command: findmnt -n {{ storage_device }}
+            register: mount_result
+            failed_when: false
+            changed_when: false
+
+          - name: Get controlling user
+            set_fact:
+              local_user: "{{ lookup('env', 'USER') }}"
+
+          - block:
+              - name: Detect existing filesystem type
+                ansible.builtin.command: blkid -o value -s TYPE {{ storage_device }}
+                register: blkid_result
+                failed_when: false
+                changed_when: false
+
+              - name: Set filesystem type (existing or default to XFS)
+                set_fact:
+                  fs_type: "{{ blkid_result.stdout if blkid_result.rc == 0 else 'UNKNOWN' }}"
+
+              - name: Wipe existing filesystem if not XFS
+                ansible.builtin.command: wipefs -a {{ storage_device }}
+                when: fs_type != "xfs"
+
+              - name: Create XFS filesystem if missing or wiped
+                ansible.builtin.filesystem:
+                  fstype: xfs
+                  dev: "{{ storage_device }}"
+                when: fs_type != "xfs" or blkid_result.rc != 0
+
+              - name: Ensure mount point exists
+                ansible.builtin.file:
+                  path: "{{ nvme_mount }}"
+                  state: directory
+                  mode: '0755'
+
+              - name: Mount NVMe device
+                ansible.builtin.mount:
+                  path: "{{ nvme_mount }}"
+                  src: "{{ storage_device }}"
+                  fstype: xfs
+                  state: mounted
+                  opts: defaults,noatime
+            when: mount_result.rc != 0
+
+          - name: Create per-user directory on mounted NVMe
+            ansible.builtin.file:
+              path: "{{ nvme_mount }}/{{ local_user }}"
+              state: directory
+              owner: "{{ local_user }}"
+              group: "{{ local_user }}"
+              mode: '0755'
       become: true
+
+      #  - community.crypto
+    - name: Install required Ansible collections
+      ansible.builtin.command: >
+        ansible-galaxy collection install {{ item }}
+      loop:
+        - community.general
+        - ansible.posix
+        - community.libvirt
+      delegate_to: localhost
+      run_once: true
 
     - name: Ensure $HOME/bin and {{ mpihome }}/bin are in PATH
       lineinfile:
@@ -200,4 +487,3 @@
     - name: Display PATH verification results
       debug:
         var: path_check.stdout_lines
-

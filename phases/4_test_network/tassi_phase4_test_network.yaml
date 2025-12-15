@@ -2,8 +2,10 @@
 - hosts: physical_hosts
   gather_facts: yes
   any_errors_fatal: true
+  become: false
   vars:
     ping_count: 3
+    ansible_remote_tmp: /tmp
 
   tasks:
     - block:
@@ -11,7 +13,9 @@
         ansible.builtin.file:
           path: "{{ image_dir }}"
           state: absent
-        when: false # don't clean up image dir
+        delegate_to: localhost
+        run_once: true
+        when: true # clean up image dir
 
       - name: Exit after cleanup
         ansible.builtin.meta: end_play
@@ -73,8 +77,11 @@
 - name: Run tasks now on the VMs themselves (dynamic_hosts group)
   hosts: vms
   gather_facts: no
+  become: true
   vars:
     network: "{{ hostvars[groups['physical_hosts'][0]].network | default(omit) }}"
+    ansible_remote_tmp: /tmp
+    ansible_ssh_common_args: '-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null'
   tasks:
     - debug:
         msg: "Hostname: {{ inventory_hostname }}"
@@ -152,20 +159,21 @@
         ping_results_data: "{{  vm_vm_ping_results.results }}"
         dont_use_ip: true
 
-    - name: Aggregate vm-vm ping results
-      ansible.builtin.set_fact:
-        aggregated_ping_results: >-
-          {{
-            ansible_play_hosts_all
-            | map('extract', hostvars, 'ping_results')
-            | sum(start=[])
-          }}
+    - name: Create the graphs
+      become: false
       delegate_to: localhost
       run_once: true
-
-    - name: Debug vm-vm ping results
       block:
-      - name:
+      - name: Aggregate vm-vm ping results
+        ansible.builtin.set_fact:
+          aggregated_ping_results: >-
+            {{
+              ansible_play_hosts_all
+              | map('extract', hostvars, 'ping_results')
+              | sum(start=[])
+            }}
+
+      - name: Debug vm-vm ping results
         debug:
           var: aggregated_ping_results
 
@@ -174,21 +182,16 @@
           src: templates/ping_results_vm_vm.dot.j2
           dest: "{{ image_dir }}/ping_results_vm_vm.dot"
 
-      # Convert DOT file to PNG
       - name: Convert DOT file to PNG in {{ image_dir }}
         ansible.builtin.shell: |
           dot -Kcirco -Tpng "{{ image_dir }}"/ping_results_vm_vm.dot -o "{{ image_dir }}"/ping_results_vm_vm.png
-      delegate_to: localhost
-      run_once: true
 
-    - name: Make network graph
-      include_tasks: make_network_graph.yaml
-      vars:
-        template_file: templates/network_graph.dot.j2
+      - name: Make network graph
+        include_tasks: make_network_graph.yaml
+        vars:
+          template_file: templates/network_graph.dot.j2
 
-    - name: Message final status
-      debug:
-        msg: "Graphs of network structure and status now available in {{ image_dir }}"
-      delegate_to: localhost
-      run_once: true
+      - name: Message final status
+        debug:
+          msg: "Graphs of network structure and status now available in {{ image_dir }}"
 

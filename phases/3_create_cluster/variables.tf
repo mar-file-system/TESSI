@@ -9,6 +9,7 @@ variable "vm_name" {
     host                    = string
     source_image            = string 
     storage_pool            = string 
+    storage_pool_path       = string
     netone                  = string 
     nettwo                  = string 
     mac_address             = string

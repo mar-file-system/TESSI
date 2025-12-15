@@ -1,0 +1,67 @@
+# configure_nat_routing.yaml
+---
+- name: Ensure IP forwarding is enabled
+  ansible.builtin.sysctl:
+    name: net.ipv4.ip_forward
+    value: '1'
+    state: present
+    reload: yes
+
+# ------------------------------------------------------------------
+# INTERNET ACCESS: NAT only on the public interface
+# ------------------------------------------------------------------
+- name: Enable NAT for VM traffic leaving via Public Internet Interface
+  ansible.builtin.iptables:
+    table: nat
+    chain: POSTROUTING
+    source: "{{ libvirt_addresses }}"
+    out_interface: "{{ ansible_default_ipv4.interface }}"
+    jump: MASQUERADE
+    comment: "NAT for VM Internet Access Only"
+
+- name: Allow forwarding from VMs to Internet
+  ansible.builtin.iptables:
+    chain: FORWARD
+    in_interface: "{{ bridge.interface }}"
+    out_interface: "{{ ansible_default_ipv4.interface }}"
+    jump: ACCEPT
+
+- name: Allow return traffic from Internet to VMs (Established)
+  ansible.builtin.iptables:
+    chain: FORWARD
+    in_interface: "{{ ansible_default_ipv4.interface }}"
+    out_interface: "{{ bridge.interface }}"
+    match: state
+    ctstate: RELATED,ESTABLISHED
+    jump: ACCEPT
+
+# ------------------------------------------------------------------
+# MPI/CLUSTER ACCESS: Route (No NAT) on the backend interface
+# ------------------------------------------------------------------
+- name: Allow forwarding from VMs to Backend Network ({{ backend_interface }})
+  ansible.builtin.iptables:
+    chain: FORWARD
+    in_interface: "{{ bridge.interface }}"
+    out_interface: "{{ backend_interface }}"
+    jump: ACCEPT
+
+- name: Allow forwarding from Backend Network ({{ backend_interface }}) to VMs
+  ansible.builtin.iptables:
+    chain: FORWARD
+    in_interface: "{{ backend_interface }}"
+    out_interface: "{{ bridge.interface }}"
+    jump: ACCEPT
+
+# ------------------------------------------------------------------
+# CLEANUP: Remove old "Blanket" NAT that breaks MPI (if it exists)
+# ------------------------------------------------------------------
+- name: Remove legacy blanket MASQUERADE rule (Fixes OpenMPI source IP)
+  ansible.builtin.iptables:
+    table: nat
+    chain: POSTROUTING
+    source: "{{ libvirt_addresses }}"
+    out_interface: "!" # Matches if interface is NOT defined (i.e., the old blanket rule)
+    destination: "!{{ libvirt_addresses }}"
+    jump: MASQUERADE
+    state: absent
+  ignore_errors: true

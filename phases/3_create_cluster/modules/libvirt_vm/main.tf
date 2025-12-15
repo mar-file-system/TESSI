@@ -32,6 +32,10 @@ resource "libvirt_domain" "domain" {
   running    = true
   autostart  = true
 
+  cpu {
+    mode = "host-passthrough"
+  }
+
   # Attach primary disk
   disk {
     volume_id = var.primary
@@ -57,15 +61,20 @@ resource "libvirt_domain" "domain" {
     dev = ["cdrom", "hd"]
   }
 
+    # this network just causes problems and we don't use it
   # Primary network interface
-  network_interface {
-    network_name = var.netone
-  }
+  #network_interface {
+  #  network_name = var.netone
+  #}
 
   # Secondary network interface
   network_interface {
     network_name = var.nettwo
     mac          = var.mac_address
+  }
+
+  graphics {
+    type = "vnc"
   }
 
   console {

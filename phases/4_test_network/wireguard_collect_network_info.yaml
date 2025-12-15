@@ -39,6 +39,7 @@
           grep '<host ' |
           awk -F"[\"']" '/name=/{print $6, $4}'
         register: ip_hostname_lines
+        become: true
 
       - name: Show raw IP and hostname lines
         debug:
@@ -50,7 +51,6 @@
           vm_ips: "{{ (vm_ips | default([])) + [item.split()[0]] }}"
         loop: "{{ ip_hostname_lines.stdout_lines }}"
         when: item.split()[1] in matching_vms
-
       when: network_type == 'wireguard'
 
     - name: Get VM IP details for private network 
@@ -142,7 +142,7 @@
       debug:
         var: ip_to_label_map
 
-    - name: Block of tasks to get networking details when using a dedicated secondary NIC
+    - name: Block of tasks to get networking details when using a dedicated secondary NIC or a wireguard tunnel
       block:
       - name: Get list of all libvirt networks
         shell: >
@@ -200,8 +200,7 @@
         when: bridge_ip is defined
 
       - name: Get bridge configuration
-        shell: >
-          brctl show {{ bridge_name }}
+        command: ip -d link show {{ bridge_name }} 
         register: bridge_config
         when: bridge_name is defined
 
@@ -209,13 +208,15 @@
         debug:
           msg: "Bridge configuration: {{ bridge_config.stdout }}"
         tags: debug
-      when: network_type == 'private'
+      when: network_type != 'mvpnet'
+      become: true
 
     - name: Block of tasks to get wireguard details 
       block:
       - name: Get list of WireGuard interfaces
         shell: wg show | grep interface | awk '{print $2}'
         register: wireguard_interfaces
+        become: true
 
       - name: Debug the ip_to_label_map
         debug:
@@ -262,6 +263,7 @@
         shell: wg show {{ selected_wireguard }}
         register: wireguard_info
         when: selected_wireguard is defined
+        become: true
 
       - name: Debug WireGuard info
         debug:
@@ -309,7 +311,7 @@
         debug:
           msg: "Libvirt network range: {{ libvirt_network_range }}"
         tags: debug
-      when: network_type == 'private'
+      when: network_type != 'mvpnet'
 
     - name: Save collected data to a JSON file
       copy:
@@ -332,6 +334,7 @@
           END {if (peer) print substr(endpoint, 1, index(endpoint, ":") - 1), allowed_ips}'
       register: wireguard_peer_mapping
       when: selected_wireguard is defined
+      become: true
 
     - name: Debug wireguard peers 
       debug:
@@ -412,3 +415,4 @@
         dest: /tmp/hostvars.json
       delegate_to: localhost
       run_once: true
+      become: true

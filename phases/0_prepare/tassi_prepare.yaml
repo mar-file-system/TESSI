@@ -6,7 +6,7 @@
       - { var_name: 'gold_install',   required: true }
       - { var_name: 'cluster_test',   required: false }
   tasks:
-    - name: Define and ensure relevant directories 
+    - name: Define and ensure relevant directories and files
       block:
       - name: Check for user-specified playbooks
         include_tasks: check_playbook.yaml
@@ -21,6 +21,7 @@
         set_fact:
           raw_artifact_path: "{{ playbook_dir }}/../../artifacts/{{ UNIQUE_TAG }}"
           qcow2_dir: "{{ image_storage.qcow }}/{{ UNIQUE_TAG }}"
+          pool_dir:  "{{ image_storage.libvirt }}/{{ UNIQUE_TAG }}/images"
           phase_dir: "{{ lookup('pipe', 'realpath ' ~ playbook_dir ~ '/..') }}"
 
       - name: Ensure raw artifact directory exists before realpath
@@ -29,14 +30,21 @@
           state: directory
           mode: '0755'
 
-      - name: Now get the realpath after dir exists
+      - name: Set the path to artifact dir 
         set_fact:
           artifact_dir: "{{ lookup('pipe', 'realpath ' ~ raw_artifact_path) }}"
+        when: output_dir is not defined 
+
+      - name: Set the path to artifact_dir using user-supplied path
+        set_fact:
+          artifact_dir: "{{ output_dir }}/{{ UNIQUE_TAG }}/artifacts"
+        when: output_dir is defined
 
       - name: Define children of the artifact directory
         set_fact:
           physical_inventory_dir: "{{ artifact_dir }}/inventory_physical"
           virtual_inventory_dir: "{{ artifact_dir }}/inventory_virtual"
+          tofu_dir: "{{ artifact_dir }}/tofu"
           make_log_dir: "{{ artifact_dir }}/logs"
           make_status_dir: "{{ artifact_dir }}/status"
           tfvars_file: "{{ artifact_dir }}/phase3.tfvars"
@@ -48,17 +56,25 @@
           state: directory
           mode: '0755'
         loop:
+          - "{{ artifact_dir }}"
           - "{{ physical_inventory_dir }}"
           - "{{ virtual_inventory_dir }}"
           - "{{ make_log_dir }}"
           - "{{ make_status_dir }}"
           - "{{ qcow2_dir }}"
+          - "{{ pool_dir }}"
+          - "{{ tofu_dir }}"
+
+      - name: Ensure storage pool directory is world-writable so that virtd can create in it
+        ansible.builtin.file:
+          path: "{{ pool_dir }}"
+          mode: '0777'
 
     - name: Define necessary variables
       block:
       - name: Define some stuff needed by the tofu in phase 3
         set_fact:
-          tofu_chdir: "-chdir={{ phase_dir }}/3_create_cluster"
+          tofu_chdir: "-chdir={{ tofu_dir }}"
           tofu_workspace: "{{ UNIQUE_TAG }}"
 
       - name: Define qcow2 paths for each role
@@ -78,6 +94,10 @@
           - debug:
               var: gold_qcow2_paths
         when: true
+
+      - name: Debug gold vm defaults
+        debug:
+          var: gold_vms.defaults
 
       - name: Compute final_gold_vms dictionary with recursive merging of default gold with individual
         set_fact:
@@ -99,6 +119,66 @@
           var: final_gold_vms
         when: true
 
+      - name: Ensure each gold VM defines important values 
+        ansible.builtin.assert:
+          that:
+            - item.value.ssh_keys is defined
+            - item.value.ssh_keypair is defined
+            - item.value.iso is defined
+          fail_msg: "Gold VM '{{ item.key }}' is missing important variables in final_gold_vms. Add to config file."
+        loop: "{{ final_gold_vms | dict2items }}"
+
+      - name: Stat required SSH files for each gold VM
+        ansible.builtin.stat:
+          path: >-
+            {{
+              item.0.value.ssh_keys
+                if item.1 == 'authorized_keys'
+              else item.0.value.ssh_keypair
+                if item.1 == 'priv'
+              else item.0.value.ssh_keypair + '.pub'
+            }}
+        loop: "{{ (final_gold_vms | dict2items) | product(['authorized_keys', 'priv', 'pub']) | list }}"
+        register: gold_ssh_file_checks
+
+      - name: Fail if any SSH files are missing
+        ansible.builtin.fail:
+          msg: >
+            Gold VM '{{ missing.item.0.key }}' is missing required SSH file:
+            {{
+              missing.item.0.value.ssh_keys
+                if missing.item.1 == 'authorized_keys'
+              else missing.item.0.value.ssh_keypair
+                if missing.item.1 == 'priv'
+              else missing.item.0.value.ssh_keypair + '.pub'
+            }}
+        when: not missing.stat.exists
+        loop: "{{ gold_ssh_file_checks.results }}"
+        loop_control:
+          loop_var: missing
+
+      - name: Fail if any SSH files are missing
+        ansible.builtin.fail:
+          msg: >
+            Gold VM '{{ item.item.0.key }}' is missing required SSH file:
+            {{ item.stat.path }}
+        when: not item.stat.exists
+        loop: "{{ gold_ssh_file_checks.results }}"
+
+      - name: Stat ISO file for each gold VM
+        ansible.builtin.stat:
+          path: "{{ item.value.iso }}"
+        loop: "{{ final_gold_vms | dict2items }}"
+        register: gold_iso_checks
+
+      - name: Fail if any ISO files are missing
+        ansible.builtin.fail:
+          msg: "Gold VM '{{ iso_result.item.key }}' is missing ISO file: {{ iso_result.item.value.iso }}"
+        when: not iso_result.stat.exists
+        loop: "{{ gold_iso_checks.results }}"
+        loop_control:
+          loop_var: iso_result
+
       - name: Check if {{ UNIQUE_TAG }} exceeds 14 characters
         ansible.builtin.fail:
           msg: "UNIQUE TAG '{{ UNIQUE_TAG }}' is too long (max 14 characters)."
@@ -117,6 +197,7 @@
           wireguard:
             interface: "wg-{{ UNIQUE_TAG }}"
             cidr: "{{ network.wg_cidr }}"
+            base_ip: "{{ network.wg_base_ip }}"
 
       - name: Validate networking definitions
         block:
@@ -222,8 +303,10 @@
                       'nettwo': libvirt.name, 
                       'physical_host': phys,
                       'ssh_keys': final_gold_vms.get(vm[1]).ssh_keys, 
+                      'ssh_keypair': final_gold_vms.get(vm[1]).ssh_keypair,
                       'source_image': gold_qcow2_paths.get(vm[1]), 
                       'storage_pool': "{{ UNIQUE_TAG }}-pool", 
+                      'storage_pool_path': pool_dir,
                       'vcpu': final_gold_vms.get(vm[1]).vcpu, 
                     }) -%}
                 {%- set ns.mac_counter = ns.mac_counter + 1 -%}
@@ -275,6 +358,12 @@
         - name: Format the autogenerated opentofu file 
           ansible.builtin.command:
             cmd: tofu fmt "{{ phase3_tfvars_result.dest }}" 
+
+        - name: Copy over the tofu files from TASSI source into artifact dir
+          ansible.builtin.synchronize:
+            src: "{{ phase_dir }}/3_create_cluster/"
+            dest: "{{ tofu_dir }}/"
+            recursive: yes
 
         - name: Make sure the tofu modules have been initialized
           ansible.builtin.command:
