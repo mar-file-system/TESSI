@@ -97,10 +97,6 @@
     ansible_ssh_common_args: "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ControlMaster=no -o ControlPersist=0"
     ansible_remote_tmp: /tmp
     mpihome: "/usr/lib64/openmpi"
-    mount_src: "10.15.1.11:/mnt/vol0/usrc-storage"
-    mount_path: "/mnt/usrc-storage-nfs"
-    mount_fstype: "nfs"
-    mount_opts: "vers=4.2,hard,noatime,_netdev,local_lock=all"
     login_files:
       - ~/.bashrc
       - ~/.bash_profile
@@ -296,6 +292,7 @@
               name:
                 - wireguard-tools 
               state: present
+        become: true
 
       - name: Check current sshd LimitMEMLOCK setting
         command: systemctl show sshd.service -p LimitMEMLOCK
@@ -332,86 +329,16 @@
                   state: restarted
         when: "'LimitMEMLOCK=infinity' not in memlock_check.stdout"
 
-      - name: Ensure mount point directory exists
-        file:
-          path: "{{ mount_path }}"
-          state: directory
-          mode: "0755"
+    - name: Detect which cluster we are on
+      set_fact:
+        cluster: >-
+          {{ 'intrepid' if ansible_hostname.startswith('in')
+             else 'hellscape' if ansible_hostname.startswith('hs')
+             else 'unknown' }}
 
-      - name: Ensure NFS mount is configured and mounted
-        mount:
-          path: "{{ mount_path }}"
-          src: "{{ mount_src }}"
-          fstype: "{{ mount_fstype }}"
-          opts: "{{ mount_opts }}"
-          state: mounted
-
-      - name: Ensure NVMe XFS mount and per-user directory
-        become: true
-        vars:
-          nvme_mount: /mnt/nvme0n1
-
-        block:
-          - name: Detect preferred storage device
-            set_fact:
-              storage_device: >-
-                {{ ansible_facts.devices['nvme1n1'] is defined
-                   | ternary('/dev/nvme1n1', '/dev/nvme0n1') }}
-
-          - name: Check if storage device {{ storage_device }} is mounted
-            ansible.builtin.command: findmnt -n {{ storage_device }}
-            register: mount_result
-            failed_when: false
-            changed_when: false
-
-          - name: Get controlling user
-            set_fact:
-              local_user: "{{ lookup('env', 'USER') }}"
-
-          - block:
-              - name: Detect existing filesystem type
-                ansible.builtin.command: blkid -o value -s TYPE {{ storage_device }}
-                register: blkid_result
-                failed_when: false
-                changed_when: false
-
-              - name: Set filesystem type (existing or default to XFS)
-                set_fact:
-                  fs_type: "{{ blkid_result.stdout if blkid_result.rc == 0 else 'UNKNOWN' }}"
-
-              - name: Wipe existing filesystem if not XFS
-                ansible.builtin.command: wipefs -a {{ storage_device }}
-                when: fs_type != "xfs"
-
-              - name: Create XFS filesystem if missing or wiped
-                ansible.builtin.filesystem:
-                  fstype: xfs
-                  dev: "{{ storage_device }}"
-                when: fs_type != "xfs" or blkid_result.rc != 0
-
-              - name: Ensure mount point exists
-                ansible.builtin.file:
-                  path: "{{ nvme_mount }}"
-                  state: directory
-                  mode: '0755'
-
-              - name: Mount NVMe device
-                ansible.builtin.mount:
-                  path: "{{ nvme_mount }}"
-                  src: "{{ storage_device }}"
-                  fstype: xfs
-                  state: mounted
-                  opts: defaults,noatime
-            when: mount_result.rc != 0
-
-          - name: Create per-user directory on mounted NVMe
-            ansible.builtin.file:
-              path: "{{ nvme_mount }}/{{ local_user }}"
-              state: directory
-              owner: "{{ local_user }}"
-              group: "{{ local_user }}"
-              mode: '0755'
-      become: true
+    - name: Run cluster-specific prereqs (intrepid / hellscape)
+      include_tasks: prereqs/intrepid_hellscape.yaml
+      when: cluster in ['intrepid', 'hellscape']
 
       #  - community.crypto
     - name: Install required Ansible collections
