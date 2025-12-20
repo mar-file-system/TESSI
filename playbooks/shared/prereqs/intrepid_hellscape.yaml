@@ -61,75 +61,65 @@
           debug:
             msg: "NVMe size before prep: {{ nvme_size_before.stdout }} bytes"
 
-        - name: Get NVMe PCI device path
-          command: readlink /sys/class/nvme/{{ nvme_controller | basename }}/device
-          register: nvme_pci_path
-          changed_when: false
-          when: nvme_size_before.stdout | int < expected_min_bytes
+        - block: 
+          - name: Get NVMe PCI device path
+            command: readlink /sys/class/nvme/{{ nvme_controller | basename }}/device
+            register: nvme_pci_path
+            changed_when: false
 
-        - name: Extract NVMe PCI address
-          set_fact:
-            nvme_pci: "{{ nvme_pci_path.stdout | basename }}"
-          when: nvme_size_before.stdout | int < expected_min_bytes
+          - name: Extract NVMe PCI address
+            set_fact:
+              nvme_pci: "{{ nvme_pci_path.stdout | basename }}"
 
-        - name: Sanitize NVMe controller (DESTRUCTIVE)
-          command: nvme sanitize {{ nvme_controller }} -a 2
-          when: nvme_size_before.stdout | int < expected_min_bytes
+          - name: Sanitize NVMe controller (DESTRUCTIVE)
+            command: nvme sanitize {{ nvme_controller }} -a 2
 
-        - name: Reset NVMe controller
-          command: nvme reset {{ nvme_controller }}
-          when: nvme_size_before.stdout | int < expected_min_bytes
+          - name: Reset NVMe controller
+            command: nvme reset {{ nvme_controller }}
 
-        - name: Remove NVMe PCI device
-          shell: echo 1 > /sys/bus/pci/devices/{{ nvme_pci }}/remove
-          when: nvme_size_before.stdout | int < expected_min_bytes
+          - name: Remove NVMe PCI device
+            shell: echo 1 > /sys/bus/pci/devices/{{ nvme_pci }}/remove
 
-        - name: Rescan PCI bus
-          shell: echo 1 > /sys/bus/pci/rescan
-          when: nvme_size_before.stdout | int < expected_min_bytes
+          - name: Rescan PCI bus
+            shell: echo 1 > /sys/bus/pci/rescan
 
-        - name: Wait for udev to settle
-          command: udevadm settle
-          when: nvme_size_before.stdout | int < expected_min_bytes
+          - name: Wait for udev to settle
+            command: udevadm settle
 
-        - name: Read NVMe controller info
-          command: nvme id-ctrl {{ nvme_controller }}
-          register: nvme_ctrl
-          changed_when: false
-          when: nvme_size_before.stdout | int < expected_min_bytes
+          - name: Read NVMe controller info
+            command: nvme id-ctrl {{ nvme_controller }}
+            register: nvme_ctrl
 
-        - name: Extract total NVMe capacity in bytes
-          set_fact:
-            nvme_bytes: >-
-              {{ nvme_ctrl.stdout
-                 | regex_search('tnvmcap\\s+:\\s+(\\d+)', '\\1')
-                 | int }}
-          when: nvme_size_before.stdout | int < expected_min_bytes
+          - name: Extract total NVMe capacity in bytes
+            set_fact:
+              nvme_bytes: >-
+                {{ nvme_ctrl.stdout
+                   | regex_search('tnvmcap\\s+:\\s+(\\d+)', '\\1')
+                   | int }}
 
-        - name: Compute namespace size in LBAs
-          set_fact:
-            nvme_lbas: "{{ nvme_bytes // 512 }}"
-          when: nvme_size_before.stdout | int < expected_min_bytes
+          - name: Compute namespace size in LBAs
+            set_fact:
+              nvme_lbas: "{{ nvme_bytes // 512 }}"
 
-        - name: Delete existing NVMe namespace
-          command: nvme delete-ns {{ nvme_controller }} -n 1
-          failed_when: false
-          when: nvme_size_before.stdout | int < expected_min_bytes
+          - name: Delete existing NVMe namespace
+            command: nvme delete-ns {{ nvme_controller }} -n 1
+            failed_when: false
+            when: nvme_size_before.stdout | int < expected_min_bytes
 
-        - name: Create full-size NVMe namespace
-          command: >
-            nvme create-ns {{ nvme_controller }}
-            --nsze={{ nvme_lbas }}
-            --ncap={{ nvme_lbas }}
-            -f 0
-          when: nvme_size_before.stdout | int < expected_min_bytes
+          - name: Create full-size NVMe namespace
+            command: >
+              nvme create-ns {{ nvme_controller }}
+              --nsze={{ nvme_lbas }}
+              --ncap={{ nvme_lbas }}
+              -f 0
+            when: nvme_size_before.stdout | int < expected_min_bytes
 
-        - name: Attach NVMe namespace
-          command: nvme attach-ns {{ nvme_controller }} -n 1 -c 0
-          when: nvme_size_before.stdout | int < expected_min_bytes
+          - name: Attach NVMe namespace
+            command: nvme attach-ns {{ nvme_controller }} -n 1 -c 0
+            when: nvme_size_before.stdout | int < expected_min_bytes
 
-        - name: Wait for udev after namespace attach
-          command: udevadm settle
+          - name: Wait for udev after namespace attach
+            command: udevadm settle
           when: nvme_size_before.stdout | int < expected_min_bytes
 
         - name: Verify NVMe block device size after prep
@@ -143,10 +133,9 @@
               NVMe prep failed: {{ storage_device }} is still
               {{ nvme_size_after.stdout }} bytes
           when: nvme_size_after.stdout | int < expected_min_bytes
+      when: cluster == "hellscape"
 
-      when:
-        - cluster == "hellscape"
-
+      - block: 
         - name: Detect existing filesystem type
           ansible.builtin.command: blkid -o value -s TYPE {{ storage_device }}
           register: blkid_result
