@@ -5,7 +5,7 @@
     mount_path: "/mnt/usrc-storage-nfs"
     mount_fstype: "nfs"
     mount_opts: "vers=4.2,hard,noatime,_netdev,local_lock=all"
-  block:
+
   - name: Ensure mount point directory exists
     file:
       path: "{{ mount_path }}"
@@ -25,151 +25,150 @@
   vars:
     nvme_mount: /mnt/nvme0n1
 
-  block:
-    - name: Detect preferred storage device
-      set_fact:
-        storage_device: >-
-          {{ ansible_facts.devices['nvme1n1'] is defined
-             | ternary('/dev/nvme1n1', '/dev/nvme0n1') }}
+  - name: Detect preferred storage device
+    set_fact:
+      storage_device: >-
+        {{ ansible_facts.devices['nvme1n1'] is defined
+           | ternary('/dev/nvme1n1', '/dev/nvme0n1') }}
 
-    - name: Get controlling user
-      set_fact:
-        local_user: "{{ lookup('env', 'USER') }}"
+  - name: Get controlling user
+    set_fact:
+      local_user: "{{ lookup('env', 'USER') }}"
 
-    - name: Check if storage device {{ storage_device }} is mounted
-      ansible.builtin.command: findmnt -n {{ storage_device }}
-      register: mount_result
+  - name: Check if storage device {{ storage_device }} is mounted
+    ansible.builtin.command: findmnt -n {{ storage_device }}
+    register: mount_result
+    failed_when: false
+    changed_when: false
+
+  - name: Set expected minimum NVMe size (1 TB)
+    set_fact:
+      expected_min_bytes: 1000000000000
+
+  - name: Derive NVMe controller from storage device
+    set_fact:
+      nvme_controller: "/dev/{{ storage_device | basename | regex_replace('n[0-9]+$', '') }}"
+
+  - name: Check NVMe block device size
+    command: blockdev --getsize64 {{ storage_device }}
+    register: nvme_size_before
+    changed_when: false
+
+  - name: Debug NVMe size
+    debug:
+      msg: "NVMe size before prep: {{ nvme_size_before.stdout }} bytes"
+
+  - name: Resize the unexpectedly small NVME devicd
+    block: 
+    - name: Get NVMe PCI device path
+      command: readlink /sys/class/nvme/{{ nvme_controller | basename }}/device
+      register: nvme_pci_path
+      changed_when: false
+
+    - name: Extract NVMe PCI address
+      set_fact:
+        nvme_pci: "{{ nvme_pci_path.stdout | basename }}"
+
+    - name: Sanitize NVMe controller (DESTRUCTIVE)
+      command: nvme sanitize {{ nvme_controller }} -a 2
+
+    - name: Reset NVMe controller
+      command: nvme reset {{ nvme_controller }}
+
+    - name: Remove NVMe PCI device
+      shell: echo 1 > /sys/bus/pci/devices/{{ nvme_pci }}/remove
+
+    - name: Rescan PCI bus
+      shell: echo 1 > /sys/bus/pci/rescan
+
+    - name: Wait for udev to settle
+      command: udevadm settle
+
+    - name: Read NVMe controller info
+      command: nvme id-ctrl {{ nvme_controller }}
+      register: nvme_ctrl
+
+    - name: Extract total NVMe capacity in bytes
+      set_fact:
+        nvme_bytes: >-
+          {{ nvme_ctrl.stdout
+             | regex_search('tnvmcap\\s+:\\s+(\\d+)', '\\1')
+             | int }}
+
+    - name: Compute namespace size in LBAs
+      set_fact:
+        nvme_lbas: "{{ nvme_bytes // 512 }}"
+
+    - name: Delete existing NVMe namespace
+      command: nvme delete-ns {{ nvme_controller }} -n 1
+      failed_when: false
+
+    - name: Create full-size NVMe namespace
+      command: >
+        nvme create-ns {{ nvme_controller }}
+        --nsze={{ nvme_lbas }}
+        --ncap={{ nvme_lbas }}
+        -f 0
+
+    - name: Attach NVMe namespace
+      command: nvme attach-ns {{ nvme_controller }} -n 1 -c 0
+
+    - name: Wait for udev after namespace attach
+      command: udevadm settle
+    when: nvme_size_before.stdout | int < expected_min_bytes
+
+  - name: Verify NVMe block device size after prep
+    command: blockdev --getsize64 {{ storage_device }}
+    register: nvme_size_after
+    changed_when: false
+
+  - name: Fail if NVMe is still unexpectedly small
+    ansible.builtin.fail:
+      msg: >
+        NVMe prep failed: {{ storage_device }} is still
+        {{ nvme_size_after.stdout }} bytes
+    when: nvme_size_after.stdout | int < expected_min_bytes
+
+  - name: Ensure filesystem on the NVME device
+    block: 
+    - name: Detect existing filesystem type
+      ansible.builtin.command: blkid -o value -s TYPE {{ storage_device }}
+      register: blkid_result
       failed_when: false
       changed_when: false
 
-    - block:
-      - block:
-        - name: Set expected minimum NVMe size (1 TB)
-          set_fact:
-            expected_min_bytes: 1000000000000
+    - name: Set filesystem type (existing or default to XFS)
+      set_fact:
+        fs_type: "{{ blkid_result.stdout if blkid_result.rc == 0 else 'UNKNOWN' }}"
 
-        - name: Derive NVMe controller from storage device
-          set_fact:
-            nvme_controller: "/dev/{{ storage_device | basename | regex_replace('n[0-9]+$', '') }}"
+    - name: Wipe existing filesystem if not XFS
+      ansible.builtin.command: wipefs -a {{ storage_device }}
+      when: fs_type != "xfs"
 
-        - name: Check NVMe block device size
-          command: blockdev --getsize64 {{ storage_device }}
-          register: nvme_size_before
-          changed_when: false
+    - name: Create XFS filesystem if missing or wiped
+      ansible.builtin.filesystem:
+        fstype: xfs
+        dev: "{{ storage_device }}"
+      when: fs_type != "xfs" or blkid_result.rc != 0
 
-        - name: Debug NVMe size
-          debug:
-            msg: "NVMe size before prep: {{ nvme_size_before.stdout }} bytes"
+    - name: Ensure mount point exists
+      ansible.builtin.file:
+        path: "{{ nvme_mount }}"
+        state: directory
+        mode: '0755'
 
-        - block: 
-          - name: Get NVMe PCI device path
-            command: readlink /sys/class/nvme/{{ nvme_controller | basename }}/device
-            register: nvme_pci_path
-            changed_when: false
+    - name: Mount NVMe device
+      ansible.builtin.mount:
+        path: "{{ nvme_mount }}"
+        src: "{{ storage_device }}"
+        fstype: xfs
+        state: mounted
+        opts: defaults,noatime
+  when: mount_result.rc != 0
 
-          - name: Extract NVMe PCI address
-            set_fact:
-              nvme_pci: "{{ nvme_pci_path.stdout | basename }}"
-
-          - name: Sanitize NVMe controller (DESTRUCTIVE)
-            command: nvme sanitize {{ nvme_controller }} -a 2
-
-          - name: Reset NVMe controller
-            command: nvme reset {{ nvme_controller }}
-
-          - name: Remove NVMe PCI device
-            shell: echo 1 > /sys/bus/pci/devices/{{ nvme_pci }}/remove
-
-          - name: Rescan PCI bus
-            shell: echo 1 > /sys/bus/pci/rescan
-
-          - name: Wait for udev to settle
-            command: udevadm settle
-
-          - name: Read NVMe controller info
-            command: nvme id-ctrl {{ nvme_controller }}
-            register: nvme_ctrl
-
-          - name: Extract total NVMe capacity in bytes
-            set_fact:
-              nvme_bytes: >-
-                {{ nvme_ctrl.stdout
-                   | regex_search('tnvmcap\\s+:\\s+(\\d+)', '\\1')
-                   | int }}
-
-          - name: Compute namespace size in LBAs
-            set_fact:
-              nvme_lbas: "{{ nvme_bytes // 512 }}"
-
-          - name: Delete existing NVMe namespace
-            command: nvme delete-ns {{ nvme_controller }} -n 1
-            failed_when: false
-            when: nvme_size_before.stdout | int < expected_min_bytes
-
-          - name: Create full-size NVMe namespace
-            command: >
-              nvme create-ns {{ nvme_controller }}
-              --nsze={{ nvme_lbas }}
-              --ncap={{ nvme_lbas }}
-              -f 0
-            when: nvme_size_before.stdout | int < expected_min_bytes
-
-          - name: Attach NVMe namespace
-            command: nvme attach-ns {{ nvme_controller }} -n 1 -c 0
-            when: nvme_size_before.stdout | int < expected_min_bytes
-
-          - name: Wait for udev after namespace attach
-            command: udevadm settle
-          when: nvme_size_before.stdout | int < expected_min_bytes
-
-        - name: Verify NVMe block device size after prep
-          command: blockdev --getsize64 {{ storage_device }}
-          register: nvme_size_after
-          changed_when: false
-
-        - name: Fail if NVMe is still unexpectedly small
-          ansible.builtin.fail:
-            msg: >
-              NVMe prep failed: {{ storage_device }} is still
-              {{ nvme_size_after.stdout }} bytes
-          when: nvme_size_after.stdout | int < expected_min_bytes
-      when: cluster == "hellscape"
-
-      - block: 
-        - name: Detect existing filesystem type
-          ansible.builtin.command: blkid -o value -s TYPE {{ storage_device }}
-          register: blkid_result
-          failed_when: false
-          changed_when: false
-
-        - name: Set filesystem type (existing or default to XFS)
-          set_fact:
-            fs_type: "{{ blkid_result.stdout if blkid_result.rc == 0 else 'UNKNOWN' }}"
-
-        - name: Wipe existing filesystem if not XFS
-          ansible.builtin.command: wipefs -a {{ storage_device }}
-          when: fs_type != "xfs"
-
-        - name: Create XFS filesystem if missing or wiped
-          ansible.builtin.filesystem:
-            fstype: xfs
-            dev: "{{ storage_device }}"
-          when: fs_type != "xfs" or blkid_result.rc != 0
-
-        - name: Ensure mount point exists
-          ansible.builtin.file:
-            path: "{{ nvme_mount }}"
-            state: directory
-            mode: '0755'
-
-        - name: Mount NVMe device
-          ansible.builtin.mount:
-            path: "{{ nvme_mount }}"
-            src: "{{ storage_device }}"
-            fstype: xfs
-            state: mounted
-            opts: defaults,noatime
-      when: mount_result.rc != 0
+  - name: Ensure storage device {{ storage_device }} is now mounted
+    ansible.builtin.command: findmnt -n {{ storage_device }}
+    register: mount_result
 
     - name: Create per-user directory on mounted NVMe
       ansible.builtin.file:
@@ -178,4 +177,5 @@
         owner: "{{ local_user }}"
         group: "{{ local_user }}"
         mode: '0755'
+      when: mount_result.rc == 0
 
