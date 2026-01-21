@@ -1,0 +1,54 @@
+---
+- name: OSU Microbenchmarks Tester 
+  hosts: all
+  become: false # don't need to be root for this 
+  gather_facts: false
+  vars:
+    ansible_remote_tmp: /tmp
+
+  tasks:
+  - name: Create directory path to store the results
+    set_fact:
+      osu_results_directory: "/mnt/usrc-storage-nfs/jbent/osu_results/{{ UNIQUE_TAG }}/{{ pretty_name }}"
+  - name: Ensure OSU results directory exists on control node
+    file:
+      path: "{{ osu_results_directory }}" 
+      state: directory
+      mode: "0755"
+    delegate_to: localhost
+
+  - name: Run OSU on clients using mpirun with delegated tasks
+    block:
+      - name: Count the hosts in the clients group
+        set_fact:
+          host_count: "{{ ansible_play_hosts | length }}"
+
+      - name: Set OSU parameters as facts
+        set_fact:
+          hostfile:         "/tmp/hosts.{{ UNIQUE_TAG }}"
+
+      - name: Debug fstype and client count
+        debug:
+          var: fstype
+          var: host_count
+
+      - name: Write the list of client hostnames to the hostfile
+        copy:
+          content: "{{ ansible_play_hosts | join('\n') }}"
+          dest: "{{ hostfile }}"
+
+      - name: Set the complicated mpirun mca arguments for running in the VM
+        set_fact:
+          mcaflags: "--bind-to none --map-by slot --mca pml ob1 --mca osc pt2pt --mca pml_ucx 0 --mca mtl_ofi 0 --mca btl tcp,self --mca btl_tcp_if_include {{ device }}" 
+
+      - name: Run OSU tests for multiple MPI implementations
+        vars:
+          mpi_configs:
+            - mpi_module: mpi/openmpi-x86_64
+              mpirun_args: "--prefix $MPI_HOME {{ mcaflags }}"
+        include_tasks: run_osu.yaml
+        loop: "{{ mpi_configs }}"
+        loop_control:
+          loop_var: mpi_config
+        register: osu_task_results
+    when: inventory_hostname == ansible_play_hosts[0]
