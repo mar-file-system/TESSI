@@ -38,6 +38,7 @@
           | selectattr('rc', 'ne', 0)
           | list
           | length > 0
+      when: false # skip this because we are switching to mpi module approach
 
     - block:
       # --- Check for pid_file ---
@@ -143,28 +144,23 @@
       debug:
         msg: "All cloud-init renders complete. Proceeding."
 
-    - name: Detect MPI flavor
-      command: mpirun --version
-      register: mpi_version
-      changed_when: false
-      failed_when: false
-
     - name: Set MPI flavor fact
       set_fact:
         mpi_flavor: >-
-          {% if 'Open MPI' in mpi_version.stdout %}
+          {% if 'open' in network.mpi_module %}
           openmpi
-          {% elif 'MPICH' in mpi_version.stdout %}
+          {% elif 'mpich' in network.mpi_module %}
           mpich
+          {% elif 'mvapich' in network.mpi_module %}
+          mvapich
           {% else %}
           unknown
           {% endif %}
 
-    - name: Fail if MPI flavor could not be detected
+    - name: Fail if MPI flavor could not be detected from {{ network.mpi_module }}
       fail:
         msg: >
-          Unable to detect MPI flavor from 'mpirun --version' output:
-          {{ mpi_version.stdout | default('no output') }}
+          Unable to detect MPI flavor 
       when: mpi_flavor == 'unknown'
 
     - name: Normalize mpi_flavor (trim)
@@ -339,7 +335,15 @@
             # These are the old IB flags
             #--mca pml ob1
             #--mca btl openib,tcp,self
+
+      - name: Fail if mvapich
+        fail:
+          msg: >
+            mvapich is not supported yet because the hostfile setup has not been implemented.
+        when: mpi_flavor == 'mvapich' 
+
       - name: Set mca flags depending on interface {{ network.host_interface }} - prefer IB if present but don't require
+        when: mpi_flavor == 'openmpi' 
         set_fact: 
           mca_flags: >-
             {% if network.host_interface is search('^ib') %}
@@ -362,14 +366,14 @@
       - name: Construct mpirun command line running on {{ network.host_interface }}
         set_fact:
           mpirun_cmd: >-
-            mpirun -n {{ num_vms }} -hostfile {{ mpi_hostfile }} {{ mca_flags }} 
-            mvpnet -C 1
+            mpirun --prefix $MPI_HOME -n {{ num_vms }} -hostfile {{ mpi_hostfile }} {{ mca_flags | default('') }} 
+            {{ network.mvpnet_path }}/mvpnet -C 1
             {{ mvpnet_c_flags }}
             {{ mvpnet_i_flags }}
             {{ mvpnet_hdd_flags }}
             -l {{ mvpnet_workdir }}
             -w 1
-            -M monwrap -r {{ mvpnet_workdir }} -s {{ mvpnet_workdir }}
+            -M {{ network.mvpnet_path }}/monwrap -r {{ mvpnet_workdir }} -s {{ mvpnet_workdir }}
             -g -L 1 -D {{ mvpnet_verbosity }} -S {{ mvpnet_verbosity }}
             -n dgram
 
@@ -387,14 +391,19 @@
             - "PID file:       {{ pid_file }}"
             - "mpirun command: {{ mpirun_cmd }}"
 
-      # --- Launch mpirun asynchronously (24h timeout), nothing fancy ---
       - name: Start mvpnet with async (24h) on launcher logging to {{ mvpnet_log }}
         shell: |
-          nohup {{ mpirun_cmd }} >> {{ mvpnet_log }} 2>&1 & 
+          set -e
+          source /etc/profile.d/modules.sh
+          module load "{{ network.mpi_module }}"
+          nohup {{ mpirun_cmd }} >> "{{ mvpnet_log }}" 2>&1 &
           echo $! > "{{ pid_file }}"
+        args:
+          executable: /bin/bash
         async: 86400
         poll: 0
         register: mvpnet_async
+
 
         # Immediately fetch async status once — if it already died, you’ll see why
       - name: Check async job status right after launch
