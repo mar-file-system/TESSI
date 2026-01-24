@@ -15,6 +15,32 @@
       delegate_to: localhost
       run_once: true
 
+- import_playbook: ../shared/install_mvapich.yaml
+
+- name: Build OSU Micro-Benchmarks and mvpnet for all MPI implementations
+  hosts: all
+  become: true
+  gather_facts: true
+
+  vars:
+    ansible_remote_tmp: /tmp/ansible
+    mpi_modules:
+      - mpi/openmpi-x86_64
+      - mpi/mvapich2-x86_64
+
+  tasks:
+    - name: Install OSU for each MPI module
+      include_tasks: install_osu_micro_benchmarks.yaml
+      loop: "{{ mpi_modules }}"
+      loop_control:
+        loop_var: mpi_module
+
+    - name: Build mvpnet for each MPI
+      include_tasks: install_mvpnet.yaml
+      loop: "{{ mpi_modules }}"
+      loop_control:
+        loop_var: mpi_module
+
 - name: Refresh SSH known_hosts (Unified Loop)
   hosts: "{{ target_hosts | default('physical_hosts') }}"
   gather_facts: true
@@ -112,7 +138,6 @@
   vars:
     ansible_ssh_common_args: "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ControlMaster=no -o ControlPersist=0"
     ansible_remote_tmp: /tmp
-    mpihome: "/usr/lib64/openmpi"
     login_files:
       - ~/.bashrc
       - ~/.bash_profile
@@ -380,72 +405,3 @@
     - name: Run cluster-specific prereqs (intrepid / hellscape)
       include_tasks: prereqs/intrepid_hellscape.yaml
       when: cluster in ['intrepid', 'hellscape']
-
-    - name: Ensure $HOME/bin and {{ mpihome }}/bin are in PATH
-      lineinfile:
-        path: "{{ item }}"
-        insertafter: EOF
-        line: 'export PATH="$HOME/bin:{{ mpihome }}/bin:$PATH"'
-        state: present
-      loop: "{{ login_files }}"
-
-    - name: Check whether mvpnet binaries are in PATH
-      shell: |
-        which mvpnet && which monwrap 
-      register: path_check
-      changed_when: false
-      failed_when: false
-
-    - name: Optionally force mvpnet refresh
-      set_fact:
-        force_mvpnet_refresh: true
-
-    - name: Git and build mvpnet if required
-      block:
-      - name: Set mvpnet directory fact
-        set_fact:
-          mvpnet_dir: /tmp/mvpnet
-          mvpnet_build: /tmp/mvpnet/build
-
-      - name: Ensure {{ mvpnet_dir }} directory doesn't exist 
-        file:
-          path: "{{ mvpnet_dir }}" 
-          state: absent
-
-      - name: Clone mvpnet repository
-        git:
-          repo: https://github.com/pnfs-storage/mvpnet.git
-          dest: "{{ mvpnet_dir }}" 
-
-      - name: Create build directory
-        file:
-          path: "{{ mvpnet_build }}" 
-          state: directory
-
-      - block:
-        - name: Configure CMake build
-          command: >
-            cmake -DCMAKE_INSTALL_PREFIX=$HOME
-                   -DCMAKE_PREFIX_PATH={{ mpihome }}
-                   ..
-
-        - name: Build mvpnet
-          command: make 
-
-        - name: Install mvpnet
-          command: make install
-        module_defaults:
-          command:
-            chdir: /tmp/mvpnet/build
-      when: path_check.rc != 0 or force_mvpnet_refresh  # force rebuild of mvpnet
-
-    - name: Verify binaries are in PATH
-      shell: |
-        which mvpnet && which monwrap && which mpirun
-      register: path_check
-      changed_when: false
-      failed_when: path_check.rc != 0
-
-    - name: Display PATH verification results
-      debug:
-        var: path_check.stdout_lines
