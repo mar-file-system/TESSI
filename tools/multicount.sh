@@ -13,8 +13,8 @@ while true; do
   ))
 
   cur_ib=$(( \
-    $(cat /sys/class/net/ibp193s0/statistics/rx_packets) + \
-    $(cat /sys/class/net/ibp193s0/statistics/tx_packets) \
+    $(cat /sys/class/net/enp65s0np0/statistics/rx_packets) + \
+    $(cat /sys/class/net/enp65s0np0/statistics/tx_packets) \
   ))
 
   # First iteration: establish baseline
@@ -31,7 +31,7 @@ while true; do
   tot_eno1=$((tot_eno1 + d_eno1))
   tot_ib=$((tot_ib + d_ib))
 
-  printf "eno1: Δ=%10d | Σ=%8.1e   ||   ibp193s0: Δ=%10d | Σ=%8.1e\n" \
+  printf "eno1: Δ=%10d | Σ=%8.1e   ||   enp65s0np0: Δ=%10d | Σ=%8.1e\n" \
     $d_eno1 $tot_eno1 \
     $d_ib $tot_ib
 

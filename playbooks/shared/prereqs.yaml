@@ -15,6 +15,98 @@
       delegate_to: localhost
       run_once: true
 
+- name: Ensure module support is available and add openmpi to it 
+  hosts: "{{ target_hosts | default('physical_hosts') }}"
+  gather_facts: false
+  become: true
+  vars:
+    mpi_module_root: /etc/modulefiles/mpi
+  tasks:
+    - name: Install environment-modules
+      ansible.builtin.dnf:
+        name: environment-modules
+        state: present
+
+    - name: Ensure modules init is available system-wide
+      ansible.builtin.copy:
+        dest: /etc/profile.d/modules.sh
+        mode: "0755"
+        content: |
+          #!/bin/bash
+          if [ -f /usr/share/Modules/init/bash ]; then
+              source /usr/share/Modules/init/bash
+          fi
+
+    - name: Ensure modules init is sourced system-wide
+      ansible.builtin.copy:
+        dest: /etc/profile.d/modules.sh
+        content: |
+          #!/bin/bash
+          source /usr/share/Modules/init/bash
+        mode: "0755"
+
+    - name: Set canonical MODULEPATH order
+      copy:
+        dest: /etc/profile.d/modulepath.sh
+        mode: "0644"
+        content: |
+          export MODULEPATH=/etc/modulefiles:/usr/share/modulefiles:${MODULEPATH}
+
+    - name: Check if OpenMPI install path exists
+      ansible.builtin.stat:
+        path: /usr/mpi/gcc/openmpi-4.1.7rc1
+      register: openmpi_prefix
+
+    - name: Check if OpenMPI modulefile already exists
+      ansible.builtin.stat:
+        path: "{{ mpi_module_root }}/openmpi"
+      register: openmpi_modulefile
+
+    - name: Ensure MPI modulefiles directory exists
+      ansible.builtin.file:
+        path: "{{ mpi_module_root }}" 
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Create OpenMPI modulefile (only if prefix exists and modulefile missing)
+      ansible.builtin.copy:
+        dest: "{{ mpi_module_root }}/openmpi" 
+        mode: "0644"
+        content: |
+          #%Module1.0
+          proc ModulesHelp { } {
+              puts stderr "OpenMPI 4.1.7rc1 (system install, UCX-capable)"
+          }
+
+          module-whatis "OpenMPI 4.1.7rc1 (system install)"
+
+          set root /usr/mpi/gcc/openmpi-4.1.7rc1
+
+          prepend-path PATH            $root/bin
+          prepend-path LD_LIBRARY_PATH $root/lib
+          prepend-path LD_LIBRARY_PATH $root/lib64
+          prepend-path MANPATH         $root/share/man
+
+          setenv MPI_HOME $root
+          setenv MPI_BIN  $root/bin
+          setenv MPI_LIB  $root/lib64
+          setenv MPI_INC  $root/include
+      when:
+        - openmpi_prefix.stat.exists
+        - not openmpi_modulefile.stat.exists
+
+    - name: Remove legacy OpenMPI PATH injection from /etc/profile.d
+      ansible.builtin.file:
+        path: /etc/profile.d/openmpi.sh
+        state: absent
+      when:
+        - openmpi_prefix.stat.exists
+        - not openmpi_modulefile.stat.exists
+
+
+
 - import_playbook: ../shared/install_mvapich.yaml
 
 - name: Build OSU Micro-Benchmarks and mvpnet for all MPI implementations
@@ -25,8 +117,8 @@
   vars:
     ansible_remote_tmp: /tmp/ansible
     mpi_modules:
-      - mpi/openmpi-x86_64
-      - mpi/mvapich2-x86_64
+      - mpi/openmpi
+      - mpi/mvapich2
 
   tasks:
     - name: Install OSU for each MPI module
@@ -162,6 +254,13 @@
             state: stopped
             enabled: false
         when: firewalld_status.rc == 0
+
+      - name: Manually create libnuma.so symlink (used by mvpnet)
+        ansible.builtin.file:
+          src: /usr/lib64/libnuma.so.1
+          dest: /usr/lib64/libnuma.so
+          state: link
+          force: yes
 
       - name: Check if OpenTofu is already installed
         command: which tofu
