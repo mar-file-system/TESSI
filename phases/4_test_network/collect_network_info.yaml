@@ -2,26 +2,6 @@
       set_fact:
         ip_to_label_map: {}
 
-    - name: Get list of VMs matching regex
-      shell: >
-        virsh list --name | grep {{ vm_regex }}
-        {% if vm_anti_regex is defined %}
-        | grep -v "{{ vm_anti_regex }}"
-        {% endif %}
-      register: matching_vms
-      when: false
-
-    - name: Aggregate matching VMs globally
-      ansible.builtin.set_fact:
-        aggregated_matching_vms: >-
-          {{
-            (ansible_play_hosts_all
-            | map('extract', hostvars, 'matching_vms')  
-            | map(attribute='stdout_lines')            
-            | sum(start=[]))                          
-          }}
-      when: false
-
     - name: Set aggregated matching_vms from inventory
       set_fact:
         aggregated_matching_vms: "{{ groups['vms'] }}"
@@ -149,10 +129,19 @@
       debug:
         var: vm_mac_addresses
 
+    - name: Remove stale known_hosts entries for all VM IPs on all hosts including localhost
+      ansible.builtin.shell: ssh-keygen -R {{ hostvars[item.1].ansible_host | default(item.1) }}
+      loop: >-
+        {{ (groups['all'] + ['localhost']) | unique | product(matching_vms) | list }}
+      loop_control:
+        label: "{{ item.0 }} removing {{ item.1 }}"
+      delegate_to: "{{ item.0 }}"
+      run_once: true
+      when: false
+
     - name: Remove stale known_hosts entries for all VM IPs
       ansible.builtin.shell: ssh-keygen -R {{ hostvars[item].ansible_host | default(item) }}
       with_items: "{{ matching_vms }}"
-      delegate_to: localhost
       run_once: false
 
     - name: Get IP info from VMs
@@ -167,7 +156,7 @@
         var: matching_vms
 
     - debug:
-        var: vm_ip_output.message
+        var: vm_ip_output.results
 
     - name: Show which VMs failed to return IP info
       debug:

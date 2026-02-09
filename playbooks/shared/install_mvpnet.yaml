@@ -1,0 +1,66 @@
+- name: Derive mvpnet install prefix for {{ mpi_module }}
+  set_fact:
+    mvpnet_prefix: "/usr/local/mvpnet/{{ mpi_module | regex_replace('/', '_') }}"
+    mvpnet_dir: "/tmp/mvpnet"
+    mvpnet_build: "/tmp/mvpnet/build"
+
+- name: Ensure modules environment is available
+  ansible.builtin.shell: |
+    source /etc/profile.d/modules.sh
+  args:
+    executable: /bin/bash
+  changed_when: false
+
+- name: Check whether mvpnet is already installed for this MPI
+  ansible.builtin.stat:
+    path: "{{ mvpnet_prefix }}/bin/mvpnet"
+  register: mvpnet_installed
+
+- name: Force mvpnet refresh (optional)
+  set_fact:
+    force_mvpnet_refresh: false
+  when: force_mvpnet_refresh is not defined
+
+- name: Build and install mvpnet for selected MPI
+  block:
+
+    - name: Remove existing mvpnet source tree
+      file:
+        path: "{{ mvpnet_dir }}"
+        state: absent
+
+    - name: Clone mvpnet repository
+      git:
+        repo: https://github.com/pnfs-storage/mvpnet.git
+        dest: "{{ mvpnet_dir }}"
+
+    - name: Create build directory
+      file:
+        path: "{{ mvpnet_build }}"
+        state: directory
+
+    - name: Configure mvpnet with {{ mpi_module }} to install into {{ mvpnet_prefix }}
+      ansible.builtin.shell: |
+        source /etc/profile.d/modules.sh
+        module load {{ mpi_module }}
+
+        cmake \
+          -DCMAKE_INSTALL_PREFIX={{ mvpnet_prefix }} \
+          -DCMAKE_PREFIX_PATH=$(dirname $(which mpicc))/.. \
+          ..
+      args:
+        chdir: "{{ mvpnet_build }}"
+        executable: /bin/bash
+
+    - name: Build mvpnet
+      ansible.builtin.command: make
+      args:
+        chdir: "{{ mvpnet_build }}"
+
+    - name: Install mvpnet for {{ mpi_module }}
+      ansible.builtin.command: make install
+      args:
+        chdir: "{{ mvpnet_build }}"
+
+  when: not mvpnet_installed.stat.exists or force_mvpnet_refresh
+

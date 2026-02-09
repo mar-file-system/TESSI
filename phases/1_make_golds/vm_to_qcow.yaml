@@ -35,6 +35,19 @@
     path: "{{ qcow2_file }}"
   register: qcow2_image
 
+# Only for mvpnet: derive .img path and check if it exists
+- block:
+    - name: (mvpnet) Set fact img_file from qcow2_file
+      set_fact:
+        img_file: "{{ qcow2_file | regex_replace('\\.qcow2$', '.img') }}"
+
+    - name: (mvpnet) Check if raw IMG exists
+      stat:
+        path: "{{ img_file }}"
+      register: img_image
+  when:
+    - network.type == 'mvpnet'
+
 - block:
     - name: Skip image creation for {{ qcow2_file }} if it already exists
       debug:
@@ -51,12 +64,32 @@
     - name: Extract disk path for VM {{ item.name }} 
       shell: "virsh dumpxml {{ item.name }} | awk -F\"'\" '/<source file=/ {print $2}'"
       register: disk_path
+      become: true
 
-    - name: Copy QCOW2 image for VM {{ item.name }} to target directory
+    - name: Show disk path
+      debug:
+        msg: "{{ disk_path.stdout.strip() }} is the disk path for {{ item.name }}. Will store into {{ qcow2_file }}"
+
+    - name: Allow global read on {{ item.name }} image
+      ansible.builtin.file:
+        path: "{{ disk_path.stdout.strip() }}"
+        mode: '0644'
+      become: true
+
+    - name: Copy QCOW2 image for VM {{ item.name }} to target directory into {{ qcow2_file }}
       command: "qemu-img convert -O qcow2 {{ disk_path.stdout.strip() }} {{ qcow2_file }}"
 
     - name: Debug QCOW2 image for VM {{ item.name }} creation
       debug:
         msg: "{{ item.name }} stored from {{ disk_path.stdout.strip() }} into {{ qcow2_file }}"
   when: not qcow2_image.stat.exists
+
+- name: (mvpnet) Convert QCOW2 to raw IMG
+  command: "qemu-img convert -O raw {{ qcow2_file }} {{ img_file }}"
+  args:
+    creates: "{{ img_file }}"
+  when:
+    - network is defined
+    - network.type == 'mvpnet'
+    - not qcow2_image.stat.exists
 

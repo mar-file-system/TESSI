@@ -14,6 +14,11 @@
   ansible.builtin.debug:
     msg: "target_directory={{ target_directory }}"
 
+- name: Remove existing {{ connauthfile }}
+  ansible.builtin.file:
+    path: "{{ connauthfile }}"
+    state: absent
+
 - name: Ensure BeeGFS directories exist
   ansible.builtin.file:
     path: "{{ target_directory }}"
@@ -36,15 +41,29 @@
       cmd: "chmod 400 {{ connauthfile }}"
   when: inventory_hostname == groups['mservers'][0]
 
-- name: Copy connection auth file to other nodes
-  ansible.builtin.synchronize:
-    src: "{{ connauthfile }}"
-    dest: "{{ connauthfile }}"
-    mode: push
-    owner: yes
-    group: yes
-    perms: yes
-  delegate_to: "{{ groups['mservers'][0] }}"
+# 1) Decide which address to pull from (mserver0)
+- name: Compute target host/port for scp pull
+  set_fact:
+    target_ip: >-
+      {{
+        (hostvars[groups['mservers'][0]].mvpnet_ip)
+        if (networking | default('')) in ['mvpnet']   
+        else (hostvars[groups['mservers'][0]].ansible_host | default(groups['mservers'][0]))
+      }}
+
+- name: Show pull plan
+  debug:
+    msg:
+      - "networking={{ networking | default('') }}"
+      - "mserver={{ groups['mservers'][0] }}"
+      - "target_ip={{ target_ip }}"
+      - "connauthfile={{ connauthfile }}"
+
+# 2) Pull the file with scp (runs in parallel on all nodes except the source)
+- name: Pull connection auth file from mserver {{ target_ip }} via scp
+  become: true                # needed to write {{ connauthfile }} locally
+  ansible.builtin.shell: >
+    scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null {{ target_ip }}:{{ connauthfile }} {{ connauthfile }}
   when: inventory_hostname != groups['mservers'][0]
 
 - name: Verify connection auth file exists

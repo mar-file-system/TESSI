@@ -1,0 +1,63 @@
+- name: Set ranks based on benchmark type
+  set_fact:
+    osu_np: >-
+      {{
+        2
+        if ('pt2pt' in osu_exe or 'one-sided' in osu_exe)
+        else host_count
+      }}
+
+- name: Set output file path for benchmark
+  set_fact:
+    osu_output_file: "{{ osu_results_directory }}/{{ osu_exe | basename }}"
+
+- set_fact:
+    mpi_module_path: "{{ mpi_config.mpi_module | replace('/', '_') }}"
+
+- set_fact:
+    executable: 
+      /usr/local/osu/{{ mpi_module_path }}/libexec/osu-micro-benchmarks/{{ osu_exe }}
+
+- debug:
+    var: executable
+
+- name: Check that {{ executable }} exists and is executable
+  ansible.builtin.stat:
+    path: "{{ executable }}"
+  register: exec_stat
+
+- name: Fail if {{ executable }} is missing or not executable
+  ansible.builtin.fail:
+    msg: "{{ executable }} does not exist or is not executable"
+  when: not exec_stat.stat.exists or not exec_stat.stat.executable
+
+- name: Build mpirun command
+  set_fact:
+    mpirun_command: >
+      export MODULEPATH="{{ mpi_config.modulepath | default('/usr/share/Modules/modulefiles:/etc/modulefiles:/usr/share/modulefiles') }}";
+      eval "$(modulecmd bash load {{ mpi_config.mpi_module }})"
+      && mpirun -np {{ osu_np }} -hostfile {{ hostfile }} {{ mpi_config.mpirun_args }}
+      {{ executable }}
+      && eval "$(modulecmd bash unload {{ mpi_config.mpi_module }})"
+
+- name: Show mpirun command
+  debug:
+    var: mpirun_command
+
+- name: Run OSU benchmark {{ osu_exe }}
+  shell: "{{ mpirun_command }}"
+  register: mpirun_output
+  timeout: 1200
+
+- name: Show mpirun output for {{ osu_exe }}
+  debug:
+    var: mpirun_output.stdout
+
+- name: Write OSU output {{ osu_ouput_file }}
+  copy:
+    content: "{{ mpirun_output.stdout }}\n"
+    dest: "{{ osu_output_file }}"
+  delegate_to: localhost
+  become: false
+  run_once: true
+

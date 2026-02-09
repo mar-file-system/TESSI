@@ -18,6 +18,7 @@ vm_name = [
     {% endif %}
     source_image         = "{{ vm.source_image }}"
     storage_pool         = "{{ vm.storage_pool }}"
+    storage_pool_path    = "{{ vm.storage_pool_path }}"
     vcpu                 = "{{ vm.vcpu }}"
     cloudinit_user_data  = <<EOT
 #cloud-config
@@ -32,9 +33,29 @@ runcmd:
   - systemctl enable add-static-route.service
   - systemctl start add-static-route.service
   - echo "nameserver {{ vm.libvirt_bridge }}" >> /etc/resolv.conf
+{# Add route back to WireGuard peers if WireGuard is enabled #}
+{# Add routes to reach each remote libvirt subnet via the local bridge gateway #}
+{# DISABLED: Proxy ARP on host handles this now #}
+{% if network.type == 'wireguard' and false %}
+  - ip route add {{ network.wg_base_ip }}.0/{{ network.wg_cidr }} via {{ vm.libvirt_bridge }}
+{% for host in groups['all'] if host != vm.physical_host %}
+  - ip route add {{ network.libvirt.base_ip }}.{{ hostvars[host].libvirt_suffix }}/{{ network.libvirt.cidr }} via {{ vm.libvirt_bridge }}
+{% endfor %}
+{% endif %}
+{# Populate /etc/hosts with hostname to IP mappaings #}
 {% for inner_vm in vm_info %}
   - echo "{{ inner_vm.ansible_host }} {{ inner_vm.name }}" >> /etc/hosts
 {% endfor %}
+{# Disable APR broadcast to test if it works #}
+{# This breaks ability of host to ssh to VM #}
+{#  - ip link set dev {{ vm.nettwo }} arp off #}
+{# Populate ARP cache with permanent MAC address to IP mappaings #}
+{# DISABLED: Proxy ARP on host handles this now #}
+{% if false %}
+{% for inner_vm in vm_info if inner_vm.ansible_host != vm.ansible_host %}
+  - ip neigh replace {{ inner_vm.ansible_host }} lladdr {{ inner_vm.mac_address }} dev {{ vm.nettwo }}
+{% endfor %}
+{% endif %}
 EOT
     cloudinit_network     = <<EON
 network:
@@ -43,8 +64,11 @@ network:
     static-nic:
       match:
         macaddress: "{{ vm.mac_address }}"
+      set-name: {{ vm.nettwo }}
       dhcp4: false
       addresses: [{{ vm.ansible_host }}/24]
+      # add this line to fix Lustre issue
+      gateway4: {{ vm.libvirt_bridge }}
 EON
   },
 {% endfor %}

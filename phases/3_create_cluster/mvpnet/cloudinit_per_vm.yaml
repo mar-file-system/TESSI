@@ -1,0 +1,234 @@
+# cloudinit_per_vm.yaml
+- name: "{{ inventory_hostname }} constructing cloud-init structure for {{ vm }}"
+  debug:
+    msg: Building cloudinit directory for {{ inventory_hostname }}
+
+- name: Create data disks for {{ vm }}
+  block:
+  - name: Read hdd_sizes for {{ vm }}
+    ansible.builtin.set_fact:
+      _hdd_raw: "{{ hostvars[vm].hdd_sizes | default([], true) }}"
+
+  # Normalize to a clean list of positive integers (handles list, "[6,8]", "6,8", "", " ")
+  - name: Normalize hdd_sizes for {{ vm }}
+    ansible.builtin.set_fact:
+      hdd_sizes_list: >-
+        {%- set raw = _hdd_raw -%}
+        {%- if raw is sequence and raw is not string -%}
+        {{ raw | map('string') | map('trim') | select('match','^[0-9]+$') | map('int') | list }}
+        {%- elif raw is string -%}
+          {%- set s = raw | trim -%}
+          {%- if s | length == 0 -%}
+          []
+          {%- elif s.startswith('[') -%}
+          {{ (s | from_yaml) | map('string') | map('trim') | select('match','^[0-9]+$') | map('int') | list }}
+          {%- else -%}
+          {{ s.split(',') | map('trim') | reject('equalto','') | select('match','^[0-9]+$') | map('int') | list }}
+          {%- endif -%}
+        {%- else -%}
+        []
+        {%- endif -%}
+
+  - name: Planned data disks for {{ vm }}
+    ansible.builtin.debug:
+      msg: "Will create the following disks for {{ vm }}: {{ hdd_sizes_list }}"
+
+  # ' Ensure target dir exists: {{ hdd_image_dir }}/{{ vm }}
+  - name: Ensure data-disk directory exists for {{ vm }}
+    ansible.builtin.file:
+      path: "{{ hdd_image_dir }}/{{ vm }}"
+      state: directory
+      mode: "0755"
+
+  - name: Build qemu-img commands for {{ vm }}
+    set_fact:
+      qemu_img_cmds: >-
+        {{
+          (qemu_img_cmds | default([]))
+          + [ {
+              'cmd': 'qemu-img' ~ ' create -f qcow2 '
+                     ~ hdd_image_dir ~ '/' ~ vm ~ '/hdd' ~ (idx | string) ~ '.qcow2 '
+                     ~ (item | string) ~ 'G',
+              'creates': hdd_image_dir ~ '/' ~ vm ~ '/hdd' ~ (idx | string) ~ '.qcow2'
+            } ]
+        }}
+    loop: "{{ hdd_sizes_list | list }}"
+    loop_control:
+      index_var: idx
+      label: "hdd{{ idx }}={{ item }}G"
+    when: (hdd_sizes_list | length) > 0
+
+  # 2) Show exactly what will be executed
+  - name: Preview qemu-img commands
+    debug:
+      var: qemu_img_cmds
+    when: (hdd_sizes_list | length) > 0
+
+  # 3) Execute those commands
+  - name: Create qcow2 data disks for {{ vm }}
+    ansible.builtin.shell: "{{ item.cmd }}"
+    args:
+      creates: "{{ item.creates }}"
+    loop: "{{ qemu_img_cmds | default([]) }}"
+    loop_control:
+      label: "{{ item.cmd }}"
+    when: (hdd_sizes_list | length) > 0
+
+  # Create qcow2 disks: {{ hdd_image_dir }}/{{ vm }}/hdd{{idx}}.qcow2 sized {{item}}G
+  - name: Create qcow2 data disks for {{ vm }}
+    ansible.builtin.command:
+      cmd: "qemu-img create -f qcow2 {{ hdd_image_dir }}/{{ vm }}/hdd{{ idx }}.qcow2 {{ item }}G"
+      creates: "{{ hdd_image_dir }}/{{ vm }}/hdd{{ idx }}.qcow2"
+    loop: "{{ hdd_sizes_list | list }}"
+    loop_control:
+      index_var: idx
+      label: "hdd{{ idx }}={{ item }}G"
+    when: (hdd_sizes_list | length) > 0 and false # old way
+
+- name: Ensure per-VM cloud-init dir exists
+  ansible.builtin.file:
+    path: "{{ cloudinit_dir }}/{{ vm }}"
+    state: directory
+    mode: "0755"
+
+- name: Write meta-data
+  ansible.builtin.copy:
+    dest: "{{ cloudinit_dir }}/{{ vm }}/meta-data"
+    mode: "0644"
+    content: |
+      {
+        "instance-id": "{{ vm }}-{{ lookup('pipe','date +%s') }}",
+        "dsmode": "local"
+      }
+
+- name: Assert required per-VM vars exist (nice error if missing)
+  ansible.builtin.assert:
+    that:
+      - hostvars[vm].ssh_keys is defined
+      - hostvars[vm].ansible_host is defined
+      - (hostvars[vm].network_device | default('')) != ''
+    fail_msg: "Missing one of: ssh_keys, ansible_host, network_device for {{ vm }}"
+
+- name: Write network-config
+  ansible.builtin.copy:
+    dest: "{{ cloudinit_dir }}/{{ vm }}/network-config"
+    mode: "0644"
+    content: |
+      version: 2
+      ethernets:
+        {{ hostvars[vm].network_device }}:
+          dhcp4: false
+          addresses:
+            - {{ hostvars[vm].ansible_host }}/8
+          renderer: NetworkManager
+  when: false # NetworkManager isn't supported on Alma8 which is what the VMs are running
+
+- name: Write network-config
+  ansible.builtin.copy:
+    dest: "{{ cloudinit_dir }}/{{ vm }}/network-config"
+    mode: "0644"
+    content: |
+      version: 1
+      config:
+        - type: physical
+          name: {{ hostvars[vm].network_device }}
+          subnets:
+            - type: static
+              address: {{ hostvars[vm].ansible_host }}
+              netmask: 255.0.0.0
+  when: true # NetworkManager isn't supported on Alma8 which is what the VMs are running
+
+- name: Create SSH key pair
+  block:
+  - name: Set cluster key path
+    set_fact:
+      cluster_key_path: "{{ cloudinit_dir }}/keys/root_intervm"
+
+  - name: Ensure key directory exists
+    ansible.builtin.file:
+      path: "{{ hostvars['localhost'].cluster_key_path | dirname }}"
+      state: directory
+      mode: "0700"
+
+  - name: Create/OpenSSH keypair for inter-VM root SSH (idempotent)
+    openssh_keypair:
+      path: "{{ hostvars['localhost'].cluster_key_path }}"
+      type: rsa
+      size: 3072
+      mode: "0600"
+      comment: "root@intervm"
+      force: false                # do NOT overwrite if it already exists
+
+  - name: Load key material (base64 + line)
+    set_fact:
+      intervm_priv_b64: "{{ lookup('file', hostvars['localhost'].cluster_key_path) | b64encode }}"
+      intervm_pub_line: "{{ lookup('file', hostvars['localhost'].cluster_key_path ~ '.pub') | trim }}"
+      intervm_pub_b64:  "{{ lookup('file', hostvars['localhost'].cluster_key_path ~ '.pub') | b64encode }}"
+  delegate_facts: true
+  delegate_to: localhost
+  run_once: true
+
+- name: Write user-data
+  ansible.builtin.copy:
+    dest: "{{ cloudinit_dir }}/{{ vm }}/user-data"
+    mode: "0644"
+    content: |
+      #cloud-config
+      preserve_hostname: false
+      hostname: {{ vm }}
+
+      users:
+        - name: {{ hostvars[vm].mvpnet_user }}
+          sudo: ALL=(ALL) NOPASSWD:ALL
+          shell: /bin/bash
+          ssh_authorized_keys:
+      {% for k in lookup('file', hostvars[vm].ssh_keys).splitlines() %}
+            - "{{ k }}"
+      {% endfor %}
+    
+      # Have cloud-init write a complete /etc/hosts for all VMs
+      write_files:
+        - path: /etc/hosts
+          permissions: '0644'
+          owner: root:root
+          content: |
+            127.0.0.1 localhost
+            ::1       localhost
+      {% for h in groups['vms'] %}
+            {{ hostvars[h].ansible_host }} {{ h }}
+      {% endfor %}
+
+      {% if False %}
+        - path: /root/.ssh/id_rsa
+          permissions: '0600'
+          owner: root:root
+          encoding: b64
+          content: "{{ hostvars['localhost'].intervm_priv_b64 }}"
+
+        - path: /root/.ssh/id_rsa.pub
+          permissions: '0644'
+          owner: root:root
+          encoding: b64
+          content: "{{ hostvars['localhost'].intervm_pub_b64 }}"
+
+        - path: /root/.ssh/authorized_keys
+          permissions: '0600'
+          owner: root:root
+          append: true
+          content: "{{ hostvars['localhost'].intervm_pub_line }}\n"
+      {% endif %}
+
+      runcmd:
+        - [ hostnamectl, set-hostname, "{{ vm }}" ]
+
+- name: Create cloud-init ISO for {{ vm }}
+  ansible.builtin.command: >
+    genisoimage
+      -output {{ cloudinit_dir }}/{{ vm }}.iso
+      -volid cidata
+      -joliet
+      -rock
+      {{ cloudinit_dir }}/{{ vm }}
+  register: cloudinit_iso
+  changed_when: "'ISO 9660' in cloudinit_iso.stdout or cloudinit_iso.rc == 0"
+

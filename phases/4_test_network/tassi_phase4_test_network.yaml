@@ -2,263 +2,213 @@
 - hosts: physical_hosts
   gather_facts: yes
   any_errors_fatal: true
-  gather_subset:
-    - network
+  become: false
   vars:
     ping_count: 3
+    ansible_remote_tmp: /tmp
+
   tasks:
-    - name: Collect network information
-      include_tasks: collect_network_info.yaml
+    - block:
+      - name: Remove {{ image_dir }}
+        ansible.builtin.file:
+          path: "{{ image_dir }}"
+          state: absent
+        delegate_to: localhost
+        run_once: true
+        when: true # clean up image dir
 
-    - name: Save collected data to a JSON file
-      copy:
-        content: "{{ hostvars | to_json }}"
-        dest: /tmp/hostvars.json
-      run_once: true
-      delegate_to: localhost
-      when: true 
-      tags: debug
-
-    - name: Ensure {{ image_dir }} directory
-      ansible.builtin.file:
-        path: "{{ image_dir }}"
-        state: directory
-      delegate_to: localhost
-      run_once: true
-
-    - name: Remove any previously rendered images from {{ image_dir }}
-      ansible.builtin.shell: "rm -f {{ image_dir }}/*.png"
+      - name: Exit after cleanup
+        ansible.builtin.meta: end_play
+        when: "'makeclean' in ansible_run_tags"
       tags: makeclean
 
-    - name: Render graph in DOT format
-      template:
-        src: templates/graph.dot.j2
-        dest: "{{ image_dir }}/graph.dot"
-      run_once: true
-      delegate_to: localhost
+    - name: Network Testing
+      block:
+      - name: Fail if network.type is not defined
+        fail:
+          msg: "'network.type' must be defined"
+        when: network.type is not defined
 
-    - name: Convert DOT file to PNG
-      shell: dot -Tpng {{ image_dir }}/graph.dot -o {{ image_dir }}/graph.png
-      args:
-        executable: /bin/bash
-      register: dot_to_png_result
-      run_once: true
-      delegate_to: localhost
+      - name: Fail if network.type is unsupported
+        fail:
+          msg: "'network.type' must be either 'private' 'wireguard' or 'mvpnet'. Got: {{ network.type }}"
+        when: network.type is defined and network.type not in ['private', 'wireguard', 'mvpnet']
 
-    - name: Initialize ping results
-      set_fact:
-        ping_results: []
+      - name: Create artifacts directory {{ image_dir }}
+        ansible.builtin.file:
+          path: "{{ image_dir }}"
+          state: directory
+        delegate_to: localhost
+        run_once: true
 
-    # Local pings
-    - name: Ping the bridge interface on each host (local)
-      ansible.builtin.shell: |
-        ping -c {{ ping_count }} {{ hostvars[inventory_hostname].bridge_ip }}
-      register: bridge_ping_results
+      - name: Debug network type "{{ network.type }}"
+        debug:
+          var: network.type
 
-    - name: Record bridge ping result
-      set_fact:
-        ping_results: >-
-          {{
-            ping_results + [{
-              'src': ansible_default_ipv4.address,
-              'dst': hostvars[inventory_hostname].bridge_ip,
-              'success': (bridge_ping_results.rc == 0)
-            }]
-          }}
+      - name: include private network playbook
+        include_tasks: test_private.yaml
+        when: network.type == 'private' or network.type == 'mvpnet'
 
-    - name: Ping VMs on the same host by IP address (local)
-      ansible.builtin.shell: |
-        ping -c {{ ping_count }} {{ item }}
-      with_items: "{{ hostvars[inventory_hostname].vm_ips }}"
-      register: vm_local_ping_results
-      ignore_errors: yes
+      - name: include wireguard network playbook
+        when: network.type == 'wireguard'
+        include_tasks: test_wireguard.yaml
+      tags: always
 
-    - name: Record VM ping results by IP
-      include_tasks: record_ping_results.yaml
-      vars:
-        ping_results_data: "{{ vm_local_ping_results.results }}"
-
-    - name: Ping VMs on the same host by hostname (local)
-      ansible.builtin.shell: |
-        ping -c {{ ping_count }} {{ item }}
-      with_items: "{{ matching_vms }}"
-      register: vm_local_hostname_ping_results
-      ignore_errors: yes
-
-    - name: Record VM ping results by hostname
-      include_tasks: record_ping_results.yaml
-      vars:
-        ping_results_data: "{{ vm_local_hostname_ping_results.results }}"
-
-    - name: Ping bridges on other hosts (remote)
-      ansible.builtin.shell: |
-        ping -c {{ ping_count }} {{ item }}
-      with_items: "{{ groups['physical_hosts'] | map('extract', hostvars, 'bridge_ip') | difference([hostvars[inventory_hostname].bridge_ip]) }}"
-      register: bridge_peer_ping_results
-
-    - name: Record bridge ping results for other hosts
-      include_tasks: record_ping_results.yaml
-      vars:
-        ping_results_data: "{{ bridge_peer_ping_results.results }}"
-
-    - name: Ping VMs on other hosts by IP address (remote)
-      ansible.builtin.shell: |
-        ping -c {{ ping_count }} {{ item }}
-      with_items: >-
-        {{
-          groups['physical_hosts']
-          | map('extract', hostvars, 'vm_ips')
-          | map('dict2items')
-          | sum(start=[])
-          | map(attribute='value')
-          | list
-          | difference(
-              hostvars[inventory_hostname].vm_ips | dict2items | map(attribute='value') | list
-            )
-        }}
-      register: vm_peer_ping_results
-      ignore_errors: yes
-
-
-    - name: Record VM ping results for other hosts by IP address
-      include_tasks: record_ping_results.yaml
-      vars:
-        ping_results_data: "{{ vm_peer_ping_results.results }}"
-
-    - name: Ping VMs on other hosts by hostname (remote)
-      ansible.builtin.shell: |
-        ping -c {{ ping_count }} {{ item }}
-      with_items: >-
-        {{
-          groups['physical_hosts']
-          | map('extract', hostvars, 'matching_vms')
-          | sum(start=[])
-          | difference(hostvars[inventory_hostname].matching_vms)
-        }}
-      register: vm_peer_hostname_ping_results
-      ignore_errors: yes
-
-    - name: Record VM ping results for other hosts by hostname
-      include_tasks: record_ping_results.yaml
-      vars:
-        ping_results_data: "{{ vm_peer_hostname_ping_results.results }}"
-
-    # Aggregate ping results globally
-    - name: Aggregate all ping results
-      ansible.builtin.set_fact:
-        aggregated_ping_results: >-
-          {{
-            ansible_play_hosts_all
-            | map('extract', hostvars, 'ping_results')
-            | sum(start=[])
-          }}  
-      delegate_to: localhost
-      run_once: true
-
-    # Generate a DOT file for the ping results
-    - name: Render ping results in DOT format
-      ansible.builtin.template:
-        src: templates/ping_results.dot.j2
-        dest: "{{ image_dir }}/ping_results.dot"
-      delegate_to: localhost
-      run_once: true
-
-    # Convert DOT file to PNG
-    - name: Convert DOT file to PNG
-      ansible.builtin.shell: |
-        dot -Tpng {{ image_dir }}/ping_results.dot -o {{ image_dir }}/ping_results.png
-      args:
-        executable: /bin/bash
-      delegate_to: localhost
-      run_once: true
-
-    - name: Ensure dynamic_hosts group exists by adding localhost only when tags makeclean is passed
-      add_host:
-        name: dummyhost
-        groups: dynamic_hosts
-      delegate_to: localhost
-      run_once: true
-      tags: makeclean
-      when: "'makeclean' in ansible_run_tags"
-
-    # Add VMs to inventory
+    # Add VMs to inventory simply when networking is not mvpnet
     - name: Add VMs to inventory
       add_host:
         name: "{{ item }}"  # Add each VM hostname
         groups: "dynamic_hosts"  # Assign to dynamic_hosts group
-        ansible_ssh_common_args: "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"  
+        ansible_ssh_common_args: "-o StrictHostKeyChecking=no"  
       with_items: "{{ aggregated_matching_vms }}"
       delegate_to: localhost
       run_once: true
+      when: network.type != 'mvpnet'
 
-- name: Verify dynamic_hosts group
-  hosts: dynamic_hosts
+    # Add VMs to inventory a bit more complexly when networking is mvpnet
+    - name: Add VMs to inventory
+      add_host:
+        name: "{{ item }}"  # Add each VM hostname
+        groups: "dynamic_hosts"  # Assign to dynamic_hosts group
+        ansible_host: "127.0.0.1"                       # the VM is on localhost *from the bastion's POV*
+        ansible_port: "{{ hostvars[item].mvpnet_port }}"
+        ansible_ssh_common_args: "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ProxyJump={{ hostvars[item].physical_host }}"
+      with_items: "{{ aggregated_matching_vms }}"
+      delegate_to: localhost
+      run_once: true
+      when: network.type == 'mvpnet'
+
+- name: Run tasks now on the VMs themselves (dynamic_hosts group)
+  hosts: vms
   gather_facts: no
+  become: true
+  vars:
+    network: "{{ hostvars[groups['physical_hosts'][0]].network | default(omit) }}"
+    ansible_remote_tmp: /tmp
   tasks:
     - debug:
         msg: "Hostname: {{ inventory_hostname }}"
+    
+    - name: Get MAC addresses when network is mvpnet
+      block:
+      - name: Gather network facts
+        ansible.builtin.setup:
+          gather_subset:
+            - network
+
+      - name: Pick first physical host
+        ansible.builtin.set_fact:
+          _phys0: "{{ (groups['physical_hosts'] | default([])) | first | default('') }}"
+
+      - name: Debug chosen _phys0
+        ansible.builtin.debug:
+          var: _phys0
+
+      - name: Debug network dict on _phys0
+        ansible.builtin.debug:
+          var: hostvars[_phys0]['network']
+
+      - name: Set target_device from canonical host
+        ansible.builtin.set_fact:
+          target_device: "{{ hostvars[_phys0]['network']['device'] }}"
+
+      - name: Debug target device 
+        ansible.builtin.debug:
+          var: target_device 
+
+      - name: Extract MAC/IP from facts
+        ansible.builtin.set_fact:
+          _iface: "{{ lookup('vars', 'ansible_' ~ target_device) | default({}) }}"
+          target_mac: "{{ (_iface.macaddress | default('')) | lower }}"
+          target_ipv4: "{{ _iface.ipv4.address | default('') }}"
+        when: false
+
+      - name: Query the MAC address 
+        ansible.builtin.command: "cat /sys/class/net/{{ target_device }}/address"
+        register: _mac_out
+        changed_when: false
+
+      - name: Query the IP address
+        ansible.builtin.shell: "ip -o -4 addr show dev {{ target_device }} | awk '{print $4}' | cut -d/ -f1"
+        register: _ip4_out
+        changed_when: false
+
+      - name: Record IP and MAC addreses
+        ansible.builtin.set_fact:
+          target_mac: "{{ (_mac_out.stdout|trim|lower) }}"
+          target_ipv4: "{{ (_ip4_out.stdout|trim) }}"
+
+      - name: Debug {{ target_device }} MAC/IP
+        ansible.builtin.debug:
+          msg: "Host {{ inventory_hostname }}  iface={{ target_device }}  MAC={{ target_mac | default('UNKNOWN') }}  IPv4={{ target_ipv4 | default('NONE') }}"
+      when: network.type == 'mvpnet'
 
     - name: Re-initialize ping results
       set_fact:
         ping_results: []
 
-    - name: All VMs ping each other 
-      ansible.builtin.shell: |
-        ping -c {{ ping_count | default(3) }} {{ item }}
-      # to get list of other vms, use aggregated_matching_vms from the first in the list of original hosts
-      with_items: >-
-        {{
-          hostvars[
-            (groups['all'] | difference(groups['dynamic_hosts']) | first)
-          ].aggregated_matching_vms
-          | difference([inventory_hostname])  
-        }}
-      register: vm_vm_ping_results 
-      ignore_errors: yes
-
-    - name: Record VM-VM ping results 
-      include_tasks: record_ping_results.yaml
-      vars:
-        ping_results_data: "{{  vm_vm_ping_results.results }}"
-        dont_use_ip: true
-
-    - name: Aggregate vm-vm ping results
-      ansible.builtin.set_fact:
-        aggregated_ping_results: >-
+    - block:
+      - name: All VMs ping each other 
+        ansible.builtin.shell: |
+          ping -c {{ ping_count | default(3) }} {{ item }}
+        # to get list of other vms, use aggregated_matching_vms from the first in the list of original hosts
+        with_items: >-
           {{
-            ansible_play_hosts_all
-            | map('extract', hostvars, 'ping_results')
-            | sum(start=[])
+            hostvars[
+              (groups['all'] | difference(groups['dynamic_hosts']) | first)
+            ].aggregated_matching_vms
+            | difference([inventory_hostname])  
           }}
-      delegate_to: localhost
-      run_once: true
+        register: vm_vm_ping_results 
+        ignore_errors: yes
+          #when: >
+          #(
+          #  hostvars[
+          #    (groups['all'] | difference(groups['dynamic_hosts']) | first)
+          #  ].aggregated_matching_vms
+          #  | length
+          #) < 20
 
-    - name: Debug vm-vm ping results
-      debug:
-        var: aggregated_ping_results
-      delegate_to: localhost
-      run_once: true
+      - name: Record VM-VM ping results 
+        include_tasks: record_ping_results.yaml
+        vars:
+          ping_results_data: "{{  vm_vm_ping_results.results }}"
+          dont_use_ip: true
 
-    # TODO: create a taskfile for these two tasks and share it with the above dot to png tasks
-    # Generate a DOT file for the vm-vm ping results
-    - name: Render ping results in DOT format
-      ansible.builtin.template:
-        src: templates/ping_results_vm_vm.dot.j2
-        dest: "{{ image_dir }}/ping_results_vm_vm.dot"
-      delegate_to: localhost
-      run_once: true
+      - name: Create the graphs
+        become: false
+        delegate_to: localhost
+        run_once: true
+        block:
+        - name: Make network graph
+          include_tasks: make_network_graph.yaml
+          vars:
+            template_file: templates/network_graph.dot.j2
+        - block:
+          - name: Aggregate vm-vm ping results
+            ansible.builtin.set_fact:
+              aggregated_ping_results: >-
+                {{
+                  ansible_play_hosts_all
+                  | map('extract', hostvars, 'ping_results')
+                  | sum(start=[])
+                }}
 
-    # Convert DOT file to PNG
-    - name: Convert DOT file to PNG
-      ansible.builtin.shell: |
-        dot -Kcirco -Tpng {{ image_dir }}/ping_results_vm_vm.dot -o {{ image_dir }}/ping_results_vm_vm.png
-      args:
-        executable: /bin/bash
-      delegate_to: localhost
-      run_once: true
+          - name: Debug vm-vm ping results
+            debug:
+              var: aggregated_ping_results
+
+          - name: Render ping results in DOT format
+            ansible.builtin.template:
+              src: templates/ping_results_vm_vm.dot.j2
+              dest: "{{ image_dir }}/ping_results_vm_vm.dot"
+
+          - name: Convert DOT file to PNG in {{ image_dir }}
+            ansible.builtin.shell: |
+              dot -Kcirco -Tpng "{{ image_dir }}"/ping_results_vm_vm.dot -o "{{ image_dir }}"/ping_results_vm_vm.png
+        when: ansible_play_hosts | length < 17
 
     - name: Message final status
       debug:
         msg: "Graphs of network structure and status now available in {{ image_dir }}"
-      delegate_to: localhost
-      run_once: true
+

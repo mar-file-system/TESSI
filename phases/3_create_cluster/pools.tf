@@ -1,8 +1,9 @@
 locals {
   unique_pools = distinct([
     for vm in var.vm_name : {
-      name = vm.storage_pool,
-      host      = vm.host
+      name               = vm.storage_pool,
+      host               = vm.host
+      storage_pool_path  = vm.storage_pool_path
     }
   ])
 
@@ -18,7 +19,7 @@ module "pools" {
   for_each = local.unique_pools_map
 
   name = each.value.name
-  pool_path = "/var/lib/libvirt/${each.value.name}_pool"
+  pool_path = "${each.value.storage_pool_path}/${each.value.name}_pool"
 
   providers = {
     libvirt = libvirt.by_host[each.value.host]

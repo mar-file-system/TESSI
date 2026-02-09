@@ -11,101 +11,80 @@
 
 - name: Configure passwordless ssh across VMs if not already done
   block:
-  - name: Remove old SSH key for host
-    become: yes
-    command: ssh-keygen -R "{{ inventory_hostname }}"
-    ignore_errors: true
+  - name: Remove old SSH key for host from known_hosts
+    ansible.builtin.known_hosts:
+      path: "{{ ansible_env.HOME }}/.ssh/known_hosts"
+      name: "{{ inventory_hostname }}"
+      state: absent
 
   - name: Include wait_ssh task
     include_tasks: wait_ssh.yaml
+    when: networking != 'mvpnet'
 
   - name: Gather facts
     setup:
     tags:
       - always
 
-  - name: Generate SSH key on each host if they do not already exist
-    ansible.builtin.openssh_keypair:
-      path: "{{ ansible_env.HOME }}/.ssh/id_rsa"
-      size: 2048
-    delegate_to: "{{ inventory_hostname }}"
-    tags:
-      - sshkeys
+  # ---- collect host keys (per-host) ----
+  # note this will fail when not mvpnet. Will need to fix eventually
+  - name: Collect SSH host key for this host
+    ansible.builtin.shell: |
+      ssh-keyscan {{ hostvars[inventory_hostname].mvpnet_ip }}
+    register: ssh_hostkey
 
-  - name: Fetch public key from each host
-    fetch:
-      src: "{{ ansible_env.HOME }}/.ssh/id_rsa.pub"
-      dest: "/tmp/{{ inventory_hostname }}.pub"
-      flat: yes
-    tags:
-      - sshkeys
+  - block:
+    - name: Build cluster known_hosts blob (hostname + IP alias)
+      ansible.builtin.set_fact:
+        known_hosts_blob: |
+          {%- for h in ansible_play_hosts %}
+          {%- for line in hostvars[h].ssh_hostkey.stdout_lines %}
+          {{ h }},{{ line }}
+          {% endfor %}
+          {%- endfor %}
+    - name: Debug known_hosts content
+      debug:
+        var: known_hosts_blob
+    run_once: true
+    delegate_to: localhost
 
-  - name: Distribute each host's public key to all other hosts' authorized keys
-    authorized_key:
-      user: "{{ ansible_user_id }}"
-      state: present
-      key: "{{ lookup('file', item) }}"
-      manage_dir: yes
-    loop: "{{ query('fileglob', '/tmp/*.pub') }}"
-    delegate_to: "{{ inventory_hostname }}"
-    tags:
-      - sshkeys
+  - name: Install cluster known_hosts
+    ansible.builtin.copy:
+      dest: "{{ ansible_env.HOME }}/.ssh/known_hosts"
+      content: "{{ known_hosts_blob }}\n"
+      mode: "0644"
 
-  - name: Get SSH host keys from each host
-    shell: ssh-keyscan -H {{ inventory_hostname }}
-    register: host_keys
-    delegate_to: "{{ inventory_hostname }}"
-    tags:
-      - sshkeys
+  # ---- expensive network / ssh testing (guarded) ----
+  - block:
+      - name: Ping other nodes
+        ansible.builtin.command: "ping -c 3 {{ item }}"
+        loop: "{{ ansible_play_hosts }}"
+        when: inventory_hostname != item
+        ignore_errors: true
+        register: ping_result
 
-  - name: Add SSH host keys to known_hosts
-    known_hosts:
-      path: "{{ ansible_env.HOME }}/.ssh/known_hosts"
-      name: "{{ hostvars[item].ansible_facts.hostname }}"
-      key: "{{ hostvars[item].host_keys.stdout }}"
-    loop: "{{ ansible_play_hosts }}"
-    delegate_to: "{{ inventory_hostname }}"
-    tags:
-      - sshkeys
+      - name: Test SSH using ansible ping
+        ansible.builtin.ping:
+        delegate_to: "{{ item }}"
+        loop: "{{ ansible_play_hosts }}"
+        when: inventory_hostname != item
+        ignore_errors: true
+        register: ssh_ping_result
 
-  - name: Ping other nodes to ensure network is working
-    command: "ping -c 3 {{ item }}" 
-    with_items: "{{ groups['all'] }}"
-    when: "inventory_hostname != item"
-    ignore_errors: true
-    register: ping_result
-    tags:
-      - test
+      - name: Test SSH manually
+        ansible.builtin.shell: >
+          ssh -o StrictHostKeyChecking=no
+          {{ ansible_user_id }}@{{ item }} echo SSH Success
+        loop: "{{ ansible_play_hosts }}"
+        when: inventory_hostname != item
+        ignore_errors: true
+        register: ssh_result
+    when: ansible_play_hosts | length < 17
+    tags: [test]
 
-  - name: Test SSH connection to other nodes using ansible built-ins
-    ansible.builtin.ping:
-    delegate_to: "{{ item }}"
-    with_items: "{{ groups['all'] }}"
-    when: inventory_hostname != item
-    ignore_errors: true
-    register: ssh_ping_result
-    tags:
-      - test
-
-  - name: Test SSH to other nodes manually
-    shell: ssh -o StrictHostKeyChecking=no {{ ansible_user_id }}@{{ item }} echo SSH Success
-    with_items: "{{ groups['all'] }}"
-    when: inventory_hostname != item
-    ignore_errors: true
-    register: ssh_result
-    tags:
-      - test
-
-  - name: Display results
-    debug:
-      var: ssh_result
-    tags:
-      - test
-    when: false # disable this because output is copious
-
+  # ---- marker ----
   - name: Create task marker file {{ task_marker }}
     ansible.builtin.file:
       path: "{{ task_marker }}"
       state: touch
 
-  when: not marker_stat.stat.exists

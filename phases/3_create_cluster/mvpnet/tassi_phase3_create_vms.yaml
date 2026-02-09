@@ -1,0 +1,461 @@
+---
+- name: Launch mvpnet cluster in background (user mode) and wait for RUN
+  hosts: physical_hosts
+  collections:
+    - community.crypto
+  gather_facts: false
+  vars_files: vars.yaml
+  any_errors_fatal: true
+
+  # TODO: need to delete the /tmp/mvpnet directory
+  # TODO: need to go through and replace almost everything with values from config
+  # TODO: need to individualize the MPI ranks cloud-init and images
+  # TODO: check to see if another mvpnet is already running
+
+  tasks:
+
+    - block:
+      - name: Check required binaries are in PATH
+        ansible.builtin.command: which {{ item }}
+        loop:
+          - mvpnet
+          - monwrap
+          - mpirun
+        register: path_check
+        changed_when: false
+        ignore_errors: true
+
+      - name: Fail if any required binaries are missing
+        ansible.builtin.fail:
+          msg: >
+            Missing executables: {{
+              path_check.results
+              | selectattr('rc', 'ne', 0)
+              | map(attribute='item')
+              | join(', ')
+            }}
+        when: >
+          path_check.results
+          | selectattr('rc', 'ne', 0)
+          | list
+          | length > 0
+      when: false # skip this because we are switching to mpi module approach
+
+    - block:
+      # --- Check for pid_file ---
+      - name: Check for existing pid_file {{ pid_file }} 
+        run_once: true
+        delegate_to: "{{ groups['physical_hosts'][0] }}"
+        stat:
+          path: "{{ pid_file }}"
+        register: pidfile_stat
+
+      - block: 
+        - name: Kill mvpnet by pid_file {{ pid_file }}
+          run_once: true
+          delegate_to: "{{ groups['physical_hosts'][0] }}"
+          shell: "kill $(cat {{ pid_file }}) || true"
+          args:
+            executable: /bin/bash
+          when: pidfile_stat.stat.exists
+
+        - name: Remove pid_file {{ pid_file }}
+          run_once: true
+          delegate_to: "{{ groups['physical_hosts'][0] }}"
+          file:
+            path: "{{ pid_file }}"
+            state: absent
+        when: pidfile_stat.stat.exists
+
+      - name: Remove mvpnet_workdir
+        file:
+          path: "{{ mvpnet_workdir }}"
+          state: absent
+
+      - name: Remove mvpnet SSH entries (workstation/controller)
+        blockinfile:
+          path: "{{ sshconfig }}"
+          state: absent
+          marker: "{{ sshconfigmark }}"
+        ignore_errors: true
+
+      - name: Remove RAM-backed qcow2s in /dev/shm for all VMs
+        run_once: true
+        delegate_to: "{{ hostvars[vm].physical_host }}"
+        ansible.builtin.shell: |
+          set -euo pipefail
+          shopt -s nullglob
+          for f in /dev/shm/{{ vm }}-{{ UNIQUE_TAG }}-d*.qcow2; do
+            rm -f "$f"
+          done
+        args:
+          executable: /bin/bash
+        loop: "{{ groups['vms'] }}"
+        loop_control:
+          loop_var: vm
+          label: "{{ vm }}"
+        changed_when: true
+
+      - name: Remove per-VM HDD image directory recursively
+        ansible.builtin.file:
+          path: "{{ hdd_image_dir }}"
+          state: absent
+
+      - name: Exit early when makeclean is requested
+        meta: end_play
+        when: "'makeclean' in ansible_run_tags"
+      tags: [always]
+
+    - name: Ensure work and cloud-init dirs exist on each host
+      file:
+        path: "{{ item }}"
+        state: directory
+        mode: "0755"
+      loop:
+        - "{{ mvpnet_workdir }}"
+        - "{{ cloudinit_dir }}"
+
+- name: Build cloud-init per VM on its physical host
+  hosts: physical_hosts
+  gather_facts: false
+  strategy: free
+  vars_files: vars.yaml
+  any_errors_fatal: true
+
+  tasks:
+
+    - name: Build per-VM cloud-init via include
+      ansible.builtin.include_tasks:
+        file: cloudinit_per_vm.yaml
+      loop: "{{ hostvars[inventory_hostname].vms | default([]) }}"
+      loop_control:
+        loop_var: vm
+        label: "{{ vm }}"
+      vars:
+        vm: "{{ vm }}"
+
+- name: Resume normal playbook after parallelizing the cloud-init construction 
+  hosts: physical_hosts
+  gather_facts: false
+  vars_files: vars.yaml
+
+  tasks:
+
+    - name: Barrier confirmation
+      debug:
+        msg: "All cloud-init renders complete. Proceeding."
+
+    - name: Set MPI flavor fact
+      set_fact:
+        mpi_flavor: >-
+          {% if 'open' in network.mpi_module %}
+          openmpi
+          {% elif 'mpich' in network.mpi_module %}
+          mpich
+          {% elif 'mvapich' in network.mpi_module %}
+          mvapich
+          {% else %}
+          unknown
+          {% endif %}
+
+    - name: Fail if MPI flavor could not be detected from {{ network.mpi_module }}
+      fail:
+        msg: >
+          Unable to detect MPI flavor 
+      when: mpi_flavor == 'unknown'
+
+    - name: Normalize mpi_flavor (trim)
+      set_fact:
+        mpi_flavor: "{{ mpi_flavor | trim }}"
+
+    - name: Debug detected MPI flavor
+      debug:
+        msg: "Detected MPI flavor: {{ mpi_flavor }}"
+
+    - name: Build MPI hostfile from physical hosts
+      run_once: true
+      delegate_to: "{{ groups['physical_hosts'][0] }}"
+      copy:
+        dest: "{{ mpi_hostfile }}"
+        mode: "0644"
+        content: |
+          {% for h in groups['physical_hosts'] %}
+          {% set count = (hostvars[h].vms | default([])) | length %}
+          {% if mpi_flavor == 'openmpi' %}
+          {{ h }} slots={{ count }}
+          {% elif mpi_flavor == 'mpich' %}
+          {{ h }}:{{ count }}
+          {% endif %}
+          {% endfor %}
+
+    - name: Build MPI hostfile from physical hosts (on launcher); assume MPICH (add slots)
+      run_once: true
+      delegate_to: "{{ groups['physical_hosts'][0] }}"
+      copy:
+        dest: "{{ mpi_hostfile }}"
+        mode: "0644"
+        content: |
+          {% for h in groups['physical_hosts'] %}
+          {{ h }}:{{ (hostvars[h].vms | default([])) | length }}
+          {% endfor %}
+      when: false # old way
+
+    - name: Set fact for number of vms
+      set_fact:
+        num_vms: "{{ groups['vms'] | length }}"
+
+    - name: Create RAM-backed qcow2s in /dev/shm for all VMs
+      delegate_to: "{{ hostvars[vm].physical_host }}"
+      run_once: true
+      vars:
+        sizes: "{{ (hostvars[vm].hdd_sizes | default('[]') | from_yaml) }}"
+      ansible.builtin.shell: |
+        set -euo pipefail
+        vm="{{ vm }}"
+        i=1
+        for sz in {{ sizes | map('quote') | join(' ') }}; do
+          qemu-img create -f qcow2 "/dev/shm/${vm}-{{ UNIQUE_TAG }}-d${i}.qcow2" "${sz}G"
+          i=$((i+1))
+        done
+      args:
+        executable: /bin/bash
+      loop: "{{ groups['vms'] }}"
+      loop_control:
+        loop_var: vm
+        label: "{{ vm }}"
+      when: "(hostvars[vm].hdd_sizes | default('[]') | from_yaml | length) > 0"
+      changed_when: true
+
+    - block:
+      - name: Build per-rank -c flag list (prefers vm.mpi_rank, falls back to order)
+        set_fact:
+          mvpnet_c_flags: >-
+            {%- set parts = [] -%}
+            {%- set pairs = [] -%}
+            {%- for h in groups['vms'] -%}
+              {%- set r = (hostvars[h].mpi_rank | default(loop.index0)) | int -%}
+              {%- set _ = pairs.append([r, h]) -%}
+            {%- endfor -%}
+            {%- for p in pairs | sort -%}
+              {%- set _ = parts.append("-c %s:%s/%s.iso" | format(p[0], cloudinit_dir, p[1])) -%}
+            {%- endfor -%}
+            {{ parts | join(' ') }}
+
+      # ' just add a noop comment to fix vim's syntax coloring which gets confused by the ' ' above
+
+      - name: Build per-rank -i flag list 
+        set_fact:
+          mvpnet_i_flags: >-
+            {%- set parts = [] -%}
+            {%- set pairs = [] -%}
+            {%- for h in groups['vms'] -%}
+              {%- set r = (hostvars[h].mpi_rank | default(loop.index0)) | int -%}
+              {%- set i = (hostvars[h].source_image) -%}
+              {%- set _ = pairs.append([r, i]) -%}
+            {%- endfor -%}
+            {%- for p in pairs | sort -%}
+              {%- set _ = parts.append("-i %s:%s,mvpctl=s" | format(p[0], p[1])) -%}
+            {%- endfor -%}
+            {{ parts | join(' ') }} 
+           
+      # ' just add a noop comment to fix vim's syntax coloring which gets confused by the ' ' above
+
+      # this works but doesn't create a nice link at /dev/disk/by-id/virtio-hdd0
+      # TODO: follow this suggestion to improve the command-line: https://github.com/pnfs-storage/mvpnet/issues/14#issuecomment-3670941617
+      - name: Build per-rank extra HDD -i flags
+        set_fact:
+          mvpnet_hdd_flags: >-
+            {%- set parts = [] -%}
+            {%- for h in groups['vms'] | default([]) -%}
+              {%- set r = (hostvars[h].mpi_rank | default(loop.index0)) | int -%}
+              {#-- Normalize hdd_sizes: accepts [], "[6,8]", "6,8", ["6","8"], "", etc. --#}
+              {%- set raw = hostvars[h].hdd_sizes | default([], true) -%}
+              {%- if raw is sequence and raw is not string -%}
+                {%- set sizes = raw -%}
+              {%- elif raw is string -%}
+                {%- set s = raw | trim -%}
+                {%- if s | length == 0 -%}
+                  {%- set sizes = [] -%}
+                {%- elif s.startswith('[') -%}
+                  {%- set sizes = (s | from_yaml) -%}
+                {%- else -%}
+                  {%- set sizes = (s.split(',')) -%}
+                {%- endif -%}
+              {%- else -%}
+                {%- set sizes = [] -%}
+              {%- endif -%}
+              {%- set sizes = sizes
+                    | map('string') | map('trim')
+                    | reject('equalto','')
+                    | select('match','^[0-9]+$')
+                    | map('int') | list -%}
+              {%- for idx in range(sizes | length) -%}
+                {%- set path = "%s/%s/hdd%s.qcow2" | format(hdd_image_dir, h, idx) -%}
+                {%- set _ = parts.append("-i %s:%s,mvpctl=s" | format(r, path)) -%}
+              {%- endfor -%}
+            {%- endfor -%}
+            {{ parts | join(' ') }}
+            
+      - name: Build per-rank HDD -i flags (virtio + serials, no file=) with deterministic labels in /dev/disk/by-id/
+        set_fact:
+          mvpnet_hdd_flags: >-
+            {%- set parts = [] -%}
+            {%- set base = (hdd_image_dir | regex_replace('/+$','')) -%}
+            {%- for h in groups['vms'] | default([]) -%}
+              {%- set r = (hostvars[h].mpi_rank | default(loop.index0)) | int -%}
+              {# normalize hdd_sizes -> list[int] #}
+              {%- set raw = hostvars[h].hdd_sizes | default([], true) -%}
+              {%- if raw is sequence and raw is not string -%}
+                {%- set sizes = raw -%}
+              {%- elif raw is string -%}
+                {%- set s = raw | trim -%}
+                {%- if s | length == 0 -%}{%- set sizes = [] -%}
+                {%- elif s.startswith('[') -%}{%- set sizes = (s | from_yaml) -%}
+                {%- else -%}{%- set sizes = (s.split(',')) -%}
+                {%- endif -%}
+              {%- else -%}
+                {%- set sizes = [] -%}
+              {%- endif -%}
+              {%- set sizes = sizes | map('string') | map('trim') | reject('equalto','') | map('int') | list -%}
+              {%- for idx in range(sizes | length) -%}
+                {%- set path = "%s/%s/hdd%s.qcow2" | format(base, h, idx) -%}
+                {%- set serial = "hdd%s" | format(idx) -%}
+                {# QEMU drive string: <path>,if=virtio,format=qcow2,serial=... #}
+                {%- set drv = "%s,if=virtio,format=qcow2,serial=%s" | format(path, serial) -%}
+                {%- set _ = parts.append("-i %s:%s,mvpctl=s" | format(r, drv)) -%}
+              {%- endfor -%}
+            {%- endfor -%}
+            {{ parts | join(' ') }}
+        when: false # this one isn't working now....      
+      # ' just add a noop comment to fix vim's syntax coloring which gets confused by the ' ' above
+
+      - name: Show extra HDD flags (sanity check)
+        debug:
+          var: mvpnet_hdd_flags
+
+            # These are the old IB flags
+            #--mca pml ob1
+            #--mca btl openib,tcp,self
+
+      - name: Fail if mvapich
+        fail:
+          msg: >
+            mvapich is not supported yet because the hostfile setup has not been implemented.
+        when: mpi_flavor == 'mvapich' 
+
+      - name: Set mca flags depending on interface {{ network.host_interface }} - prefer IB if present but don't require
+        when: mpi_flavor == 'openmpi' 
+        set_fact: 
+          mca_flags: >-
+            {% if network.host_interface is search('^ib') %}
+
+            {% elif network.host_interface is search('^en') %}
+            --mca pml ob1
+            --mca btl tcp,self
+            --mca btl_tcp_if_include {{ network.host_interface }}
+            --mca mtl ^ofi
+            {% else %}
+            {{ fail('Unsupported network.host_interface: ' ~ network.host_interface) }}
+            {% endif %}
+
+      # fix vim coloring '
+
+      - name: Show mca flags 
+        debug:
+          var: mca_flags
+
+      - name: Construct mpirun command line running on {{ network.host_interface }}
+        set_fact:
+          mpirun_cmd: >-
+            mpirun --prefix $MPI_HOME -n {{ num_vms }} -hostfile {{ mpi_hostfile }} {{ mca_flags | default('') }} 
+            {{ network.mvpnet_path }}/mvpnet -C 1
+            {{ mvpnet_c_flags }}
+            {{ mvpnet_i_flags }}
+            {{ mvpnet_hdd_flags }}
+            -l {{ mvpnet_workdir }}
+            -w 1
+            -M {{ network.mvpnet_path }}/monwrap -r {{ mvpnet_workdir }} -s {{ mvpnet_workdir }}
+            -g -L 1 -D {{ mvpnet_verbosity }} -S {{ mvpnet_verbosity }}
+            -n dgram
+
+      - name: Show mpirun command (copy/paste friendly)
+        debug:
+          msg: | 
+            {{ mpirun_cmd }}
+
+      - name: Show log path and tail hint (on launcher)
+        run_once: true
+        delegate_to: "{{ groups['physical_hosts'][0] }}"
+        debug:
+          msg:
+            - "Log files:      {{ mvpnet_log }}"
+            - "PID file:       {{ pid_file }}"
+            - "mpirun command: {{ mpirun_cmd }}"
+
+      - name: Start mvpnet with async (24h) on launcher logging to {{ mvpnet_log }}
+        shell: |
+          set -e
+          source /etc/profile.d/modules.sh
+          module load "{{ network.mpi_module }}"
+          nohup {{ mpirun_cmd }} >> "{{ mvpnet_log }}" 2>&1 &
+          echo $! > "{{ pid_file }}"
+        args:
+          executable: /bin/bash
+        async: 86400
+        poll: 0
+        register: mvpnet_async
+
+
+        # Immediately fetch async status once — if it already died, you’ll see why
+      - name: Check async job status right after launch
+        async_status:
+          jid: "{{ mvpnet_async.ansible_job_id }}"
+        register: launch_status
+
+      - name: Debug launch status (rc/stdout/stderr)
+        debug:
+          var: launch_status
+        when: launch_status.finished | default(false)
+
+      - name: Wait until all {{ num_vms }} ranks report RUN in {{ mvpnet_log }} 
+        shell: |
+          cnt=$(grep -Ec 'BOOT_QN? => RUN' "{{ mvpnet_log }}" 2>/dev/null || true)
+          echo "$cnt"
+        register: run_count
+        changed_when: false
+        retries: 120           # ~10 minutes
+        delay: 5
+        until: (run_count.stdout | int) >= (num_vms | int)
+
+      - name: Ensure SSH config file exists on physical hosts
+        ansible.builtin.file:
+          path: "{{ sshconfig }}"
+          state: touch
+          mode: "0600"
+
+      - name: Install mvpnet SSH entries for easy ssh access 
+        blockinfile:
+          path: "{{ sshconfig }}" 
+          create: true
+          mode: "0600"
+          marker: "{{ sshconfigmark }}"
+          block: |
+            {% for vm in groups['vms'] %}
+            Host {{ vm }}
+              HostName localhost
+              Port {{ hostvars[vm].mvpnet_port }}
+              User {{ hostvars[vm].mvpnet_user | default('jbent') }}
+              ProxyJump {{ hostvars[vm].physical_host }}
+              StrictHostKeyChecking no
+              UserKnownHostsFile /dev/null
+            {% endfor %}
+
+      - name: Report success
+        when: run_count.stdout | int >= num_vms | int
+        debug:
+          msg:
+            - "mvpnet is up: saw {{ num_vms }} 'BOOT_QN => RUN' lines."
+            - "Log file: {{ mvpnet_log }}"
+            - "Tip: grep -n \"BOOT_QN => RUN\" {{ mvpnet_log }}"
+      run_once: true
+      delegate_to: "{{ groups['physical_hosts'][0] }}"

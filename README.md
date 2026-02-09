@@ -19,10 +19,11 @@ The motivation and some additional information about TESSI can be found in our [
 1. Ansible
 2. Libvirt
 3. Python 3.8
-4. \> git clone git@gitlab.newmexicoconsortium.org:jbent/tassi.git
-5. \> cd tassi 
-6. \> git checkout v3.0.0
-4. \> pip3.8 install -r requirements.txt
+4. qemu-img
+5. \> git clone git@gitlab.newmexicoconsortium.org:jbent/tassi.git
+6. \> cd tassi 
+7. \> git checkout v3.0.0
+8. \> pip3.8 install -r requirements.txt
 
 ## Running
 1. To run TESSI for the first time, make sure you are in the sudoers file.
@@ -45,29 +46,3 @@ TESSI runs in five main phases. Phase 0 is the step documented above. The create
 
 ## Help
 For help with TESSI, please create a [new Issue](https://gitlab.newmexicoconsortium.org/jbent/tassi/-/issues/new) in this repo or email jbent@newmexicoconsortium.org.
-
-<!--
-
-## Integrate with your tools
-
-- [ ] [Set up project integrations](https://gitlab.newmexicoconsortium.org/jbent/tassi/-/settings/integrations)
-
-## Collaborate with your team
-
-- [ ] [Invite team members and collaborators](https://docs.gitlab.com/ee/user/project/members/)
-- [ ] [Create a new merge request](https://docs.gitlab.com/ee/user/project/merge_requests/creating_merge_requests.html)
-- [ ] [Automatically close issues from merge requests](https://docs.gitlab.com/ee/user/project/issues/managing_issues.html#closing-issues-automatically)
-- [ ] [Enable merge request approvals](https://docs.gitlab.com/ee/user/project/merge_requests/approvals/)
-- [ ] [Automatically merge when pipeline succeeds](https://docs.gitlab.com/ee/user/project/merge_requests/merge_when_pipeline_succeeds.html)
-
-## Test and Deploy
-
-Use the built-in continuous integration in GitLab.
-
-- [ ] [Get started with GitLab CI/CD](https://docs.gitlab.com/ee/ci/quick_start/index.html)
-- [ ] [Analyze your code for known vulnerabilities with Static Application Security Testing(SAST)](https://docs.gitlab.com/ee/user/application_security/sast/)
-- [ ] [Deploy to Kubernetes, Amazon EC2, or Amazon ECS using Auto Deploy](https://docs.gitlab.com/ee/topics/autodevops/requirements.html)
-- [ ] [Use pull-based deployments for improved Kubernetes management](https://docs.gitlab.com/ee/user/clusters/agent/)
-- [ ] [Set up protected environments](https://docs.gitlab.com/ee/ci/environments/protected_environments.html)
--->
-

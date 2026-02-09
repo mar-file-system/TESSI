@@ -1,0 +1,68 @@
+- name: Collect network information
+  include_tasks: wireguard_collect_network_info.yaml
+  when: network.type == 'wireguard'
+
+- name: Initialize ping results
+  set_fact:
+    ping_results: []
+
+- name: Ping the WireGuard tunnel on each host (local)
+  ansible.builtin.shell: |
+    ping -c {{ ping_count }} {{ hostvars[inventory_hostname].wireguard_ip_address.stdout }}
+  register: wireguard_ping_results
+
+- name: Record WireGuard tunnel ping result
+  set_fact:
+    ping_results: >-
+      {{
+        ping_results + [{
+          'src': ansible_default_ipv4.address,
+          'dst': hostvars[inventory_hostname].wireguard_ip_address.stdout,
+          'success': (wireguard_ping_results.rc == 0)
+        }]
+      }}
+
+- name: Gather wireguard_ip for all hosts
+  run_once: true
+  set_fact:
+    host_wireguard_ips: >-
+      {{
+        dict(
+          ansible_play_hosts_all
+          | map('extract', hostvars)
+          | selectattr('wireguard_ip', 'defined')
+          | map(attribute='inventory_hostname')
+          | zip(
+              ansible_play_hosts_all
+              | map('extract', hostvars)
+              | selectattr('wireguard_ip', 'defined')
+              | map(attribute='wireguard_ip')
+            )
+          | list
+        )
+      }}
+
+- name: Debug wireguard IP addresses
+  debug:
+    var: host_wireguard_ips 
+
+- name: Ping other hosts' WireGuard IPs
+  ansible.builtin.shell: |
+    ping -c {{ ping_count }} {{ item }}
+  loop: >-
+    {{
+      host_wireguard_ips
+      | dict2items
+      | rejectattr('key', 'equalto', inventory_hostname)
+      | map(attribute='value')
+      | list
+    }}
+  register: wireguard_peer_ping_results
+
+- name: Record WireGuard endpoint ping results
+  include_tasks: record_ping_results.yaml
+  vars:
+    ping_results_data: "{{ wireguard_peer_ping_results.results }}"
+
+- name: Collect more pings using a shared task file 
+  include_tasks: collect_pings.yaml
