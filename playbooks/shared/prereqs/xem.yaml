@@ -1,0 +1,189 @@
+---
+
+- name: Assert required variables are defined
+  assert:
+    that:
+      - storage_device is defined
+      - nvme_mount is defined
+
+- name: Set proxy environment variables
+  copy:
+    dest: /etc/environment
+    content: |
+      http_proxy=http://proxy.pdl.cmu.edu:3128/
+      https_proxy=http://proxy.pdl.cmu.edu:3128/
+      HTTP_PROXY=http://proxy.pdl.cmu.edu:3128/
+      HTTPS_PROXY=http://proxy.pdl.cmu.edu:3128/
+    owner: root
+    group: root
+    mode: '0644'
+
+- name: Configure DNF to use proxy
+  ini_file:
+    path: /etc/dnf/dnf.conf
+    section: main
+    option: proxy
+    value: http://proxy.pdl.cmu.edu:3128/
+    state: present
+
+
+- name: Check if mount already exists
+  command: findmnt -n {{ nvme_mount }}
+  register: existing_mount
+  failed_when: false
+  changed_when: false
+
+# ---------------------------
+# Detect existing partitions
+# ---------------------------
+
+- block:
+  - name: Get existing partitions on device
+    command: lsblk -nr -o NAME {{ storage_device }}
+    register: lsblk_output
+    changed_when: false
+
+  - name: Set fact for existing partitions 
+    set_fact:
+      existing_partitions: "{{ lsblk_output.stdout_lines | reject('equalto', storage_device | basename) | list }}"
+
+  - name: Debug existing partitions
+    debug:
+      var: existing_partitions
+
+  - name: Set fact for last partition number
+    set_fact:
+      last_partition_number: >-
+        {{
+          (
+            existing_partitions
+            | map('regex_replace', '^.*?([0-9]+)$', '\1')
+            | map('int')
+            | list
+            + [0]
+          )
+          | max
+        }}
+
+  # ---------------------------
+  # Check for free space
+  # ---------------------------
+
+  - name: Get free space from parted
+    command: parted -ms {{ storage_device }} unit GB print free
+    register: parted_output
+    changed_when: false
+
+  - name: Detect if free space exists
+    set_fact:
+      free_space_available: "{{ 'free' in parted_output.stdout }}"
+
+  # ---------------------------
+  # Create partition if needed
+  # ---------------------------
+
+  - block:
+    - debug:
+        var: parted_output.stdout_lines
+
+    - name: Extract start of last free region
+      shell: >
+        parted -ms {{ storage_device }} unit GB print free
+        | awk -F: '/:free;$/ { start=$2 } END { gsub("GB","",start); print start }'
+      register: free_start
+      changed_when: false
+
+    - set_fact:
+        free_region_start: "{{ free_start.stdout }}"
+
+    - debug:
+        var: free_region_start
+
+    - name: Create new partition using remaining free space
+      command: >
+        parted -s {{ storage_device }} mkpart primary xfs {{ free_region_start }}GB 100%
+
+    - name: Refresh partition table
+      command: partprobe {{ storage_device }}
+
+    when: free_space_available
+    become: true
+
+  # ---------------------------
+  # Determine partition path
+  # ---------------------------
+
+  - name: Determine new partition number
+    set_fact:
+      new_partition_number: "{{ last_partition_number | int + 1 }}"
+
+  - name: Determine partition device path
+    set_fact:
+      new_partition: >-
+        {{ storage_device }}{{ 'p' if storage_device is search('nvme') else '' }}{{ new_partition_number }}
+
+  - debug:
+      var: new_partition
+
+  # ---------------------------
+  # Check filesystem
+  # ---------------------------
+
+  - name: Check if filesystem already exists
+    command: blkid -o value -s TYPE {{ new_partition }}
+    register: fs_check
+    failed_when: false
+    changed_when: false
+
+  - name: Format partition as XFS if not formatted
+    command: mkfs.xfs -f {{ new_partition }}
+    when: fs_check.stdout == ""
+    become: true
+
+  # ---------------------------
+  # Mount partition
+  # ---------------------------
+
+  - name: Ensure mount directory exists
+    file:
+      path: "{{ nvme_mount }}"
+      state: directory
+      mode: '0755'
+    become: true
+
+  - name: Get UUID of partition
+    command: blkid -o value -s UUID {{ new_partition }}
+    register: uuid_result
+    changed_when: false
+
+  - name: Ensure fstab entry exists
+    mount:
+      path: "{{ nvme_mount }}"
+      src: "UUID={{ uuid_result.stdout }}"
+      fstype: xfs
+      opts: defaults
+      state: mounted
+    become: true
+
+  # ---------------------------
+  # Post-mount tasks (yours)
+  # ---------------------------
+
+  - name: Ensure storage device {{ storage_device }} is now mounted
+    command: findmnt -n {{ nvme_mount }}
+    register: mount_result
+    changed_when: false
+
+  - name: Get actual controlling user (handling sudo)
+    set_fact:
+      local_user: "{{ lookup('env', 'SUDO_USER') | default(lookup('env', 'USER'), true) }}"
+
+  - name: Create per-user directory on mounted storage
+    file:
+      path: "{{ nvme_mount }}/{{ local_user }}"
+      state: directory
+      owner: "{{ local_user }}"
+      mode: '0755'
+    when: mount_result.rc == 0
+    become: true
+  when: existing_mount.rc != 0
