@@ -5,7 +5,6 @@
   become: false
   vars:
     ping_count: 3
-    ansible_remote_tmp: /tmp
 
   tasks:
     - block:
@@ -54,29 +53,14 @@
         include_tasks: test_wireguard.yaml
       tags: always
 
-    # Add VMs to inventory simply when networking is not mvpnet
+    # Add VMs to inventory 
     - name: Add VMs to inventory
       add_host:
         name: "{{ item }}"  # Add each VM hostname
         groups: "dynamic_hosts"  # Assign to dynamic_hosts group
-        ansible_ssh_common_args: "-o StrictHostKeyChecking=no"  
       with_items: "{{ aggregated_matching_vms }}"
       delegate_to: localhost
       run_once: true
-      when: network.type != 'mvpnet'
-
-    # Add VMs to inventory a bit more complexly when networking is mvpnet
-    - name: Add VMs to inventory
-      add_host:
-        name: "{{ item }}"  # Add each VM hostname
-        groups: "dynamic_hosts"  # Assign to dynamic_hosts group
-        ansible_host: "127.0.0.1"                       # the VM is on localhost *from the bastion's POV*
-        ansible_port: "{{ hostvars[item].mvpnet_port }}"
-        ansible_ssh_common_args: "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ProxyJump={{ hostvars[item].physical_host }}"
-      with_items: "{{ aggregated_matching_vms }}"
-      delegate_to: localhost
-      run_once: true
-      when: network.type == 'mvpnet'
 
 - name: Run tasks now on the VMs themselves (dynamic_hosts group)
   hosts: vms
@@ -84,7 +68,6 @@
   become: true
   vars:
     network: "{{ hostvars[groups['physical_hosts'][0]].network | default(omit) }}"
-    ansible_remote_tmp: /tmp
   tasks:
     - debug:
         msg: "Hostname: {{ inventory_hostname }}"
@@ -137,6 +120,7 @@
         ansible.builtin.set_fact:
           target_mac: "{{ (_mac_out.stdout|trim|lower) }}"
           target_ipv4: "{{ (_ip4_out.stdout|trim) }}"
+        delegate_facts: true
 
       - name: Debug {{ target_device }} MAC/IP
         ansible.builtin.debug:
@@ -148,42 +132,40 @@
         ping_results: []
 
     - block:
-      - name: All VMs ping each other 
-        ansible.builtin.shell: |
-          ping -c {{ ping_count | default(3) }} {{ item }}
-        # to get list of other vms, use aggregated_matching_vms from the first in the list of original hosts
-        with_items: >-
-          {{
-            hostvars[
-              (groups['all'] | difference(groups['dynamic_hosts']) | first)
-            ].aggregated_matching_vms
-            | difference([inventory_hostname])  
-          }}
-        register: vm_vm_ping_results 
-        ignore_errors: yes
-          #when: >
-          #(
-          #  hostvars[
-          #    (groups['all'] | difference(groups['dynamic_hosts']) | first)
-          #  ].aggregated_matching_vms
-          #  | length
-          #) < 20
+      - block:
+        - name: All VMs ping each other 
+          ansible.builtin.shell: |
+            ping -c {{ ping_count | default(3) }} {{ item }}
+          # to get list of other vms, use aggregated_matching_vms from the first in the list of original hosts
+          with_items: >-
+            {{
+              hostvars[
+                (groups['all'] | difference(groups['dynamic_hosts']) | first)
+              ].aggregated_matching_vms
+              | difference([inventory_hostname])  
+            }}
+          register: vm_vm_ping_results 
+          ignore_errors: yes
+            #when: >
+            #(
+            #  hostvars[
+            #    (groups['all'] | difference(groups['dynamic_hosts']) | first)
+            #  ].aggregated_matching_vms
+            #  | length
+            #) < 20
 
-      - name: Record VM-VM ping results 
-        include_tasks: record_ping_results.yaml
-        vars:
-          ping_results_data: "{{  vm_vm_ping_results.results }}"
-          dont_use_ip: true
+        - name: Record VM-VM ping results 
+          include_tasks: record_ping_results.yaml
+          vars:
+            ping_results_data: "{{  vm_vm_ping_results.results }}"
+            dont_use_ip: true
+        when: false # turn off pinging for right now
 
       - name: Create the graphs
         become: false
         delegate_to: localhost
         run_once: true
         block:
-        - name: Make network graph
-          include_tasks: make_network_graph.yaml
-          vars:
-            template_file: templates/network_graph.dot.j2
         - block:
           - name: Aggregate vm-vm ping results
             ansible.builtin.set_fact:
@@ -208,7 +190,26 @@
               dot -Kcirco -Tpng "{{ image_dir }}"/ping_results_vm_vm.dot -o "{{ image_dir }}"/ping_results_vm_vm.png
         when: ansible_play_hosts | length < 17
 
-    - name: Message final status
-      debug:
-        msg: "Graphs of network structure and status now available in {{ image_dir }}"
+- name: Generate final graphs
+  hosts: physical_hosts
+  gather_facts: no
+  tasks:
+    - block:
+      - name: Sanity check physical host data visibility
+        debug:
+          msg: |
+            PHYS={{ item }}
+            matching_vms={{ hostvars[item].matching_vms | default('MISSING') }}
+            vm_ips={{ hostvars[item].vm_ips | default('MISSING') }}
+            network_type={{ hostvars[item].network.type | default('MISSING') }}
+        loop: "{{ groups['physical_hosts'] }}"
+      - include_tasks: make_network_graph.yaml
+        vars:
+          template_file: templates/network_graph.dot.j2
+
+      - name: Message final status
+        debug:
+          msg: "Graphs of network structure and status now available in {{ image_dir }}"
+      delegate_to: localhost
+      run_once: true
 

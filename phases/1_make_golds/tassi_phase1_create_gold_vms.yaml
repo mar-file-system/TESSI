@@ -3,8 +3,7 @@
   gather_facts: no
   strategy: free    # allow independent processing for parallel execution
   become: false     # need to be root for just parts of this phase
-  vars:
-    ansible_remote_tmp: /tmp
+
 
   tasks:
     - block:
@@ -42,8 +41,6 @@
   hosts: physical_hosts
   gather_facts: no
   become: false
-  vars:
-    ansible_remote_tmp: /tmp
   tasks:
     # Per-host short-circuit: no assigned work? stop this host now.
     - meta: end_host
@@ -84,13 +81,21 @@
   hosts: "{{ (groups['dynamic_hosts'] | default(['localhost'])) | join(',') }}"
   gather_facts: no
   become: false
-  vars:
-    ansible_remote_tmp: /tmp
   tasks:
     - debug:
         msg: "Host {{ inventory_hostname }} is in groups: {{ group_names }}"
     - debug:
         var: hostvars[inventory_hostname]
+
+- name: Capture proxy from libvirt host
+  hosts: physical_hosts
+  gather_facts: yes
+  run_once: true
+  tasks:
+    - name: Save host proxy values
+      set_fact:
+        detected_http_proxy: "{{ ansible_env.http_proxy | default(ansible_env.HTTP_PROXY | default('')) }}"
+        detected_https_proxy: "{{ ansible_env.https_proxy | default(ansible_env.HTTPS_PROXY | default('')) }}"
 
 - name: Install Custom Software onto the Gold VMs 
   hosts: "{{ groups['dynamic_hosts'] | default([]) }}"
@@ -98,17 +103,31 @@
   strategy: free    # allow independent processing for parallel execution
   become: true      # cool to be root in the VMs
   vars:
-    ansible_remote_tmp: /tmp
+    ansible_ssh_common_args: "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
+  environment:
+    http_proxy: "{{ hostvars[groups['physical_hosts'][0]].detected_http_proxy | default('') }}"
+    https_proxy: "{{ hostvars[groups['physical_hosts'][0]].detected_https_proxy | default('') }}"
   tasks:
+    - name: Persist proxy in /etc/environment
+      copy:
+        dest: /etc/environment
+        content: |
+          http_proxy={{ hostvars[groups['physical_hosts'][0]].detected_http_proxy }}
+          https_proxy={{ hostvars[groups['physical_hosts'][0]].detected_https_proxy }}
+          HTTP_PROXY={{ hostvars[groups['physical_hosts'][0]].detected_http_proxy }}
+          HTTPS_PROXY={{ hostvars[groups['physical_hosts'][0]].detected_https_proxy }}
+        owner: root
+        group: root
+        mode: '0644'
+      when: hostvars[groups['physical_hosts'][0]].detected_http_proxy != ''
+
     - include_tasks: "{{ install_playbook }}"
 
 - name: Save each gold VM to qcow2 
   hosts: physical_hosts
   gather_facts: no
   strategy: free    # allow independent processing for parallel execution
-  become: false
-  vars:
-    ansible_remote_tmp: /tmp
+  become: true
   tasks:
     - meta: end_host
       when: (assigned_vms | default([])) | length == 0
