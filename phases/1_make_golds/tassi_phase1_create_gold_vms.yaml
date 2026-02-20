@@ -54,12 +54,14 @@
       loop: "{{ assigned_vms }}"
       loop_control:
         label: "{{ item.name }}"
+      when: false
 
     - name: Add each VM to dynamic inventory
       add_host:
+        ansible_host: "{{ vm.name }}"
         name: "{{ vm.name }}"
         groups: "{{ vm.group }},dynamic_hosts"
-        ansible_ssh_common_args: "-o ProxyCommand='ssh -W %h:%p -q {{ physical_host }}' -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
+        ansible_ssh_common_args: "-o ProxyCommand='ssh -W %h:%p -q {{ hostvars[physical_host].ansible_host }}' -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
       with_subelements:
         - "{{ vm_assignment | dict2items }}"
         - value
@@ -69,7 +71,6 @@
         physical_host: "{{ item.0.key }}"
         vm: "{{ item.1 }}"
       when: vm is defined and true # this is the old way before we started trying to exit early if images already exist. That's not working anymore. Just add them all.
-      run_once: true
 
     - name: Show dynamic hosts that were added
       debug:
@@ -88,22 +89,29 @@
         var: hostvars[inventory_hostname]
 
 - name: Capture proxy from libvirt host
-  hosts: physical_hosts
-  gather_facts: yes
-  run_once: true
+  hosts: "{{ groups['physical_hosts'][0] }}"
+  gather_facts: true # must be true to fetch the environment
   tasks:
     - name: Save host proxy values
       set_fact:
         detected_http_proxy: "{{ ansible_env.http_proxy | default(ansible_env.HTTP_PROXY | default('')) }}"
         detected_https_proxy: "{{ ansible_env.https_proxy | default(ansible_env.HTTPS_PROXY | default('')) }}"
 
+- name: Show SSH args for dynamic hosts
+  hosts: localhost
+  gather_facts: no
+  tasks:
+    - debug:
+        msg: >
+          Host {{ item }} →
+          ssh_common={{ hostvars[item].ansible_ssh_common_args | default('NONE') }}
+      loop: "{{ groups['dynamic_hosts'] | default([]) }}"
+
 - name: Install Custom Software onto the Gold VMs 
   hosts: "{{ groups['dynamic_hosts'] | default([]) }}"
   gather_facts: no
   strategy: free    # allow independent processing for parallel execution
   become: true      # cool to be root in the VMs
-  vars:
-    ansible_ssh_common_args: "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
   environment:
     http_proxy: "{{ hostvars[groups['physical_hosts'][0]].detected_http_proxy | default('') }}"
     https_proxy: "{{ hostvars[groups['physical_hosts'][0]].detected_https_proxy | default('') }}"
