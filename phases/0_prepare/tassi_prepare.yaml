@@ -11,6 +11,71 @@
         stat:
           path: "/tmp/prepare_cluster_done"
         register: prepare_cluster_marker
+
+      - name: Sanitize control node known_hosts
+        delegate_to: localhost
+        become: false
+        throttle: 1
+        block:
+          - name: Remove old host fingerprints from known_hosts
+            known_hosts:
+              name: "{{ item }}"
+              state: absent
+            loop:
+              - "{{ inventory_hostname }}"
+              - "{{ ansible_host | default(inventory_hostname) }}"
+
+          - name: Scan and add new host fingerprints
+            shell: "ssh-keyscan -H {{ ansible_host | default(inventory_hostname) }} >> ~/.ssh/known_hosts"
+            register: keyscan_out
+            changed_when: keyscan_out.rc == 0
+
+      - name: Find and read local public key
+        delegate_to: localhost
+        run_once: true
+        set_fact:
+          local_pub_key: "{{ lookup('file', lookup('first_found', key_list), errors='strict') }}"
+        vars:
+          key_list:
+            - "~/.ssh/id_rsa.pub"
+            - "~/.ssh/id_ed25519.pub"
+            - "~/.ssh/id_ecdsa.pub"
+
+      - name: Ensure SSH keys are present on Physical Hosts (User and Root)
+        become: true
+        authorized_key:
+          user: "{{ item }}"
+          state: present
+          key: "{{ local_pub_key }}"
+        loop:
+          - "{{ ansible_user_id }}"
+          - root
+        when: inventory_hostname != 'localhost'
+
+      - name: Make sure that libvirt service is good
+        become: true
+        block:
+        - name: Stop libvirtd service
+          systemd:
+            name: libvirtd.service
+            state: stopped
+
+        - name: Reset failed state for libvirtd.service
+          command: systemctl reset-failed libvirtd.service
+          failed_when: false
+          changed_when: false
+
+        - name: Enable modular libvirt with legacy compatibility
+          systemd:
+            name: "{{ item }}"
+            state: started
+            enabled: yes
+          loop:
+            - virtqemud.socket
+            - virtnetworkd.socket
+            - virtstoraged.socket
+            - libvirtd.socket  # This creates the /run/libvirt/libvirt-sock proxy
+
       - block:
         - name: Optionally include cluster preparation playbook
           include_tasks: "{{ playbooks.prepare_cluster }}"

@@ -1,0 +1,230 @@
+all:
+
+  vars:
+
+    current_user: "{{ lookup('env', 'USER') }}"
+
+    # suppress ssh annoyance
+    ansible_ssh_common_args: '-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null'
+
+    # define a tag for this system to avoid collisions (e.g. on the gold VM images or the networking)
+    UNIQUE_TAG: "xemwg"
+
+    # optional directory into which to create the TASSI workflow (defaults to pwd/artifacts/UNIQUE_TAG)
+    output_dir: "/tmp/" # use tmp because the home dir has root squash
+
+    # define paths to user-custom playbooks used in the 'install gold VMs' phase and the 'configure cluster' phase 
+    playbooks:
+      prepare_cluster: "/proj/mvpnet/jbent/TESSI/playbooks/shared/prereqs.yaml"
+      gold_install:    "/proj/mvpnet/jbent/TESSI/playbooks/empty/install.yaml"  
+      cluster_config:  "/proj/mvpnet/jbent/TESSI/playbooks/empty/config.yaml"
+      cluster_test:    "/proj/mvpnet/jbent/TESSI/playbooks/shared/osu_tester.yaml" 
+
+    # The different types of groups that VMs can have in this system.
+    # These will become ansible groups in the auto-generated inventories 
+    # subsequently used with your user-custom playbooks. 
+    vm_groups:
+      node_group: "n"
+
+    # define where images are stored
+    image_storage:
+      gold_iso: "/proj/mvpnet/images/alma/AlmaLinux-8.10-x86_64-minimal.iso"
+      gold_qcows: "/proj/mvpnet/images/{{ current_user }}"
+      libvirt: "/mnt/local/{{ current_user }}/images"
+      local_storage: "/mnt/local/{{ current_user }}"
+
+    # define the networking
+    # networking needs to either have a private network or define wireguard values
+    network:
+      type: 'wireguard' # can be 'private' or 'wireguard'. If 'private', then 'interface' must be defined. If 'wireguard', then 'wg_base_ip' and 'wg_cidr' must be defined
+      libvirt:
+        base_ip: "192.68.55"
+        cidr: "28" # if type is wireguard, this must allow a single network to span multiple hosts (e.g. 28), if type is private, 24 is a good value
+        default: "default" 
+      mvpnet:
+        base_ip: '10.0.0'
+        device: 'ens3'
+        user: '{{ current_user }}'
+        #host_interface: 'ibp193s0'
+        host_interface: 'eno1np0'
+        mpi_module: 'mpi/openmpi'
+        path: '/usr/local/mvpnet/mpi_openmpi/bin/'
+      interface: "eno2"
+      wg_base_ip: "192.68.66"
+      wg_cidr: 24
+
+    # define what the gold VMs look like
+    # note that you need to define an individual gold vm for each of your vm_groups
+    gold_vms:
+      defaults: # each default value can be overwritten in the individual entries
+        iso: "{{ image_storage.gold_iso }}"
+        machine: "pc-q35-rhel8.2.0"
+        memory: 2048
+        network:
+          bootproto: "dhcp"
+          default: "{{ network.libvirt.default }}" 
+          device: "enp1s0"
+          ipv6: "noipv6"
+          ntpservers:
+            - "0.pool.ntp.org"
+            - "1.pool.ntp.org"
+            - "2.pool.ntp.org"
+            - "3.pool.ntp.org"
+          onboot: "yes"
+        os_variant: "almalinux8"
+        root_pwd: "password"
+        ssh_keys: '/users/{{ current_user }}/.ssh/authorized_keys'
+        ssh_keypair: '/users/{{ current_user }}/.ssh/id_rsa'
+        system:
+          type: 'lustre'
+          version: '2.15.4'
+          loglevel: '5'
+        timezone: "US/Mountain"
+        vcpu: 1
+      individual:
+        - name: "gold-{{ UNIQUE_TAG }}-{{ vm_groups.node_group }}"
+          disk_size: 12
+          group: "{{ vm_groups.node_group }}"
+          vcpu: 2
+  
+  # specify the lists of physical hosts across which the VMs will run
+  # and the VMs which will run on each
+  #
+  # NOTE that EXTRA_HDDs will subsequently appear in /dev/disk/by-id/virtio-{{ $HOSTAME }}.{{ b-z }} 
+  # where b means the first extra disk, c the second, etc.
+  # This can be used in the config playbooks to know which devices to use for which mounts.
+  children:
+    physical_hosts:
+      vars:
+        user: "{{ lookup('env','USER') }}"
+        domain_suffix: "{{ user }}.mvpnet"
+        ansible_host: "{{ inventory_hostname }}.{{ domain_suffix }}"
+      hosts:
+        tessi0:
+          libvirt_suffix: "0" # the beginning of the IP space used by these VMs
+          bridge_last_octet: 6 # the IP to give to the bridge
+          vms:
+            - [ n01, "{{ vm_groups.node_group }}", [], 2 ]
+            - [ n02, "{{ vm_groups.node_group }}", [], 3 ]
+            - [ n03, "{{ vm_groups.node_group }}", [], 4 ]
+            - [ n00, "{{ vm_groups.node_group }}", [], 5 ]
+        tessi1:
+          libvirt_suffix: "16" # the beginning of the IP space used by these VMs
+          bridge_last_octet: 22 # the IP to give to the bridge
+          vms:
+            - [ n04, "{{ vm_groups.node_group }}", [], 18 ]
+            - [ n05, "{{ vm_groups.node_group }}", [], 19 ]
+            - [ n06, "{{ vm_groups.node_group }}", [], 20 ]
+            - [ n07, "{{ vm_groups.node_group }}", [], 21 ]
+        tessi2:
+          libvirt_suffix: "32" # the beginning of the IP space used by these VMs
+          bridge_last_octet: 38 # the IP to give to the bridge
+          vms:
+            - [ n08, "{{ vm_groups.node_group }}", [], 34 ]
+            - [ n09, "{{ vm_groups.node_group }}", [], 35 ]
+            - [ n10, "{{ vm_groups.node_group }}", [], 36 ]
+            - [ n11, "{{ vm_groups.node_group }}", [], 37 ]
+        tessi3:
+          libvirt_suffix: "48" # the beginning of the IP space used by these VMs
+          bridge_last_octet: 54 # the IP to give to the bridge
+          vms:
+            - [ n12, "{{ vm_groups.node_group }}", [], 50 ]
+            - [ n13, "{{ vm_groups.node_group }}", [], 51 ]
+            - [ n14, "{{ vm_groups.node_group }}", [], 52 ]
+            - [ n15, "{{ vm_groups.node_group }}", [], 53 ]
+        tessi4:
+          libvirt_suffix: "64" # the beginning of the IP space used by these VMs
+          bridge_last_octet: 70 # the IP to give to the bridge
+          vms:
+            - [ n16, "{{ vm_groups.node_group }}", [], 66 ]
+            - [ n17, "{{ vm_groups.node_group }}", [], 67 ]
+            - [ n18, "{{ vm_groups.node_group }}", [], 68 ]
+            - [ n19, "{{ vm_groups.node_group }}", [], 69 ]
+        tessi5:
+          libvirt_suffix: "80" # the beginning of the IP space used by these VMs
+          bridge_last_octet: 86 # the IP to give to the bridge
+          vms:
+            - [ n20, "{{ vm_groups.node_group }}", [], 82 ]
+            - [ n21, "{{ vm_groups.node_group }}", [], 83 ]
+            - [ n22, "{{ vm_groups.node_group }}", [], 84 ]
+            - [ n23, "{{ vm_groups.node_group }}", [], 85 ]
+        tessi6:
+          libvirt_suffix: "96" # the beginning of the IP space used by these VMs
+          bridge_last_octet: 102 # the IP to give to the bridge
+          vms:
+            - [ n24, "{{ vm_groups.node_group }}", [], 98 ]
+            - [ n25, "{{ vm_groups.node_group }}", [], 99 ]
+            - [ n26, "{{ vm_groups.node_group }}", [], 100 ]
+            - [ n27, "{{ vm_groups.node_group }}", [], 101 ]
+        tessi7:
+          libvirt_suffix: "112" # the beginning of the IP space used by these VMs
+          bridge_last_octet: 118 # the IP to give to the bridge
+          vms:
+            - [ n28, "{{ vm_groups.node_group }}", [], 114 ]
+            - [ n29, "{{ vm_groups.node_group }}", [], 115 ]
+            - [ n30, "{{ vm_groups.node_group }}", [], 116 ]
+            - [ n31, "{{ vm_groups.node_group }}", [], 117 ]
+        tessi8:
+          libvirt_suffix: "128" # the beginning of the IP space used by these VMs
+          bridge_last_octet: 134 # the IP to give to the bridge
+          vms:
+            - [ n32, "{{ vm_groups.node_group }}", [], 130 ]
+            - [ n33, "{{ vm_groups.node_group }}", [], 131 ]
+            - [ n34, "{{ vm_groups.node_group }}", [], 132 ]
+            - [ n35, "{{ vm_groups.node_group }}", [], 133 ]
+        tessi9:
+          libvirt_suffix: "144" # the beginning of the IP space used by these VMs
+          bridge_last_octet: 150 # the IP to give to the bridge
+          vms:
+            - [ n36, "{{ vm_groups.node_group }}", [], 146 ]
+            - [ n37, "{{ vm_groups.node_group }}", [], 147 ]
+            - [ n38, "{{ vm_groups.node_group }}", [], 148 ]
+            - [ n39, "{{ vm_groups.node_group }}", [], 149 ]
+        tessi10:
+          libvirt_suffix: "160" # the beginning of the IP space used by these VMs
+          bridge_last_octet: 166 # the IP to give to the bridge
+          vms:
+            - [ n40, "{{ vm_groups.node_group }}", [], 162 ]
+            - [ n41, "{{ vm_groups.node_group }}", [], 163 ]
+            - [ n42, "{{ vm_groups.node_group }}", [], 164 ]
+            - [ n43, "{{ vm_groups.node_group }}", [], 165 ]
+        tessi11:
+          libvirt_suffix: "176" # the beginning of the IP space used by these VMs
+          bridge_last_octet: 184 # the IP to give to the bridge
+          vms:
+            - [ n44, "{{ vm_groups.node_group }}", [], 178 ]
+            - [ n45, "{{ vm_groups.node_group }}", [], 179 ]
+            - [ n46, "{{ vm_groups.node_group }}", [], 180 ]
+            - [ n47, "{{ vm_groups.node_group }}", [], 181 ]
+        tessi12:
+          libvirt_suffix: "192" # the beginning of the IP space used by these VMs
+          bridge_last_octet: 198 # the IP to give to the bridge
+          vms:
+            - [ n48, "{{ vm_groups.node_group }}", [], 194 ]
+            - [ n49, "{{ vm_groups.node_group }}", [], 195 ]
+            - [ n50, "{{ vm_groups.node_group }}", [], 196 ]
+            - [ n51, "{{ vm_groups.node_group }}", [], 197 ]
+        tessi13:
+          libvirt_suffix: "208" # the beginning of the IP space used by these VMs
+          bridge_last_octet: 214 # the IP to give to the bridge
+          vms:
+            - [ n52, "{{ vm_groups.node_group }}", [], 210 ]
+            - [ n53, "{{ vm_groups.node_group }}", [], 211 ]
+            - [ n54, "{{ vm_groups.node_group }}", [], 212 ]
+            - [ n55, "{{ vm_groups.node_group }}", [], 213 ]
+        tessi14:
+          libvirt_suffix: "224" # the beginning of the IP space used by these VMs
+          bridge_last_octet: 230 # the IP to give to the bridge
+          vms:
+            - [ n56, "{{ vm_groups.node_group }}", [], 226 ]
+            - [ n57, "{{ vm_groups.node_group }}", [], 227 ]
+            - [ n58, "{{ vm_groups.node_group }}", [], 228 ]
+            - [ n59, "{{ vm_groups.node_group }}", [], 229 ]
+        tessi15:
+          libvirt_suffix: "240" # the beginning of the IP space used by these VMs
+          bridge_last_octet: 246 # the IP to give to the bridge
+          vms:
+            - [ n60, "{{ vm_groups.node_group }}", [], 242 ]
+            - [ n61, "{{ vm_groups.node_group }}", [], 243 ]
+            - [ n62, "{{ vm_groups.node_group }}", [], 244 ]
+            - [ n63, "{{ vm_groups.node_group }}", [], 245 ]
