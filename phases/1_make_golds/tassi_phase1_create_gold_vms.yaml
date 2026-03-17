@@ -61,6 +61,7 @@
         ansible_host: "{{ vm.name }}"
         name: "{{ vm.name }}"
         groups: "{{ vm.group }},dynamic_hosts"
+        ssh_keypair: "{{ vm.ssh_keypair }}"
         ansible_ssh_common_args: "-o ProxyCommand='ssh -W %h:%p -q {{ hostvars[physical_host].ansible_host }}' -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
       with_subelements:
         - "{{ vm_assignment | dict2items }}"
@@ -109,7 +110,6 @@
 
 - name: Install Custom Software onto the Gold VMs 
   hosts: "{{ groups['dynamic_hosts'] | default([]) }}"
-  gather_facts: no
   strategy: free    # allow independent processing for parallel execution
   become: true      # cool to be root in the VMs
   environment:
@@ -128,6 +128,42 @@
         group: root
         mode: '0644'
       when: hostvars[groups['physical_hosts'][0]].detected_http_proxy != ''
+
+    - name: Set up ssh authorized keys in gold VM
+      block:
+        - name: Gather minimal user facts (including environment)
+          setup:
+            gather_subset:
+              - '!all'
+              - 'env'
+
+        - name: Identify the non-root login user
+          set_fact:
+            login_user: "{{ ansible_env.SUDO_USER | default(ansible_env.USER) }}"
+
+        - name: Fail if we are only seeing root
+          fail:
+            msg: "Could not identify a non-root user. Both SUDO_USER and USER are reported as root."
+          when: login_user == 'root'
+
+        - name: Get non-root user home directory
+          getent:
+            database: passwd
+            key: "{{ login_user }}"
+          register: user_passwd
+
+        - name: Set home directory variable
+          set_fact:
+            user_home: "{{ user_passwd.ansible_facts.getent_passwd[login_user][4] }}"
+
+        - name: Deploy SSH key to non-root user and root
+          authorized_key:
+            user: "{{ item }}"
+            state: present
+            key: "{{ lookup('file', ssh_keypair + '.pub', errors='strict') }}"
+          loop:
+            - "{{ login_user }}"
+            - root
 
     - include_tasks: "{{ install_playbook }}"
 
