@@ -12,10 +12,7 @@ variable "pool_path" {}
 resource "libvirt_pool" "pool" {
   name = var.name
   type = "dir"
-
-  target {
-    path = var.pool_path
-  }
+  path = var.pool_path
 }
 
 output "pool_name" {
