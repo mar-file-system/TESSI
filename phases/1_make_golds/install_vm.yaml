@@ -70,6 +70,79 @@
   become: true
 
 - block:
+    - name: Set OS-specific flags
+      set_fact:
+        is_ubuntu: "{{ 'ubuntu' in item.os_variant | lower }}"
+        config_ext: "{{ 'yml' if 'ubuntu' in item.os_variant | lower else 'ks' }}"
+        template_src: "{{ 'user-data.j2' if 'ubuntu' in item.os_variant | lower else 'kickstart.j2' }}"
+
+    - name: Set proxy fact if environment variable exists
+      set_fact:
+        instance_proxy: "{{ lookup('env', 'http_proxy') | default(omit, true) }}"
+
+    - name: Create automated install config for VM {{ item.name }}
+      template:
+        src: "{{ template_src }}"
+        dest: "{{ kickstart_dir }}/{{ item.name }}.{{ config_ext }}"
+      vars:
+        running_user: "{{ lookup('env', 'USER') }}"
+
+    - name: Ensure {{ libvirt_images }} directory exists
+      ansible.builtin.file:
+        path: "{{ libvirt_images }}"
+        state: directory
+        mode: '0755'
+
+    - name: Build virt-install command for Ubuntu (Cloud-Init)
+      set_fact:
+        vm_command: >-
+          virt-install
+          --name "{{ item.name }}"
+          --ram "{{ [item.memory | int, 4096] | max }}"
+          --vcpus "{{ item.vcpu }}"
+          --os-variant "{{ item.os_variant }}"
+          --network network="{{ item.network.default }}"
+          --graphics none
+          --disk path={{ libvirt_images }}/{{ item.name }}.img,size={{ [item.disk_size | int, 20] | max }}
+          --location "{{ item.iso }},kernel=casper/vmlinuz,initrd=casper/initrd"
+          --cloud-init user-data={{ kickstart_dir }}/{{ item.name }}.yml
+          --noautoconsole
+          --wait -1
+          --events on_reboot=destroy
+          --extra-args "console=ttyS0,115200n8 autoinstall ds=nocloud"
+      when: is_ubuntu
+
+    - name: Build virt-install command for Alma/RHEL (Kickstart)
+      set_fact:
+        vm_command: >-
+          virt-install
+          --name "{{ item.name }}"
+          --ram "{{ item.memory }}"
+          --vcpus "{{ item.vcpu }}"
+          --os-variant "{{ item.os_variant }}"
+          --network network="{{ item.network.default }}"
+          --graphics none
+          --initrd-inject "{{ kickstart_dir }}/{{ item.name }}.ks"
+          --noautoconsole
+          --wait 20
+          --disk path={{ libvirt_images }}/{{ item.name }}.img,size={{ item.disk_size }}
+          --location "{{ item.iso }}"
+          --extra-args "inst.text inst.ks=file:/{{ item.name }}.ks console=tty0 console=ttyS0,115200n8"
+      when: not is_ubuntu
+
+    - name: Debug command for VM {{ item.name }}
+      debug:
+        msg: "About to execute: {{ vm_command }}"
+
+    - name: Execute virt-install for VM {{ item.name }}
+      command: "{{ vm_command }}"
+      timeout: 3600
+      register: virt_install_output
+      become: true
+
+  when: not vm_exists
+
+- block:
    - name: Create kickstart file for VM {{ item.name }}  
      template:
        src: kickstart.j2
@@ -127,7 +200,7 @@
    - debug:
        msg: "VM {{ item.name }} installation completed with output: {{ virt_install_output.stdout }}"
 
-  when: not vm_exists 
+  when: not vm_exists and false # this is the old way
 
 - name: Ensure VM {{ item.name }} is running
   community.libvirt.virt:

@@ -1,103 +1,73 @@
 - name: Gather facts
   setup:
 
+- name: Load Base OS Family Variables
+  include_vars: "tools_{{ ansible_os_family }}.yml"
+
+- name: Layer in Version-Specific Overrides
+  include_vars: "{{ item }}"
+  with_first_found:
+    - files:
+        - "tools_{{ ansible_os_family }}-{{ ansible_distribution_major_version }}.yml"
+      skip: true  # This prevents the task from failing if the file doesn't exist
+
 - name: Include set_hostname 
   include_tasks: set_hostname.yaml
 
-- name: Enable EPEL repository
-  ansible.builtin.package:
+- name: Enable EPEL repository (RedHat only)
+  package:
     name: epel-release
     state: present
+  when: ansible_os_family == "RedHat"
 
 - name: Ensure Development Tools are installed
-  ansible.builtin.dnf: # it's not clear that package will work for group tools so use dnf
-    name: "@Development Tools"
+  package:
+    name: "{{ dev_tools_package }}"
     state: present
 
-- name: Ensure Python 3.9 is installed
+- name: Ensure Python 3 and Dev Headers are installed
+  package:
+    name: "{{ python_packages }}"
+    state: present
+
+- name: Install Guest Agent and Utils
   package:
     name:
-      - python39
-      - python39-devel
-      - python39-pip
-    state: present
-
-- name: Make python3 default to python3.9
-  alternatives:
-    name: python
-    path: /usr/bin/python3.9
-  when: false # don't do this just in case it breaks other things 
-
-- name: Install qemu-guest-agent 
-  ansible.builtin.package:
-    name: qemu-guest-agent
-    state: present
-
-- name: Enable qemu-guest-agent service
-  systemd:
-    name: qemu-guest-agent
-    enabled: yes
-    state: started
-
-- name: Install pdsh on target machines
-  ansible.builtin.package:
-    name: pdsh-rcmd-ssh
-    state: present
-
-- name: Install pdsh on target machines
-  ansible.builtin.package:
-    name: pdsh
-    state: present
-
-- name: Install rsync on target machines
-  ansible.builtin.package:
-    name: rsync
-    state: present
-
-- name: Install nslookup on target machines
-  ansible.builtin.package:
-    name: bind-utils
+      - qemu-guest-agent
+      - rsync
+      - pdsh
+      - "{{ dns_utils_package }}"
+      - "{{ pdsh_ssh_package }}"
     state: present
 
 - name: Ensure cloud-init is installed
-  ansible.builtin.package:
+  package:
     name: cloud-init
     state: present
 
-- name: Enable and start cloud-init service
-  ansible.builtin.systemd:
-    name: cloud-init
+- name: Enable and start system services
+  systemd:
+    name: "{{ item }}"
     enabled: yes
     state: started
-
-- name: Enable cloud-init-local service
-  ansible.builtin.systemd:
-    name: cloud-init-local
-    enabled: yes
-
-- name: Enable cloud-config service
-  ansible.builtin.systemd:
-    name: cloud-config
-    enabled: yes
-
-- name: Enable cloud-final service
-  ansible.builtin.systemd:
-    name: cloud-final
-    enabled: yes
-
-# install_and_build_mpi.yml
-- name: Install and build IOR + MPI Hello for each MPI implementation
-  include_tasks: install_ior.yaml
   loop:
-    - module: mpi/openmpi-x86_64
-      mpi_packages: "openmpi openmpi-devel"
-      env_vars: |
-        setenv OMPI_MCA_pml ob1
-        setenv OMPI_MCA_btl tcp,self
-    - module: mpi/mpich-x86_64
-      mpi_packages: "mpich mpich-devel"
-      env_vars: ""
+    - qemu-guest-agent
+    - cloud-init
+
+# Ubuntu handles these via the main cloud-init target; RedHat usually needs them enabled
+- name: Enable cloud-init sub-services (RedHat only)
+  systemd:
+    name: "{{ item }}"
+    enabled: yes
+  loop:
+    - cloud-init-local
+    - cloud-config
+    - cloud-final
+  when: ansible_os_family == "RedHat"
+
+- name: Install and build IOR + MPI Hello
+  include_tasks: install_ior.yaml
+  loop: "{{ mpi_implementations }}"
   loop_control:
     loop_var: mpi
   when: "'clients' in group_names"
-

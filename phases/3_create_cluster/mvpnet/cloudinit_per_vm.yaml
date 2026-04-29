@@ -95,6 +95,7 @@
   ansible.builtin.copy:
     dest: "{{ cloudinit_dir }}/{{ vm }}/meta-data"
     mode: "0644"
+    validate: "python3 -c 'import yaml, sys; yaml.safe_load(open(\"%s\"))'"
     content: |
       {
         "instance-id": "{{ vm }}-{{ lookup('pipe','date +%s') }}",
@@ -123,7 +124,7 @@
           renderer: NetworkManager
   when: false # NetworkManager isn't supported on Alma8 which is what the VMs are running
 
-- name: Write network-config
+- name: Write network-config assuming the NIC name
   ansible.builtin.copy:
     dest: "{{ cloudinit_dir }}/{{ vm }}/network-config"
     mode: "0644"
@@ -136,7 +137,52 @@
             - type: static
               address: {{ hostvars[vm].mvpnet_ip }}
               netmask: 255.0.0.0
-  when: true # NetworkManager isn't supported on Alma8 which is what the VMs are running
+  when: false # NetworkManager isn't supported on Alma8 which is what the VMs are running
+
+- name: Write network-config matching the MAC address
+  ansible.builtin.copy:
+    dest: "{{ cloudinit_dir }}/{{ vm }}/network-config"
+    mode: "0644"
+    validate: "python3 -c 'import yaml, sys; yaml.safe_load(open(\"%s\"))'"
+    content: |
+      version: 1
+      config:
+        - type: physical
+          # Use the inventory name as the logical target
+          name: {{ hostvars[vm].network_device }}
+          match:
+            # But ensure we only apply it to the actual MVPnet hardware
+            macaddress: "{{ hostvars[vm].mac_address }}"
+          subnets:
+            - type: static
+              address: {{ hostvars[vm].mvpnet_ip }}
+              netmask: 255.0.0.0
+  when: false # switch to use the MAC address to be safest
+
+- name: Write network-config matching the MAC address
+  ansible.builtin.copy:
+    dest: "{{ cloudinit_dir }}/{{ vm }}/network-config"
+    mode: "0644"
+    validate: "python3 -c 'import yaml, sys; yaml.safe_load(open(\"%s\"))'"
+    content: |
+      version: 1
+      config:
+        # Management / MVPnet Control Plane (ens2)
+        - type: physical
+          name: ens2
+          subnets:
+            - type: dhcp
+        
+        # High-Performance Data Plane (ens3/pnfs)
+        - type: physical
+          name: "{{ hostvars[vm].network_device }}"
+          match:
+            macaddress: "{{ hostvars[vm].mac_address }}"
+          subnets:
+            - type: static
+              address: {{ hostvars[vm].mvpnet_ip }}
+              netmask: 255.0.0.0
+  when: true
 
 - name: Create SSH key pair
   block:
@@ -172,10 +218,21 @@
   ansible.builtin.copy:
     dest: "{{ cloudinit_dir }}/{{ vm }}/user-data"
     mode: "0644"
+    validate: "python3 -c 'import yaml, sys; yaml.safe_load(open(\"%s\"))'"
     content: |
       #cloud-config
       preserve_hostname: false
       hostname: {{ vm }}
+
+      {% if hostvars[vm].root_password is defined and hostvars[vm].root_password %}
+      # Emergency Debugging: Root Password Access
+      chpasswd:
+        list: |
+          root:{{ hostvars[vm].root_password }}
+        expire: False
+
+      ssh_pwauth: True
+      {% endif %}
 
       users:
         - name: {{ hostvars[vm].mvpnet_user }}

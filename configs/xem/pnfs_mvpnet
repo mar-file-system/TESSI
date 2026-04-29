@@ -1,0 +1,136 @@
+all:
+
+  vars:
+    current_user: "{{ lookup('env', 'USER') }}"
+
+    # suppress ssh annoyance
+    ansible_ssh_common_args: '-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null'
+
+    # define a tag for this system to avoid collisions (e.g. on the gold VM images or the networking)
+    UNIQUE_TAG: "xempmvpU"
+
+    # optional directory into which to create the TASSI workflow (defaults to pwd/artifacts/UNIQUE_TAG)
+    output_dir: "/proj/mvpnet/{{ current_user }}/experiments" # use tmp because the home dir has root squash
+
+    # define paths to user-custom playbooks used in the 'install gold VMs' phase and the 'configure cluster' phase 
+    playbook_base: "/proj/mvpnet/{{ current_user }}/TESSI/playbooks"
+    playbooks:
+      prepare_cluster: "{{ playbook_base }}/shared/prereqs.yaml"
+      gold_install: "{{ playbook_base }}/pnfs/install_golds/install_pnfs_all.yaml"  
+      cluster_config: "{{ playbook_base }}/pnfs/configure_cluster/configure_pnfs_all.yaml"
+      cluster_test: "{{ playbook_base }}/shared/ior_tester.yaml" # this one is optional
+
+    # The different types of groups that VMs can have in this system.
+    # These will become ansible groups in the auto-generated inventories 
+    # subsequently used with your user-custom playbooks. 
+    vm_groups:
+      cli_group: "clients"
+      mds_group: "mds"
+      ds_group: "ds"
+
+    # define where images are stored
+    image_storage:
+      #gold_iso: "/proj/mvpnet/images/alma/AlmaLinux-8.10-x86_64-minimal.iso"
+      gold_iso: "/proj/mvpnet/images/ubuntu/ubuntu-24.04.4-live-server-amd64.iso"
+      #gold_iso: "/proj/mvpnet/images/alma/AlmaLinux-9.7-x86_64-minimal.iso"
+      gold_qcows: "/proj/mvpnet/images/{{ current_user }}"
+      libvirt: "/mnt/local/{{ current_user }}/images"
+      local_storage: "/mnt/local/{{ current_user }}"
+
+    # define the networking
+    # networking needs to either have a private network or define wireguard values
+    network:
+      type: 'mvpnet' # can be 'private' or 'wireguard'. If 'private', then 'interface' must be defined. If 'wireguard', then 'wg_base_ip' and 'wg_cidr' must be defined
+      libvirt:
+        base_ip: "192.68.55"
+        cidr: "24" # if type is wireguard, this must allow a single network to span multiple hosts (e.g. 28), if type is private, 24 is a good value
+        default: "default" 
+      mvpnet:
+        base_ip: '10.0.0'
+        device: 'ens3' # note that alma installations were using 'ens3', might be the case that mvpnet assumes ens3
+        user: '{{ current_user }}'
+        host_interface: 'eno1np0'
+        mpi_module: 'mpi/openmpi'
+        path: '/usr/local/mvpnet/mpi_openmpi/bin/'
+      interface: "eno2"
+      wg_base_ip: "192.68.66"
+      wg_cidr: 24
+
+    # define what the gold VMs look like
+    # note that you need to define an individual gold vm for each of your vm_groups
+    gold_vms:
+      defaults: # each default value can be overwritten in the individual entries
+        iso: "{{ image_storage.gold_iso }}"
+        #machine: "pc-q35-rhel8.2.0"
+        machine: "pc-q35-rhel9.0.0"
+        memory: 4096
+        network:
+          bootproto: "dhcp"
+          default: "{{ network.libvirt.default }}" 
+          device: "enp1s0"
+          ipv6: "noipv6"
+          ntpservers:
+            - "0.pool.ntp.org"
+            - "1.pool.ntp.org"
+            - "2.pool.ntp.org"
+            - "3.pool.ntp.org"
+          onboot: "yes"
+        #os_variant: "almalinux8"
+        os_variant: "ubuntu24.04"
+        #os_variant: "almalinux9"
+        root_pwd: "password"
+        ssh_keys: '/users/{{ current_user }}/.ssh/authorized_keys'
+        ssh_keypair: '/users/{{ current_user }}/.ssh/id_rsa'
+        system:
+          type: 'pnfs'
+          version: 'xx'
+        timezone: "US/Mountain"
+        vcpu: 1
+      individual:
+        - name: "gold-{{ UNIQUE_TAG }}-{{ vm_groups.ds_group }}"
+          disk_size: 12
+          group: "{{ vm_groups.ds_group }}"
+          vcpu: 2
+        - name: "gold-{{ UNIQUE_TAG }}-{{ vm_groups.mds_group }}"
+          disk_size: 20
+          group: "{{ vm_groups.mds_group }}"
+          vcpu: 2
+        - name: "gold-{{ UNIQUE_TAG }}-{{ vm_groups.cli_group }}"
+          disk_size: 8
+          group: "{{ vm_groups.cli_group }}"
+  
+  # specify the lists of physical hosts across which the VMs will run
+  # and the VMs which will run on each
+  #
+  # NOTE that EXTRA_HDDs will subsequently appear in /dev/disk/by-id/virtio-{{ $HOSTAME }}.{{ b-z }} 
+  # where b means the first extra disk, c the second, etc.
+  # This can be used in the config playbooks to know which devices to use for which mounts.
+  children:
+    physical_hosts:
+      vars:
+        user: "{{ lookup('env','USER') }}"
+        domain_suffix: "{{ user }}.mvpnet"
+        ansible_host: "{{ inventory_hostname }}.{{ domain_suffix }}"
+      hosts:
+        tessi0:
+          vms:
+            - [ pnfs-mds00, "{{ vm_groups.mds_group }}", [10,10], 1 ]
+            - [ pnfs-oss00, "{{ vm_groups.ds_group }}", [10],    2 ]
+        tessi1:
+          vms:
+            - [ pnfs-mds01, "{{ vm_groups.mds_group }}", [10,10], 3 ]
+            - [ pnfs-oss01, "{{ vm_groups.ds_group }}", [10],    4 ]
+        tessi2:
+          vms:
+            - [ pnfs-mds02, "{{ vm_groups.mds_group }}", [10,10], 5 ]
+            - [ pnfs-oss02, "{{ vm_groups.ds_group }}", [10],    6 ]
+        tessi3:
+          vms:
+            - [ pnfs-mds03, "{{ vm_groups.mds_group }}", [10,10], 7 ]
+            - [ pnfs-oss03, "{{ vm_groups.ds_group }}", [10],    8 ]
+        tessi4:
+          vms:
+            - [ pnfs-cli01, "{{ vm_groups.cli_group }}", [],      9 ]
+            - [ pnfs-cli02, "{{ vm_groups.cli_group }}", [],     10 ]
+            - [ pnfs-cli03, "{{ vm_groups.cli_group }}", [],     11 ]
+            - [ pnfs-cli04, "{{ vm_groups.cli_group }}", [],     12 ]

@@ -1,3 +1,4 @@
+---
 - name: Set OSU build variables for {{ mpi_module }}
   set_fact:
     osu_version: "7.5.2"
@@ -10,36 +11,25 @@
   set_fact:
     osu_stamp: "{{ osu_prefix }}/.installed"
 
-# ---------------------------------------------------
-# Exit early if already installed
-# ---------------------------------------------------
-
 - name: Check if OSU already installed
   stat:
     path: "{{ osu_stamp }}"
   register: osu_installed
 
-- name: Skip OSU build because already installed
-  debug:
-    msg: "OSU already installed for {{ mpi_module }} — skipping."
-  when: osu_installed.stat.exists
-
-# Everything below runs only if not installed
 - block:
-
-    - name: Install required packages
-      ansible.builtin.dnf:
+    - name: Install required build packages
+      ansible.builtin.package:
         name:
-          - environment-modules
+          - "{{ environment_modules_pkg }}"
           - autoconf
           - automake
           - libtool
           - make
           - gcc
-          - gcc-c++
+          - "{{ cpp_compiler_pkg }}"
         state: present
 
-    - name: Remove existing build directory for safety
+    - name: Ensure build directory is clean
       ansible.builtin.file:
         path: "{{ osu_src_dir }}"
         state: absent
@@ -50,51 +40,56 @@
         state: directory
         mode: '0755'
 
-    - name: Download OSU tarball
-      ansible.builtin.get_url:
-        url: "{{ osu_url }}"
-        dest: "/tmp/{{ osu_tarball }}"
-        mode: "0644"
+    - name: Download OSU tarball using curl
+      ansible.builtin.command:
+        cmd: "curl -L {{ osu_url }} -o /tmp/{{ osu_tarball }}"
+        creates: "/tmp/{{ osu_tarball }}"
+      # This ensures curl uses the system proxy settings without hard-coding them
+      environment:
+        http_proxy: "{{ ansible_env.http_proxy | default('') }}"
+        https_proxy: "{{ ansible_env.https_proxy | default('') }}"
 
     - name: Extract OSU
       ansible.builtin.unarchive:
         src: "/tmp/{{ osu_tarball }}"
         dest: "{{ osu_src_dir }}"
         remote_src: true
-        extra_opts:
-          - --strip-components=1
+        extra_opts: ["--strip-components=1"]
 
     - name: Build and install OSU
       ansible.builtin.shell: |
         set -e
-        source /etc/profile.d/modules.sh
+        for init in /etc/profile.d/modules.sh /usr/share/Modules/init/bash /usr/share/modules/init/bash; do
+          [ -f "$init" ] && source "$init" && break
+        done
+
         module load {{ mpi_module }}
-
         MPICC_PATH=$(which mpicc)
-        if [ -z "$MPICC_PATH" ]; then
-            echo "ERROR: mpicc not found"
-            exit 1
-        fi
+        MPICXX_PATH=$(which mpicxx)
 
-        MPI_BIN_DIR=$(dirname "$MPICC_PATH")
-        MPI_LIB_PATH=$(readlink -f "$MPI_BIN_DIR/../lib")
+        [ -z "$MPICC_PATH" ] && echo "mpicc not found" && exit 1
 
-        [ -f Makefile ] && make distclean
+        MPI_LIB_PATH=$(readlink -f $(dirname "$MPICC_PATH")/../lib)
 
-        ./configure CC="$MPICC_PATH" CXX="$(which mpicxx)" \
+        ./configure CC="$MPICC_PATH" CXX="$MPICXX_PATH" \
             LDFLAGS="-Wl,-rpath,${MPI_LIB_PATH}" \
             --prefix="{{ osu_prefix }}"
 
-        make -j
+        make -j$(nproc)
         make install
       args:
         chdir: "{{ osu_src_dir }}"
         executable: /bin/bash
 
-    - name: Create installation stamp file
+    - name: Create installation stamp
+      ansible.builtin.file:
+        path: "{{ osu_prefix }}"
+        state: directory
+        mode: '0755'
+      
+    - name: Touch stamp file
       ansible.builtin.file:
         path: "{{ osu_stamp }}"
         state: touch
 
   when: not osu_installed.stat.exists
-

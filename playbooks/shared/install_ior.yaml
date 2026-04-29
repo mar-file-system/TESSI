@@ -1,99 +1,115 @@
-# build_ior_and_mpi_hello.yml
+---
+# 1. Load OS-specific variables first so we know how to handle paths
+- name: Load OS-specific variables
+  include_vars: "mpi_{{ ansible_os_family }}.yml"
+
+# 2. Discover mpi_bin path (Must happen before we set path facts)
+- name: Discover mpi_bin path 
+  shell: |
+    for init in /etc/profile.d/modules.sh /usr/share/Modules/init/bash /usr/share/modules/init/bash; do
+      [ -f "$init" ] && source "$init" && break
+    done
+    if module load {{ mpi.module }} 2>/dev/null; then
+      echo $MPI_BIN
+    else
+      dirname $(which mpirun)
+    fi
+  args:
+    executable: /bin/bash
+  register: mpi_bin_result
+  changed_when: false
+
+# 3. Establish the base label to avoid the same-task evaluation conflict
+- name: Set the MPI label base
+  set_fact:
+    mpi_label: "{{ mpi.module | basename | regex_replace('-x86_64', '') }}"
+
+# 4. Build the specific paths using the label and the discovery result
+- name: Set MPI_BIN path and other source paths
+  set_fact:
+    mpi_bin_path: "{{ mpi_bin_result.stdout_lines[-1] | trim }}"
+    ior_src_path: "/usr/local/src/ior_{{ mpi_label }}"
+    hello_src_dir: "/usr/local/src/hello_{{ mpi_label }}"
+    hello_file_path: "/usr/local/src/hello_{{ mpi_label }}/mpi_hello.c"
 
 - name: Ensure MPI packages are installed
   package:
     name: "{{ mpi.mpi_packages.split() }}"
     state: present
 
+- name: Ensure source directories exist
+  file:
+    path: "{{ item }}"
+    state: directory
+    mode: '0755'
+  loop:
+    - "{{ ior_src_path }}"
+    - "{{ hello_src_dir }}"
+
+- name: Set modulefile path fact
+  set_fact:
+    modulefile_path: "{{ modulefiles_base_path }}/{{ mpi.module }}"
+
+- name: Check if modulefile exists
+  stat:
+    path: "{{ modulefile_path }}"
+  register: mfile
+
 - name: Add env vars to modulefile
   blockinfile:
-    path: "/usr/share/modulefiles/{{ mpi.module }}"
+    path: "{{ modulefile_path }}"
     marker: "# {mark} MPI-specific environment variables"
     block: "{{ mpi.env_vars }}"
-  when: mpi.env_vars | length > 0
-
-- name: Discover mpi_bin path 
-  shell: |
-    source /etc/profile.d/modules.sh || true
-    source /usr/share/Modules/init/bash || true
-    module unload mpi
-    module load {{ mpi.module }}
-    echo $MPI_BIN
-    module unload {{ mpi.module }}
-  args:
-    executable: /bin/bash
-  register: mpi_bin_result
-
-- name: Set MPI_BIN path and other paths
-  set_fact:
-    mpi_bin_path: "{{ mpi_bin_result.stdout_lines[-1] }}"
-    ior_src_path: "/usr/local/src/ior_{{ mpi.module | basename }}"
-    hello_path: "/usr/local/src/mpi_hello_{{ mpi.module | basename }}"
+  when: 
+    - mpi.env_vars | length > 0
+    - mfile.stat.exists
 
 - name: Ensure build tools are present
   package:
-    name:
-      - git
-      - autoconf
-      - automake
-      - libtool
-      - make
-      - gcc
+    name: [git, autoconf, automake, libtool, make, gcc]
     state: present
 
 - name: Clone IOR
   git:
     repo: 'https://github.com/hpc/ior'
     dest: "{{ ior_src_path }}"
-    clone: yes
-    update: yes
     version: '54fd197c56dbb7a7706221acbe80198903405456'
 
 - name: Bootstrap IOR
   command:
     cmd: ./bootstrap
     chdir: "{{ ior_src_path }}"
+    creates: "{{ ior_src_path }}/configure"
 
-- name: Set IOR install path using {{ mpi_bin_path }}
+- name: Set IOR install path
   set_fact:
     ior_install: "{{ mpi_bin_path | regex_replace('/bin/?$', '') }}"
 
-- name: Configure IOR with MPI installing into {{ ior_install }}
+- name: Configure, Build, and Install IOR
   shell: |
-    set -e
-    source /etc/profile.d/modules.sh || true
-    source /usr/share/Modules/init/bash || true
-    module unload mpi
-    module load {{ mpi.module }}
+    for init in /etc/profile.d/modules.sh /usr/share/Modules/init/bash /usr/share/modules/init/bash; do
+      [ -f "$init" ] && source "$init" && break
+    done
+    module load {{ mpi.module }} 2>/dev/null || true
+    
     ./configure --prefix={{ ior_install }} {{ ior_config_option | default('') }}
-    module unload {{ mpi.module }}
-  args:
-    chdir: "{{ ior_src_path }}"
-    creates: "{{ ior_src_path }}/config.status"
-    executable: /bin/bash
-
-- name: Build and install IOR
-  shell: |
-    source /etc/profile.d/modules.sh || true
-    source /usr/share/Modules/init/bash || true
-    module load {{ mpi.module }} 
-    make clean all install 
-    module unload {{ mpi.module }}
+    make clean all install
   args:
     chdir: "{{ ior_src_path }}"
     creates: "{{ mpi_bin_path }}/ior"
+    executable: /bin/bash
 
 - name: Create mpi_hello.c
   copy:
-    dest: "{{ hello_path }}.c"
+    dest: "{{ hello_file_path }}"
     content: |
-      #include <mpi.h> 
-      #include <stdio.h> 
-      int main(int argc, char** argv) 
-      { 
-          MPI_Init(NULL, NULL); 
-          int world_size; 
-          MPI_Comm_size(MPI_COMM_WORLD, &world_size); 
+      #include <mpi.h>
+      #include <stdio.h>
+      int main(int argc, char** argv)
+      {
+          MPI_Init(NULL, NULL);
+          int world_size;
+          MPI_Comm_size(MPI_COMM_WORLD, &world_size);
           int world_rank;
           MPI_Comm_rank(MPI_COMM_WORLD, &world_rank);
           char processor_name[MPI_MAX_PROCESSOR_NAME];
@@ -106,11 +122,11 @@
 
 - name: Compile mpi_hello using MPI
   shell: |
-    source /etc/profile.d/modules.sh || true
-    source /usr/share/Modules/init/bash || true
-    module load {{ mpi.module }}
-    mpicc {{ hello_path }}.c -o {{ mpi_bin_path }}/mpi_hello
-    module unload {{ mpi.module }}
+    for init in /etc/profile.d/modules.sh /usr/share/Modules/init/bash /usr/share/modules/init/bash; do
+      [ -f "$init" ] && source "$init" && break
+    done
+    module load {{ mpi.module }} 2>/dev/null || true
+    mpicc {{ hello_file_path }} -o {{ mpi_bin_path }}/mpi_hello
   args:
     executable: /bin/bash
     creates: "{{ mpi_bin_path }}/mpi_hello"
