@@ -1,0 +1,178 @@
+- name: Set up required variables
+  set_fact:
+    pnfs_src: /proj/mvpnet/pnfs-ng/
+    pnfs_dst: /opt/pnfs-ng/
+    rondb_dst: /opt/rondb
+    rondb_url: https://repo.hops.works/master/rondb-24.10.0-linux-glibc2.28-x86_64.tar.gz 
+    mvpnet_ip: "Unknown at this phase of gold installation"
+
+- name: All MDS nodes
+  debug:
+    msg: "I'm an MDS. My IP is {{ mvpnet_ip }}"
+  when: "'mds' in group_names"
+
+- name: All client nodes
+  debug:
+    msg: "I'm a client. My IP is {{ mvpnet_ip }}"
+  when: "'clients' in group_names"
+
+
+- name: All DS nodes
+  debug:
+    msg: "I'm a DS. My IP is {{ mvpnet_ip }}"
+  when: "'ds' in group_names"
+
+- name: Install needful on the DS nodes 
+  when: "'ds' in group_names"
+  block:
+  - name: Install DS packages
+    ansible.builtin.package:
+      name: nfs-kernel-server
+      state: present
+
+  - name: Setup DS export directories
+    ansible.builtin.file:
+      path: /export/ds/data
+      state: directory
+      mode: '0777'
+
+- name: Install Client and MDS runtime tools
+  when: group_names | intersect(['clients', 'mds'])
+  ansible.builtin.package:
+    name:
+      - nfs-common
+      - attr
+      - libntirpc-dev  # Required for the MDS binary to run
+      - libgssapi-krb5-2
+    state: present
+
+- name: Verify NDB library path (MDS Only)
+  ansible.builtin.command: ldconfig
+  changed_when: false
+  when: "'mds' in group_names"
+
+- name: Install build prerequisites on the mds nodes
+  when: "'mds' in group_names"
+  block:
+  - name: Install system build dependencies
+    ansible.builtin.package:
+      name:
+        - build-essential
+        - cmake
+        - pkg-config
+        - libssl-dev
+        - libntirpc-dev
+        - liblmdb-dev
+        - libkrb5-dev
+        - gcc-13
+        - g++-13
+      state: present
+
+  - name: Configure GCC 13 toolchain via alternatives
+    ansible.builtin.shell: |
+      update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-13 100 \
+      --slave /usr/bin/g++ g++ /usr/bin/g++-13
+      update-alternatives --set gcc /usr/bin/gcc-13
+    changed_when: false
+
+  - name: Download and install RonDB {{ rondb_url }} 
+    block:
+    - name: Ensure RonDB directory exists
+      ansible.builtin.file:
+        path: "{{ rondb_dst }}"
+        state: directory
+        mode: '0755'
+    - name: Download and extract RonDB via shell
+      ansible.builtin.shell: |
+        set -o pipefail
+        curl -L {{ rondb_url }} | tar -xzf - -C {{ rondb_dst }} --strip-components=1
+      args:
+        creates: "{{ rondb_dst }}/bin/rondisd"  # Skips if already extracted
+        executable: /bin/bash
+
+  - name: Update shared library cache
+    ansible.builtin.command: ldconfig
+    changed_when: false
+
+  - name: Verify toolchain integrity
+    ansible.builtin.shell: |
+      gcc_version=$(gcc -dumpversion)
+      cmake_version=$(cmake --version | head -n1 | grep -oE '[0-9]+\.[0-9]+')
+      if [ "${gcc_version%%.*}" -lt 13 ]; then exit 1; fi
+    changed_when: false
+
+- name: Copy pnfs source code into the MDSes
+  block:
+    - name: Debug destination path
+      debug:
+        var: pnfs_dst
+
+    - name: Ensure destination directory exists
+      file:
+        path: "{{ pnfs_dst }}"
+        state: directory
+        mode: '0755'
+      become: true
+
+    - name: Check for existing source
+      ansible.builtin.stat:
+        path: "{{ pnfs_dst }}/README.md"
+      register: source_exists
+
+    - name: Manage and Transfer pnfs Source
+      when: not source_exists.stat.exists
+      block:
+      - name: Compress source locally
+        community.general.archive:
+          path: "{{ pnfs_src }}"
+          dest: /tmp/pnfs_src.tar.gz
+          format: gz
+        delegate_to: localhost
+        run_once: true
+
+      - name: Transfer and unpack to MDS nodes
+        ansible.builtin.unarchive:
+          src: /tmp/pnfs_src.tar.gz
+          dest: "{{ pnfs_dst }}"
+          remote_src: no
+          owner: root
+          group: root
+
+      - name: Cleanup local tarball
+        ansible.builtin.file:
+          path: /tmp/pnfs_src.tar.gz
+          state: absent
+        delegate_to: localhost
+        run_once: true
+
+    - name: Build pnfs-ng with RonDB support
+      ansible.builtin.shell: |
+        cmake -B build-rondb \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DENABLE_RONDB=ON \
+            -DRONDB_INCLUDE_DIR={{ rondb_dst }}/include/storage/ndb \
+            -DRONDB_LIBRARY={{ rondb_dst }}/lib/libndbclient.so
+        cmake --build build-rondb -j$(nproc)
+      args:
+        chdir: "{{ pnfs_dst }}"
+        # This prevents re-building if the binary already exists
+        creates: "{{ pnfs_dst }}/build-rondb/src/mds/pnfs-mds"
+
+    - name: Install pnfs-mds binary to /usr/local/bin
+      ansible.builtin.copy:
+        src: "{{ pnfs_dst }}/build-rondb/src/mds/pnfs-mds"
+        dest: /usr/local/bin/pnfs-mds
+        mode: '0755'
+        remote_src: true  # Necessary because the binary is already on the MDS node
+
+    - name: Create configuration and data directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+      loop:
+        - /etc/pnfs-mds
+        - /var/lib/pnfs-mds
+  when: "'mds' in group_names"
