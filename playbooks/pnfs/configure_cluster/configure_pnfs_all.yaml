@@ -1,0 +1,263 @@
+---
+- name: Setup SSH across the cluster
+  hosts: all
+  become: true
+  vars:
+    ssh_setup_marker: "/root/.ssh_setup_complete"
+
+  tasks:
+    - name: Check for SSH setup marker
+      stat:
+        path: "{{ ssh_setup_marker }}"
+      register: ssh_marker
+
+    - name: Configure SSH cluster-wide
+      block:
+        - name: Run SSH configuration tasks
+          include_tasks: ../../shared/configure_ssh.yaml
+
+        - name: Create marker file to skip future runs
+          file:
+            path: "{{ ssh_setup_marker }}"
+            state: touch
+            owner: root
+            mode: '0644'
+      # Only execute this block if the marker file does NOT exist
+      when: not ssh_marker.stat.exists
+      tags: setup
+
+- name: Configure and Start the NFS Data Servers
+  hosts: ds
+  become: true
+  vars_files:
+    - vars/cluster_params.yml  
+
+  tasks:
+    - name: Ensure export directory exists
+      file:
+        path: "{{ lab_ds_export_path }}/data"
+        state: directory
+        mode: '0777'
+        recurse: yes
+
+    - name: Configure NFS Export for pNFS
+      lineinfile:
+        path: /etc/exports.d/pnfs.exports
+        line: "{{ lab_ds_export_path }} {{ hostvars[inventory_hostname]['mvpnet_ip'].split('.')[:3] | join('.') }}.0/24(rw,sync,no_subtree_check,no_root_squash)"
+        create: yes
+      register: nfs_exports
+
+    - name: Reload NFS exports
+      shell: "exportfs -ra"
+      when: nfs_exports.changed
+
+    - name: Ensure NFS Server is running and enabled
+      systemd:
+        name: nfs-server
+        state: started
+        enabled: yes
+
+- name: Deploy and Start RonDB Cluster
+  hosts: mds
+  become: true
+  vars:
+    # Single point of definition for the installation root
+    mgmt_host: "{{ groups['mds'][0] }}"
+    mgmt_ip: "{{ hostvars[groups['mds'][0]]['mvpnet_ip'] }}"
+    force_init: false 
+  vars_files:
+    - vars/cluster_params.yml  
+
+  tasks:
+
+    - name: Ensure RonDB Infrastructure Directories Exist
+      file:
+        path: "{{ item }}"
+        state: directory
+        mode: '0755'
+      loop:
+        - "{{ lab_rondb_base }}"
+        - "{{ rondb_data }}"
+        - "{{ rondb_data }}/mgmd"
+        - "{{ rondb_data }}/ndb"
+
+    - name: Pre-flight Reset (Stop existing cluster)
+      shell: "pkill -9 ndbmtd || pkill -9 ndb_mgmd || true"
+      changed_when: false
+
+    - name: Wipe data if force_init is requested
+      file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - "{{ rondb_data }}/mgmd/*"
+        - "{{ rondb_data }}/ndb/*"
+      when: force_init | bool
+
+    - name: Generate RonDB Config (Management Node Only) into {{ lab_rondb_base }}
+      template:
+        src: templates/rondb_config.ini.j2
+        dest: "{{ rondb_data }}/config.ini"
+      when: inventory_hostname == mgmt_host
+
+    - name: Start RonDB Management Server 
+      shell: >
+        {{ rondb_bin }}/ndb_mgmd 
+        -f {{ rondb_data }}/config.ini 
+        --initial 
+        --configdir={{ rondb_data }}/mgmd 
+        --ndb-nodeid=1
+      when: inventory_hostname == mgmt_host
+
+    - name: Wait for Management Server Connectivity
+      wait_for:
+        host: "{{ mgmt_ip }}"
+        port: 1186
+        timeout: 30
+
+    - name: Detect existing Data Node state
+      stat:
+        path: "{{ rondb_data }}/ndb/ndb_2.log"
+      register: ndb_data_check
+      when: inventory_hostname != mgmt_host
+
+    - name: Start RonDB Data Nodes and Wait for Them to Join
+      block:
+      - name: Start RonDB Data Nodes
+        shell: >
+          {{ rondb_bin }}/ndbmtd -c {{ mgmt_ip }}:1186 
+          {{ '--initial' if (force_init | bool or not ndb_data_check.stat.exists) else '' }}
+
+      - name: Wait for this specific Data Node to integrate
+        shell: "{{ rondb_bin }}/ndb_mgm -c {{ mgmt_ip }}:1186 -e 'show'"
+        delegate_to: "{{ mgmt_host }}"
+        register: node_check
+        retries: 30
+        delay: 2
+        # We look specifically for this host's IP followed by the version string
+        # (which indicates it moved past "accepting connect")
+        until: "node_check.stdout is search(mvpnet_ip ~ '.*RonDB')"
+      when: inventory_hostname != mgmt_host
+
+    - name: Wait for Data Nodes to reach 'Started' state
+      shell: >
+        {{ rondb_bin }}/ndb_mgm -c {{ mgmt_ip }}:1186 -e 'show' |
+        sed -n '/\[ndbd(NDB)\]/,/\[ndb_mgmd(MGM)\]/p' |
+        grep -E 'starting|accepting connect|not connected'
+      run_once: true
+      register: data_node_health
+      retries: 40
+      delay: 5
+      # Succeed only when the isolated NDB block contains none of those keywords
+      until: data_node_health.stdout == ""
+      failed_when: data_node_health.rc > 1
+
+    - name: Verify Cluster Health
+      shell: "{{ rondb_bin }}/ndb_mgm -c {{ mgmt_ip }}:1186 -e 'show'"
+      run_once: true
+      register: cluster_status
+      retries: 15
+      delay: 5
+      until:
+        - "'not connected' not in cluster_status.stdout_lines[3:6]" # Adjust indices based on your node count
+        - "cluster_status.rc == 0"
+
+    - name: Final Cluster Status Report
+      debug:
+        var: cluster_status.stdout_lines
+      run_once: true
+
+- name: Deploy and Start MDS servers 
+  hosts: mds
+  become: true
+  vars_files:
+    - vars/cluster_params.yml  
+  tasks:
+
+    - name: Ensure MDS config directory exists
+      file:
+        path: "{{ lab_mds_conf_dir }}"
+        state: directory
+        mode: '0755'
+
+    - name: Generate MDS configuration
+      template:
+        src: templates/mds.conf.j2
+        dest: "{{ lab_mds_conf_dir }}/mds.conf"
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Generate MDS configuration for RonDB 
+      template:
+        src: templates/rondb.conf.j2
+        dest: "{{ lab_mds_conf_dir }}/rondb.conf"
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Mount DS nodes locally using integer indices
+      mount:
+        path: "/mnt/ds{{ idx }}"
+        src: "{{ hostvars[item]['mvpnet_ip'] }}:/export/ds"
+        fstype: nfs
+        opts: "vers=3,nconnect=8"
+        state: mounted
+      loop: "{{ groups['ds'] }}"
+      loop_control:
+        index_var: idx
+
+    - name: Setup Systemd Service
+      template:
+        src: templates/pnfs-mds.service.j2
+        dest: /etc/systemd/system/pnfs-mds.service
+
+    - name: Start MDS
+      systemd:
+        name: pnfs-mds
+        state: restarted
+        enabled: yes
+        daemon_reload: yes
+
+- name: Distributed pNFS Client Mount
+  hosts: clients
+  become: true
+  vars_files:
+    - vars/cluster_params.yml
+  vars:
+    mds_list: "{{ groups['mds'] }}"
+    client_idx: "{{ groups['clients'].index(inventory_hostname) }}"
+    # This ensures Client 0 -> MDS 0, Client 1 -> MDS 1, Client 3 -> MDS 0, etc.
+    target_mds: "{{ mds_list[client_idx | int % mds_list | length] }}"
+
+  pre_tasks:
+    - name: Force detach stale mounts (Lazy Unmount)
+      shell: |
+        if mountpoint -q {{ lab_client_mount | default('/mnt/pnfs') }}; then
+          umount -f -l {{ lab_client_mount | default('/mnt/pnfs') }}
+        fi
+      failed_when: false # Don't stop if it's already clean
+      changed_when: false
+
+    - name: Reload systemd to sync fstab changes
+      systemd:
+        daemon_reload: yes
+    
+  tasks:
+    - name: Create client mount point
+      file:
+        path: "{{ lab_client_mount }}"
+        state: directory
+        mode: '0755'
+
+    - name: Debug the MDS spread
+      debug:
+        var: target_mds
+
+    - name: Mount the pNFS namespace via assigned MDS
+      mount:
+        path: "{{ lab_client_mount }}"
+        src: "{{ hostvars[target_mds]['mvpnet_ip'] }}:/"
+        fstype: nfs4
+        opts: "vers=4.2,nconnect=8,rw,relatime"
+        state: mounted
