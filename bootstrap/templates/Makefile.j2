@@ -1,0 +1,208 @@
+{# Jinja2 template to generate a Makefile for the Tassi workflow (excluding prepare) with incremental builds via status files #}
+{% include 'header.j2' %}
+{# ------------------------------------------------------------------------------------ #}
+{# Define the phases and their commands #}
+
+{# --- Some phase commands are different on the basis of network--- #}
+{% if network.type == "none" %}
+  {% set phase1_clean = 'ansible-playbook -i $(PHYS_INVENTORY) $(PHASE_DIR)/1_make_golds/tassi_phase1_install_physical.yaml --tags makeclean' %}
+  {% set phase1_creat = 'ansible-playbook -i $(PHYS_INVENTORY) $(PHASE_DIR)/1_make_golds/tassi_phase1_install_physical.yaml' %}
+  {% set phase2_clean = "echo \"No networking infrastructure to be cleaned\"" %}
+  {% set phase2_creat = "echo \"No networking infrastructure to be created\"" %}
+  {% set phase3_clean = "echo \"No virtual machines to be cleaned\"" %}
+  {% set phase3_creat = "echo \"No virtual machines to be created\"" %}
+  {% set phase4_clean = "echo \"No network testing to be cleaned\"" %}
+  {% set phase4_creat = "echo \"No network testing to be created\"" %}
+  {% set phase5_hclea = 'Unmount, stop services' %}
+  {% set phase5_clean = 'ansible-playbook -i $(PHYS_INVENTORY) $(PHASE_DIR)/5_config_cluster/tassi_phase5_config_cluster.yaml -e "user_config_playbook=$(CONFIG_PLAYBOOK)" --tags makeclean' %}
+  {% set phase5_inven = '$(PHYS_INVENTORY)' %}
+  {% set phase6_inven = '$(PHYS_INVENTORY)' %}
+{% else %}
+  {% set phase1_clean = 'ansible-playbook -i $(PHYS_INVENTORY) $(PHASE_DIR)/1_make_golds/tassi_phase1_create_gold_vms.yaml --tags makeclean' %}
+  {% set phase1_creat = 'ansible-playbook -i $(PHYS_INVENTORY) $(PHASE_DIR)/1_make_golds/tassi_phase1_create_gold_vms.yaml' %}
+  {% set phase2_clean = 'ansible-playbook -i $(PHYS_INVENTORY) $(PHASE_DIR)/2_create_network/tassi_phase2_create_networks.yaml --tags makeclean' %}
+  {% set phase2_creat = 'ansible-playbook -i $(PHYS_INVENTORY) $(PHASE_DIR)/2_create_network/tassi_phase2_create_networks.yaml' %}
+  {% if network.type == "mvpnet" %}
+    {% set phase3_clean = "cd $(PHASE_DIR)/3_create_cluster/mvpnet && ansible-playbook -i $(PHYS_INVENTORY) $(PHASE_DIR)/3_create_cluster/mvpnet/tassi_phase3_create_vms.yaml --tags makeclean" %}
+    {% set phase3_creat = "cd $(PHASE_DIR)/3_create_cluster/mvpnet && ansible-playbook -i $(PHYS_INVENTORY) $(PHASE_DIR)/3_create_cluster/mvpnet/tassi_phase3_create_vms.yaml" %}
+  {% else %}
+    {% set phase3_clean = "$(TOFU_WORKSPACE) && tofu $(TOFU_CHDIR) destroy $(TFVARS) --auto-approve" %}
+    {% set phase3_creat = "$(TOFU_WORKSPACE) && tofu $(TOFU_CHDIR) apply   $(TFVARS) --auto-approve" %}
+  {% endif %}
+  {% set phase4_clean = 'cd $(PHASE_DIR)/4_test_network && ansible-playbook -i $(PHYS_INVENTORY) $(PHASE_DIR)/4_test_network/tassi_phase4_test_network.yaml --tags makeclean' %}
+  {% set phase4_creat = 'cd $(PHASE_DIR)/4_test_network && ansible-playbook -i $(PHYS_INVENTORY) $(PHASE_DIR)/4_test_network/tassi_phase4_test_network.yaml' %}
+  {% set phase5_hclea = 'NOOP. This phase cannot be undone. Redo phase3 if necessary to repeat this.' %}
+  {% set phase5_clean = 'echo Cannot clean this phase. NOOP.' %}
+  {% set phase5_inven = '$(VIRT_INVENTORY)' %}
+  {% set phase6_inven = '$(VIRT_INVENTORY)' %}
+{% endif %}
+
+{% if playbooks.get('cluster_test') and playbooks.cluster_test not in [None, "", "null", "NULL"] %}
+  {% set phase6_creat = 'ansible-playbook -i ' ~ phase6_inven ~ ' $(PHASE_DIR)/6_test_cluster/tassi_phase6_test_cluster.yaml -e "user_test_playbook=$(TEST_PLAYBOOK)"' %}
+{% else %}
+  {% set phase6_creat = "echo \"No user-provided test suite to be run\"" %}
+{% endif %}
+
+{% set phases = [
+    { 
+      'name': 'phase0',
+      'clean': 'echo Cannot clean this phase. NOOP.',
+      'creat': 'cd $(PHASE_DIR/0_prepare) && ansible-playbook -i $(PHYS_INVENTORY) $(PHASE_DIR)/0_prepare/tassi_prepare.yaml',
+      'help': 'Install sw to run TASSI system on phys hosts; optionally include user tasks (e.g. local mount points)',
+      'helpclean': 'This phase cannot be cleaned'
+    },
+    { 
+      'name': 'phase1',
+      'clean': phase1_clean,
+      'creat': phase1_creat,
+      'help': (
+            "Use $(INSTALL_PLAYBOOK) to create gold VM images and install necessary software"
+            if network.type != 'none'
+            else
+            "Use $(INSTALL_PLAYBOOK) to install necessary software on the physical hosts"
+      ),
+      'helpclean': 'Delete any gold VMs'
+    },
+    { 
+      'name': 'phase2',
+      'clean': phase2_clean,
+      'creat': phase2_creat,
+      'help': 'Create and configure any virtual networking',
+      'helpclean': 'Remove the virtual networking'
+    },
+    { 
+      'name': 'phase3',
+      'clean': phase3_clean, 
+      'creat': phase3_creat,
+      'help': 'If using VMs, clone VMs',
+      'helpclean': 'Remove any VMs'
+    },
+    { 
+      'name': 'phase4',
+      'clean': phase4_clean,
+      'creat': phase4_creat, 
+      'help': 'Debug the network and create some graphs',
+      'helpclean': 'Remove the network graphs'
+    },
+    { 
+      'name': 'phase5',
+      'clean': phase5_clean, 
+      'creat': 'ansible-playbook -i ' ~ phase5_inven ~ ' $(PHASE_DIR)/5_config_cluster/tassi_phase5_config_cluster.yaml -e "user_config_playbook=$(CONFIG_PLAYBOOK)"',
+      'help': "Configure the cluster using $(CONFIG_PLAYBOOK)",
+      'helpclean': phase5_hclea 
+    },
+    {
+      'name': 'phase6',
+      'clean': 'echo Removing the log file.',
+      'creat': phase6_creat,
+      'help': "Test the cluster using $(TEST_PLAYBOOK)",
+      'helpclean': 'Remove the test results log file so this phase can be rerun.'
+    },
+    {
+      'name': 'phase7',
+      'clean': 'echo Removing the log file.',
+      'creat': 'ansible-playbook -i $(PHYS_INVENTORY) $(PHASE_DIR)/7_capture_compatibility/tassi_capture_compatibility.yaml' ,
+      'help': "Update the compatibility file to record that this combination of system running on physical hosts of this distro and version is working.",
+      'helpclean': 'Remove the test results log file so this phase can be rerun.'
+    },
+] %}
+
+# Inventory tracking and self-check to prevent outdated runs
+INVENTORY_SRC := {{ ansible_inventory_sources | first }}
+MAKEFILE := $(realpath $(lastword $(MAKEFILE_LIST)))
+
+ifndef FORCE
+  ifneq ("$(wildcard $(INVENTORY_SRC))","")
+    ifneq ("$(shell test $(MAKEFILE) -nt $(INVENTORY_SRC) || echo outdated)","")
+      $(error Autogenerated $(MAKEFILE) is outdated: older than $(INVENTORY_SRC). Run with FORCE=1 or recreate.) 
+    endif
+  endif
+endif
+
+{# Note: We do not mark the creation targets as phony so that Make can track file timestamps.
+   We still mark help, all, clean, status, and the clean targets as phony. #}
+.PHONY: help all clean status {% for phase in phases %}{{ phase.name }}-clean {% endfor %}
+
+# define a bunch of variables. Use strip to make sure extra white-space doesn't get entered since it can break a path
+ARTIFACTS := $(strip {{ artifact_dir }})
+PHYS_INVENTORY := $(strip {{ physical_inventory_dir }})
+VIRT_INVENTORY := $(strip {{ virtual_inventory_dir }})
+TFVARS := -var-file $(strip {{ tfvars_file }})
+PHASE_DIR := $(strip {{ phase_dir }})
+STATUS_DIR := $(strip {{ make_status_dir }})
+LOG_DIR := $(strip {{ make_log_dir }})
+{% if tofu_chdir is defined and tofu_chdir %}
+TOFU_CHDIR := $(strip {{ tofu_chdir }})
+TOFU_WORKSPACE := tofu $(TOFU_CHDIR) workspace select $(strip {{ tofu_workspace }})
+{% endif %}
+CONFIG_PLAYBOOK := $(strip {{ playbooks.cluster_config }})
+INSTALL_PLAYBOOK := $(strip {{ playbooks.gold_install }})
+TEST_PLAYBOOK := $(strip {{ playbooks.cluster_test | default('') }})
+
+help:
+	@echo "TASSI Workflow {{ UNIQUE_TAG }}. Available targets:"
+	@echo "  all           - Run the entire {{ UNIQUE_TAG }} workflow"
+	@echo "  clean         - Clean the entire {{ UNIQUE_TAG }} workflow"
+{% for phase in phases %}
+	@echo "  {{ phase.name }}        - {{ phase.help }}"
+{% endfor %}
+{% for phase in phases %}
+	@echo "  {{ phase.name }}-clean  - {{ phase.helpclean }}"
+{% endfor %}
+	@echo "  status        - Show status of each phase (timestamp or 'Not yet run')"
+	@echo "By default, the output for creates phases is silently logged. Use VERBOSE=1 to also see output at console (e.g. make VERBOSE=1 phase3)"
+
+# The "all" target runs all phases in order.
+all: {% for phase in phases %}{{ phase.name }} {% endfor %}
+
+	@echo "All phases created!"
+
+# The "clean" target runs the clean commands in reverse order and removes all status files.
+clean: {% for phase in phases | reverse %}{{ phase.name }}-clean {% endfor %}
+
+	@rm -f status.phase*
+	@echo "All phases cleaned!"
+
+# "status" target reports the status for each phase.
+status:
+	@echo "Phase statuses:"
+{% for phase in phases %}
+	@if [ -f $(STATUS_DIR)/status.{{ phase.name }} ]; then \
+	  echo "{{ phase.name }}:" `stat -c %y $(STATUS_DIR)/status.{{ phase.name }}`; \
+	else \
+	  echo "{{ phase.name }}: Not yet run"; \
+	fi
+{% endfor %}
+
+{# Define each phase as a file target that creates a status file upon successful completion.
+   Also, set up dependencies so that each phase depends on the previous one. #}
+{% for phase in phases %}
+$(STATUS_DIR)/status.{{ phase.name }}:{% if not loop.first %} $(STATUS_DIR)/status.{{ phases[loop.index0 - 1].name }}{% endif %}
+
+	@echo "==> $$(date) Running {{ phase.name }}. Logging into $(LOG_DIR)/log.{{ phase.name }}"
+	@echo "   ==> {{ phase.help }}"
+ifeq ($(VERBOSE),1)
+	@bash -c 'set -o pipefail; {{ phase.creat }} 2>&1 | tee $(LOG_DIR)/log.{{ phase.name }}'
+else
+	@bash -c '{{ phase.creat }} > $(LOG_DIR)/log.{{ phase.name }} 2>&1'
+endif
+	@touch $@
+	@echo "   ==> $$(date) Ran {{ phase.name }}. Logged into $(LOG_DIR)/log.{{ phase.name }}"
+
+{{ phase.name }}: $(STATUS_DIR)/status.{{ phase.name }}
+{% endfor %}
+
+{# Define the clean targets for each phase (which also remove the corresponding status file) #}
+{% for phase in phases %}
+{{ phase.name }}-clean:{% if not loop.last %} {{ phases[loop.index0 + 1].name }}-clean{% endif %}
+
+	@echo "==> $(shell date) Cleaning {{ phase.name }}. Logging into $(LOG_DIR)/log.{{ phase.name }}_clean"
+	@echo "   ==> {{ phase.helpclean }}"
+ifeq ($(VERBOSE),1)
+	@bash -c 'set -o pipefail; {{ phase.clean }} 2>&1 | tee $(LOG_DIR)/log.{{ phase.name }}_clean'
+else
+	@bash -c '{{ phase.clean }} > $(LOG_DIR)/log.{{ phase.name }}_clean 2>&1'
+endif
+	@rm -f $(STATUS_DIR)/status.{{ phase.name }}
+	@echo "   ==> $(shell date) Cleaned {{ phase.name }}"
+{% endfor %}

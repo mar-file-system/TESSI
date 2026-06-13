@@ -1,8 +1,8 @@
 ---
 - name: Hello World Playbook
   hosts: clients
-  become: true # run as root on the VMs
-  gather_facts: false
+  become: false # 
+  gather_facts: true
   vars:
     ior_result_file: "/tmp/ior_results.json"
 
@@ -38,9 +38,18 @@
         set_fact:
           outputPath: "/mnt/{{ fstype }}/ior.{{ UNIQUE_TAG }}"
 
-      - name: Write the list of client hostnames to the hostfile
+      - name: Write the list of client hostnames to the hostfile (defer this to the child task file)
         copy:
           content: "{{ groups['clients'] | join('\n') }}"
+          dest: "{{ hostfile }}.oldway"
+        when: false 
+
+      - name: Write the list of client FQDNs to the hostfile
+        copy:
+          content: |
+            {% for host in groups['clients'] %}
+            {{ hostvars[host]['ansible_fqdn'] }}
+            {% endfor %}
           dest: "{{ hostfile }}"
 
       - name: Run IOR tests for multiple MPI implementations
@@ -49,7 +58,8 @@
             - mpi_module: mpi/mpich-x86_64
               mpirun_args: ""
             - mpi_module: mpi/openmpi-x86_64
-              mpirun_args: "--allow-run-as-root --prefix $MPI_HOME --mca btl_tcp_if_include {{ device }}"
+              mpirun_args: "--prefix $MPI_HOME --mca plm_rsh_args '-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null'"
+              #mpirun_args: "--allow-run-as-root --prefix $MPI_HOME --mca btl_tcp_if_include {{ device }} --mca plm_rsh_args '-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null'"
         include_tasks: run_ior.yaml
         loop: "{{ mpi_configs }}"
         loop_control:
@@ -80,7 +90,11 @@
 
     - name: Decode raw content from IOR result file
       set_fact:
-        ior_result_lines: "{{ ior_raw.content | b64decode }}"
+        ior_result_lines: "{{ (ior_raw.content | b64decode) | string }}"
+
+    - name: Debug raw content
+      debug:
+        var: ior_result_lines
 
     - name: Debug individual JSONL lines
       debug:

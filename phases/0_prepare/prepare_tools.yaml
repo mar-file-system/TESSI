@@ -1,0 +1,510 @@
+- name: Install required Ansible collections
+  ansible.builtin.command: >
+    ansible-galaxy collection install {{ item }}
+  loop:
+    - ansible.posix
+    - community.crypto
+    - community.general
+    - community.libvirt
+  delegate_to: localhost
+  run_once: true
+
+- name: Refresh SSH known_hosts for physical hosts 
+  block:
+  
+  - name: Set some variables
+    set_fact:
+      ansible_ssh_common_args: '-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null'
+      
+  - name: Detect the actual connecting user
+    set_fact:
+      real_user: "{{ ansible_env.SUDO_USER | default(ansible_user_id) }}"
+
+  - name: Get passwd entry for real_user
+    ansible.builtin.getent:
+      database: passwd
+      key: "{{ real_user }}"
+
+  - name: Set real_user_home fact
+    set_fact:
+      real_user_home: "{{ getent_passwd[real_user][4] }}"
+
+  - name: Build target file list
+    set_fact:
+      # We build a list of objects. Each has a path and the owner user.
+      target_files: >-
+        {{
+          [
+            {'path': '/root/.ssh/known_hosts', 'owner': 'root'}
+          ] +
+          (
+            [{'path': real_user_home + '/.ssh/known_hosts', 'owner': real_user}]
+            if real_user != 'root' else []
+          )
+        }}
+
+  - name: Generate known_hosts content (Computed Once)
+    set_fact:
+      all_inventory_identifiers: >-
+        {%- for host in groups['physical_hosts'] -%}
+        {{ host }} {{ hostvars[host]['ansible_default_ipv4']['address'] }} 
+        {%- endfor -%}
+      
+      known_hosts_content: |
+        {% for host in groups['physical_hosts'] %}
+        {% if hostvars[host]['ansible_ssh_host_key_ed25519_public'] is defined %}
+        # {{ host }}
+        {% set names = [host, hostvars[host]['ansible_default_ipv4']['address']] %}
+        {%- if hostvars[host]['domain_suffix'] is defined -%}
+        {%-   set _ = names.append(host ~ '.' ~ hostvars[host]['domain_suffix']) -%}
+        {%- endif -%}
+        {{ names | join(',') }} ssh-ed25519 {{ hostvars[host]['ansible_ssh_host_key_ed25519_public'] }}
+        {% endif %}
+        {% endfor %}
+    run_once: true
+
+  - name: Ensure known_hosts files exist
+    file:
+      path: "{{ item.path }}"
+      state: touch
+      owner: "{{ item.owner }}"
+      mode: '0644'
+    become_user: "{{ item.owner }}"  # <--- THE MAGIC SWITCH
+    loop: "{{ target_files }}"
+
+  - name: Purge stale keys from files
+    shell: |
+      for target in {{ all_inventory_identifiers }}; do
+        ssh-keygen -R "$target" -f "{{ item.path }}" > /dev/null 2>&1
+      done
+    become_user: "{{ item.owner }}"  # <--- Executes as 'root' or 'jbent' dynamically
+    loop: "{{ target_files }}"
+    changed_when: false
+
+  - name: Purge stale keys by IP
+    shell: ssh-keygen -R "{{ hostvars[host]['ansible_default_ipv4']['address'] }}" -f "{{ file.path }}" > /dev/null 2>&1
+    become_user: "{{ file.owner }}"
+    loop: "{{ target_files | product(groups['physical_hosts']) | list }}"
+    loop_control:
+      loop_var: pair
+    vars:
+      file: "{{ pair.0 }}"
+      host: "{{ pair.1 }}"
+    changed_when: false
+
+  - name: Add cluster keys to files
+    blockinfile:
+      path: "{{ item.path }}"
+      owner: "{{ item.owner }}"
+      mode: '0644'
+      marker: "# {mark} ANSIBLE MANAGED CLUSTER KEYS"
+      block: "{{ known_hosts_content }}"
+    become_user: "{{ item.owner }}"
+    loop: "{{ target_files }}"
+
+  - name: Cleanup backup files
+    file:
+      path: "{{ item.path }}.old"
+      state: absent
+    become_user: "{{ item.owner }}"
+    loop: "{{ target_files }}"
+  become: true
+
+- name: Ensure a bunch of TASSI prerequisites across all physical hosts 
+  block:
+
+  - name: Tasks that need to be run as root 
+    become: true
+    block:
+    - name: Clean package manager cache
+      block:
+        - name: Clean and update apt cache (Ubuntu/Debian)
+          ansible.builtin.apt:
+            autoclean: yes
+            update_cache: yes
+          when: ansible_os_family == "Debian"
+
+        - name: Clean and update dnf cache (RedHat/CentOS)
+          ansible.builtin.dnf:
+            update_cache: yes
+          vars:
+            # The dnf module doesn't have a direct 'clean all'
+            # but clearing metadata is the equivalent goal.
+            cache_valid_time: 0
+          when: ansible_os_family == "RedHat"
+
+    - name: Install other tools for making reports 
+      package:
+        name:
+          - enscript
+          - "{{ (ansible_os_family == 'Debian') | ternary('img2pdf', 'python3-img2pdf') }}"
+          - python3-img2pdf
+          - poppler-utils
+          - rsync
+          - ghostscript
+          - graphviz
+          - "{{ (ansible_os_family == 'Debian') | ternary('ncat', 'nmap-ncat') }}"
+          - "{{ (ansible_os_family == 'Debian') | ternary('imagemagick', 'ImageMagick') }}"
+        state: present
+
+    - name: Check if firewalld is active
+      command: systemctl is-active firewalld
+      register: firewalld_status
+      changed_when: false
+      failed_when: false
+
+    - block:
+      - name: Warn if firewalld is active
+        debug:
+          msg: "WARNING: firewalld is active and will be disabled."
+
+      - name: Disable and stop firewalld if active
+        service:
+          name: firewalld
+          state: stopped
+          enabled: false
+      when: firewalld_status.rc == 0
+
+    - name: Install MPI and MVPNet when needed
+      when: network.type == 'mvpnet'
+      block:
+      - name:
+        set_fact:
+          mpi_module_root: /etc/modulefiles/mpi
+      - name: Install environment-modules
+        ansible.builtin.dnf:
+          name: environment-modules
+          state: present
+
+      - name: Ensure modules init is available system-wide
+        ansible.builtin.copy:
+          dest: /etc/profile.d/modules.sh
+          mode: "0755"
+          content: |
+            #!/bin/bash
+            if [ -f /usr/share/Modules/init/bash ]; then
+                source /usr/share/Modules/init/bash
+            fi
+
+      - name: Ensure modules init is sourced system-wide
+        ansible.builtin.copy:
+          dest: /etc/profile.d/modules.sh
+          content: |
+            #!/bin/bash
+            source /usr/share/Modules/init/bash
+          mode: "0755"
+
+      - name: Set canonical MODULEPATH order
+        copy:
+          dest: /etc/profile.d/modulepath.sh
+          mode: "0644"
+          content: |
+            export MODULEPATH=/etc/modulefiles:/usr/share/modulefiles:${MODULEPATH}
+
+      - name: Install mpi versions
+        include_tasks: ../../playbooks/shared/install_mpi.yaml
+      become: true
+
+    - name: Build OSU Micro-Benchmarks and mvpnet for all MPI implementations
+      when: network.type == 'mvpnet'
+      block:
+        - name: Set some variables
+          set_fact:
+            mpi_modules:
+              - mpi/openmpi
+              - mpi/mvapich2
+
+        - name: Install OSU for each MPI module
+          include_tasks: ../../playbooks/shared/install_osu_micro_benchmarks.yaml
+          loop: "{{ mpi_modules }}"
+          loop_control:
+            loop_var: mpi_module
+
+        - name: Build mvpnet for each MPI
+          include_tasks: ../../playbooks/shared/install_mvpnet.yaml
+          loop: "{{ mpi_modules }}"
+          loop_control:
+            loop_var: mpi_module
+      become: true
+
+    - name: Set up virtualization
+      when: network.type != 'none' 
+      block:
+      - name: Manually create libnuma.so symlink (used by mvpnet)
+        ansible.builtin.file:
+          src: /usr/lib64/libnuma.so.1
+          dest: /usr/lib64/libnuma.so
+          state: link
+          force: yes
+
+      - name: Check if OpenTofu is already installed
+        command: which tofu
+        register: tofu_check
+        ignore_errors: yes
+
+      - block:
+        - name: Download OpenTofu installer script
+          get_url:
+            url: https://get.opentofu.org/install-opentofu.sh
+            dest: /tmp/install-opentofu.sh
+            mode: '0755'
+
+        - name: Run OpenTofu installer
+          command: ./install-opentofu.sh --install-method rpm
+          args:
+            chdir: /tmp
+
+        - name: Remove installer script
+          file:
+            path: /tmp/install-opentofu.sh
+            state: absent
+        when: tofu_check.rc != 0 and network.type != 'mvpnet'
+
+    - name: Remove OpenTofu repo file if present
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /etc/yum.repos.d/opentofu.repo
+        - /etc/yum.repos.d/tofu.repo
+      ignore_errors: true
+
+    - name: Setup virtualization and networking tools 
+      when: network.type != 'none'
+      block:
+        - name: Check if qemu-system-x86_64 is already present
+          command: which qemu-system-x86_64
+          register: qemu_check
+          ignore_errors: true
+          changed_when: false
+
+        - name: Remove coreos NFS package if present
+          ansible.builtin.dnf:
+            name: nfs-utils-coreos
+            state: absent
+          when:
+            - qemu_check.rc != 0
+            - false # this might be breaking things
+            - cluster == 'xem'
+
+        - name: Debug effective user (no become)
+          command: whoami
+          register: whoami_no_become
+          changed_when: false
+
+        - debug:
+            var: whoami_no_become.stdout
+
+        - name: Set distribution-specific QEMU package names
+          ansible.builtin.set_fact:
+            qemu_packages: >-
+              {{
+                ['qemu-kvm', 'qemu-kvm-common'] if (ansible_os_family == 'RedHat' and ansible_distribution_major_version | int >= 9) else
+                ['qemu-kvm', 'qemu-img'] if (ansible_os_family == 'RedHat') else
+                ['qemu-kvm', 'qemu-utils'] if (ansible_os_family == 'Debian') else
+                ['qemu']
+              }}
+
+        - name: Install QEMU if missing
+          ansible.builtin.package:
+            name: "{{ qemu_packages }}"
+            state: present
+          when: qemu_check.rc != 0
+
+        - name: Ensure qemu-system-x86_64 alias if necessary 
+          block:
+            - name: Check if /usr/bin/qemu-system-x86_64 exists
+              stat:
+                path: /usr/bin/qemu-system-x86_64
+              register: qemu_stat
+
+            - name: Create symlink to /usr/libexec/qemu-kvm if missing
+              file:
+                src: /usr/libexec/qemu-kvm
+                dest: /usr/bin/qemu-system-x86_64
+                state: link
+              when: not qemu_stat.stat.exists
+
+        - name: Verify qemu-system-x86_64 exists after install
+          command: which qemu-system-x86_64
+          register: qemu_path
+          changed_when: false
+
+        - name: Assert that qemu-system-x86_64 is now available
+          assert:
+            that:
+              - qemu_path.rc == 0
+            fail_msg: "qemu-system-x86_64 was not found even after installation!"
+
+        - name: Enable and start and configure libvirtd
+          block:
+
+          - name: Install libvirt and virt-install (RedHat Family)
+            ansible.builtin.dnf:
+              name:
+                - libvirt
+                - virt-install
+              state: present
+              install_weak_deps: false
+            when: ansible_os_family == "RedHat"
+
+          - name: Install libvirt and virt-install (Debian/Ubuntu Family)
+            ansible.builtin.apt:
+              name:
+                - libvirt-daemon-system
+                - virtinst
+              state: present
+              install_recommends: false
+            when: ansible_os_family == "Debian"
+
+          - name: Install libvirt-manager
+            package:
+              name:
+                - virt-manager
+              state: present
+
+          - name: Start libvirtd
+            service: 
+              name: libvirtd
+              state: started
+              enabled: yes
+
+          - name: Get username from environment
+            set_fact:
+              local_user: "{{ lookup('env', 'USER') }}"
+
+          - name: Add user to libvirt group
+            ansible.builtin.user:
+              name: "{{ local_user }}"
+              groups: libvirt
+              append: yes
+            when: false # this isn't working. Not sure it's needed
+
+          - name: Install libvirt-nss
+            dnf:
+              name: libvirt-nss
+              state: present
+
+          - name: Ensure 'libvirt' is present in /etc/nsswitch.conf hosts line
+            ansible.builtin.lineinfile:
+              path: /etc/nsswitch.conf
+              regexp: '^(hosts:\s*)(?!.*\blibvirt\b)(.*)$'
+              line: '\1\2 libvirt'
+              backrefs: true
+
+          - name: Ensure 'libvirt_guest' is present in /etc/nsswitch.conf hosts line
+            ansible.builtin.lineinfile:
+              path: /etc/nsswitch.conf
+              regexp: '^(hosts:\s*)(?!.*\blibvirt_guest\b)(.*)$'
+              line: '\1\2 libvirt_guest'
+              backrefs: true
+
+          - name: Ensure working libvirt-nss on Rocky Linux 9
+            block:
+              - name: Add temporary CentOS Stream AppStream repo
+                ansible.builtin.copy:
+                  dest: /etc/yum.repos.d/centos-stream-appstream.repo
+                  content: |
+                    [centos-stream-appstream]
+                    name=CentOS Stream 9 AppStream
+                    baseurl=https://mirror.stream.centos.org/9-stream/AppStream/x86_64/os/
+                    gpgcheck=0
+                    enabled=1
+
+              - name: Upgrade libvirt and libvirt-nss from CentOS Stream
+                ansible.builtin.dnf:
+                  name:
+                    - libvirt
+                    - libvirt-daemon
+                    - libvirt-libs
+                    - libvirt-client
+                    - libvirt-nss
+                  state: latest
+                  enablerepo: centos-stream-appstream
+                  allowerasing: true
+
+              - name: Restart libvirtd service
+                ansible.builtin.service:
+                  name: libvirtd
+                  state: restarted
+
+            when:
+              - ansible_distribution == "Rocky"
+              - ansible_distribution_major_version == "9"
+
+          - name: Install Virtualization Host group
+            command: dnf -y groupinstall "Virtualization Host"
+
+          - name: Enable libvirt modular daemons
+            systemd:
+              name: "{{ item }}"
+              enabled: yes
+              state: started
+            loop:
+              - virtqemud
+              - virtnetworkd
+              - virtstoraged
+
+          - name: Ensure system users (e.g. qemu) are created
+            command: systemd-sysusers
+            changed_when: false
+
+          - name: Restart libvirtd service
+            ansible.builtin.service:
+              name: libvirtd
+              state: restarted
+            when: false # apparently we don't need this anymore
+
+          - name: Verify qemu system user exists
+            command: getent passwd qemu
+            register: qemu_user
+            changed_when: false
+            failed_when: qemu_user.rc != 0
+
+          - name: Verify virsh connectivity
+            command: virsh -c qemu:///system list
+            changed_when: false
+
+        - name: Install Wireguard if necessary 
+          when:
+            - network.type == 'wireguard' 
+          package:
+            name:
+              - wireguard-tools 
+            state: present
+
+    - name: Check current sshd LimitMEMLOCK setting
+      command: systemctl show sshd.service -p LimitMEMLOCK
+      register: memlock_check
+      changed_when: false
+
+    - name: Add LimitMEMLOCK=infinity override for sshd
+      block:
+        - name: Create systemd override directory
+          file:
+            path: /etc/systemd/system/sshd.service.d
+            state: directory
+            mode: '0755'
+
+        - name: Add LimitMEMLOCK=infinity override file
+          copy:
+            dest: /etc/systemd/system/sshd.service.d/override.conf
+            content: |
+              [Service]
+              LimitMEMLOCK=infinity
+            owner: root
+            group: root
+            mode: '0644'
+
+        - name: Reload systemd and restart sshd
+          block:
+            - name: Reload systemd daemon
+              command: systemctl daemon-reexec
+            - name: Reload systemd units
+              command: systemctl daemon-reload
+            - name: Restart sshd
+              service:
+                name: sshd
+                state: restarted
+      when: "'LimitMEMLOCK=infinity' not in memlock_check.stdout"
+

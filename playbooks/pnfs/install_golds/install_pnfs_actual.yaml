@@ -1,9 +1,9 @@
 - name: Set up required variables
   set_fact:
-    pnfs_src: /proj/mvpnet/pnfscore/
+    pnfs_src_path: "{{ pnfs_src }}"
     pnfs_dst: /opt/pnfscore/
     rondb_dst: /opt/rondb
-    rondb_url: https://repo.hops.works/master/rondb-24.10.0-linux-glibc2.28-x86_64.tar.gz 
+    rondb_url: "{{ rondb_url }}"
     mvpnet_ip: "Unknown at this phase of gold installation"
 
 - name: All MDS nodes
@@ -15,7 +15,6 @@
   debug:
     msg: "I'm a client. My IP is {{ mvpnet_ip }}"
   when: "'clients' in group_names"
-
 
 - name: All DS nodes
   debug:
@@ -102,10 +101,24 @@
     changed_when: false
 
 - name: Copy pnfs source code into the MDSes
+  vars:
+    pnfs_bin: "/usr/local/bin"
+    pnfs_binary: "pnfs-mds"
+    force_rebuild: true
   block:
     - name: Debug destination path
       debug:
         var: pnfs_dst
+
+    - name: Remove any existing pnfs source tree and installed binary
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      become: true
+      loop:
+        - "{{ pnfs_dst }}"
+        - "{{ pnfs_bin }}/{{ pnfs_binary }}"
+      when: force_rebuild
 
     - name: Ensure destination directory exists
       file:
@@ -120,11 +133,11 @@
       register: source_exists
 
     - name: Manage and Transfer pnfs Source
-      when: not source_exists.stat.exists
+      when: force_rebuild or not source_exists.stat.exists 
       block:
       - name: Compress source locally
         community.general.archive:
-          path: "{{ pnfs_src }}"
+          path: "{{ pnfs_src_path }}"
           dest: /tmp/pnfs_src.tar.gz
           format: gz
         delegate_to: localhost
@@ -155,13 +168,11 @@
         cmake --build build-rondb -j$(nproc)
       args:
         chdir: "{{ pnfs_dst }}"
-        # This prevents re-building if the binary already exists
-        creates: "{{ pnfs_dst }}/build-rondb/src/mds/pnfs-mds"
 
-    - name: Install pnfs-mds binary to /usr/local/bin
+    - name: Install {{ pnfs_binary }} binary to {{ pnfs_bin }} 
       ansible.builtin.copy:
-        src: "{{ pnfs_dst }}/build-rondb/src/mds/pnfs-mds"
-        dest: /usr/local/bin/pnfs-mds
+        src: "{{ pnfs_dst }}/build-rondb/src/mds/{{ pnfs_binary }}"
+        dest: "{{ pnfs_bin }}/{{ pnfs_binary }}"
         mode: '0755'
         remote_src: true  # Necessary because the binary is already on the MDS node
 
