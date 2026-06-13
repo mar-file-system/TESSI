@@ -1,4 +1,87 @@
 ---
+- hosts: physical_hosts
+  gather_facts: true
+  tasks:
+    - name: Include the user-provided cluster preparation tasks
+      ansible.builtin.include_tasks: "{{ playbooks.bootstrap_cluster }}"
+      when:
+        - playbooks.bootstrap_cluster is defined
+        - playbooks.bootstrap_cluster | length > 0
+        - playbooks.bootstrap_cluster != 'NONE'
+
+    - name: Set some artifact paths 
+      set_fact:
+        raw_artifact_path: "{{ playbook_dir }}/../../artifacts/{{ UNIQUE_TAG }}"
+        phase_dir: "{{ lookup('pipe', 'realpath ' ~ (playbook_dir | dirname) ~ '/phases') }}"
+
+    - debug:
+        var: phase_dir
+
+    - name: Set some artifact paths 
+      set_fact:
+        qcow2_dir: "{{ image_storage.gold_qcows }}/{{ UNIQUE_TAG }}"
+        pool_dir:  "{{ image_storage.libvirt }}/{{ UNIQUE_TAG }}/images"
+      when: network.type != 'none'
+
+    - name: Set some unneededartifact paths to /tmp so that they pass the existance test
+      set_fact:
+        qcow2_dir: "/tmp"
+        pool_dir:  "/tmp"
+      when: network.type == 'none'
+
+    - name: Allow user to specify already computed gold images if they want
+      set_fact:
+        qcow2_dir: "{{ image_storage.qcow_predefined }}"
+      when: image_storage.qcow_predefined is defined
+
+    - name: Ensure raw artifact directory exists before realpath
+      file:
+        path: "{{ raw_artifact_path }}"
+        state: directory
+        mode: '0755'
+
+    - name: Set the path to artifact dir 
+      set_fact:
+        artifact_dir: "{{ lookup('pipe', 'realpath ' ~ raw_artifact_path) }}"
+      when: output_dir is not defined 
+
+    - name: Set the path to artifact_dir using user-supplied path
+      set_fact:
+        artifact_dir: "{{ output_dir }}/{{ UNIQUE_TAG }}/artifacts"
+      when: output_dir is defined
+
+    - name: Define children of the artifact directory
+      set_fact:
+        physical_inventory_dir: "{{ artifact_dir }}/inventory_physical"
+        virtual_inventory_dir: "{{ artifact_dir }}/inventory_virtual"
+        tofu_dir: "{{ artifact_dir }}/tofu"
+        make_log_dir: "{{ artifact_dir }}/logs"
+        make_status_dir: "{{ artifact_dir }}/status"
+        tfvars_file: "{{ artifact_dir }}/phase3.tfvars"
+        image_dir: "{{ artifact_dir }}/images"
+
+    - name: Assert all other directories exist
+      file:
+        path: "{{ item }}"
+        state: directory
+      loop:
+        - "{{ artifact_dir }}"
+        - "{{ physical_inventory_dir }}"
+        - "{{ virtual_inventory_dir }}"
+        - "{{ make_log_dir }}"
+        - "{{ make_status_dir }}"
+        - "{{ qcow2_dir }}"
+        - "{{ pool_dir }}"
+        - "{{ tofu_dir }}"
+      when: true
+
+    - name: Ensure storage pool directory is world-writable so that virtd can create in it
+      ansible.builtin.file:
+        path: "{{ pool_dir }}"
+        mode: '0777'
+      when: network.type != 'none'
+      ignore_errors: true
+
 - hosts: localhost
   gather_facts: false
   vars:
@@ -6,10 +89,26 @@
       - { var_name: 'cluster_config', required: true }
       - { var_name: 'gold_install',   required: true }
       - { var_name: 'cluster_test',   required: false }
-      - { var_name: 'prepare_cluster',required: false }
+      - { var_name: 'bootstrap_cluster',required: false }
   tasks:
 
-    - name: Define and ensure relevant directories and files
+    - name: Mirror required directory paths from the first physical host to localhost
+      ansible.builtin.set_fact:
+        "{{ item }}": "{{ hostvars[groups['physical_hosts'][0]][item] }}"
+      loop:
+        - artifact_dir
+        - physical_inventory_dir
+        - virtual_inventory_dir
+        - make_log_dir
+        - make_status_dir
+        - qcow2_dir
+        - pool_dir
+        - tofu_dir
+        - tfvars_file
+        - phase_dir
+        - image_dir
+
+    - name: Check a lot of the necessary bootstrapping info in the config file 
       block:
       - name: Check for user-specified playbooks
         include_tasks: check_playbook.yaml
@@ -19,101 +118,6 @@
         vars:
           var_name: "{{ item.var_name }}"
           required: "{{ item.required }}"
-
-      - name: Set some artifact paths 
-        set_fact:
-          raw_artifact_path: "{{ playbook_dir }}/../../artifacts/{{ UNIQUE_TAG }}"
-          phase_dir: "{{ lookup('pipe', 'realpath ' ~ (playbook_dir | dirname) ~ '/phases') }}"
-
-      - debug:
-          var: phase_dir
-
-      - name: Set some artifact paths 
-        set_fact:
-          qcow2_dir: "{{ image_storage.gold_qcows }}/{{ UNIQUE_TAG }}"
-          pool_dir:  "{{ image_storage.libvirt }}/{{ UNIQUE_TAG }}/images"
-        when: network.type != 'none'
-
-      - name: Set some unneededartifact paths to /tmp so that they pass the existance test
-        set_fact:
-          qcow2_dir: "/tmp"
-          pool_dir:  "/tmp"
-        when: network.type == 'none'
-
-      - name: Allow user to specify already computed gold images if they want
-        set_fact:
-          qcow2_dir: "{{ image_storage.qcow_predefined }}"
-        when: image_storage.qcow_predefined is defined
-
-      - name: Ensure raw artifact directory exists before realpath
-        file:
-          path: "{{ raw_artifact_path }}"
-          state: directory
-          mode: '0755'
-
-      - name: Set the path to artifact dir 
-        set_fact:
-          artifact_dir: "{{ lookup('pipe', 'realpath ' ~ raw_artifact_path) }}"
-        when: output_dir is not defined 
-
-      - name: Set the path to artifact_dir using user-supplied path
-        set_fact:
-          artifact_dir: "{{ output_dir }}/{{ UNIQUE_TAG }}/artifacts"
-        when: output_dir is defined
-
-      - name: Define children of the artifact directory
-        set_fact:
-          physical_inventory_dir: "{{ artifact_dir }}/inventory_physical"
-          virtual_inventory_dir: "{{ artifact_dir }}/inventory_virtual"
-          tofu_dir: "{{ artifact_dir }}/tofu"
-          make_log_dir: "{{ artifact_dir }}/logs"
-          make_status_dir: "{{ artifact_dir }}/status"
-          tfvars_file: "{{ artifact_dir }}/phase3.tfvars"
-          image_dir: "{{ artifact_dir }}/images"
-
-      - name: Assert all other directories exist
-        file:
-          path: "{{ item }}"
-          state: directory
-        loop:
-          - "{{ artifact_dir }}"
-          - "{{ physical_inventory_dir }}"
-          - "{{ virtual_inventory_dir }}"
-          - "{{ make_log_dir }}"
-          - "{{ make_status_dir }}"
-          - "{{ qcow2_dir }}"
-          - "{{ pool_dir }}"
-          - "{{ tofu_dir }}"
-        when: false
-
-      - name: Check all other directories exist
-        file:
-          path: "{{ item }}"
-          state: directory
-        loop:
-          - "{{ artifact_dir }}"
-          - "{{ physical_inventory_dir }}"
-          - "{{ virtual_inventory_dir }}"
-          - "{{ make_log_dir }}"
-          - "{{ make_status_dir }}"
-          - "{{ qcow2_dir }}"
-          - "{{ pool_dir }}"
-          - "{{ tofu_dir }}"
-        register: dir_results
-        ignore_errors: true
-
-      - name: Warn about specific failed directories
-        debug:
-          msg: "WARNING: Failed to create directory: {{ item.item }}. Reason: {{ item.msg }}"
-        loop: "{{ dir_results.results }}"
-        when: item is failed
-
-      - name: Ensure storage pool directory is world-writable so that virtd can create in it
-        ansible.builtin.file:
-          path: "{{ pool_dir }}"
-          mode: '0777'
-        when: network.type != 'none'
-        ignore_errors: true
 
     - name: Define necessary variables
       when: network.type != 'none'
