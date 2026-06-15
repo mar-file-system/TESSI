@@ -5,7 +5,7 @@
     state: present
 
 - name: Set modulefile path
-  set_fact:
+  ansible.builtin.set_fact:
     target_modulefile: "{{ modulefiles_base_path }}/{{ mpi.module }}"
 
 - name: Ensure modulefile directory exists
@@ -14,7 +14,7 @@
     state: directory
     mode: "0755"
 
-- name: Ensure modulefile has magic cookie header
+- name: Ensure modulefile {{ target_modulefile }} has magic cookie header
   ansible.builtin.lineinfile:
     path: "{{ target_modulefile }}"
     line: "#%Module"
@@ -22,11 +22,76 @@
     create: yes
     mode: "0644"
 
-- name: Add env vars to modulefile
+# -------------------------------------------------------------------
+# DYNAMIC PATH DISCOVERY & CLEAN ISOLATION SILOS
+# -------------------------------------------------------------------
+
+# Alma/RedHat naturally isolates binaries. Debian/Ubuntu dumps them into /usr/bin.
+# For RedHat, we query the path. For Debian, we skip query and generate a clean silo path.
+- name: Determine MPI bin path dynamically (RedHat family)
+  ansible.builtin.shell: |
+    rpm -ql {{ mpi.mpi_packages.split() | first }} | grep '/bin/' | head -n 1 | xargs -r dirname
+  register: redhat_mpi_bin
+  changed_when: false
+  when: ansible_os_family != "Debian"
+
+- name: Link all the MPI binaries into a new directory that the module file will prepend to PATH
+  when: ansible_os_family == "Debian"
+  block:
+  - name: Create isolated execution paths for modules (Debian family)
+    ansible.builtin.file:
+      path: "/usr/lib/x86_64-linux-gnu/{{ mpi.module }}/bin"
+      state: directory
+      mode: "0755"
+
+  - name: Find all binaries installed by the execution package (Debian family)
+    ansible.builtin.shell: |
+      dpkg -L {{ mpi.mpi_packages.split() | first }} | grep -E '^/usr/bin/'
+    register: mpich_binaries
+    changed_when: false
+
+  - name: Link all package binaries to isolated directory (Debian family)
+    ansible.builtin.file:
+      src: "{{ item }}"
+      # Extracts just the generic name (e.g., converts /usr/bin/hydra_pmi_proxy.mpich to hydra_pmi_proxy)
+      dest: "/usr/lib/x86_64-linux-gnu/{{ mpi.module }}/bin/{{ item | basename | replace('.' ~ ((mpi.module | basename) | replace('-x86_64', '')), '') }}"
+      state: link
+    loop: "{{ mpich_binaries.stdout_lines | default([]) }}"
+
+- name: Consolidate final canonical bin path
+  ansible.builtin.set_fact:
+    final_mpi_bin: "{{ (ansible_os_family == 'Debian') | ternary('/usr/lib/x86_64-linux-gnu/' ~ mpi.module ~ '/bin', redhat_mpi_bin.stdout | default('')) }}"
+
+- name: Determine MPI lib paths dynamically
+  ansible.builtin.shell: |
+    if [ "{{ ansible_os_family }}" = "Debian" ]; then
+      dpkg -L {{ mpi.mpi_packages.split() | last }} | grep -E 'libmpi\.so|libmpich\.so' | head -n 1 | xargs -r dirname
+    else
+      rpm -ql {{ mpi.mpi_packages.split() | last }} | grep -E 'libmpi\.so|libmpich\.so' | head -n 1 | xargs -r dirname
+    fi
+  register: found_mpi_lib
+  changed_when: false
+
+- name: Verify discovered paths via debug loop
+  ansible.builtin.debug:
+    msg: 
+      - "OS Family: {{ ansible_os_family }}"
+      - "Target MPI Module: {{ mpi.module }}"
+      - "Determined BIN Path: {{ final_mpi_bin }}"
+      - "Determined LIB Path: {{ found_mpi_lib.stdout }}"
+
+# -------------------------------------------------------------------
+# MODULEFILE CONFIGURATION WRITING
+# -------------------------------------------------------------------
+
+- name: Write modulefile with dynamic paths and any additional env vars
   ansible.builtin.blockinfile:
     path: "{{ target_modulefile }}"
-    marker: "# {mark} MPI-specific environment variables"
-    block: "{{ mpi.env_vars }}"
+    marker: "# {mark} Managed MPI Environment"
+    block: |
+      prepend-path    PATH            {{ final_mpi_bin }}
+      prepend-path    LD_LIBRARY_PATH {{ found_mpi_lib.stdout }}
+      setenv          MPI_HOME        {{ final_mpi_bin | dirname }}
+      {{ mpi.env_vars }}
     create: yes
     mode: "0644"
-  when: mpi.env_vars | length > 0

@@ -26,164 +26,180 @@
     value: http://proxy.pdl.cmu.edu:3128/
     state: present
 
-
-- name: Check if mount already exists
-  command: findmnt -n {{ nvme_mount }}
-  register: existing_mount
-  failed_when: false
+- name: Check if the target mount point is already active
+  ansible.builtin.command: findmnt -n -o SOURCE "{{ nvme_mount }}"
+  register: active_mount
   changed_when: false
+  failed_when: false
 
-# ---------------------------
-# Detect existing partitions
-# ---------------------------
+- name: Debug active mount state
+  ansible.builtin.debug:
+    msg: "Mount {{ nvme_mount }} is already active on device {{ active_mount.stdout }}. Skipping provisioning."
+  when: active_mount.rc == 0
 
-- block:
-  - name: Get existing partitions on device
-    command: lsblk -nr -o NAME {{ storage_device }}
-    register: lsblk_output
-    changed_when: false
+- name: Provision and mount storage
+  when: active_mount.rc != 0
+  become: true
+  block:
+    - name: Deploy topology analysis engine
+      ansible.builtin.copy:
+        dest: /tmp/analyze_storage_topology.py
+        mode: '0755'
+        content: |
+          #!/usr/bin/env python3
+          import json, subprocess, sys
 
-  - name: Set fact for existing partitions 
-    set_fact:
-      existing_partitions: "{{ lsblk_output.stdout_lines | reject('equalto', storage_device | basename) | list }}"
+          device = sys.argv[1]
 
-  - name: Debug existing partitions
-    debug:
-      var: existing_partitions
+          # 1. Enumerate unused partitions
+          try:
+              lsblk_out = subprocess.check_output(["lsblk", "-J", "-b", "-o", "NAME,TYPE,FSTYPE,MOUNTPOINT,SIZE", device], universal_newlines=True)
+              lsblk_data = json.loads(lsblk_out)
+          except Exception as e:
+              print(json.dumps({"error": f"lsblk failed: {str(e)}"}))
+              sys.exit(1)
 
-  - name: Set fact for last partition number
-    set_fact:
-      last_partition_number: >-
-        {{
-          (
-            existing_partitions
-            | map('regex_replace', '^.*?([0-9]+)$', '\1')
-            | map('int')
-            | list
-            + [0]
-          )
-          | max
-        }}
+          unused_parts = []
+          for dev in lsblk_data.get("blockdevices", []):
+              for child in dev.get("children", []):
+                  if child.get("type") == "part" and not child.get("mountpoint"):
+                      unused_parts.append({
+                          "type": "partition",
+                          "name": f"/dev/{child['name']}",
+                          "size_bytes": int(child["size"])
+                      })
 
-  # ---------------------------
-  # Check for free space
-  # ---------------------------
+          # 2. Enumerate unallocated gaps using parted
+          gaps = []
+          try:
+              parted_out = subprocess.check_output(["parted", "-s", "-m", device, "unit", "B", "print", "free"], universal_newlines=True, stderr=subprocess.DEVNULL)
+              for line in parted_out.splitlines():
+                  if "free;" in line:
+                      parts = line.split(":")
+                      if len(parts) >= 4:
+                          size_bytes = int(parts[3].rstrip("B"))
+                          # Filter out structural 1MB alignment gaps
+                          if size_bytes > 2097152:
+                              gaps.append({
+                                  "type": "gap",
+                                  "name": f"Gap from {parts[1].rstrip('B')}B to {parts[2].rstrip('B')}B",
+                                  "size_bytes": size_bytes
+                              })
+          except Exception:
+              pass
 
-  - name: Get free space from parted
-    command: parted -ms {{ storage_device }} unit GB print free
-    register: parted_output
-    changed_when: false
+          all_opts = unused_parts + gaps
+          if not all_opts:
+              print(json.dumps({"error": "No unused partitions or usable gaps found."}))
+              sys.exit(1)
 
-  - name: Detect if free space exists
-    set_fact:
-      free_space_available: "{{ 'free' in parted_output.stdout }}"
+          # Find the absolute largest available space
+          largest = max(all_opts, key=lambda x: x["size_bytes"])
 
-  # ---------------------------
-  # Create partition if needed
-  # ---------------------------
+          print(json.dumps({
+              "unused_partitions": unused_parts,
+              "gaps": gaps,
+              "largest": largest
+          }))
 
-  - block:
-    - debug:
-        var: parted_output.stdout_lines
-
-    - name: Extract start of last free region
-      shell: >
-        parted -ms {{ storage_device }} unit GB print free
-        | awk -F: '/:free;$/ { start=$2 } END { gsub("GB","",start); print start }'
-      register: free_start
+    - name: Execute topology analysis
+      ansible.builtin.command: /tmp/analyze_storage_topology.py "{{ storage_device }}"
+      register: topology_raw
       changed_when: false
 
-    - set_fact:
-        free_region_start: "{{ free_start.stdout }}"
+    - name: Parse topology analysis payload
+      ansible.builtin.set_fact:
+        topology: "{{ topology_raw.stdout | from_json }}"
 
-    - debug:
-        var: free_region_start
+    - name: Debug storage topography and selection
+      ansible.builtin.debug:
+        msg: 
+          - "=== UNUSED PARTITIONS FOUND ==="
+          - "{{ topology.unused_partitions }}"
+          - "=== UNALLOCATED GAPS FOUND ==="
+          - "{{ topology.gaps }}"
+          - "=== CHOSEN LARGEST OPTION ==="
+          - "{{ topology.largest }}"
 
-    - name: Create new partition using remaining free space
-      command: >
-        parted -s {{ storage_device }} mkpart primary xfs {{ free_region_start }}GB 100%
+    - name: Assert the chosen space meets minimum capacity requirements
+      ansible.builtin.assert:
+        that:
+          # Convert minimum_nvme_gb to bytes (1024^3) for exact comparison
+          - (topology.largest.size_bytes | int) >= (minimum_nvme_gb | int * 1073741824)
+        fail_msg: >
+          Validation failed: The largest available space is {{ (topology.largest.size_bytes | int / 1073741824) | round(2) }} GB, 
+          which is less than the required minimum of {{ minimum_nvme_gb }} GB.
+        success_msg: "Capacity requirements met. Proceeding with provisioning."
 
-    - name: Refresh partition table
-      command: partprobe {{ storage_device }}
+    - name: Create new partition in the selected gap
+      when: topology.largest.type == 'gap'
+      block:
+      - name: Relocate GPT backup header to end of disk
+        ansible.builtin.command: sgdisk -e {{ storage_device }}
+        when: topology.largest.type == 'gap'
+        changed_when: false # This is a maintenance fix
 
-    when: free_space_available
-    become: true
+      - name: Actually create new partition in the selected gap
+        ansible.builtin.shell: |
+          set -e
+          # sgdisk -N 0 automatically utilizes the largest unallocated space
+          sgdisk -N 0 {{ storage_device }} > /dev/null
+          partprobe {{ storage_device }}
 
-  # ---------------------------
-  # Determine partition path
-  # ---------------------------
+          # Defensive polling: Wait up to 10 seconds for the kernel to expose the new large partition
+          for i in $(seq 1 10); do
+            udevadm settle
 
-  - name: Determine new partition number
-    set_fact:
-      new_partition_number: "{{ last_partition_number | int + 1 }}"
+            # Filter dynamically using the minimum_nvme_gb variable converted to bytes
+            NEW_PART=$(lsblk -J -b -o NAME,TYPE,FSTYPE,MOUNTPOINT,SIZE {{ storage_device }} | \
+              jq -r --argjson min_bytes "{{ minimum_nvme_gb | int * 1073741824 }}" \
+              '.blockdevices[0].children[]? | select(.type == "part" and .fstype == null and .mountpoint == null and .size >= $min_bytes) | "\(.size) \(.name)"' | \
+              sort -n | tail -n 1 | awk '{print $2}')
 
-  - name: Determine partition device path
-    set_fact:
-      new_partition: >-
-        {{ storage_device }}{{ 'p' if storage_device is search('nvme') else '' }}{{ new_partition_number }}
+            if [ -n "$NEW_PART" ]; then
+              echo "$NEW_PART"
+              exit 0
+            fi
+            sleep 1
+          done
 
-  - debug:
-      var: new_partition
+          echo "Error: New partition meeting minimum size criteria did not register within the timeout." >&2
+          exit 1
+        register: newly_created_partition
+        changed_when: true
 
-  # ---------------------------
-  # Check filesystem
-  # ---------------------------
+    - name: Set resolved partition path
+      ansible.builtin.set_fact:
+        resolved_device: "{{ topology.largest.name if topology.largest.type == 'partition' else '/dev/' + newly_created_partition.stdout }}"
 
-  - name: Check if filesystem already exists
-    command: blkid -o value -s TYPE {{ new_partition }}
-    register: fs_check
-    failed_when: false
-    changed_when: false
+    - name: Create XFS filesystem on the resolved partition
+      community.general.filesystem:
+        fstype: xfs
+        dev: "{{ resolved_device }}"
+        force: true
 
-  - name: Format partition as XFS if not formatted
-    command: mkfs.xfs -f {{ new_partition }}
-    when: fs_check.stdout == ""
-    become: true
+    - name: Ensure the mount point directory exists
+      ansible.builtin.file:
+        path: "{{ nvme_mount }}"
+        state: directory
+        mode: '0755'
 
-  # ---------------------------
-  # Mount partition
-  # ---------------------------
+    - name: Mount the partition and persist in fstab
+      ansible.builtin.mount:
+        path: "{{ nvme_mount }}"
+        src: "{{ resolved_device }}"
+        fstype: xfs
+        state: mounted
+        opts: defaults
 
-  - name: Ensure mount directory exists
-    file:
-      path: "{{ nvme_mount }}"
-      state: directory
-      mode: '0755'
-    become: true
+- name: Get actual controlling user (handling sudo)
+  set_fact:
+    local_user: "{{ lookup('env', 'SUDO_USER') | default(lookup('env', 'USER'), true) }}"
 
-  - name: Get UUID of partition
-    command: blkid -o value -s UUID {{ new_partition }}
-    register: uuid_result
-    changed_when: false
-
-  - name: Ensure fstab entry exists
-    mount:
-      path: "{{ nvme_mount }}"
-      src: "UUID={{ uuid_result.stdout }}"
-      fstype: xfs
-      opts: defaults
-      state: mounted
-    become: true
-
-  # ---------------------------
-  # Post-mount tasks (yours)
-  # ---------------------------
-
-  - name: Ensure storage device {{ storage_device }} is now mounted
-    command: findmnt -n {{ nvme_mount }}
-    register: mount_result
-    changed_when: false
-
-  - name: Get actual controlling user (handling sudo)
-    set_fact:
-      local_user: "{{ lookup('env', 'SUDO_USER') | default(lookup('env', 'USER'), true) }}"
-
-  - name: Create per-user directory on mounted storage
-    file:
-      path: "{{ nvme_mount }}/{{ local_user }}"
-      state: directory
-      owner: "{{ local_user }}"
-      mode: '0755'
-    when: mount_result.rc == 0
-    become: true
-  when: existing_mount.rc != 0
+- name: Create per-user directory on mounted storage
+  become: true
+  file:
+    path: "{{ nvme_mount }}/{{ local_user }}"
+    state: directory
+    owner: "{{ local_user }}"
+    mode: '0755'

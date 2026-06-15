@@ -10,72 +10,103 @@
   set_fact:
     summary_file_path: "{{ summaryFile }}_{{ mpi_module_sanitized }}.json"
 
-- name: Build full mpirun command line
-  set_fact:
-    mpirun_command: >
-      export MODULEPATH="{{ mpi_config.modulepath | default('/usr/share/Modules/modulefiles:/etc/modulefiles:/usr/share/modulefiles') }}";
-      eval "$(modulecmd bash load {{ mpi_config.mpi_module }})"
-      && mpirun -np {{ client_count }} -hostfile {{ hostfile }} {{ mpi_config.mpirun_args }}
-      ior -F -C -s {{ segmentCount }} -t {{ transferSize }} -b {{ blockSize }}
-      -o {{ outputPath }}_{{ mpi_module_sanitized }}
-      -O summaryFormat=JSON
-      -O summaryFile={{ summary_file_path }}
-      && eval "$(modulecmd bash unload {{ mpi_config.mpi_module }})"
-
-- name: Show the constructed mpirun command
-  debug:
-    msg: "{{ mpirun_command }}"
-
-- name: Wait for Lustre space to free up
+- name: Check if MPI module {{ mpi_config.mpi_module }} is available
   shell: |
-    df -BG {{ outputPath | dirname }} | awk 'NR==2 {gsub("G","",$4); print $4}'
-  register: free_gb
-  until: free_gb.stdout | int >= 30
-  retries: 20
-  delay: 10
+    export MODULEPATH="/etc/modulefiles:/usr/share/modulefiles:/usr/share/modules/modulefiles"
+    modulecmd bash load {{ mpi_config.mpi_module }}
+  register: mpi_module_check
+  failed_when: false
+  changed_when: false
 
-- name: Run IOR using mpirun {{ mpi_config.mpi_module }}
-  shell: "{{ mpirun_command }}"
-  register: mpirun_output
-  timeout: 600
-
-- name: Load JSON from summary file using slurp
-  slurp:
-    src: "{{ summary_file_path }}"
-  register: json_file
-
-- name: Parse JSON content from the summary file
+- name: Set availability fact
   set_fact:
-    mpirun_json: "{{ json_file.content | b64decode | from_json }}"
+    mpi_module_available: "{{ mpi_module_check.rc == 0 and 'ERROR' not in mpi_module_check.stderr and 'ERROR' not in mpi_module_check.stdout }}"
 
-- name: Extract write bandwidth (bwMeanMIB) from summary
-  set_fact:
-    write_bw: "{{ mpirun_json.summary | selectattr('operation', 'equalto', 'write') | map(attribute='bwMeanMIB') | first }}"
-
-- name: Extract read bandwidth (bwMeanMIB) from summary
-  set_fact:
-    read_bw: "{{ mpirun_json.summary | selectattr('operation', 'equalto', 'read') | map(attribute='bwMeanMIB') | first }}"
-
-- name: "Display IOR bandwidth results for {{ mpi_config.mpi_module }}"
+- name: Debug availability of {{ mpi_config.mpi_module }}
   debug:
-    msg: "IOR Results for {{ mpi_config.mpi_module }}: Write Bandwidth = {{ write_bw }} MiB/s, Read Bandwidth = {{ read_bw }} MiB/s"
+    var: mpi_module_available
 
-- name: Build IOR result JSON line
-  set_fact:
-    single_ior_result_json: >-
-      {{ {
-        "mpi_module": mpi_config.mpi_module,
-        "write_bw": write_bw | default('FAILURE'),
-        "read_bw": read_bw | default('FAILURE'),
-        "status": ('success' if mpirun_output.rc == 0 else 'failure')
-      } | to_json }}
+- name: Actually run IOR and collect the results
+  when: mpi_module_available
+  block:
+  - name: Build full mpirun command line
+    set_fact:
+      mpirun_command: >
+        export MODULEPATH="/etc/modulefiles:/usr/share/modulefiles:/usr/share/modules/modulefiles";
+        eval "$(modulecmd bash load {{ mpi_config.mpi_module }})"
+        && mpirun -np {{ client_count }} -hostfile {{ hostfile }} {{ mpi_config.mpirun_args }}
+        ior -F -C -s {{ segmentCount }} -t {{ transferSize }} -b {{ blockSize }}
+        -o {{ outputPath }}_{{ mpi_module_sanitized }}
+        -O summaryFormat=JSON
+        -O summaryFile={{ summary_file_path }}
+        && eval "$(modulecmd bash unload {{ mpi_config.mpi_module }})"
 
-- name: Append IOR result to file on control node
-  lineinfile:
-    path: "{{ ior_result_file }}"
-    line: "{{ single_ior_result_json }}"
-    create: yes
-    insertafter: EOF
-  delegate_to: localhost
-  become: false
-  run_once: true
+  - name: Show the constructed mpirun command
+    debug:
+      msg: "{{ mpirun_command }}"
+
+  - name: Set minimum required storage space 
+    set_fact:
+      min_gb: 15
+
+  - name: Wait for storage space to free up to at least {{ min_gb }}
+    shell: |
+      df -BG {{ outputPath | dirname }} | awk 'NR==2 {gsub("G","",$4); print $4}'
+    register: free_gb
+    until: (free_gb.stdout | int) >= (min_gb | int)
+    retries: 20
+    delay: 10
+
+  - name: Write the dynamic hostfile for the active MPI implementation
+    copy:
+      content: |
+        {% for host in groups['clients'] -%}
+        {{ hostvars[host]['ansible_fqdn'] }}{{ ' slots=1' if 'openmpi' in mpi_config.mpi_module else '' }}
+        {% endfor %}
+      dest: "{{ hostfile }}"
+
+  - name: Run IOR using mpirun {{ mpi_config.mpi_module }}
+    shell: "{{ mpirun_command }}"
+    register: mpirun_output
+    timeout: 600
+
+  - name: Load JSON from summary file using slurp
+    slurp:
+      src: "{{ summary_file_path }}"
+    register: json_file
+
+  - name: Parse JSON content from the summary file
+    set_fact:
+      mpirun_json: "{{ json_file.content | b64decode | from_json }}"
+
+  - name: Extract write bandwidth (bwMeanMIB) from summary
+    set_fact:
+      write_bw: "{{ mpirun_json.summary | selectattr('operation', 'equalto', 'write') | map(attribute='bwMeanMIB') | first }}"
+
+  - name: Extract read bandwidth (bwMeanMIB) from summary
+    set_fact:
+      read_bw: "{{ mpirun_json.summary | selectattr('operation', 'equalto', 'read') | map(attribute='bwMeanMIB') | first }}"
+
+  - name: "Display IOR bandwidth results for {{ mpi_config.mpi_module }}"
+    debug:
+      msg: "IOR Results for {{ mpi_config.mpi_module }}: Write Bandwidth = {{ write_bw }} MiB/s, Read Bandwidth = {{ read_bw }} MiB/s"
+
+  - name: Build IOR result JSON line
+    set_fact:
+      single_ior_result_json: >-
+        {{ {
+          "mpi_module": mpi_config.mpi_module,
+          "write_bw": write_bw | default('FAILURE'),
+          "read_bw": read_bw | default('FAILURE'),
+          "status": ('success' if mpirun_output.rc == 0 else 'failure')
+        } | to_json }}
+
+  - name: Append IOR result to file on control node
+    lineinfile:
+      path: "{{ ior_result_file }}"
+      line: "{{ single_ior_result_json }}"
+      create: yes
+      insertafter: EOF
+    delegate_to: localhost
+    become: false
+    run_once: true

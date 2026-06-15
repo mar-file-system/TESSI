@@ -3,21 +3,40 @@
 - name: Load OS-specific variables
   include_vars: "mpi_{{ ansible_os_family }}.yml"
 
-# 2. Discover mpi_bin path (Must happen before we set path facts)
-- name: Discover mpi_bin path 
-  shell: |
+- name: Discover mpi_bin path
+  ansible.builtin.shell: |
+    # Initialize environment modules correctly
     for init in /etc/profile.d/modules.sh /usr/share/Modules/init/bash /usr/share/modules/init/bash; do
-      [ -f "$init" ] && source "$init" && break
+      if [ -f "$init" ]; then
+        source "$init"
+        break
+      fi
     done
-    if module load {{ mpi.module }} 2>/dev/null; then
-      echo $MPI_BIN
+
+    # Load the specific MPI module cleanly
+    module load {{ mpi.module }}
+
+    # Locate the active binary path
+    REAL_MPIRUN=$(type -p mpirun)
+
+    if [ -z "$REAL_MPIRUN" ]; then
+      echo "CRITICAL_ERROR: mpirun could not be found in PATH" >&2
+      exit 1
     else
-      dirname $(which mpirun)
+      dirname "$REAL_MPIRUN"
     fi
   args:
     executable: /bin/bash
   register: mpi_bin_result
   changed_when: false
+
+- name: Diagnostic Log - MPI Bin Evaluation
+  ansible.builtin.debug:
+    msg:
+      - "Target Module: {{ mpi.module }}"
+      - "Shell Return Code: {{ mpi_bin_result.rc }}"
+      - "Discovered Path: {{ mpi_bin_result.stdout | default('UNDEFINED', true) }}"
+      - "Standard Error Stream: {{ mpi_bin_result.stderr | default('None', true) }}"
 
 # 3. Establish the base label to avoid the same-task evaluation conflict
 - name: Set the MPI label base
@@ -84,6 +103,13 @@
 - name: Set IOR install path
   set_fact:
     ior_install: "{{ mpi_bin_path | regex_replace('/bin/?$', '') }}"
+
+- name: Display MPI bin path and IOR install variables
+  ansible.builtin.debug:
+    msg:
+      - "mpi_bin_result: {{ mpi_bin_result | default('NOT DEFINED') }}"
+      - "mpi_bin_path: {{ mpi_bin_path | default('NOT DEFINED') }}"
+      - "ior_install: {{ ior_install | default('NOT DEFINED') }}"
 
 - name: Configure, Build, and Install IOR
   shell: |

@@ -16,15 +16,112 @@
         - name: Run SSH configuration tasks
           include_tasks: ../../shared/configure_ssh.yaml
 
+        - name: Refresh cluster facts post-configuration because some variables might have gone out of scope
+          setup:
+
         - name: Create marker file to skip future runs
           file:
             path: "{{ ssh_setup_marker }}"
             state: touch
             owner: root
             mode: '0644'
+
       # Only execute this block if the marker file does NOT exist
       when: not ssh_marker.stat.exists
       tags: setup
+
+- name: Full Environment Scorched Earth Cleanup
+  hosts: all
+  become: true
+  gather_facts: false
+  tags: makeclean
+  vars_files:
+    - vars/cluster_params.yml
+
+  tasks:
+    - name: Client Cleanup Tasks
+      block:
+        - name: Unmount and remove client mount point
+          mount:
+            path: "{{ lab_client_mount }}"
+            state: absent # 'absent' unmounts AND removes from fstab
+      when: "'clients' in group_names"
+
+    - name: MDS and RonDB Node Cleanup Tasks
+      block:
+        - name: Stop pNFS MDS service
+          systemd:
+            name: pnfs-mds
+            state: stopped
+            enabled: false
+          failed_when: false
+
+        - name: Kill Data Node process (ndbmtd)
+          shell: "pkill -9 ndbmtd || true"
+          changed_when: false
+
+        - name: Wipe Data Node state and source
+          file:
+            path: "{{ item }}"
+            state: absent
+          loop:
+            - "{{ rondb_data }}/ndb/"
+            - "{{ lab_mds_conf_dir }}"
+
+        - name: Remove rondb tarball 
+          file:
+            path: "{{ lab_rondb_base }}/rondb-dist.tar.gz"
+            state: absent
+          when: false # don't clean phase2 things
+
+        - name: Management Node Specific Cleanup
+          block:
+            - name: Kill Management Server process (ndb_mgmd)
+              shell: "pkill -9 ndb_mgmd || true"
+              changed_when: false
+
+            - name: Wipe Management state and config
+              file:
+                path: "{{ item }}"
+                state: absent
+              loop:
+                - "{{ rondb_data }}/mgmd/"
+                - "{{ rondb_data }}/config.ini"
+          when: inventory_hostname == groups['mds'][0]
+
+        - name: Force detach DS mounts from MDS nodes
+          ansible.builtin.shell: |
+            TARGET_MOUNT="/mnt/ds{{ idx }}"
+            if awk '{print $2}' /proc/mounts | grep -qx "$TARGET_MOUNT"; then
+              timeout 10s umount -l "$TARGET_MOUNT" || true
+              timeout 10s umount -f "$TARGET_MOUNT" || true
+            fi
+          loop: "{{ groups['ds'] }}"
+          loop_control:
+            index_var: idx
+          changed_when: false
+          failed_when: false
+
+      when: "'mds' in group_names"
+
+    - name: Data Server (DS) Cleanup Tasks
+      block:
+        - name: Stop NFS Server and wipe exports (Debian/Ubuntu)
+          ansible.builtin.systemd:
+            name: "{{ 'nfs-kernel-server' if ansible_os_family == 'Debian' else 'nfs-server' }}"
+            state: stopped
+            enabled: false
+          changed_when: false
+          failed_when: false
+
+        - name: Wipe DS export state
+          file:
+            path: "{{ item }}"
+            state: absent
+          loop:
+            - "/etc/exports.d/pnfs.exports"
+            - "{{ lab_ds_export_path }}/data"
+      when: "'ds' in group_names"
 
 - name: Configure and Start the NFS Data Servers
   hosts: ds
@@ -40,15 +137,21 @@
         mode: '0777'
         recurse: yes
 
+    - name: Purge any existing export entries
+      lineinfile:
+        path: /etc/exports.d/pnfs.exports
+        regexp: "^{{ lab_ds_export_path | regex_escape }}\\s+.*"
+        state: absent
+
     - name: Configure NFS Export for pNFS
       lineinfile:
         path: /etc/exports.d/pnfs.exports
-        line: "{{ lab_ds_export_path }} {{ hostvars[inventory_hostname]['mvpnet_ip'].split('.')[:3] | join('.') }}.0/24(rw,sync,no_subtree_check,no_root_squash)"
+        line: "{{ lab_ds_export_path }} {{ target_ip.split('.')[:3] | join('.') }}.0/24(rw,sync,no_subtree_check,no_root_squash)"
         create: yes
       register: nfs_exports
 
     - name: Reload NFS exports
-      shell: "exportfs -ra"
+      shell: "/usr/sbin/exportfs -ra"
       when: nfs_exports.changed
 
     - name: Ensure NFS Server is running and enabled
@@ -63,7 +166,7 @@
   vars:
     # Single point of definition for the installation root
     mgmt_host: "{{ groups['mds'][0] }}"
-    mgmt_ip: "{{ hostvars[groups['mds'][0]]['mvpnet_ip'] }}"
+    mgmt_ip: "{{ (hostvars[groups['mds'][0]]['target_ip']) | trim }}"
     force_init: false 
   vars_files:
     - vars/cluster_params.yml  
@@ -109,11 +212,11 @@
         --ndb-nodeid=1
       when: inventory_hostname == mgmt_host
 
-    - name: Wait for Management Server Connectivity
+    - name: Wait for Management Server Connectivity on {{ mgmt_ip }}
       wait_for:
         host: "{{ mgmt_ip }}"
         port: 1186
-        timeout: 30
+        timeout: 600
 
     - name: Detect existing Data Node state
       stat:
@@ -136,7 +239,7 @@
         delay: 2
         # We look specifically for this host's IP followed by the version string
         # (which indicates it moved past "accepting connect")
-        until: "node_check.stdout is search(mvpnet_ip ~ '.*RonDB')"
+        until: "node_check.stdout is search(target_ip ~ '.*RonDB')"
       when: inventory_hostname != mgmt_host
 
     - name: Wait for Data Nodes to reach 'Started' state
@@ -199,7 +302,7 @@
     - name: Mount DS nodes locally using integer indices
       mount:
         path: "/mnt/ds{{ idx }}"
-        src: "{{ hostvars[item]['mvpnet_ip'] }}:/export/ds"
+        src: "{{ hostvars[item]['target_ip'] }}:/export/ds"
         fstype: nfs
         opts: "vers=3,nconnect=8"
         state: mounted
@@ -233,10 +336,11 @@
   pre_tasks:
     - name: Force detach stale mounts (Lazy Unmount)
       shell: |
-        if mountpoint -q {{ lab_client_mount | default('/mnt/pnfs') }}; then
-          umount -f -l {{ lab_client_mount | default('/mnt/pnfs') }}
+        TARGET_MOUNT="{{ lab_client_mount }}"
+        if awk '{print $2}' /proc/mounts | grep -qx "$TARGET_MOUNT"; then
+            umount -f -l "$TARGET_MOUNT"
         fi
-      failed_when: false # Don't stop if it's already clean
+      failed_when: false
       changed_when: false
 
     - name: Reload systemd to sync fstab changes
@@ -250,14 +354,22 @@
         state: directory
         mode: '0755'
 
-    - name: Debug the MDS spread
+    - name: Debug MDS IP resolution
       debug:
-        var: target_mds
+        msg: "Target MDS is {{ target_mds }} and its IP is '{{ hostvars[target_mds]['target_ip'] | default('UNDEFINED') }}'"
 
-    - name: Mount the pNFS namespace via assigned MDS
+    - name: Mount the pNFS namespace at {{ lab_client_mount }} via assigned MDS
       mount:
         path: "{{ lab_client_mount }}"
-        src: "{{ hostvars[target_mds]['mvpnet_ip'] }}:/"
+        src: "{{ hostvars[target_mds]['target_ip'] }}:/"
         fstype: nfs4
         opts: "vers=4.2,nconnect=8,rw,relatime"
         state: mounted
+
+    - name: Create {{ ansible_env.SUDO_USER }} directory on {{ lab_client_mount }}
+      when: inventory_hostname == groups['clients'][0]
+      ansible.builtin.file:
+        path: "{{ lab_client_mount }}/{{ ansible_env.SUDO_USER }}"
+        state: directory
+        owner: "{{ ansible_env.SUDO_USER }}"
+        mode: '0755'

@@ -1,34 +1,55 @@
 ---
-- name: Install any necessary prerequisites
+- name: Sanitize and Update Control Node Fingerprints
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Remove old host fingerprints
+      ansible.builtin.known_hosts:
+        name: "{{ item }}"
+        state: absent
+      loop: "{{ groups['all'] }}"
+
+    - name: Scan and add new host fingerprints
+      ansible.builtin.command: "ssh-keyscan {{ hostvars[item].ansible_host | default(item) }}"
+      loop: "{{ groups['physical_hosts'] }}"
+      register: keyscan_results
+      # This handles any temporary DNS/network glitches gracefully up to 5 times
+      until: keyscan_results.rc == 0
+      retries: 5
+      delay: 3
+      throttle: 1
+
+    - name: Add fingerprints to known_hosts
+      ansible.builtin.known_hosts:
+        # Split the key line by spaces and grab the first element (the host string)
+        name: "{{ item.1.split(' ')[0] }}"
+        key: "{{ item.1 }}"
+        state: present
+      with_subelements:
+        - "{{ keyscan_results.results }}"
+        - stdout_lines
+      when:
+        - item.0.rc is defined
+        - item.0.rc == 0
+        - item.1 | length > 0
+        - not item.1.startswith('#')  # <-- ADD THIS LINE HERE
+
+- name: Install necessary prerequisites
   hosts: "{{ 'physical_hosts' if 'physical_hosts' in groups else 'localhost' }}"
   gather_facts: true
   become: false
-  vars:
-    prep_marker: '/tmp/tessi_prepared'
   tasks:
+
+    - name: Include the user-provided cluster preparation tasks (moved to bootstrap)
+      ansible.builtin.include_tasks: "{{ prepare_cluster_playbook }}"
+      when:
+        - prepare_cluster_playbook is defined
+        - prepare_cluster_playbook | length > 0
+        - prepare_cluster_playbook != 'NONE'
+        - false
+
     - block:
-      - name: Check if cluster preparation already completed
-        stat:
-          path: "/tmp/prepare_cluster_done"
-        register: prepare_cluster_marker
-
-      - name: Sanitize control node known_hosts
-        delegate_to: localhost
-        become: false
-        throttle: 1
-        block:
-          - name: Remove old host fingerprints from known_hosts
-            known_hosts:
-              name: "{{ item }}"
-              state: absent
-            loop:
-              - "{{ inventory_hostname }}"
-              - "{{ ansible_host | default(inventory_hostname) }}"
-
-          - name: Scan and add new host fingerprints
-            shell: "ssh-keyscan -H {{ ansible_host | default(inventory_hostname) }} >> ~/.ssh/known_hosts"
-            register: keyscan_out
-            changed_when: keyscan_out.rc == 0
 
       - name: Find and read local public key
         delegate_to: localhost
@@ -51,6 +72,9 @@
           - "{{ ansible_user_id }}"
           - root
         when: inventory_hostname != 'localhost'
+
+      - name: Install necessary tools on physical hosts
+        include_tasks: "prepare_tools.yaml"
 
       - name: Make sure that libvirt service is good
         become: true
@@ -75,426 +99,5 @@
             - virtnetworkd.socket
             - virtstoraged.socket
             - libvirtd.socket  # This creates the /run/libvirt/libvirt-sock proxy
+        when: network.type != 'none'
 
-      - block:
-        - name: Optionally include cluster preparation playbook
-          include_tasks: "{{ playbooks.prepare_cluster }}"
-        - name: Create the cluster preparation marker
-          file:
-            path: "/tmp/prepare_cluster_done"
-            state: touch
-        when: not prepare_cluster_marker.stat.exists
-      when: playbooks.prepare_cluster is defined
-
-- hosts: localhost
-  gather_facts: false
-  vars:
-    playbook_checks:
-      - { var_name: 'cluster_config', required: true }
-      - { var_name: 'gold_install',   required: true }
-      - { var_name: 'cluster_test',   required: false }
-      - { var_name: 'prepare_cluster',required: false }
-  tasks:
-
-    - name: Define and ensure relevant directories and files
-      block:
-      - name: Check for user-specified playbooks
-        include_tasks: check_playbook.yaml
-        loop: "{{ playbook_checks }}"
-        loop_control:
-          label: "{{ item.var_name }}"
-        vars:
-          var_name: "{{ item.var_name }}"
-          required: "{{ item.required }}"
-
-      - name: Set preliminary artifact path (not realpath yet)
-        set_fact:
-          raw_artifact_path: "{{ playbook_dir }}/../../artifacts/{{ UNIQUE_TAG }}"
-          qcow2_dir: "{{ image_storage.gold_qcows }}/{{ UNIQUE_TAG }}"
-          pool_dir:  "{{ image_storage.libvirt }}/{{ UNIQUE_TAG }}/images"
-          phase_dir: "{{ lookup('pipe', 'realpath ' ~ playbook_dir ~ '/..') }}"
-
-      - name: Allow user to specify already computed gold images if they want
-        set_fact:
-          qcow2_dir: "{{ image_storage.qcow_predefined }}"
-        when: image_storage.qcow_predefined is defined
-
-      - name: Ensure raw artifact directory exists before realpath
-        file:
-          path: "{{ raw_artifact_path }}"
-          state: directory
-          mode: '0755'
-
-      - name: Set the path to artifact dir 
-        set_fact:
-          artifact_dir: "{{ lookup('pipe', 'realpath ' ~ raw_artifact_path) }}"
-        when: output_dir is not defined 
-
-      - name: Set the path to artifact_dir using user-supplied path
-        set_fact:
-          artifact_dir: "{{ output_dir }}/{{ UNIQUE_TAG }}/artifacts"
-        when: output_dir is defined
-
-      - name: Define children of the artifact directory
-        set_fact:
-          physical_inventory_dir: "{{ artifact_dir }}/inventory_physical"
-          virtual_inventory_dir: "{{ artifact_dir }}/inventory_virtual"
-          tofu_dir: "{{ artifact_dir }}/tofu"
-          make_log_dir: "{{ artifact_dir }}/logs"
-          make_status_dir: "{{ artifact_dir }}/status"
-          tfvars_file: "{{ artifact_dir }}/phase3.tfvars"
-          image_dir: "{{ artifact_dir }}/images"
-
-      - name: Ensure all other directories exist
-        file:
-          path: "{{ item }}"
-          state: directory
-          mode: '0755'
-        loop:
-          - "{{ artifact_dir }}"
-          - "{{ physical_inventory_dir }}"
-          - "{{ virtual_inventory_dir }}"
-          - "{{ make_log_dir }}"
-          - "{{ make_status_dir }}"
-          - "{{ qcow2_dir }}"
-          - "{{ pool_dir }}"
-          - "{{ tofu_dir }}"
-
-      - name: Ensure storage pool directory is world-writable so that virtd can create in it
-        ansible.builtin.file:
-          path: "{{ pool_dir }}"
-          mode: '0777'
-
-    - name: Define necessary variables
-      block:
-      - name: Define some stuff needed by the tofu in phase 3
-        set_fact:
-          tofu_chdir: "-chdir={{ tofu_dir }}"
-          tofu_workspace: "{{ UNIQUE_TAG }}"
-
-      - name: Define qcow2 paths for each role
-        set_fact:
-          gold_qcow2_paths: >-
-            {{
-              dict(vm_groups.values() | zip(vm_groups.values() | map('regex_replace', '^', qcow2_dir ~ '/') | map('regex_replace', '$', '.qcow2')))
-              | dict2items | items2dict
-            }}
-
-      - name: Debug qcow2 paths 
-        block:
-          - debug:
-              msg: "VM: {{ item.0 }}, Role: {{ item.1 }}, Resolved Path: {{ gold_qcow2_paths.get(item.1, 'MISSING_PATH') }}"
-            loop: "{{ groups['all'] | map('extract', hostvars, 'vms') | select('defined') | list | flatten(1) }}"
-          
-          - debug:
-              var: gold_qcow2_paths
-        when: true
-
-      - name: Debug gold vm defaults
-        debug:
-          var: gold_vms.defaults
-
-      - name: Compute final_gold_vms dictionary with recursive merging of default gold with individual
-        set_fact:
-          final_gold_vms: "{{ computed_final_gold_vms }}"
-        vars:
-          computed_final_gold_vms: >-
-            {%- set result = {} -%}
-            {%- for vm in (gold_vms.individual | default([])) -%}
-              {%- set merged_vm = gold_vms.defaults | combine(vm, recursive=True) -%}
-              {%- set _ = result.update({merged_vm.group: merged_vm}) -%}
-            {%- endfor -%}
-            {%- if (gold_vms.individual | default([])) | length == 0 -%}
-              {%- set _ = result.update({gold_vms.defaults.group: gold_vms.defaults}) -%}
-            {%- endif -%}
-            {{ result }}
-
-      - name: Debug final_gold_vms structure
-        debug:
-          var: final_gold_vms
-        when: true
-
-      - name: Ensure each gold VM defines important values 
-        ansible.builtin.assert:
-          that:
-            - item.value.ssh_keys is defined
-            - item.value.ssh_keypair is defined
-            - item.value.iso is defined
-          fail_msg: "Gold VM '{{ item.key }}' is missing important variables in final_gold_vms. Add to config file."
-        loop: "{{ final_gold_vms | dict2items }}"
-
-      - name: Stat required SSH files for each gold VM
-        ansible.builtin.stat:
-          path: >-
-            {{
-              item.0.value.ssh_keys
-                if item.1 == 'authorized_keys'
-              else item.0.value.ssh_keypair
-                if item.1 == 'priv'
-              else item.0.value.ssh_keypair + '.pub'
-            }}
-        loop: "{{ (final_gold_vms | dict2items) | product(['authorized_keys', 'priv', 'pub']) | list }}"
-        register: gold_ssh_file_checks
-
-      - name: Fail if any SSH files are missing
-        ansible.builtin.fail:
-          msg: >
-            Gold VM '{{ missing.item.0.key }}' is missing required SSH file:
-            {{
-              missing.item.0.value.ssh_keys
-                if missing.item.1 == 'authorized_keys'
-              else missing.item.0.value.ssh_keypair
-                if missing.item.1 == 'priv'
-              else missing.item.0.value.ssh_keypair + '.pub'
-            }}
-        when: not missing.stat.exists
-        loop: "{{ gold_ssh_file_checks.results }}"
-        loop_control:
-          loop_var: missing
-
-      - name: Fail if any SSH files are missing
-        ansible.builtin.fail:
-          msg: >
-            Gold VM '{{ item.item.0.key }}' is missing required SSH file:
-            {{ item.stat.path }}
-        when: not item.stat.exists
-        loop: "{{ gold_ssh_file_checks.results }}"
-
-      - name: Stat ISO file for each gold VM
-        ansible.builtin.stat:
-          path: "{{ item.value.iso }}"
-        loop: "{{ final_gold_vms | dict2items }}"
-        register: gold_iso_checks
-
-      - name: Fail if any ISO files are missing
-        ansible.builtin.fail:
-          msg: "Gold VM '{{ iso_result.item.key }}' is missing ISO file: {{ iso_result.item.value.iso }}"
-        when: not iso_result.stat.exists
-        loop: "{{ gold_iso_checks.results }}"
-        loop_control:
-          loop_var: iso_result
-
-      - name: Check if {{ UNIQUE_TAG }} exceeds 14 characters
-        ansible.builtin.fail:
-          msg: "UNIQUE TAG '{{ UNIQUE_TAG }}' is too long (max 14 characters)."
-        when: UNIQUE_TAG | length > 14
-
-      - name: Set interface name
-        set_fact:
-          interface_name: "b{{ UNIQUE_TAG }}"
-
-      - name: Set additional network variables
-        set_fact:
-          libvirt:
-            name: "l{{ UNIQUE_TAG }}"
-            base_ip: "{{ network.libvirt.base_ip }}"
-            cidr: "{{ network.libvirt.cidr }}"
-          wireguard:
-            interface: "wg-{{ UNIQUE_TAG }}"
-            cidr: "{{ network.wg_cidr }}"
-            base_ip: "{{ network.wg_base_ip }}"
-
-      - name: Validate networking definitions
-        block:
-        - name: Fail if network.type is not defined
-          fail:
-            msg: "'network.type' must be defined"
-          when: network.type is not defined
-
-        - name: Fail if network.type is unsupported
-          fail:
-            msg: "'network.type' must be either 'private' or 'wireguard' or 'mvpnet'. Got: {{ network.type }}"
-          when: network.type is defined and network.type not in ['private', 'wireguard', 'mvpnet']
-
-        - name: Validate private network configuration if type is private
-          when: network.type == 'private'
-          block:
-            - name: Assert 'network.interface' is defined
-              assert:
-                that: network.interface is defined
-                fail_msg: "'network.interface' must be defined for private networks"
-
-        - name: Validate mvpnet network configuration if type is private
-          when: network.type == 'mvpnet'
-          block:
-            - name: Assert mvpnet variables are defined
-              assert:
-                that: network.mvpnet.base_ip is defined and network.mvpnet.device is defined and network.mvpnet.user and network.mvpnet.host_interface
-                fail_msg: "'network.mvpnet.base_ip' and 'network.mvpnet.device' and 'network.mvpnet.user' and 'network.mvpnet.host_interface' must be defined for mvpnet networks"
-
-        - name: Validate wireguard configuration if type is wireguard
-          when: network.type == 'wireguard'
-          block:
-            - name: Assert 'wg_base_ip' and 'wg_cidr' are defined
-              assert:
-                that:
-                  - network.wg_base_ip is defined
-                  - network.wg_cidr is defined
-                fail_msg: "'network.wg_base_ip' and 'network.wg_cidr' must be defined for wireguard networks"
-
-      - name: Validate VM definitions
-        fail:
-          msg: >
-            "VM {{ vm }} has an invalid format.\n
-            Expected: [string, string, [integers], int (0-254)],\n
-            Got: [{{ vm[0] | type_debug }}, {{ vm[1] | type_debug }}, {{ vm[2] | type_debug }}, {{ vm[3] | type_debug }}]"
-        when: >
-          vm | length != 4 or
-          vm[0] is not string or
-          vm[1] is not string or
-          vm[2] is not iterable or vm[2] is mapping or vm[2] is string or not (vm[2] | map('regex_search', '^-?\d+$') | list == vm[2] | map('string') | list) 
-        loop: "{{ groups['all'] | default([]) | map('extract', hostvars, 'vms') | select('defined') | list | flatten(1) }}"
-        loop_control:
-          loop_var: vm
-
-      - name: Validate VM[3] range for non-mvpnet networks
-        fail:
-          msg: >
-            "VM {{ vm }} has invalid IP last octet {{ vm[3] }} for network.type != 'mvpnet'.\n
-            Expected: between 2 and 254."
-        when: network.type != 'mvpnet' and (vm[3] < 2 or vm[3] > 254)
-        loop: "{{ groups['all'] | default([]) | map('extract', hostvars, 'vms') | select('defined') | list | flatten(1) }}"
-        loop_control:
-          loop_var: vm
-
-      - name: Validate VM[3] range for mvpnet networks
-        fail:
-          msg: >
-            "VM {{ vm }} has invalid IP last octet {{ vm[3] }} for network.type == 'mvpnet'.\n
-            Expected: between 0 and 254."
-        when: network.type == 'mvpnet' and (vm[3] < 0 or vm[3] > 254)
-        loop: "{{ groups['all'] | default([]) | map('extract', hostvars, 'vms') | select('defined') | list | flatten(1) }}"
-        loop_control:
-          loop_var: vm
-
-      - name: Set base_ip depending on network.type
-        set_fact:
-          base_ip: >-
-            {{ hostvars['localhost'].network.mvpnet.base_ip
-               if hostvars['localhost'].network.type == 'mvpnet'
-               else hostvars['localhost'].network.libvirt.base_ip }}
-
-      - name: Define a ton of derived stuff for each VM to make later templating easier 
-        set_fact:
-          vm_info: "{{ computed_vm_info }}"
-        vars:
-          network_data: "{{ hostvars['localhost'].network }}"  # Explicitly fetch network
-          computed_vm_info: >
-            {%- set ns = namespace(mac_counter=0, result=[]) -%}
-            {%- for phys in groups['all'] if hostvars[phys].vms is defined -%}
-              {%- for vm in hostvars[phys].vms -%}
-                {%- set mac = "52:54:00:" ~ ("%02x" | format(ns.mac_counter //(256*256))) ~ ":" ~ ("%02x" | format((ns.mac_counter // 256) % 256)) ~ ":" ~ ("%02x" | format(ns.mac_counter % 256)) -%}
-                {%- set _ = ns.result.append({
-                      'name': vm[0],
-                      'ansible_host': base_ip ~ '.' ~ vm[3],
-                      'mvpnet_port' : 2200 + vm[3] - 1,
-                      'group': vm[1],
-                      'hdd_sizes': vm[2],
-                      'libvirt_bridge': network.libvirt.base_ip ~ '.' ~ ((hostvars[phys].libvirt_suffix | default(0)) | int + 1),
-                      'mac_address': mac,
-                      'machine': final_gold_vms.get(vm[1]).machine, 
-                      'memory': final_gold_vms.get(vm[1]).memory, 
-                      'netone': network.libvirt.default, 
-                      'nettwo': libvirt.name, 
-                      'physical_host': hostvars[phys].ansible_host | default(phys),
-                      'root_password': final_gold_vms.get(vm[1]).root_pwd | default(none),
-                      'ssh_keys': final_gold_vms.get(vm[1]).ssh_keys, 
-                      'ssh_keypair': final_gold_vms.get(vm[1]).ssh_keypair,
-                      'source_image': gold_qcow2_paths.get(vm[1]), 
-                      'storage_pool': "{{ UNIQUE_TAG }}-pool", 
-                      'storage_pool_path': pool_dir,
-                      'vcpu': final_gold_vms.get(vm[1]).vcpu, 
-                    }) -%}
-                {%- set ns.mac_counter = ns.mac_counter + 1 -%}
-              {%- endfor -%}
-            {%- endfor -%}
-            {{ ns.result }}
-
-      - name: Debug VM info structure
-        debug:
-          var: vm_info
-        when: true
-
-      - name: Capture variables for the template provenance headers 
-        set_fact:
-          playbook_command: "{{ lookup('file', '/proc/self/cmdline') | regex_replace('\u0000', ' ') }}"
-          current_date: "{{ lookup('pipe', 'date \"+%Y-%m-%d %H:%M:%S\"') }}"
-          ansible_hostname: "{{ lookup('pipe', 'hostname') }}"
-          phys_count: "{{ groups['physical_hosts'] | length }}"
-          vms_count: >-
-            {{
-              groups['physical_hosts']
-              | map('extract', hostvars, 'vms')
-              | select('defined')
-              | map('length')
-              | sum
-            }}
-
-    - name: Generate inventory and tofu var files for subsequent phases and the Makefile driver
-      block:
-      - block:
-        - name: Generate Makefile for subsequent phases 
-          template:
-            src: templates/Makefile.j2
-            dest: "{{ artifact_dir }}/Makefile"
-
-        - name: Generate ansible inventory and variable files for ansible phases 
-          template:
-            src: "templates/{{ item.0 }}.j2"
-            dest: "{{ item.1 }}/{{ item.0 }}.yaml"
-          loop:
-            - [ "all", "{{ physical_inventory_dir }}" ]
-            - [ "phase1_gold_inventory", "{{ physical_inventory_dir }}" ]
-            - [ "phase2_networking", "{{ physical_inventory_dir }}" ]
-            - [ "phase4_nettest", "{{ physical_inventory_dir }}" ]
-            - [ "phase5_config_cluster", "{{ virtual_inventory_dir }}" ]
-        vars:
-          comment_style: "hash"
-
-      - block:
-        - name: Generate phase 3 opentofu vars file
-          template:
-            src: templates/phase3_vms.j2
-            dest: "{{ tfvars_file }}" 
-          register: phase3_tfvars_result
-          vars:
-            comment_style: "hcl"
-
-        - name: Format the autogenerated opentofu file 
-          ansible.builtin.command:
-            cmd: tofu fmt "{{ phase3_tfvars_result.dest }}" 
-
-        - name: Copy over the tofu files from TASSI source into artifact dir
-          synchronize:
-            src: "{{ phase_dir }}/3_create_cluster/"
-            dest: "{{ tofu_dir }}/"
-            recursive: yes
-
-        - name: Make sure the tofu modules have been initialized
-          ansible.builtin.command:
-            cmd: tofu {{ tofu_chdir }} init 
-
-        - name: List current tofu workspaces
-          ansible.builtin.command: tofu {{ tofu_chdir }} workspace list
-          register: tofu_workspace_list
-
-        - name: Debug tofu workspace list
-          ansible.builtin.debug:
-            var: tofu_workspace_list.stdout_lines
-
-        - name: Create tofu workspace {{ tofu_workspace }} if it doesn't exist
-          ansible.builtin.command: tofu {{ tofu_chdir }} workspace new -var-file {{ tfvars_file }} {{ tofu_workspace }}
-          when: tofu_workspace not in tofu_workspace_list.stdout_lines | map('regex_replace', '^\\*?\\s*', '') | list
-        when: network.type != 'mvpnet'
-
-      - name: Run 'make -C {{ artifact_dir }} help'
-        command: make -C "{{ artifact_dir }}" help
-        register: make_help_output
-
-      - name: Display output of 'make -C {{ artifact_dir }} help' 
-        debug:
-          var: make_help_output.stdout_lines 
-
-    - debug:
-        msg:
-          - "Next steps for TASSI {{ UNIQUE_TAG }}: make -C {{ artifact_dir }} all"
