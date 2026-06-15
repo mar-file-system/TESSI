@@ -38,47 +38,43 @@
       ansible.builtin.set_fact:
         base_matrix_dict: "{{ (existing_data.compatibility_matrix is defined and existing_data.compatibility_matrix is string) | ternary(existing_data.compatibility_matrix | from_yaml, existing_data.compatibility_matrix | default({}, true)) }}"
 
-    - name: Build new matrix entries loop as a raw JSON string
+    - name: Build new matrix entry from the primary physical host
       ansible.builtin.set_fact:
         new_entries_json: >-
-          {% set entries = {} %}
-          {% set target_fact_host = groups['physical_hosts'][0] %}
-          {% set fact_vars = hostvars[target_fact_host] %}
-          
-          {% for host in groups['physical_hosts'] %}
-            {% set hvars = hostvars[host] %}
-            
-            {# Extract short name fallback matching (e.g. tessi0 from tessi0.ubuntu.mvpnet) #}
-            {% set short_name = host.split('.')[0] %}
-            {% set short_hvars = hostvars[short_name] | default({}) %}
-            
-            {# Map exact specific parameters required by your operational architecture #}
-            {% set target_system = hvars.fstype | default(short_hvars.fstype) | default(fstype) %}
-            {% set target_network = hvars.network.type | default(short_hvars.network.type) | default(network.type) %}
-            
-            {# Track dynamic cluster facts cleanly #}
-            {% set current_distro = fact_vars.ansible_distribution %}
-            {% set current_version = fact_vars.ansible_distribution_major_version %}
-            {% set current_kernel = fact_vars.ansible_kernel %}
-            {% set current_arch = fact_vars.ansible_architecture %}
-            
-            {% set compound_key = target_system ~ '.' ~ target_network ~ '.' ~ (current_distro | lower) ~ '.' ~ current_version %}
-            {% set node_details = {
-              'system': target_system,
-              'network': target_network,
-              'distro': current_distro,
-              'distro_version': current_version,
-              'fqdn': hvars.ansible_fqdn | default(host),
-              'ansible_user': hvars.ansible_user | default(local_user.stdout),
-              'kernel': current_kernel,
-              'arch': current_arch,
-              'last_git_commit': git_commit.stdout,
-              'recorded_by_user': local_user.stdout,
-              'timestamp': now(fmt='%Y-%m-%d %H:%M:%S')
-            } %}
-            {% set _ = entries.update({compound_key: node_details}) %}
-          {% endfor %}
-          {{ entries | to_json }}
+          {% set target_host = groups['physical_hosts'][0] %}
+          {% set hvars = hostvars[target_host] %}
+
+          {# Extract parameters directly without a loop #}
+          {% set target_system = hvars['system']['type'] %}
+          {% set target_config = hvars['config_file'] %}
+          {% set target_network = hvars['network']['type'] %}
+
+          {# Dynamic system facts gathered from the host #}
+          {% set current_distro = hvars.ansible_distribution %}
+          {% set current_version = hvars.ansible_distribution_major_version %}
+          {% set current_kernel = hvars.ansible_kernel %}
+          {% set current_arch = hvars.ansible_architecture %}
+
+          {# Construct the single compound entry #}
+          {% set compound_key = target_system ~ '.' ~ target_network ~ '.' ~ (current_distro | lower) ~ '.' ~ current_version %}
+          {% set node_details = {
+            'system': target_system,
+            'network': target_network,
+            'distro': current_distro,
+            'distro_version': current_version,
+            'fqdn': hvars.ansible_fqdn | default(target_host),
+            'ansible_user': hvars.ansible_user | default(local_user.stdout),
+            'kernel': current_kernel,
+            'arch': current_arch,
+            'config_file': target_config,
+            'last_git_commit': git_commit.stdout,
+            'recorded_by_user': local_user.stdout,
+            'bootstrap_cluster_playbook': bootstrap_cluster | default('NONE'),
+            'timestamp': now(fmt='%Y-%m-%d %H:%M:%S')
+          } %}
+
+          {# Output as a single-entry dictionary payload #}
+          {{ {compound_key: node_details} | to_json }}
 
     - name: DEBUG - State of Matrix Variables Before Combining
       ansible.builtin.debug:

@@ -20,6 +20,24 @@
         set_fact:
           client_count: "{{ groups['clients'] | length }}"
 
+      - name: Scan public keys of all client nodes from each client executor
+        ansible.builtin.shell: "ssh-keyscan -H {{ item }}"
+        loop: "{{ groups['clients'] }}"
+        register: scanned_client_keys
+        changed_when: false
+
+      - name: Append clean client signatures to local known_hosts profiles
+        ansible.builtin.known_hosts:
+          name: "{{ item.item }}"
+          key: "{{ item.stdout }}"
+          state: present
+        loop: "{{ scanned_client_keys.results }}"
+        # Discard lines that contain standard warning headers or empty captures
+        when:
+          - item.stdout is defined
+          - item.stdout != ""
+          - not item.stdout.startswith('#')
+
       - name: Set IOR parameters as facts
         set_fact:
           hostfile:         "/tmp/hosts.{{ UNIQUE_TAG }}"
@@ -34,9 +52,9 @@
           var: fstype
           var: client_count
 
-      - name: Set outputPath using fstype and UNIQUE_TAG
+      - name: Set outputPath using fstype and UNIQUE_TAG and {{ ansible_env.USER }}
         set_fact:
-          outputPath: "/mnt/{{ fstype }}/ior.{{ UNIQUE_TAG }}"
+          outputPath: "/mnt/{{ fstype }}/{{ ansible_env.USER }}/ior.{{ UNIQUE_TAG }}"
 
       - name: Write the list of client hostnames to the hostfile (defer this to the child task file)
         copy:

@@ -63,6 +63,38 @@
         {% endfor %}
     run_once: true
 
+  - name: Map each target file to its respective file system
+    ansible.builtin.set_fact:
+      file_system_mappings: >-
+        {% set results = [] %}
+        {% for item in target_files %}
+          {% set matching_mounts = ansible_mounts | selectattr('mount', 'in', item.path) | sort(attribute='mount') %}
+          {% if matching_mounts | length > 0 %}
+            {% set target_mount = matching_mounts | last %}
+            {% set _ = results.append({
+              'file_path': item.path,
+              'owner': item.owner | default('unknown'),
+              'mount_point': target_mount.mount,
+              'fstype': target_mount.fstype,
+              'device': target_mount.device
+            }) %}
+          {% else %}
+            {% set _ = results.append({
+              'file_path': item.path,
+              'owner': item.owner | default('unknown'),
+              'mount_point': 'unknown',
+              'fstype': 'unknown',
+              'device': 'unknown'
+            }) %}
+          {% endif %}
+        {% endfor %}
+        {{ results | to_json }}
+
+  - name: Example task using the saved data later in the play
+    ansible.builtin.debug:
+      msg: "File {{ item.file_path }} (owned by {{ item.owner }}) is sitting on {{ item.mount_point }} ({{ item.fstype }})"
+    loop: "{{ file_system_mappings | from_json }}"
+
   - name: Ensure known_hosts files exist
     file:
       path: "{{ item.path }}"
@@ -71,6 +103,11 @@
       mode: '0644'
     become_user: "{{ item.owner }}"  # <--- THE MAGIC SWITCH
     loop: "{{ target_files }}"
+    vars:
+      current_mapping: "{{ (file_system_mappings | from_json) | selectattr('file_path', 'equalto', item.path) | first }}"
+    when: >
+      current_mapping.fstype != 'nfs' or
+      inventory_hostname == ansible_play_hosts[0]
 
   - name: Purge stale keys from files
     shell: |
@@ -80,6 +117,11 @@
     become_user: "{{ item.owner }}"  # <--- Executes as 'root' or 'jbent' dynamically
     loop: "{{ target_files }}"
     changed_when: false
+    vars:
+      current_mapping: "{{ (file_system_mappings | from_json) | selectattr('file_path', 'equalto', item.path) | first }}"
+    when: >
+      current_mapping.fstype != 'nfs' or
+      inventory_hostname == ansible_play_hosts[0]
 
   - name: Purge stale keys by IP
     shell: ssh-keygen -R "{{ hostvars[host]['ansible_default_ipv4']['address'] }}" -f "{{ file.path }}" > /dev/null 2>&1
@@ -90,7 +132,11 @@
     vars:
       file: "{{ pair.0 }}"
       host: "{{ pair.1 }}"
+      current_mapping: "{{ (file_system_mappings | from_json) | selectattr('file_path', 'equalto', file.path) | first }}"
     changed_when: false
+    when: >
+      current_mapping.fstype != 'nfs' or
+      inventory_hostname == ansible_play_hosts[0]
 
   - name: Add cluster keys to files
     blockinfile:
@@ -101,6 +147,11 @@
       block: "{{ known_hosts_content }}"
     become_user: "{{ item.owner }}"
     loop: "{{ target_files }}"
+    vars:
+      current_mapping: "{{ (file_system_mappings | from_json) | selectattr('file_path', 'equalto', item.path) | first }}"
+    when: >
+      current_mapping.fstype != 'nfs' or
+      inventory_hostname == ansible_play_hosts[0]
 
   - name: Cleanup backup files
     file:
@@ -108,6 +159,11 @@
       state: absent
     become_user: "{{ item.owner }}"
     loop: "{{ target_files }}"
+    vars:
+      current_mapping: "{{ (file_system_mappings | from_json) | selectattr('file_path', 'equalto', item.path) | first }}"
+    when: >
+      current_mapping.fstype != 'nfs' or
+      inventory_hostname == ansible_play_hosts[0]
   become: true
 
 - name: Ensure a bunch of TASSI prerequisites across all physical hosts 
@@ -208,11 +264,12 @@
     - name: Build OSU Micro-Benchmarks and mvpnet for all MPI implementations
       when: network.type == 'mvpnet'
       block:
+        # TODO: Replace this by pulling from a vars file
         - name: Set some variables
           set_fact:
             mpi_modules:
-              - mpi/openmpi
-              - mpi/mvapich2
+              - mpi/openmpi-x86_64
+              - mpi/mpich-x86_64
 
         - name: Install OSU for each MPI module
           include_tasks: ../../playbooks/shared/install_osu_micro_benchmarks.yaml
