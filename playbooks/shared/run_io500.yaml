@@ -1,0 +1,105 @@
+
+- name: Debug some crap
+  debug:
+    var: mpi_config
+
+- name: Set up a bunch of MPI path facts 
+  ansible.builtin.include_tasks:
+    file: "../tasks/discover_mpi.yaml"
+  vars:
+    mpi: "{{ mpi_config }}"
+    target_mpi_module: "{{ mpi_config.module }}"  
+
+- name: Gets IO500 source path specific to this MPI flavor {{ mpi_label }}
+  ansible.builtin.include_tasks:
+    file: "../tasks/path_to_mpi_specific_src.yaml"
+  vars:
+    target_mpi_label: "{{ mpi_label }}"   # Inherited from your core set_fact base step
+    target_executable: "{{ item.exe }}"
+  loop:
+    - { exe: 'io500' }
+
+- name: Debug some crap
+  debug:
+    msg: "{{ mpi_config }} {{ mpi_label }} {{ mpi_bin }}"
+
+- name: Debug some crap
+  debug:
+    var: mpi_paths
+
+- name: Set io500 path
+  set_fact:
+    io500_path: "{{ mpi_paths.io500 }}"
+    io500_config: "config.ini"
+    io500_stonewall: "5"
+    io500_datadir: "/mnt/{{ system.type }}/{{ ansible_env.SUDO_USER | default(ansible_env.USER) }}/io500"
+    io500_hostfile: "/tmp/hostfile.{{ ansible_env.SUDO_USER | default(ansible_env.USER) }}_io500_mpi_label"
+
+- name: Ensure {{ io500_datadir }} exists and is owned by the sudo user
+  ansible.builtin.file:
+    path: "{{ io500_datadir }}"
+    state: directory
+    owner: "{{ ansible_env.SUDO_USER | default(ansible_env.USER) }}"
+    mode: '0755'
+
+- name: Create a default io500 config file 
+  ansible.builtin.include_tasks: ../tasks/run_with_mpi_module.yaml
+  vars:
+    mpi_module: "{{ mpi_config.module }}"
+    working_dir: "{{ io500_path }}"
+    creates_path: "{{ io500_path }}/{{ io500_config }}"
+    commands: |
+      ./io500 --list > {{ io500_config }}
+
+- name: Set cluster node counts and current timestamp
+  ansible.builtin.set_fact:
+    num_clients: "{{ groups.get('clients', []) | length }}"
+    num_mds: "{{ groups.get('mds', []) | length }}"
+    num_ds: "{{ (groups.get('ds', []) + groups.get('oss', [])) | unique | length }}"
+    timestamp: "{{ lookup('pipe', 'date +%s') }}"
+
+- name: Create an output dir for these results
+  set_fact:
+    output_dir: "{{ image_dir }}/io500/mds-{{ num_mds }}.ds-{{ num_ds }}.clients-{{ num_clients }}.{{ timestamp }}"
+
+- name: Ensure {{ output_dir }} exists and is owned by the sudo user
+  ansible.builtin.file:
+    path: "{{ output_dir }}"
+    state: directory
+    owner: "{{ ansible_env.SUDO_USER | default(ansible_env.USER) }}"
+    mode: '0755'
+
+- name: Dynamically append datadir and stonewall-timer and output_dir to the config updates
+  ansible.builtin.set_fact:
+    io500_config_updates: >-
+      {{
+        io500_config_updates + [
+          { 'section': 'global', 'option': 'datadir',        'value': io500_datadir },
+          { 'section': 'global', 'option': 'resultdir',      'value': output_dir },
+          { 'section': 'debug',  'option': 'stonewall-time', 'value': io500_stonewall }
+        ]
+      }}
+
+- name: Apply granular IO500 configuration overrides
+  ansible.builtin.include_tasks: ../tasks/configure_io500.yaml
+  vars:
+    config_file_path: "{{ io500_path }}/{{ io500_config }}"
+
+- name: Generate the MPI hostfile from clients inventory using the shared task
+  ansible.builtin.include_tasks:
+    file: ../tasks/write_mpi_hostfile.yaml  # Adjust this path based on where you save the file
+  vars:
+    mpi_module: "{{ mpi_config.module }}"
+    hosts: "{{ groups['clients'] }}"
+    hostfile_path: "{{ io500_hostfile }}"
+
+- name: mpirun IO500 
+  ansible.builtin.include_tasks: ../tasks/run_with_mpi_module.yaml
+  vars:
+    mpi_module: "{{ mpi_config.module }}"
+    command_timeout: 3000 # fail if it takes too long
+    working_dir: "{{ io500_path }}"
+    show_output: true
+    commands: >
+      mpirun -np {{ num_clients }} -hostfile {{ io500_hostfile }} {{ mpi_config.mpirun_args }}
+      io500 {{ io500_config }}

@@ -4,16 +4,16 @@
 
 - name: Sanitize MPI module name 
   set_fact:
-    mpi_module_sanitized: "{{ mpi_config.mpi_module | regex_replace('[^A-Za-z0-9]', '_') }}"
+    mpi_module_sanitized: "{{ mpi_config.module | regex_replace('[^A-Za-z0-9]', '_') }}"
 
 - name: Set summary file path 
   set_fact:
     summary_file_path: "{{ summaryFile }}_{{ mpi_module_sanitized }}.json"
 
-- name: Check if MPI module {{ mpi_config.mpi_module }} is available
+- name: Check if MPI module {{ mpi_config.module }} is available
   shell: |
     export MODULEPATH="/etc/modulefiles:/usr/share/modulefiles:/usr/share/modules/modulefiles"
-    modulecmd bash load {{ mpi_config.mpi_module }}
+    modulecmd bash load {{ mpi_config.module }}
   register: mpi_module_check
   failed_when: false
   changed_when: false
@@ -22,28 +22,13 @@
   set_fact:
     mpi_module_available: "{{ mpi_module_check.rc == 0 and 'ERROR' not in mpi_module_check.stderr and 'ERROR' not in mpi_module_check.stdout }}"
 
-- name: Debug availability of {{ mpi_config.mpi_module }}
+- name: Debug availability of {{ mpi_config.module }}
   debug:
     var: mpi_module_available
 
 - name: Actually run IOR and collect the results
   when: mpi_module_available
   block:
-  - name: Build full mpirun command line
-    set_fact:
-      mpirun_command: >
-        export MODULEPATH="/etc/modulefiles:/usr/share/modulefiles:/usr/share/modules/modulefiles";
-        eval "$(modulecmd bash load {{ mpi_config.mpi_module }})"
-        && mpirun -np {{ client_count }} -hostfile {{ hostfile }} {{ mpi_config.mpirun_args }}
-        ior -F -C -s {{ segmentCount }} -t {{ transferSize }} -b {{ blockSize }}
-        -o {{ outputPath }}_{{ mpi_module_sanitized }}
-        -O summaryFormat=JSON
-        -O summaryFile={{ summary_file_path }}
-        && eval "$(modulecmd bash unload {{ mpi_config.mpi_module }})"
-
-  - name: Show the constructed mpirun command
-    debug:
-      msg: "{{ mpirun_command }}"
 
   - name: Set minimum required storage space 
     set_fact:
@@ -57,18 +42,40 @@
     retries: 20
     delay: 10
 
-  - name: Write the dynamic hostfile for the active MPI implementation
-    copy:
-      content: |
-        {% for host in groups['clients'] -%}
-        {{ hostvars[host]['ansible_fqdn'] }}{{ ' slots=1' if 'openmpi' in mpi_config.mpi_module else '' }}
-        {% endfor %}
-      dest: "{{ hostfile }}"
+  - name: Generate the MPI hostfile from clients inventory using the shared task
+    ansible.builtin.include_tasks:
+      file: ../tasks/write_mpi_hostfile.yaml  # Adjust this path based on where you save the file
+    vars:
+      mpi_module: "{{ mpi_config.module }}"
+      hosts: "{{ groups['clients'] }}"
+      hostfile_path: "{{ hostfile }}"
 
-  - name: Run IOR using mpirun {{ mpi_config.mpi_module }}
-    shell: "{{ mpirun_command }}"
-    register: mpirun_output
-    timeout: 600
+  - name: Ensure previous IOR summary files are deleted to force a clean run
+    ansible.builtin.file:
+      path: "{{ summary_file_path }}"
+      state: absent
+
+  - name: mpirun IOR 
+    ansible.builtin.include_tasks: ../tasks/run_with_mpi_module.yaml
+    vars:
+      mpi_module: "{{ mpi_config.module }}"
+      working_dir: "/tmp/"
+      show_output: true
+      creates_path: "{{ summary_file_path }}"
+      command_timeout: 300 # fail if it takes too long
+      commands: >
+        mpirun -np {{ client_count }} -hostfile {{ hostfile }} {{ mpi_config.mpirun_args }}
+        ior -F -C -s {{ segmentCount }} -t {{ transferSize }} -b {{ blockSize }}
+        -o {{ outputPath }}_{{ mpi_module_sanitized }}
+        -O summaryFormat=JSON
+        -O summaryFile={{ summary_file_path }}
+
+  - name: Check mpirun IOR results 
+    ansible.builtin.debug:
+      msg:
+        - "Return Code: {{ mpi_shell_result.rc }}"
+        - "STDERR: {{ mpi_shell_result.stderr }}"
+        - "STDOUT: {{ mpi_shell_result.stdout }}"
 
   - name: Load JSON from summary file using slurp
     slurp:
@@ -87,18 +94,18 @@
     set_fact:
       read_bw: "{{ mpirun_json.summary | selectattr('operation', 'equalto', 'read') | map(attribute='bwMeanMIB') | first }}"
 
-  - name: "Display IOR bandwidth results for {{ mpi_config.mpi_module }}"
+  - name: "Display IOR bandwidth results for {{ mpi_config.module }}"
     debug:
-      msg: "IOR Results for {{ mpi_config.mpi_module }}: Write Bandwidth = {{ write_bw }} MiB/s, Read Bandwidth = {{ read_bw }} MiB/s"
+      msg: "IOR Results for {{ mpi_config.module }}: Write Bandwidth = {{ write_bw }} MiB/s, Read Bandwidth = {{ read_bw }} MiB/s"
 
   - name: Build IOR result JSON line
     set_fact:
       single_ior_result_json: >-
         {{ {
-          "mpi_module": mpi_config.mpi_module,
+          "mpi_module": mpi_config.module,
           "write_bw": write_bw | default('FAILURE'),
           "read_bw": read_bw | default('FAILURE'),
-          "status": ('success' if mpirun_output.rc == 0 else 'failure')
+          "status": ('success' if mpi_shell_result.rc == 0 else 'failure')
         } | to_json }}
 
   - name: Append IOR result to file on control node
