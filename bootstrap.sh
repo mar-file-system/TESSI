@@ -32,11 +32,6 @@ if ! command -v ansible-playbook >/dev/null 2>&1; then
   fi
 fi
 
-if [[ ! -f bootstrap/bootstrap.yaml ]]; then
-  echo "Error: missing playbook: bootstrap/bootstrap.yaml" >&2
-  exit 1
-fi
-
 if locale -a 2>/dev/null | grep -qi '^C\.UTF-8$'; then
   export LC_ALL=C.UTF-8
   export LANG=C.UTF-8
@@ -50,4 +45,4 @@ else
   exit 1
 fi
 
-exec ansible-playbook -i "$INV" bootstrap/bootstrap.yaml
+exec ansible-playbook -i "$INV" playbooks/bootstrap/bootstrap.yaml

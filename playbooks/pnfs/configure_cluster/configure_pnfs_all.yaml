@@ -1,4 +1,28 @@
 ---
+- name: Debug Cluster Parameters Variable Loading
+  hosts: localhost
+  gather_facts: false
+  tags: always
+  tasks:
+    - name: Verify pnfs_params.yml exists on the Ansible Controller
+      block:
+        - name: Check if the file is reachable via the relative path from {{ playbook_dir }}
+          ansible.builtin.stat:
+            path: "{{ playbook_dir }}/../../vars/pnfs_params.yml"
+          register: file_status
+
+        - name: Show file presence and absolute path safely
+          ansible.builtin.debug:
+            msg:
+              - "Does file exist?: {{ file_status.stat.exists }}"
+              - "Target path evaluated: {{ playbook_dir }}/../../vars/pnfs_params.yml"
+              - "Calculated absolute path: {{ file_status.stat.path | default('FILE NOT FOUND at targeted path') }}"
+
+        - name: Fail early if the file is genuinely missing
+          ansible.builtin.fail:
+            msg: "CRITICAL: Cannot find pnfs_params.yml at {{ playbook_dir }}/../../vars/pnfs_params.yml"
+          when: not file_status.stat.exists
+
 - name: Setup SSH across the cluster
   hosts: all
   become: true
@@ -27,8 +51,46 @@
             mode: '0644'
 
       # Only execute this block if the marker file does NOT exist
-      when: not ssh_marker.stat.exists
+      when: not ssh_marker.stat.exists # or true # always do it because if we added hosts, then everyone must do
       tags: setup
+
+- name: Configure pnfs-lab.env for the multi-mds environment
+  hosts: mds
+  gather_facts: false
+  become: true
+  vars_files:
+    - ../../vars/pnfs_params.yml
+  vars:
+    env_file: "{{ pnfs_local_src }}/scripts/pnfs-lab.env"
+
+  tasks:
+    - name: Set the required arrays needed to rewrite the pnfs-lattice environment file 
+      ansible.builtin.set_fact:
+        dynamic_cluster_topology:
+          mds_hosts: "{{ groups['mds'] | default([]) }}"
+          mds_ips: "{{ groups['mds'] | default([]) | map('extract', hostvars, ['target_ip']) | list }}"
+          rondb_hosts: "{{ groups['mds'] | default([]) }}"
+          rondb_ips: "{{ groups['mds'] | default([]) | map('extract', hostvars, ['target_ip']) | list }}"
+          ds_hosts: "{{ groups['ds'] | default([]) }}"
+          ds_ips: "{{ groups['ds'] | default([]) | map('extract', hostvars, ['target_ip']) | list }}"
+          client_hosts: "{{ groups['clients'] | default([]) }}"
+          client_ips: "{{ groups['clients'] | default([]) | map('extract', hostvars, ['target_ip']) | list }}"
+      run_once: true
+
+    - name: Debug the required arrays 
+      ansible.builtin.debug:
+        var: dynamic_cluster_topology
+      run_once: true
+
+    - name: Create a backup copy of the target environment profile file
+      ansible.builtin.copy:
+        src: "{{ env_file }}"
+        dest: "{{ env_file }}.bak.{{ lookup('pipe', 'date +%Y%m%d%H%M%S') }}"
+        remote_src: true
+
+    - name: Update the pnfs-lattice environment file 
+      ansible.builtin.script: >
+        ../scripts/update_env_topology.py "{{ env_file }}" '{{ dynamic_cluster_topology | to_json }}'
 
 - name: Full Environment Scorched Earth Cleanup
   hosts: all
@@ -36,7 +98,7 @@
   gather_facts: false
   tags: makeclean
   vars_files:
-    - vars/cluster_params.yml
+    - ../../vars/pnfs_params.yml
 
   tasks:
     - name: Client Cleanup Tasks
@@ -123,11 +185,63 @@
             - "{{ lab_ds_export_path }}/data"
       when: "'ds' in group_names"
 
+- name: Create all the various required config files and place them where they need to go
+  hosts: mds
+  become: true 
+  vars_files:
+    - ../../vars/pnfs_params.yml  
+
+  tasks:
+    - name: Write newline-separated IP lists for cluster groups
+      ansible.builtin.copy:
+        content: |
+          {% for host in groups[item] | default([]) -%}
+          {{ hostvars[host]['target_ip'] }}
+          {% endfor %}
+        dest: "/tmp/{{ item }}"
+        mode: '0644'
+      loop:
+        - mds
+        - ds
+
+    - name: Set path into which to generate the various config files 
+      set_fact:
+        generated_config_file_path: "/tmp/TESSI-{{ UNIQUE_TAG }}"
+
+          #{{ pnfs_local_src }}/scripts/lattice-genconfig
+    - name: Build the command line string to generate the config files (temporarily use different path for testing)
+      ansible.builtin.set_fact:
+        generated_cmd: >-
+          /proj/mvpnet/pnfs-lattice/scripts/lattice-genconfig
+          --grpc-port {{ lab_mds_grpc_port }}
+          --nfs-port {{ lab_mds_nfs_port }}
+          --conf-dir {{ lab_mds_conf_dir }}
+          --out {{ generated_config_file_path }}
+          --schema-name {{ lab_rondb_schema }}
+          --mds-file /tmp/mds
+          --ds-file /tmp/ds
+          --ds-export {{ lab_ds_export_path }}
+          --data-dir {{ lab_rondb_data_dir }}
+          --force
+
+    - name: Append dedicated management flag when RonDB manager is not colocated
+      ansible.builtin.set_fact:
+        generated_cmd: "{{ generated_cmd }} --dedicate-mgmd"
+      when: not rondb_colocate_mgr
+
+    - name: Debug the generated command line
+      ansible.builtin.debug:
+        var: generated_cmd
+
+    - name: Execute the pNFS lattice configuration profile generation
+      ansible.builtin.command:
+        cmd: "{{ generated_cmd }}"
+
 - name: Configure and Start the NFS Data Servers
   hosts: ds
   become: true
   vars_files:
-    - vars/cluster_params.yml  
+    - ../../vars/pnfs_params.yml  
 
   tasks:
     - name: Ensure export directory exists
@@ -169,20 +283,16 @@
     mgmt_ip: "{{ (hostvars[groups['mds'][0]]['target_ip']) | trim }}"
     force_init: false 
   vars_files:
-    - vars/cluster_params.yml  
+    - ../../vars/pnfs_params.yml  
 
   tasks:
 
-    - name: Ensure RonDB Infrastructure Directories Exist
-      file:
-        path: "{{ item }}"
+    - name: Ensure all RonDB base and data subdirectories exist
+      ansible.builtin.file:
+        path: "{{ item.0 }}/{{ item.1 }}"
         state: directory
         mode: '0755'
-      loop:
-        - "{{ lab_rondb_base }}"
-        - "{{ rondb_data }}"
-        - "{{ rondb_data }}/mgmd"
-        - "{{ rondb_data }}/ndb"
+      loop: "{{ [lab_rondb_base, lab_rondb_data_dir, rondb_data] | product(['mgmd', 'mgm', 'ndb']) | list }}"
 
     - name: Pre-flight Reset (Stop existing cluster)
       shell: "pkill -9 ndbmtd || pkill -9 ndb_mgmd || true"
@@ -197,10 +307,38 @@
         - "{{ rondb_data }}/ndb/*"
       when: force_init | bool
 
-    - name: Generate RonDB Config (Management Node Only) into {{ lab_rondb_base }}
+    - name: Validate that RonDB Data Nodes can support replication 
+      ansible.builtin.assert:
+        that:
+          - ((groups['mds'] | length - 1) % 2) == 0
+          - (groups['mds'] | length - 1) > 0
+        fail_msg: |
+          CRITICAL INVENTORY CONFIGURATION ERROR:
+          pnfs-lattice requires High Availability (NoOfReplicas=2) in rondb.
+          Currently, you have {{ groups['mds'] | length }} total host(s) in the 'mds' group.
+          Subtracting 1 for the Management Node leaves an ODD count of {{ groups['mds'] | length - 1 }} data nodes.
+          Please add or remove a host in your 'mds' inventory group so that the remaining data nodes count is EVEN.
+        success_msg: "Inventory validation passed. Total Data Nodes: {{ groups['mds'] | length - 1 }} (Even, safe for NoOfReplicas=2)."
+      run_once: true
+      when: false
+
+    - name: Set the required arrays needed to rewrite the pnfs-lattice environment file 
+      ansible.builtin.set_fact:
+        rondb_nodeid: 65
+      when: false
+
+    - name: Generate RonDB Config (Management Node Only) into {{ lab_rondb_base }} {{ rondb_data }}
       template:
         src: templates/rondb_config.ini.j2
         dest: "{{ rondb_data }}/config.ini"
+      when: inventory_hostname == mgmt_host and false
+
+    - name: Copy RonDB {{ generated_config_file_path }}/config.ini into {{ rondb_data }}/config.ini 
+      ansible.builtin.copy:
+        src: "{{ generated_config_file_path }}/config.ini"
+        dest: "{{ rondb_data }}/config.ini"
+        remote_src: true
+        mode: '0644'
       when: inventory_hostname == mgmt_host
 
     - name: Start RonDB Management Server 
@@ -209,7 +347,6 @@
         -f {{ rondb_data }}/config.ini 
         --initial 
         --configdir={{ rondb_data }}/mgmd 
-        --ndb-nodeid=1
       when: inventory_hostname == mgmt_host
 
     - name: Wait for Management Server Connectivity on {{ mgmt_ip }}
@@ -218,14 +355,13 @@
         port: 1186
         timeout: 600
 
-    - name: Detect existing Data Node state
-      stat:
-        path: "{{ rondb_data }}/ndb/ndb_2.log"
-      register: ndb_data_check
-      when: inventory_hostname != mgmt_host
-
-    - name: Start RonDB Data Nodes and Wait for Them to Join
+    - name: Start RonDB Data Nodes and Wait for Them to Join Using {{ rondb_bin }}/ndbmtd
+      when: inventory_hostname != mgmt_host or rondb_colocate_mgr
       block:
+      - name: Detect existing Data Node state
+        stat:
+          path: "{{ rondb_data }}/ndb/ndb_2.log"
+        register: ndb_data_check
       - name: Start RonDB Data Nodes
         shell: >
           {{ rondb_bin }}/ndbmtd -c {{ mgmt_ip }}:1186 
@@ -240,9 +376,8 @@
         # We look specifically for this host's IP followed by the version string
         # (which indicates it moved past "accepting connect")
         until: "node_check.stdout is search(target_ip ~ '.*RonDB')"
-      when: inventory_hostname != mgmt_host
 
-    - name: Wait for Data Nodes to reach 'Started' state
+    - name: Wait for Data Nodes to reach 'Started' state by querying {{ rondb_bin }}/ndb_mgm -c {{ mgmt_ip }}
       shell: >
         {{ rondb_bin }}/ndb_mgm -c {{ mgmt_ip }}:1186 -e 'show' |
         sed -n '/\[ndbd(NDB)\]/,/\[ndb_mgmd(MGM)\]/p' |
@@ -274,30 +409,51 @@
   hosts: mds
   become: true
   vars_files:
-    - vars/cluster_params.yml  
+    - ../../vars/pnfs_params.yml  
   tasks:
 
-    - name: Ensure MDS config directory exists
+    - name: Ensure MDS config directory exists at {{ lab_mds_conf_dir }}
       file:
         path: "{{ lab_mds_conf_dir }}"
         state: directory
         mode: '0755'
 
-    - name: Generate MDS configuration
-      template:
-        src: templates/mds.conf.j2
-        dest: "{{ lab_mds_conf_dir }}/mds.conf"
-        owner: root
-        group: root
-        mode: '0644'
+    - name: Generate the MDS config files (old way)
+      when: false
+      block:
+      - name: Generate MDS configuration
+        template:
+          src: templates/mds.conf.j2
+          dest: "{{ lab_mds_conf_dir }}/mds.conf"
+          owner: root
+          group: root
+          mode: '0644'
 
-    - name: Generate MDS configuration for RonDB 
-      template:
-        src: templates/rondb.conf.j2
-        dest: "{{ lab_mds_conf_dir }}/rondb.conf"
-        owner: root
-        group: root
-        mode: '0644'
+      - name: Generate MDS configuration for RonDB 
+        template:
+          src: templates/rondb.conf.j2
+          dest: "{{ lab_mds_conf_dir }}/rondb.conf"
+          owner: root
+          group: root
+          mode: '0644'
+
+    - name: Copy the generated config files into appropriate directories
+      block:
+        - name: Copy indexed MDS configuration
+          ansible.builtin.copy:
+            src: "{{ generated_config_file_path }}/mds-{{ (groups['mds'].index(inventory_hostname) + 1) }}.conf"
+            dest: "{{ lab_mds_conf_dir }}/mds.conf"
+            owner: root
+            group: root
+            mode: '0644'
+
+        - name: Copy MDS configuration for RonDB
+          ansible.builtin.copy:
+            src: "{{ generated_config_file_path }}/rondb.conf"
+            dest: "{{ lab_mds_conf_dir }}/rondb.conf"
+            owner: root
+            group: root
+            mode: '0644'
 
     - name: Mount DS nodes locally using integer indices
       mount:
@@ -322,11 +478,37 @@
         enabled: yes
         daemon_reload: yes
 
+    - name: Allow settling window for MDS initialization and bootstrap loops
+      ansible.builtin.pause:
+        seconds: 10
+
+    - name: Wait and verify that the pNFS MDS listening port binds successfully
+      ansible.builtin.shell: |
+        ss -tulpn | grep -q :2049
+      register: mds_port_check
+      until: mds_port_check.rc == 0
+      retries: 6
+      delay: 5
+      changed_when: false
+      failed_when: false
+
+    - name: Assert that MDS server successfully bound port 2049
+      ansible.builtin.assert:
+        that:
+          - mds_port_check.rc == 0
+        fail_msg: |
+          CRITICAL DEPLOYMENT FAILURE: The 'pnfs-mds' port (2049) never became active!
+          The process is alive but stuck in a crash/restart loop.
+
+          Please SSH into the node and view the schema/bootstrap errors:
+            sudo journalctl -u pnfs-mds -n 50 --no-pager
+        success_msg: "MDS validation passed! Port 2049 is listening and ready for client mounts."
+
 - name: Distributed pNFS Client Mount
   hosts: clients
   become: true
   vars_files:
-    - vars/cluster_params.yml
+    - ../../vars/pnfs_params.yml
   vars:
     mds_list: "{{ groups['mds'] }}"
     client_idx: "{{ groups['clients'].index(inventory_hostname) }}"

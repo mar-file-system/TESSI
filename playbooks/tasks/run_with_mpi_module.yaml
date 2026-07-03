@@ -1,0 +1,57 @@
+---
+# Shared Task: Load profile environments, attach the target MPI module, and run commands
+- name: Sanitize and preserve incoming shell instructions
+  ansible.builtin.set_fact:
+    _sanitized_commands: "{{ commands | string }}"
+
+- name:
+  debug:
+    msg: "Will execute {{ _sanitized_commands }} using {{ mpi_module }}"
+
+- name:
+  set_fact:
+    _timeout: "{{ command_timeout | default(0) }}"
+
+- name: Show detailed MPI execution plan
+  ansible.builtin.debug:
+    msg: |
+      === COMMAND TO BE EXECUTED ===
+      {{ _sanitized_commands }}
+  when: show_output is defined and show_output | bool
+
+- name: Execute shell commands wrapped in {{ mpi_module }} module with timeout {{ _timeout }} 
+  ansible.builtin.shell:
+    cmd: |
+      # Discover and initialize the environment modules framework sub-shell
+      for init in /etc/profile.d/modules.sh /usr/share/Modules/init/bash /usr/share/modules/init/bash; do
+        [ -f "$init" ] && source "$init" && break
+      done
+
+      # Load the requested target MPI implementation cleanly
+      module load {{ mpi_module }} 2>/dev/null || true
+
+      # Execute the caller's inline custom instructions string
+      {{ _sanitized_commands }}
+  args:
+    executable: /bin/bash
+    chdir: "{{ working_dir | default(omit) }}"
+    creates: "{{ creates_path | default(omit) }}"
+  register: mpi_shell_result
+  async: "{{ _timeout }}" 
+  poll: 5
+
+- name: Show detailed output of the MPI execution
+  ansible.builtin.debug:
+    msg: |
+      === COMMAND EXECUTED ===
+      {{ _sanitized_commands }}
+      
+      === RETURN CODE ===
+      {{ mpi_shell_result.rc | default('Skipped/None') }}
+      
+      === STDOUT ===
+      {{ mpi_shell_result.stdout | default('No standard output') }}
+      
+      === STDERR ===
+      {{ mpi_shell_result.stderr | default('No standard error') }}
+  when: show_output is defined and show_output | bool
