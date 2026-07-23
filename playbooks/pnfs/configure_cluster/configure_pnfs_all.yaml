@@ -203,6 +203,7 @@
       loop:
         - mds
         - ds
+        - clients
 
     - name: Set path into which to generate the various config files 
       set_fact:
@@ -223,6 +224,8 @@
           --ds-export {{ lab_ds_export_path }}
           --data-dir {{ lab_rondb_data_dir }}
           --force
+          --host-memory 64G
+          --worker-threads 32
 
     - name: Append dedicated management flag when RonDB manager is not colocated
       ansible.builtin.set_fact:
@@ -405,6 +408,35 @@
         var: cluster_status.stdout_lines
       run_once: true
 
+    - name: Manage RonDB Index Statistics
+      run_once: true
+      block:
+        - name: Create RonDB index statistics system objects
+          ansible.builtin.command:
+            argv:
+              - /opt/rondb/bin/ndb_index_stat
+              - --sys-create-if-not-exist
+              - -c
+              - "{{ mgmt_ip }}:1186"
+          register: rondb_index_stat_create
+          changed_when: >-
+            'created' in
+            ((rondb_index_stat_create.stdout | default('')) ~
+             (rondb_index_stat_create.stderr | default(''))) | lower
+
+        - name: Verify RonDB index statistics system objects
+          ansible.builtin.command:
+            argv:
+              - /opt/rondb/bin/ndb_index_stat
+              - --sys-check
+              - -c
+              - "{{ mgmt_ip }}:1186"
+          register: rondb_index_stat_check
+          changed_when: false
+          retries: 5
+          delay: 3
+          until: rondb_index_stat_check.rc == 0
+
 - name: Deploy and Start MDS servers 
   hosts: mds
   become: true
@@ -458,7 +490,7 @@
     - name: Mount DS nodes locally using integer indices
       mount:
         path: "/mnt/ds{{ idx }}"
-        src: "{{ hostvars[item]['target_ip'] }}:/export/ds"
+        src: "{{ hostvars[item]['target_ip'] }}:{{ lab_ds_export_path }}"
         fstype: nfs
         opts: "vers=3,nconnect=8"
         state: mounted

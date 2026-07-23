@@ -1,0 +1,168 @@
+---
+- name: Debug Cluster Parameters Variable Loading
+  hosts: localhost
+  gather_facts: false
+  tags: always
+  tasks:
+    - name: Verify pnfs_params.yml exists on the Ansible Controller
+      block:
+        - name: Check if the file is reachable via the relative path from {{ playbook_dir }}
+          ansible.builtin.stat:
+            path: "{{ playbook_dir }}/../../vars/pnfs_params.yml"
+          register: file_status
+
+        - name: Show file presence and absolute path safely
+          ansible.builtin.debug:
+            msg:
+              - "Does file exist?: {{ file_status.stat.exists }}"
+              - "Target path evaluated: {{ playbook_dir }}/../../vars/pnfs_params.yml"
+              - "Calculated absolute path: {{ file_status.stat.path | default('FILE NOT FOUND at targeted path') }}"
+
+        - name: Fail early if the file is genuinely missing
+          ansible.builtin.fail:
+            msg: "CRITICAL: Cannot find pnfs_params.yml at {{ playbook_dir }}/../../vars/pnfs_params.yml"
+          when: not file_status.stat.exists
+
+- name: Setup SSH across the cluster
+  hosts: all
+  become: true
+  vars:
+    ssh_setup_marker: "/root/.ssh_setup_complete"
+
+  tasks:
+    - name: Check for SSH setup marker
+      stat:
+        path: "{{ ssh_setup_marker }}"
+      register: ssh_marker
+
+    - name: Configure SSH cluster-wide
+      block:
+        - name: Run SSH configuration tasks
+          include_tasks: ../../shared/configure_ssh.yaml
+
+        - name: Refresh cluster facts post-configuration because some variables might have gone out of scope
+          setup:
+
+        - name: Create marker file to skip future runs
+          file:
+            path: "{{ ssh_setup_marker }}"
+            state: touch
+            owner: root
+            mode: '0644'
+
+      # Only execute this block if the marker file does NOT exist
+      when: not ssh_marker.stat.exists # or true # always do it because if we added hosts, then everyone must do
+      tags: setup
+
+- name: Remove existing RonDB runtime from all MDS hosts
+  hosts: all
+  become: true
+  gather_facts: false
+  vars_files:
+    - ../../vars/pnfs_params.yml
+
+  tasks:
+    - name: Remove RonDB installation directory
+      ansible.builtin.file:
+        path: "{{ lab_rondb_base }}"
+        state: absent
+
+- name: Use pnfs-lab.env for the multi-mds environment
+  hosts: "mds[0]"
+  gather_facts: true
+  become: false
+  vars_files:
+    - ../../vars/pnfs_params.yml
+  vars:
+    env_file: "{{ pnfs_local_src }}/scripts/pnfs-lab.env"
+
+  tasks:
+    - name: Calculate network subnet from host facts
+      ansible.builtin.set_fact:
+        lab_ds_export_subnet: "{{ (ansible_default_ipv4.network ~ '/' ~ ansible_default_ipv4.netmask) | ansible.utils.ipaddr('subnet') }}"
+
+    - name: Determine active MDS nodes based on manager colocation
+      ansible.builtin.set_fact:
+        active_mds_hosts: "{{ groups['mds'][1:] if (not rondb_colocate_mgr | bool) else groups['mds'] }}"
+        inventory_file: "/tmp/inventory"
+
+    - name: Determine active RonDB nodes based on manager colocation
+      ansible.builtin.set_fact:
+        active_rondb_data_hosts: "{{ active_mds_hosts }}"
+
+    - name: Calculate RonDB replica count
+      ansible.builtin.set_fact:
+        # 2 if total active RonDB data nodes is even, otherwise 1
+        lab_profile_multi_rondb_num_replicas: "{{ 2 if (active_rondb_data_hosts | length % 2 == 0) else 1 }}" 
+
+    - name: Render dynamic inventory environment file into {{ inventory_file }}
+      ansible.builtin.template:
+        src: templates/pnfs-inv.env.j2
+        dest: "{{ inventory_file }}"
+      when: false
+
+    - name: Render simplified pnfs cluster specification
+      ansible.builtin.template:
+        src: templates/pnfs-cluster-spec.ini.j2
+        dest: /tmp/pnfs-cluster-spec.ini
+        mode: "0644"
+
+    - name: Generate pnfs-lab inventory environment
+      ansible.builtin.command:
+        argv:
+          - ./scripts/pnfs-lab-genenv
+          - /tmp/pnfs-cluster-spec.ini
+        chdir: "{{ pnfs_local_src }}"
+      register: pnfs_lab_genenv
+      changed_when: false
+
+    - name: Write generated pnfs-lab inventory into {{ inventory_file }}
+      ansible.builtin.copy:
+        content: "{{ pnfs_lab_genenv.stdout }}\n"
+        dest: "{{ inventory_file }}"
+        mode: "0644"
+
+    - name: Validate generated inventory shell syntax
+      ansible.builtin.command:
+        argv:
+          - bash
+          - -n
+          - "{{ inventory_file }}"
+      changed_when: false
+
+    - name: Display pnfs-lab generator status
+      ansible.builtin.debug:
+        msg: |
+          Cluster specification: /tmp/pnfs-cluster-spec.ini
+          Generated inventory: {{ inventory_file }}
+          {{ pnfs_lab_genenv.stderr | default('', true) }}
+
+    - name: Read important generated inventory values
+      ansible.builtin.shell:
+        cmd: |
+          grep -E '^(LAB_USER|LAB_SOURCE_DIR|LAB_BUILD_DIR|LAB_BUILD_HOST_RONDB_BASE|LAB_BUILD_HOST_RONDB_LINK|LAB_REMOTE_RONDB_BASE|LAB_REMOTE_RONDB_LINK|LAB_RONDB_MGM_HOST|LAB_RONDB_MGM_IP|LAB_PROFILE_MULTI_RONDB_NUM_REPLICAS)=' \
+            {{ inventory_file | quote }}
+      register: pnfs_generated_inventory_summary
+      changed_when: false
+
+    - name: Display important generated inventory values
+      ansible.builtin.debug:
+        var: pnfs_generated_inventory_summary.stdout_lines
+          
+          #- { cmd: "--dry-run full-multi", desc: "Preview and sanity-check the inventory" }
+    - name: Execute each task in the pnfs-lab deployment pipeline in source directory {{ pnfs_local_src }}
+      ansible.builtin.include_tasks: pnfs_lab_stage.yaml
+      loop:
+        - { cmd: "validate",             desc: "Validate profile configuration" }
+        - { cmd: "stop",                 desc: "Stop services and unmount lab filesystems" }
+        - { cmd: "--confirm-reset reset", desc: "Clear generated lab state" }
+        - { cmd: "deps",                 desc: "Install runtime dependencies" }
+        - { cmd: "ds",                   desc: "Configure DS exports" }
+        - { cmd: "rondb",                desc: "Initialize RonDB: management daemon and data nodes" }
+        - { cmd: "build",                desc: "Build pnfs-mds source binaries" }
+        - { cmd: "multi-mds",            desc: "Deploy pnfs-mds to active MDS nodes" }
+        - { cmd: "client",               desc: "Mount clients at target mount point" }
+        - { cmd: "smoke",                desc: "Run smoke validation tests" }
+      loop_control:
+        loop_var: pnfs_lab_stage
+        label: "{{ pnfs_lab_stage.desc }} ({{ pnfs_lab_stage.cmd }})"
