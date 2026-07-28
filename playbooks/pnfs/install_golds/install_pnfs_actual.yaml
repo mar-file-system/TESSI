@@ -5,7 +5,7 @@
 - name: Set up required variables
   set_fact:
     pnfs_src_path: "{{ system.pnfs_src }}"
-    pnfs_dst: "{{ pnfs_local_src }}" 
+    pnfs_dst: "{{ lab_source_dir }}" 
     rondb_dst: /opt/rondb
     rondb_url: "{{ system.rondb_url }}"
     mvpnet_ip: "Unknown at this phase of gold installation"
@@ -33,9 +33,9 @@
       name: nfs-kernel-server
       state: present
 
-  - name: Setup DS export directories at {{ lab_export_ds_path }}
+  - name: Setup DS export directories at {{ lab_ds_export_path }}
     ansible.builtin.file:
-      path: "{{ lab_export_ds_path }}/data" 
+      path: "{{ lab_ds_export_path }}/data" 
       state: directory
       mode: '0777'
 
@@ -124,11 +124,25 @@
         - "{{ pnfs_bin }}/{{ pnfs_binary }}"
       when: force_rebuild
 
+    - name: Determine remote login user
+      ansible.builtin.command: id -un
+      become: false
+      register: pnfs_owner
+      changed_when: false
+
+    - name: Determine remote login user's primary group
+      ansible.builtin.command: id -gn
+      become: false
+      register: pnfs_group
+      changed_when: false
+
     - name: Ensure destination directory exists
       file:
         path: "{{ pnfs_dst }}"
         state: directory
         mode: '0755'
+        owner: "{{ pnfs_owner.stdout }}"
+        group: "{{ pnfs_group.stdout }}"
       become: true
 
     - name: Check for existing source
@@ -139,28 +153,18 @@
     - name: Manage and Transfer pnfs Source
       when: force_rebuild or not source_exists.stat.exists 
       block:
-      - name: Compress source locally
-        community.general.archive:
-          path: "{{ pnfs_src_path }}"
-          dest: /tmp/pnfs_src.tar.gz
-          format: gz
-        delegate_to: localhost
-        run_once: true
-
-      - name: Transfer and unpack to MDS nodes
-        ansible.builtin.unarchive:
-          src: /tmp/pnfs_src.tar.gz
+      - name: Copy PNFS src into /tmp 
+        ansible.posix.synchronize:
+          src: "{{ pnfs_src_path }}" 
           dest: "{{ pnfs_dst }}"
-          remote_src: no
-          owner: root
-          group: root
 
-      - name: Cleanup local tarball
+      - name: Ensure destination ownership and permissions
         ansible.builtin.file:
-          path: /tmp/pnfs_src.tar.gz
-          state: absent
-        delegate_to: localhost
-        run_once: true
+          path: "{{ pnfs_dst }}"
+          owner: "{{ pnfs_owner.stdout }}"
+          group: "{{ pnfs_group.stdout }}"
+          state: directory
+          recurse: yes
 
     - name: Build pnfs-ng with RonDB support
       ansible.builtin.shell: |
@@ -172,6 +176,9 @@
         cmake --build build-rondb -j$(nproc)
       args:
         chdir: "{{ pnfs_dst }}"
+      become: true
+      become_user: "{{ pnfs_owner.stdout }}"
+      become_flags: "-H"
 
     - name: Install {{ pnfs_binary }} binary to {{ pnfs_bin }} 
       ansible.builtin.copy:

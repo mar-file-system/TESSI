@@ -55,31 +55,39 @@
     name: [git, autoconf, automake, libtool, make, gcc]
     state: present
 
-- name: Clone IOR
-  git:
-    repo: 'https://github.com/hpc/ior'
-    dest: "{{ mpi_paths.ior }}"
-    version: '54fd197c56dbb7a7706221acbe80198903405456'
+- name: Check if IOR binary exists
+  ansible.builtin.stat:
+    path: "{{ mpi_bin_path }}/ior"
+  register: ior_binary
 
-- name: Bootstrap IOR
-  command:
-    cmd: ./bootstrap
-    chdir: "{{ mpi_paths.ior }}"
-    creates: "{{ mpi_paths.ior }}/configure"
+- name: Build and install IOR if missing
+  when: not ior_binary.stat.exists
+  block:
+    - name: Clone IOR
+      ansible.builtin.git:
+        repo: 'https://github.com/hpc/ior'
+        dest: "{{ mpi_paths.ior }}"
+        version: '54fd197c56dbb7a7706221acbe80198903405456'
 
-- name: Set IOR install path
-  set_fact:
-    ior_install: "{{ mpi_bin_path | regex_replace('/bin/?$', '') }}"
+    - name: Bootstrap IOR
+      ansible.builtin.command:
+        cmd: ./bootstrap
+        chdir: "{{ mpi_paths.ior }}"
+        creates: "{{ mpi_paths.ior }}/configure"
 
-- name: Configure, Build, and Install IOR
-  ansible.builtin.include_tasks: ../tasks/run_with_mpi_module.yaml
-  vars:
-    mpi_module: "{{ mpi.module }}"
-    working_dir: "{{ mpi_paths.ior }}"
-    creates_path: "{{ mpi_bin_path }}/ior"
-    commands: |
-      ./configure --prefix={{ ior_install }} {{ ior_config_option | default('') }}
-      make clean all install
+    - name: Set IOR install path
+      ansible.builtin.set_fact:
+        ior_install: "{{ mpi_bin_path | regex_replace('/bin/?$', '') }}"
+
+    - name: Configure, Build, and Install IOR
+      ansible.builtin.include_tasks: ../tasks/run_with_mpi_module.yaml
+      vars:
+        mpi_module: "{{ mpi.module }}"
+        working_dir: "{{ mpi_paths.ior }}"
+        creates_path: "{{ mpi_bin_path }}/ior"
+        commands: |
+          ./configure --prefix={{ ior_install }} {{ ior_config_option | default('') }}
+          make clean all install
 
 - name: Create mpi_hello.c
   copy:
@@ -110,52 +118,55 @@
     commands: |
       mpicc {{ hello_file_path }} -o {{ mpi_bin_path }}/mpi_hello
 
-- name: Blow away any old io500 folders 
-  ansible.builtin.file:
-    path: "{{ mpi_paths.io500 }}"
-    state: absent
-
-- name: Ensure IO500 source directory exists
-  ansible.builtin.file:
-    path: "{{ mpi_paths.io500 }}"
-    state: directory
-    mode: '0755'
-
-- name: Clone IO500 Benchmark Repository
-  ansible.builtin.git:
-    repo: 'https://github.com/IO500/io500.git'
-    dest: "{{ mpi_paths.io500 }}"
-    version: 'main'  # Adjust to a specific release tag/commit if required for reproducibility
-
-- name: Compile IO500 
-  ansible.builtin.include_tasks: ../tasks/run_with_mpi_module.yaml
-  vars:
-    mpi_module: "{{ mpi.module }}"
-    working_dir: "{{ mpi_paths.io500 }}"
-    creates_path: "{{ mpi_paths.io500 }}/io500"
-    commands: ./prepare.sh 
-
-- name: Verify IO500 Binary Generation Layout
+- name: Check if IO500 binary exists
   ansible.builtin.stat:
     path: "{{ mpi_paths.io500 }}/io500"
-  register: io500_bin_check
+  register: io500_binary
 
-- name: Assert IO500 Compilation succeeded
-  ansible.builtin.fail:
-    msg: "The IO500 binary failed to compile under {{ mpi_paths.io500 }}/bin/io500"
-  when: not io500_bin_check.stat.exists
+- name: Build and setup IO500 if missing
+  when: not io500_binary.stat.exists
+  block:
+    - name: Ensure IO500 source directory exists
+      ansible.builtin.file:
+        path: "{{ mpi_paths.io500 }}"
+        state: directory
+        mode: '0755'
 
-- name: Make IO500 directory world-writable for regular users
-  ansible.builtin.file:
-    path: "{{ mpi_paths.io500 }}"
-    mode: '0777'
-    recurse: true
+    - name: Clone IO500 Benchmark Repository
+      ansible.builtin.git:
+        repo: 'https://github.com/IO500/io500.git'
+        dest: "{{ mpi_paths.io500 }}"
+        version: 'main'
 
-- name: Deploy a baseline template io500 configuration file
-  ansible.builtin.shell: |
-    # IO500 comes with an initialization utility to generate baseline test matrix configurations
-    ./schema-export.sh io500-default-setup.ini
-  args:
-    chdir: "{{ mpi_paths.io500 }}"
-    creates: "{{ mpi_paths.io500 }}/io500-default-setup.ini"
-  when: false
+    - name: Compile IO500
+      ansible.builtin.include_tasks: ../tasks/run_with_mpi_module.yaml
+      vars:
+        mpi_module: "{{ mpi.module }}"
+        working_dir: "{{ mpi_paths.io500 }}"
+        creates_path: "{{ mpi_paths.io500 }}/io500"
+        commands: ./prepare.sh
+
+    - name: Verify IO500 Binary Generation Layout
+      ansible.builtin.stat:
+        path: "{{ mpi_paths.io500 }}/io500"
+      register: io500_bin_check
+
+    - name: Assert IO500 Compilation succeeded
+      ansible.builtin.fail:
+        msg: "The IO500 binary failed to compile under {{ mpi_paths.io500 }}/io500"
+      when: not io500_bin_check.stat.exists
+
+    - name: Make IO500 directory world-writable for regular users
+      ansible.builtin.file:
+        path: "{{ mpi_paths.io500 }}"
+        mode: '0777'
+        recurse: true
+
+    - name: Deploy a baseline template io500 configuration file
+      ansible.builtin.shell: |
+        # IO500 comes with an initialization utility to generate baseline test matrix configurations
+        ./schema-export.sh io500-default-setup.ini
+      args:
+        chdir: "{{ mpi_paths.io500 }}"
+        creates: "{{ mpi_paths.io500 }}/io500-default-setup.ini"
+      when: false

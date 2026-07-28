@@ -35,151 +35,363 @@
     replace: "URIs: https://mirror.umd.edu/ubuntu/"
     backup: true
 
+- name: Define optional five-disk NVMe RAID0 layout
+  ansible.builtin.set_fact:
+    nvme_raid_members:
+      - /dev/nvme0n1
+      - /dev/nvme1n1
+      - /dev/nvme2n1
+      - /dev/nvme3n1
+      - /dev/nvme4n1
+    nvme_raid_device: /dev/md0
+
+- name: Check whether all five NVMe disks exist
+  ansible.builtin.shell: |
+    set -e
+    {% for dev in nvme_raid_members %}
+    test -b {{ dev | quote }}
+    {% endfor %}
+  args:
+    executable: /bin/bash
+  register: nvme_raid_probe
+  changed_when: false
+  failed_when: false
+
+- name: Record whether the five-disk NVMe RAID0 layout is available
+  ansible.builtin.set_fact:
+    nvme_raid_available: "{{ nvme_raid_probe.rc == 0 }}"
+
 - name: Check if the target mount point is already active
   ansible.builtin.command: findmnt -n -o SOURCE "{{ nvme_mount }}"
   register: active_mount
   changed_when: false
   failed_when: false
 
-- name: Debug active mount state
+- name: Check whether the active mount is already the expected five-disk RAID
+  when:
+    - nvme_raid_available | bool
+    - active_mount.rc == 0
+  ansible.builtin.shell: |
+    set -euo pipefail
+
+    source_device=$(readlink -f {{ active_mount.stdout | quote }})
+    array_name=$(basename "$source_device")
+    sysfs_array="/sys/class/block/${array_name}"
+
+    test -d "${sysfs_array}/md"
+    test "$(find "${sysfs_array}/slaves" -mindepth 1 -maxdepth 1 -type l | wc -l)" -eq {{ nvme_raid_members | length }}
+
+    {% for dev in nvme_raid_members %}
+    test -e "${sysfs_array}/slaves/{{ dev | basename }}"
+    {% endfor %}
+  args:
+    executable: /bin/bash
+  register: active_mount_is_expected_raid
+  changed_when: false
+  failed_when: false
+
+- name: Determine whether storage provisioning can be skipped
+  ansible.builtin.set_fact:
+    storage_provisioning_complete: >-
+      {{
+        (active_mount.rc == 0)
+        and
+        (
+          ((nvme_raid_available | bool) and (active_mount_is_expected_raid.rc | default(1) == 0))
+          or
+          (not (nvme_raid_available | bool))
+        )
+      }}
+
+- name: Debug active storage state
   ansible.builtin.debug:
-    msg: "Mount {{ nvme_mount }} is already active on device {{ active_mount.stdout }}. Skipping provisioning."
-  when: active_mount.rc == 0
+    msg: >-
+      Mount {{ nvme_mount }} is already active on {{ active_mount.stdout }}
+      {% if nvme_raid_available | bool %}and uses all five expected NVMe RAID members{% endif %}.
+      Skipping provisioning.
+  when: storage_provisioning_complete | bool
 
 - name: Provision and mount storage
-  when: active_mount.rc != 0
+  when: not (storage_provisioning_complete | bool)
   become: true
   block:
-    - name: Deploy topology analysis engine
-      ansible.builtin.copy:
-        dest: /tmp/analyze_storage_topology.py
-        mode: '0755'
-        content: |
-          #!/usr/bin/env python3
-          import json, subprocess, sys
-
-          device = sys.argv[1]
-
-          # 1. Enumerate unused partitions
-          try:
-              lsblk_out = subprocess.check_output(["lsblk", "-J", "-b", "-o", "NAME,TYPE,FSTYPE,MOUNTPOINT,SIZE", device], universal_newlines=True)
-              lsblk_data = json.loads(lsblk_out)
-          except Exception as e:
-              print(json.dumps({"error": f"lsblk failed: {str(e)}"}))
-              sys.exit(1)
-
-          unused_parts = []
-          for dev in lsblk_data.get("blockdevices", []):
-              for child in dev.get("children", []):
-                  if child.get("type") == "part" and not child.get("mountpoint"):
-                      unused_parts.append({
-                          "type": "partition",
-                          "name": f"/dev/{child['name']}",
-                          "size_bytes": int(child["size"])
-                      })
-
-          # 2. Enumerate unallocated gaps using parted
-          gaps = []
-          try:
-              parted_out = subprocess.check_output(["parted", "-s", "-m", device, "unit", "B", "print", "free"], universal_newlines=True, stderr=subprocess.DEVNULL)
-              for line in parted_out.splitlines():
-                  if "free;" in line:
-                      parts = line.split(":")
-                      if len(parts) >= 4:
-                          size_bytes = int(parts[3].rstrip("B"))
-                          # Filter out structural 1MB alignment gaps
-                          if size_bytes > 2097152:
-                              gaps.append({
-                                  "type": "gap",
-                                  "name": f"Gap from {parts[1].rstrip('B')}B to {parts[2].rstrip('B')}B",
-                                  "size_bytes": size_bytes
-                              })
-          except Exception:
-              pass
-
-          all_opts = unused_parts + gaps
-          if not all_opts:
-              print(json.dumps({"error": "No unused partitions or usable gaps found."}))
-              sys.exit(1)
-
-          # Find the absolute largest available space
-          largest = max(all_opts, key=lambda x: x["size_bytes"])
-
-          print(json.dumps({
-              "unused_partitions": unused_parts,
-              "gaps": gaps,
-              "largest": largest
-          }))
-
-    - name: Execute topology analysis
-      ansible.builtin.command: /tmp/analyze_storage_topology.py "{{ storage_device }}"
-      register: topology_raw
-      changed_when: false
-
-    - name: Parse topology analysis payload
-      ansible.builtin.set_fact:
-        topology: "{{ topology_raw.stdout | from_json }}"
-
-    - name: Debug storage topography and selection
-      ansible.builtin.debug:
-        msg: 
-          - "=== UNUSED PARTITIONS FOUND ==="
-          - "{{ topology.unused_partitions }}"
-          - "=== UNALLOCATED GAPS FOUND ==="
-          - "{{ topology.gaps }}"
-          - "=== CHOSEN LARGEST OPTION ==="
-          - "{{ topology.largest }}"
-
-    - name: Assert the chosen space meets minimum capacity requirements
-      ansible.builtin.assert:
-        that:
-          # Convert minimum_nvme_gb to bytes (1024^3) for exact comparison
-          - (topology.largest.size_bytes | int) >= (minimum_nvme_gb | int * 1073741824)
-        fail_msg: >
-          Validation failed: The largest available space is {{ (topology.largest.size_bytes | int / 1073741824) | round(2) }} GB, 
-          which is less than the required minimum of {{ minimum_nvme_gb }} GB.
-        success_msg: "Capacity requirements met. Proceeding with provisioning."
-
-    - name: Create new partition in the selected gap
-      when: topology.largest.type == 'gap'
+    - name: Build RAID0 from all five NVMe disks when available
+      when: nvme_raid_available | bool
       block:
-      - name: Relocate GPT backup header to end of disk
-        ansible.builtin.command: sgdisk -e {{ storage_device }}
-        when: topology.largest.type == 'gap'
-        changed_when: false # This is a maintenance fix
+        - name: Install software RAID tooling
+          ansible.builtin.package:
+            name:
+              - mdadm
+              - gdisk
+            state: present
 
-      - name: Actually create new partition in the selected gap
-        ansible.builtin.shell: |
-          set -e
-          # sgdisk -N 0 automatically utilizes the largest unallocated space
-          sgdisk -N 0 {{ storage_device }} > /dev/null
-          partprobe {{ storage_device }}
+        - name: Destroy existing data, filesystems, partitions, and RAID metadata on NVMe members
+          ansible.builtin.shell: |
+            set -euo pipefail
 
-          # Defensive polling: Wait up to 10 seconds for the kernel to expose the new large partition
-          for i in $(seq 1 10); do
+            members=(
+            {% for dev in nvme_raid_members %}
+              {{ dev | quote }}
+            {% endfor %}
+            )
+
+            declare -A arrays_to_stop=()
+
+            # The requested target mount must not keep any member or old array busy.
+            umount -lf {{ nvme_mount | quote }} 2>/dev/null || true
+
+            # Unmount filesystems, disable swap, and identify arrays holding
+            # either a whole disk or one of its existing partitions.
+            for disk in "${members[@]}"; do
+              while read -r node type mountpoint; do
+                if [[ -n "${mountpoint:-}" ]]; then
+                  umount -lf "$node" 2>/dev/null || umount -lf "$mountpoint" 2>/dev/null || true
+                fi
+                swapoff "$node" 2>/dev/null || true
+
+                node_name=$(basename "$node")
+                for holder in "/sys/class/block/${node_name}/holders/"*; do
+                  [[ -e "$holder" ]] || continue
+                  holder_name=$(basename "$holder")
+                  if [[ -d "/sys/class/block/${holder_name}/md" ]]; then
+                    arrays_to_stop["/dev/${holder_name}"]=1
+                  fi
+                done
+              done < <(lsblk -nrpo NAME,TYPE,MOUNTPOINT "$disk")
+            done
+
+            if [[ -b {{ nvme_raid_device | quote }} ]]; then
+              arrays_to_stop[{{ nvme_raid_device | quote }}]=1
+            fi
+
+            # Stop any active md arrays using the disks.
+            for array in "${!arrays_to_stop[@]}"; do
+              while read -r node type mountpoint; do
+                if [[ -n "${mountpoint:-}" ]]; then
+                  umount -lf "$node" 2>/dev/null || umount -lf "$mountpoint" 2>/dev/null || true
+                fi
+                swapoff "$node" 2>/dev/null || true
+              done < <(lsblk -nrpo NAME,TYPE,MOUNTPOINT "$array" 2>/dev/null || true)
+
+              mdadm --stop "$array" 2>/dev/null || true
+            done
+
             udevadm settle
 
-            # Filter dynamically using the minimum_nvme_gb variable converted to bytes
-            NEW_PART=$(lsblk -J -b -o NAME,TYPE,FSTYPE,MOUNTPOINT,SIZE {{ storage_device }} | \
-              jq -r --argjson min_bytes "{{ minimum_nvme_gb | int * 1073741824 }}" \
-              '.blockdevices[0].children[]? | select(.type == "part" and .fstype == null and .mountpoint == null and .size >= $min_bytes) | "\(.size) \(.name)"' | \
-              sort -n | tail -n 1 | awk '{print $2}')
+            # Intentionally erase every existing signature and partition table.
+            # Children are wiped first so old partition-level RAID metadata is removed.
+            for disk in "${members[@]}"; do
+              while read -r node; do
+                mdadm --zero-superblock --force "$node" 2>/dev/null || true
+                wipefs --all --force "$node" 2>/dev/null || true
+              done < <(lsblk -nrpo NAME "$disk" | tac)
 
-            if [ -n "$NEW_PART" ]; then
-              echo "$NEW_PART"
-              exit 0
-            fi
-            sleep 1
-          done
+              sgdisk --zap-all "$disk"
+              wipefs --all --force "$disk"
+              partprobe "$disk" 2>/dev/null || true
+            done
 
-          echo "Error: New partition meeting minimum size criteria did not register within the timeout." >&2
-          exit 1
-        register: newly_created_partition
-        changed_when: true
+            udevadm settle
+          args:
+            executable: /bin/bash
+          changed_when: true
 
-    - name: Set resolved partition path
-      ansible.builtin.set_fact:
-        resolved_device: "{{ topology.largest.name if topology.largest.type == 'partition' else '/dev/' + newly_created_partition.stdout }}"
+        - name: Create five-disk RAID0 array
+          ansible.builtin.command:
+            argv:
+              - mdadm
+              - --create
+              - "{{ nvme_raid_device }}"
+              - --name=pnfs_nvme
+              - --metadata=1.2
+              - --level=0
+              - "--raid-devices={{ nvme_raid_members | length }}"
+              - --run
+              - --force
+              - "{{ nvme_raid_members[0] }}"
+              - "{{ nvme_raid_members[1] }}"
+              - "{{ nvme_raid_members[2] }}"
+              - "{{ nvme_raid_members[3] }}"
+              - "{{ nvme_raid_members[4] }}"
+          changed_when: true
+
+        - name: Wait for the RAID device to become available
+          ansible.builtin.shell: |
+            set -e
+            for attempt in $(seq 1 20); do
+              udevadm settle
+              if test -b {{ nvme_raid_device | quote }}; then
+                exit 0
+              fi
+              sleep 1
+            done
+            echo "RAID device {{ nvme_raid_device }} did not appear" >&2
+            exit 1
+          args:
+            executable: /bin/bash
+          changed_when: false
+
+        - name: Capture RAID assembly configuration
+          ansible.builtin.shell: |
+            set -euo pipefail
+            array_uuid=$(mdadm --detail {{ nvme_raid_device | quote }} | awk -F': ' '/^[[:space:]]*UUID[[:space:]]*:/ { print $2; exit }')
+            test -n "$array_uuid"
+            printf 'ARRAY %s UUID=%s\n' {{ nvme_raid_device | quote }} "$array_uuid"
+          args:
+            executable: /bin/bash
+          register: mdadm_scan
+          changed_when: false
+
+        - name: Persist RAID assembly configuration
+          ansible.builtin.blockinfile:
+            path: /etc/mdadm/mdadm.conf
+            create: true
+            mode: '0644'
+            marker: "# {mark} ANSIBLE MANAGED PNFS NVME RAID"
+            block: "{{ mdadm_scan.stdout }}"
+          register: mdadm_config
+
+        - name: Refresh initramfs after changing RAID configuration
+          ansible.builtin.command: update-initramfs -u
+          when: mdadm_config.changed
+          changed_when: true
+
+        - name: Use RAID0 as the resolved storage device
+          ansible.builtin.set_fact:
+            resolved_device: "{{ nvme_raid_device }}"
+
+    - name: Select or create a partition on the configured fallback disk
+      when: not (nvme_raid_available | bool)
+      block:
+        - name: Deploy topology analysis engine
+          ansible.builtin.copy:
+            dest: /tmp/analyze_storage_topology.py
+            mode: '0755'
+            content: |
+              #!/usr/bin/env python3
+              import json, subprocess, sys
+
+              device = sys.argv[1]
+
+              # 1. Enumerate unused partitions
+              try:
+                  lsblk_out = subprocess.check_output(["lsblk", "-J", "-b", "-o", "NAME,TYPE,FSTYPE,MOUNTPOINT,SIZE", device], universal_newlines=True)
+                  lsblk_data = json.loads(lsblk_out)
+              except Exception as e:
+                  print(json.dumps({"error": f"lsblk failed: {str(e)}"}))
+                  sys.exit(1)
+
+              unused_parts = []
+              for dev in lsblk_data.get("blockdevices", []):
+                  for child in dev.get("children", []):
+                      if child.get("type") == "part" and not child.get("mountpoint"):
+                          unused_parts.append({
+                              "type": "partition",
+                              "name": f"/dev/{child['name']}",
+                              "size_bytes": int(child["size"])
+                          })
+
+              # 2. Enumerate unallocated gaps using parted
+              gaps = []
+              try:
+                  parted_out = subprocess.check_output(["parted", "-s", "-m", device, "unit", "B", "print", "free"], universal_newlines=True, stderr=subprocess.DEVNULL)
+                  for line in parted_out.splitlines():
+                      if "free;" in line:
+                          parts = line.split(":")
+                          if len(parts) >= 4:
+                              size_bytes = int(parts[3].rstrip("B"))
+                              # Filter out structural 1MB alignment gaps
+                              if size_bytes > 2097152:
+                                  gaps.append({
+                                      "type": "gap",
+                                      "name": f"Gap from {parts[1].rstrip('B')}B to {parts[2].rstrip('B')}B",
+                                      "size_bytes": size_bytes
+                                  })
+              except Exception:
+                  pass
+
+              all_opts = unused_parts + gaps
+              if not all_opts:
+                  print(json.dumps({"error": "No unused partitions or usable gaps found."}))
+                  sys.exit(1)
+
+              # Find the absolute largest available space
+              largest = max(all_opts, key=lambda x: x["size_bytes"])
+
+              print(json.dumps({
+                  "unused_partitions": unused_parts,
+                  "gaps": gaps,
+                  "largest": largest
+              }))
+
+        - name: Execute topology analysis
+          ansible.builtin.command: /tmp/analyze_storage_topology.py "{{ storage_device }}"
+          register: topology_raw
+          changed_when: false
+
+        - name: Parse topology analysis payload
+          ansible.builtin.set_fact:
+            topology: "{{ topology_raw.stdout | from_json }}"
+
+        - name: Debug storage topography and selection
+          ansible.builtin.debug:
+            msg:
+              - "=== UNUSED PARTITIONS FOUND ==="
+              - "{{ topology.unused_partitions }}"
+              - "=== UNALLOCATED GAPS FOUND ==="
+              - "{{ topology.gaps }}"
+              - "=== CHOSEN LARGEST OPTION ==="
+              - "{{ topology.largest }}"
+
+        - name: Assert the chosen space meets minimum capacity requirements
+          ansible.builtin.assert:
+            that:
+              # Convert minimum_nvme_gb to bytes (1024^3) for exact comparison
+              - (topology.largest.size_bytes | int) >= (minimum_nvme_gb | int * 1073741824)
+            fail_msg: >
+              Validation failed: The largest available space is {{ (topology.largest.size_bytes | int / 1073741824) | round(2) }} GB,
+              which is less than the required minimum of {{ minimum_nvme_gb }} GB.
+            success_msg: "Capacity requirements met. Proceeding with provisioning."
+
+        - name: Create new partition in the selected gap
+          when: topology.largest.type == 'gap'
+          block:
+            - name: Relocate GPT backup header to end of disk
+              ansible.builtin.command: sgdisk -e {{ storage_device }}
+              changed_when: false # This is a maintenance fix
+
+            - name: Actually create new partition in the selected gap
+              ansible.builtin.shell: |
+                set -e
+                # sgdisk -N 0 automatically utilizes the largest unallocated space
+                sgdisk -N 0 {{ storage_device }} > /dev/null
+                partprobe {{ storage_device }}
+
+                # Defensive polling: Wait up to 10 seconds for the kernel to expose the new large partition
+                for i in $(seq 1 10); do
+                  udevadm settle
+
+                  # Filter dynamically using the minimum_nvme_gb variable converted to bytes
+                  NEW_PART=$(lsblk -J -b -o NAME,TYPE,FSTYPE,MOUNTPOINT,SIZE {{ storage_device }} | \
+                    jq -r --argjson min_bytes "{{ minimum_nvme_gb | int * 1073741824 }}" \
+                    '.blockdevices[0].children[]? | select(.type == "part" and .fstype == null and .mountpoint == null and .size >= $min_bytes) | "\(.size) \(.name)"' | \
+                    sort -n | tail -n 1 | awk '{print $2}')
+
+                  if [ -n "$NEW_PART" ]; then
+                    echo "$NEW_PART"
+                    exit 0
+                  fi
+                  sleep 1
+                done
+
+                echo "Error: New partition meeting minimum size criteria did not register within the timeout." >&2
+                exit 1
+              register: newly_created_partition
+              changed_when: true
+
+        - name: Set resolved partition path
+          ansible.builtin.set_fact:
+            resolved_device: "{{ topology.largest.name if topology.largest.type == 'partition' else '/dev/' + newly_created_partition.stdout }}"
 
     - name: Create XFS filesystem on the resolved partition
       community.general.filesystem:
