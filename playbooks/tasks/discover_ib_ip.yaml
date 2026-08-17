@@ -1,0 +1,62 @@
+
+- name: Find InfiniBand IPv4 address
+  ansible.builtin.shell: |
+    for device_path in /sys/class/net/*; do
+        [[ -f "${device_path}/type" ]] || continue
+        [[ "$(cat "${device_path}/type")" == "32" ]] || continue
+
+        device="${device_path##*/}"
+        cidr="$(ip -o -4 addr show dev "${device}" scope global |
+            awk 'NR == 1 { print $4 }')"
+        [[ -n "${cidr}" ]] || continue
+
+        printf '%s %s\n' "${device}" "${cidr}"
+        exit 0
+    done
+
+    echo "No InfiniBand interface with a global IPv4 address was found on $(hostname)" >&2
+    exit 1
+  args:
+    executable: /bin/bash
+  register: ib_ip_query
+  changed_when: false
+  failed_when: ib_ip_query.rc != 0 or ib_ip_query.stdout | trim == ""
+
+- name: Store InfiniBand interface, IP address, and CIDR
+  ansible.builtin.set_fact:
+    infiniband_device: "{{ (ib_ip_query.stdout | trim).split()[0] }}"
+    infiniband_cidr: "{{ (ib_ip_query.stdout | trim).split()[1] }}"
+    infiniband_ip: "{{ ((ib_ip_query.stdout | trim).split()[1]).split('/')[0] }}"
+
+- name: Verify InfiniBand link is operational
+  ansible.builtin.shell: |
+    device={{ infiniband_device | quote }}
+    cidr={{ infiniband_cidr | quote }}
+    operstate="$(cat "/sys/class/net/${device}/operstate" 2>/dev/null || echo unknown)"
+    carrier="$(cat "/sys/class/net/${device}/carrier" 2>/dev/null || echo unknown)"
+
+    if [[ "${operstate}" == "up" && "${carrier}" == "1" ]]; then
+        printf 'InfiniBand preflight passed: %s (%s), operstate=%s, carrier=%s\n' \
+            "${device}" "${cidr}" "${operstate}" "${carrier}"
+        exit 0
+    fi
+
+    echo "InfiniBand preflight failed on $(hostname): ${device} (${cidr}) is not operational (operstate=${operstate}, carrier=${carrier})." >&2
+    echo "Detailed interface state:" >&2
+    ip -d link show dev "${device}" >&2 || true
+    if command -v rdma >/dev/null 2>&1; then
+        echo "RDMA link state:" >&2
+        rdma link show >&2 || true
+    fi
+    echo "Resolve the InfiniBand link/fabric problem before running pnfs-lab." >&2
+    exit 1
+  args:
+    executable: /bin/bash
+  register: ib_link_preflight
+  changed_when: false
+
+- name: Print InfiniBand IP address
+  ansible.builtin.debug:
+    msg: >-
+      InfiniBand interface: {{ infiniband_device }},
+      address: {{ infiniband_cidr }}, link: operational

@@ -23,7 +23,7 @@
         pool_dir:  "{{ image_storage.libvirt }}/{{ UNIQUE_TAG }}/images"
       when: network.type != 'none'
 
-    - name: Set some unneededartifact paths to /tmp so that they pass the existance test
+    - name: Set some unneeded artifact paths to /tmp so that they pass the existance test
       set_fact:
         qcow2_dir: "/tmp"
         pool_dir:  "/tmp"
@@ -60,6 +60,26 @@
         tfvars_file: "{{ artifact_dir }}/phase3.tfvars"
         image_dir: "{{ artifact_dir }}/images"
 
+    - name: Create nicely organized folder structure for results 
+      ansible.builtin.set_fact:
+        date_string: "{{ lookup('pipe', 'date +%Y-%m-%d_%H-%M-%S') }}"
+        inventory_shape: >-
+          {%- set parts = [] -%}
+          {%- for group_name in groups.keys()
+              | reject('in', ['all', 'ungrouped'])
+              | sort -%}
+          {%- set _ = parts.append(
+              group_name ~ '-' ~ (groups[group_name] | length | string)
+          ) -%}
+          {%- endfor -%}
+          {{ parts | join('.') }}
+      run_once: true
+
+    - name: Build full result path
+      ansible.builtin.set_fact:
+        result_dir: "{{ result_dir }}/{{ system.type }}/{{ inventory_shape }}/{{ date_string }}"
+      run_once: true
+
     - name: Assert all other directories exist
       file:
         path: "{{ item }}"
@@ -73,7 +93,24 @@
         - "{{ qcow2_dir }}"
         - "{{ pool_dir }}"
         - "{{ tofu_dir }}"
+        - "{{ result_dir }}"
+        - "{{ result_dir }}/facts"
       when: true
+
+    - name: Copy inventory into result directory
+      ansible.builtin.copy:
+        src: "{{ ansible_inventory_sources | first }}"
+        dest: "{{ result_dir }}/tessi_config.yaml"
+        mode: "0644"
+      run_once: true
+      delegate_to: localhost
+
+    - name: Save each node's Ansible facts
+      ansible.builtin.copy:
+        content: "{{ ansible_facts | to_nice_yaml(indent=2, width=4096) }}"
+        dest: "{{ result_dir }}/facts/{{ ansible_facts.hostname }}.yaml"
+        mode: "0644"
+      delegate_to: localhost
 
     - name: Ensure storage pool directory is world-writable so that virtd can create in it
       ansible.builtin.file:
@@ -107,6 +144,7 @@
         - tfvars_file
         - phase_dir
         - image_dir
+        - result_dir
 
     - name: Check a lot of the necessary bootstrapping info in the config file 
       block:

@@ -1,4 +1,4 @@
-- name: Install MPIs
+- name: Install MPIs from packages
   block:
     - name: Load OS-specific MPI variables
       include_vars: "../vars/mpi_{{ ansible_os_family }}.yml"
@@ -8,4 +8,71 @@
       loop: "{{ mpi_implementations }}"
       loop_control:
         loop_var: mpi
+  become: true
+
+- name: Install MPI modules for any existing MPI implementations on this system
+  vars:
+    existing_mpi_implementations:
+      - path: /share/u24-ofi/mpich
+        env_vars:
+          - name: FI_PROVIDER
+            value: verbs
+      - path: /share/u24-ofi/ompi
+      - path: /share/u24-ucx/mpich
+        env_vars:
+          - name: UCX_LOG_LEVEL
+            value: error
+          - name: FI_PROVIDER
+            value: verbs
+      - path: /share/u24-ucx/ompi
+        env_vars:
+          - name: UCX_LOG_LEVEL
+            value: error
+  block:
+    - name: Check for an MPI installation in each existing prefix
+      ansible.builtin.stat:
+        path: "{{ existing_mpi.path }}/bin/mpirun"
+      loop: "{{ existing_mpi_implementations }}"
+      loop_control:
+        loop_var: existing_mpi
+        label: "{{ existing_mpi.path }}"
+      register: existing_mpi_checks
+
+    - name: Create local tool directories for existing MPI implementations
+      ansible.builtin.file:
+        path: >-
+          /usr/lib/x86_64-linux-gnu/mpi/{{ existing_mpi_check.existing_mpi.path
+          | regex_replace('^/share/', '') }}/{{ tool_directory }}
+        state: directory
+        mode: "0755"
+      loop: "{{ existing_mpi_checks.results | product(['bin', 'lib']) | list }}"
+      loop_control:
+        loop_var: existing_mpi_tool_directory
+        label: >-
+          /usr/lib/x86_64-linux-gnu/mpi/{{ existing_mpi_tool_directory.0.existing_mpi.path
+          | regex_replace('^/share/', '') }}/{{ existing_mpi_tool_directory.1 }}
+      when: existing_mpi_tool_directory.0.stat.exists
+      vars:
+        existing_mpi_check: "{{ existing_mpi_tool_directory.0 }}"
+        tool_directory: "{{ existing_mpi_tool_directory.1 }}"
+
+    - name: Install modulefiles for existing MPI implementations
+      ansible.builtin.include_tasks: ../tasks/install_module.yaml
+      loop: "{{ existing_mpi_checks.results }}"
+      loop_control:
+        loop_var: existing_mpi_check
+        label: "{{ existing_mpi_check.existing_mpi.path }}"
+      when: existing_mpi_check.stat.exists
+      vars:
+        module_name: "mpi/{{ existing_mpi_check.existing_mpi.path | regex_replace('^/share/', '') }}"
+        module_home: "{{ existing_mpi_check.existing_mpi.path }}"
+        module_bin_path: "{{ existing_mpi_check.existing_mpi.path }}/bin"
+        module_lib_path: "{{ existing_mpi_check.existing_mpi.path }}/lib"
+        module_tool_bin_path: >-
+          /usr/lib/x86_64-linux-gnu/mpi/{{ existing_mpi_check.existing_mpi.path
+          | regex_replace('^/share/', '') }}/bin
+        module_tool_lib_path: >-
+          /usr/lib/x86_64-linux-gnu/mpi/{{ existing_mpi_check.existing_mpi.path
+          | regex_replace('^/share/', '') }}/lib
+        module_env_vars: "{{ existing_mpi_check.existing_mpi.env_vars | default([]) }}"
   become: true

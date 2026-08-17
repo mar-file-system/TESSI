@@ -40,28 +40,69 @@
 
     - name: Convert PostScript to PDF
       command: ps2pdf "{{ cover_ps }}" "{{ cover_pdf }}"
+        
+    - name: Ensure image_dir exists
+      ansible.builtin.file:
+        path: "{{ image_dir }}"
+        state: directory
+        mode: "0755"
+
+    - name: Check whether image_dir exists
+      ansible.builtin.stat:
+        path: "{{ image_dir }}"
+      register: image_dir_stat
 
     - name: Find all PNGs in image_dir
-      find:
+      ansible.builtin.find:
         paths: "{{ image_dir }}"
         patterns: "*.png"
         use_regex: false
         file_type: file
       register: pngs
+      when: image_dir_stat.stat.isdir | default(false)
+
+    - name: Build sorted PNG path list
+      ansible.builtin.set_fact:
+        png_paths: >-
+          {{
+            (pngs.files | default([]))
+            | map(attribute='path')
+            | sort
+            | list
+          }}
 
     - name: Convert RGBA PNGs to RGB
-      shell: >
-        convert "{{ item.path }}"
-        -background white -alpha remove -alpha off "{{ item.path }}"
-      loop: "{{ pngs.files }}"
+      ansible.builtin.command:
+        argv:
+          - convert
+          - "{{ item }}"
+          - -background
+          - white
+          - -alpha
+          - remove
+          - -alpha
+          - "off"
+          - "{{ item }}"
+      loop: "{{ png_paths }}"
 
     - name: Convert PNGs to single PDF
-      command: >
-        img2pdf
-        {{ pngs.files | map(attribute='path') | join(' ') }}
-        -o /tmp/images_only.pdf
+      ansible.builtin.command:
+        argv: "{{ ['img2pdf'] + png_paths + ['-o', '/tmp/images_only.pdf'] }}"
+      when: png_paths | length > 0
 
-    - name: Merge cover and image PDFs into {{ output_pdf }}
-      command: >
-        pdfunite "{{ cover_pdf }}" /tmp/images_only.pdf "{{ output_pdf }}"
+    - name: Merge cover and image PDFs
+      ansible.builtin.command:
+        argv:
+          - pdfunite
+          - "{{ cover_pdf }}"
+          - /tmp/images_only.pdf
+          - "{{ output_pdf }}"
+      when: png_paths | length > 0
 
+    - name: Use cover as output when there are no PNGs
+      ansible.builtin.copy:
+        src: "{{ cover_pdf }}"
+        dest: "{{ output_pdf }}"
+        remote_src: true
+        mode: preserve
+      when: png_paths | length == 0

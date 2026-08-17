@@ -54,6 +54,18 @@
       when: not ssh_marker.stat.exists # or true # always do it because if we added hosts, then everyone must do
       tags: setup
 
+- name: Discover the InfiniBand data-plane address on every pNFS node
+  hosts: all
+  gather_facts: false
+  any_errors_fatal: true
+  tasks:
+    - name: Discover InfiniBand address
+      ansible.builtin.include_tasks: ../../tasks/discover_ib_ip.yaml
+
+    - name: Select InfiniBand as the pNFS data-plane address
+      ansible.builtin.set_fact:
+        target_ip: "{{ infiniband_ip }}"
+
 - name: Remove existing RonDB runtime from all MDS hosts
   hosts: all
   become: true
@@ -67,6 +79,7 @@
         path: "{{ lab_rondb_base }}"
         state: absent
 
+
 - name: Use pnfs-lab.env for the multi-mds environment
   hosts: "mds[0]"
   gather_facts: true
@@ -77,9 +90,25 @@
     env_file: "{{ lab_source_dir }}/scripts/pnfs-lab.env"
 
   tasks:
-    - name: Calculate network subnet from host facts
+    - name: Verify every pNFS node has an InfiniBand data-plane address
+      ansible.builtin.assert:
+        that:
+          - hostvars[item]['infiniband_ip'] is defined
+          - hostvars[item]['infiniband_ip'] | trim | length > 0
+          - hostvars[item]['infiniband_cidr'] is defined
+          - hostvars[item]['infiniband_cidr'] | trim | length > 0
+        fail_msg: "No InfiniBand IPv4 address was discovered for {{ item }}"
+      loop: "{{ (groups['mds'] + groups['ds'] + groups['clients']) | unique }}"
+
+    - name: Calculate the DS export subnet from the InfiniBand network
       ansible.builtin.set_fact:
-        lab_ds_export_subnet: "{{ (ansible_default_ipv4.network ~ '/' ~ ansible_default_ipv4.netmask) | ansible.utils.ipaddr('subnet') }}"
+        lab_ds_export_subnet: >-
+          {{ hostvars[groups['ds'][0]]['infiniband_cidr'] | ansible.utils.ipaddr('subnet') }}
+
+    - name: Calculate the DS export subnet from the InfiniBand network
+      ansible.builtin.set_fact:
+        lab_ds_transport: "rdma"
+
 
     - name: Determine active MDS nodes based on manager colocation
       ansible.builtin.set_fact:
@@ -101,17 +130,21 @@
         dest: "{{ inventory_file }}"
       when: false
 
+    - name: Create a path for the pnfs spec file 
+      ansible.builtin.set_fact:
+        spec_file: "/tmp/pnfs-cluster-spec.ini"
+
     - name: Render simplified pnfs cluster specification
       ansible.builtin.template:
         src: templates/pnfs-cluster-spec.ini.j2
-        dest: /tmp/pnfs-cluster-spec.ini
+        dest: "{{ spec_file }}" 
         mode: "0644"
 
     - name: Generate pnfs-lab inventory environment
       ansible.builtin.command:
         argv:
           - ./scripts/pnfs-lab-genenv
-          - /tmp/pnfs-cluster-spec.ini
+          - "{{ spec_file }}"
         chdir: "{{ lab_source_dir }}"
       register: pnfs_lab_genenv
       changed_when: false
@@ -121,6 +154,40 @@
         content: "{{ pnfs_lab_genenv.stdout }}\n"
         dest: "{{ inventory_file }}"
         mode: "0644"
+
+    - name: Save pNFS configuration artifacts
+      when: result_dir is defined
+      block:
+        - name: Create pNFS artifact directory into {{ result_dir }}/pnfs
+          ansible.builtin.file:
+            path: "{{ result_dir }}/pnfs"
+            state: directory
+            mode: "0755"
+
+        - name: Copy pNFS configuration files into {{ result_dir }}
+          ansible.builtin.copy:
+            src: "{{ item.src }}"
+            dest: "{{ result_dir }}/pnfs/{{ item.dest }}"
+            remote_src: true
+            mode: "0644"
+          loop:
+            - src: "{{ spec_file }}"
+              dest: "{{ spec_file | basename }}"
+            - src: "{{ inventory_file }}"
+              dest: "{{ inventory_file | basename }}"
+
+        - name: Get pNFS git commit
+          ansible.builtin.command: git rev-parse HEAD
+          args:
+            chdir: "{{ lab_source_dir }}"
+          register: pnfs_git_commit
+          changed_when: false
+
+        - name: Save pNFS git commit
+          ansible.builtin.copy:
+            content: "{{ pnfs_git_commit.stdout }}\n"
+            dest: "{{ result_dir }}/pnfs/git.commit"
+            mode: "0644"
 
     - name: Validate generated inventory shell syntax
       ansible.builtin.command:
@@ -171,3 +238,58 @@
       loop_control:
         loop_var: pnfs_lab_stage
         label: "{{ pnfs_lab_stage.desc }} ({{ pnfs_lab_stage.cmd }})"
+
+- name: Enable NFSD direct I/O on DS nodes, check for RDMA transport
+  hosts: ds
+  become: true
+  gather_facts: false
+
+  tasks:
+    - name: Ensure debugfs is mounted
+      ansible.posix.mount:
+        path: /sys/kernel/debug
+        src: debugfs
+        fstype: debugfs
+        state: mounted
+
+    - name: Ensure NFS server is running
+      ansible.builtin.systemd:
+        name: nfs-kernel-server
+        state: started
+        enabled: true
+
+    - name: Wait for NFSD direct I/O control to appear
+      ansible.builtin.wait_for:
+        path: /sys/kernel/debug/nfsd/io_cache_write
+        state: present
+        timeout: 30
+
+    - name: Read current NFSD write I/O mode
+      ansible.builtin.command:
+        cmd: cat /sys/kernel/debug/nfsd/io_cache_write
+      register: nfsd_io_cache_write
+      changed_when: false
+
+    - name: Set NFSD writes to direct I/O with FILE_SYNC
+      ansible.builtin.shell:
+        cmd: echo 2 > /sys/kernel/debug/nfsd/io_cache_write
+      when: nfsd_io_cache_write.stdout | trim != "2"
+
+    - name: Verify NFSD write I/O mode
+      ansible.builtin.command:
+        cmd: cat /sys/kernel/debug/nfsd/io_cache_write
+      register: nfsd_io_cache_write_verify
+      changed_when: false
+      failed_when: nfsd_io_cache_write_verify.stdout | trim != "2"
+
+    - name: Read NFS server transport listeners
+      ansible.builtin.command:
+        cmd: cat /proc/fs/nfsd/portlist
+      register: nfsd_portlist
+      changed_when: false
+
+    - name: Print NFS server transport listeners
+      ansible.builtin.debug:
+        msg: |
+          {{ inventory_hostname }} /proc/fs/nfsd/portlist:
+          {{ nfsd_portlist.stdout }}
