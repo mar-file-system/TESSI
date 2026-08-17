@@ -1,0 +1,131 @@
+---
+- name: Define network and storage counter snapshot command
+  ansible.builtin.set_fact:
+    network_storage_snapshot_command: |
+      set -euo pipefail
+
+      netdev={{ counter_ib_device | quote }}
+      storage_path={{ counter_storage_path | quote }}
+
+      read_counter() {
+          local path="$1"
+          if [[ -r "${path}" ]]; then
+              cat "${path}"
+          else
+              printf '0\n'
+          fi
+      }
+
+      storage_source="$(findmnt -n -o SOURCE --target "${storage_path}")"
+      storage_fstype="$(findmnt -n -o FSTYPE --target "${storage_path}")"
+      storage_device="$(basename "$(readlink -f "${storage_source}")")"
+      storage_stat="/sys/class/block/${storage_device}/stat"
+      if [[ ! -r "${storage_stat}" ]]; then
+          echo "Cannot read block counters for ${storage_path}: source=${storage_source}, expected=${storage_stat}" >&2
+          exit 1
+      fi
+
+      read -r storage_reads _ storage_sectors_read _ \
+          storage_writes _ storage_sectors_written _ _ \
+          storage_io_ms storage_weighted_io_ms _ < "${storage_stat}"
+
+      physical_reads=0
+      physical_sectors_read=0
+      physical_writes=0
+      physical_sectors_written=0
+      physical_io_ms=0
+      physical_weighted_io_ms=0
+      physical_devices=""
+      shopt -s nullglob
+      leaf_paths=("/sys/class/block/${storage_device}/slaves/"*)
+      if [[ -z "${leaf_paths[0]:-}" ]]; then
+          leaf_paths=("/sys/class/block/${storage_device}")
+      fi
+      for leaf_path in "${leaf_paths[@]}"; do
+          leaf_device="$(basename "${leaf_path}")"
+          read -r leaf_reads _ leaf_sectors_read _ \
+              leaf_writes _ leaf_sectors_written _ _ \
+              leaf_io_ms leaf_weighted_io_ms _ < "/sys/class/block/${leaf_device}/stat"
+          physical_reads=$((physical_reads + leaf_reads))
+          physical_sectors_read=$((physical_sectors_read + leaf_sectors_read))
+          physical_writes=$((physical_writes + leaf_writes))
+          physical_sectors_written=$((physical_sectors_written + leaf_sectors_written))
+          physical_io_ms=$((physical_io_ms + leaf_io_ms))
+          physical_weighted_io_ms=$((physical_weighted_io_ms + leaf_weighted_io_ms))
+          physical_devices="${physical_devices}${physical_devices:+,}${leaf_device}"
+      done
+
+      hca_paths=("/sys/class/net/${netdev}/device/infiniband/"*)
+      if [[ -z "${hca_paths[0]:-}" ]]; then
+          echo "Cannot map InfiniBand netdevice ${netdev} to an HCA" >&2
+          exit 1
+      fi
+      hca_device="$(basename "${hca_paths[0]}")"
+      hca_port=$(( $(cat "/sys/class/net/${netdev}/dev_port") + 1 ))
+      hca_counter_dir="/sys/class/infiniband/${hca_device}/ports/${hca_port}/counters"
+
+      rpcrdma_tracepoints_available=false
+      rpcrdma_tracepoint_definition_count=0
+      if [[ -d /sys/kernel/tracing/events/rpcrdma ]]; then
+          rpcrdma_tracepoints_available=true
+          rpcrdma_tracepoint_definition_count="$(find /sys/kernel/tracing/events/rpcrdma \
+              -mindepth 1 -maxdepth 1 -type d | wc -l)"
+      fi
+
+      nfsd_portlist=""
+      if [[ -r /proc/fs/nfsd/portlist ]]; then
+          nfsd_portlist="$(tr '\n' ',' < /proc/fs/nfsd/portlist | sed 's/,$//')"
+      fi
+
+      printf '{'
+      printf '"boot_id":"%s",' "$(cat /proc/sys/kernel/random/boot_id)"
+      printf '"timestamp_ns":%s,' "$(date +%s%N)"
+      printf '"network_device":"%s",' "${netdev}"
+      printf '"net_rx_bytes":%s,' "$(read_counter "/sys/class/net/${netdev}/statistics/rx_bytes")"
+      printf '"net_tx_bytes":%s,' "$(read_counter "/sys/class/net/${netdev}/statistics/tx_bytes")"
+      printf '"net_rx_packets":%s,' "$(read_counter "/sys/class/net/${netdev}/statistics/rx_packets")"
+      printf '"net_tx_packets":%s,' "$(read_counter "/sys/class/net/${netdev}/statistics/tx_packets")"
+      printf '"net_rx_errors":%s,' "$(read_counter "/sys/class/net/${netdev}/statistics/rx_errors")"
+      printf '"net_tx_errors":%s,' "$(read_counter "/sys/class/net/${netdev}/statistics/tx_errors")"
+      printf '"net_rx_dropped":%s,' "$(read_counter "/sys/class/net/${netdev}/statistics/rx_dropped")"
+      printf '"net_tx_dropped":%s,' "$(read_counter "/sys/class/net/${netdev}/statistics/tx_dropped")"
+      printf '"hca_device":"%s","hca_port":%s,' "${hca_device}" "${hca_port}"
+      printf '"hca_rx_bytes":%s,' "$(( $(read_counter "${hca_counter_dir}/port_rcv_data") * 4 ))"
+      printf '"hca_tx_bytes":%s,' "$(( $(read_counter "${hca_counter_dir}/port_xmit_data") * 4 ))"
+      printf '"hca_rx_packets":%s,' "$(read_counter "${hca_counter_dir}/port_rcv_packets")"
+      printf '"hca_tx_packets":%s,' "$(read_counter "${hca_counter_dir}/port_xmit_packets")"
+      printf '"hca_rx_errors":%s,' "$(read_counter "${hca_counter_dir}/port_rcv_errors")"
+      printf '"hca_tx_discards":%s,' "$(read_counter "${hca_counter_dir}/port_xmit_discards")"
+      printf '"storage_path":"%s","storage_source":"%s","storage_fstype":"%s",' \
+          "${storage_path}" "${storage_source}" "${storage_fstype}"
+      printf '"storage_device":"%s","physical_devices":"%s",' \
+          "${storage_device}" "${physical_devices}"
+      printf '"storage_read_bytes":%s,' "$((storage_sectors_read * 512))"
+      printf '"storage_write_bytes":%s,' "$((storage_sectors_written * 512))"
+      printf '"storage_reads":%s,"storage_writes":%s,' "${storage_reads}" "${storage_writes}"
+      printf '"storage_io_ms":%s,"storage_weighted_io_ms":%s,' \
+          "${storage_io_ms}" "${storage_weighted_io_ms}"
+      printf '"physical_read_bytes":%s,' "$((physical_sectors_read * 512))"
+      printf '"physical_write_bytes":%s,' "$((physical_sectors_written * 512))"
+      printf '"physical_reads":%s,"physical_writes":%s,' "${physical_reads}" "${physical_writes}"
+      printf '"physical_io_ms":%s,"physical_weighted_io_ms":%s,' \
+          "${physical_io_ms}" "${physical_weighted_io_ms}"
+      printf '"rpcrdma_tracepoints_available":%s,' "${rpcrdma_tracepoints_available}"
+      printf '"rpcrdma_tracepoint_definition_count":%s,' "${rpcrdma_tracepoint_definition_count}"
+      printf '"nfsd_portlist":"%s"' "${nfsd_portlist}"
+      printf '}\n'
+
+- name: Flush outstanding storage writes before starting counters
+  ansible.builtin.command: sync
+  changed_when: false
+
+- name: Capture starting network and storage counters
+  ansible.builtin.shell:
+    cmd: "{{ network_storage_snapshot_command }}"
+    executable: /bin/bash
+  register: network_storage_counter_start_raw
+  changed_when: false
+
+- name: Store starting network and storage counters
+  ansible.builtin.set_fact:
+    network_storage_counter_start: "{{ network_storage_counter_start_raw.stdout | from_json }}"

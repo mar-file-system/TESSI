@@ -17,6 +17,21 @@
           ansible.builtin.debug:
             var: df_output.stdout_lines
 
+- name: Capture server counters before IO500
+  hosts: all:!clients
+  gather_facts: false
+  any_errors_fatal: true
+
+  tasks:
+    - name: Discover the InfiniBand data-plane interface
+      ansible.builtin.include_tasks: ../tasks/discover_ib_ip.yaml
+
+    - name: Capture starting network and storage counters
+      ansible.builtin.include_tasks: ../tasks/start_network_storage_counters.yaml
+      vars:
+        counter_ib_device: "{{ infiniband_device }}"
+        counter_storage_path: "{{ local_storage }}"
+
 - name: Run IO500 using all MPI implementations 
   hosts: clients # must run on all because we require the fqdn for each to create the hostfile
   gather_facts: true
@@ -42,3 +57,18 @@
             loop_var: mpi_config
           register: io500_task_results
       # Enforce execution strictly on the first host of the clients group
+
+- name: Collect, aggregate, and save server counters after IO500
+  hosts: all
+  gather_facts: false
+  any_errors_fatal: true
+  vars:
+    counter_hosts: "{{ groups['all'] | difference(groups.get('clients', [])) }}"
+    counter_report_host: >-
+      {{ (groups['all'] | difference(groups.get('clients', [])))[0] }}
+    network_storage_stats_path: >-
+      {{ hostvars[groups['clients'][0]].output_dir }}/network_storage_stats.txt
+
+  tasks:
+    - name: Collect and save network and storage counter deltas
+      ansible.builtin.include_tasks: ../tasks/collect_save_network_storage_counters.yaml

@@ -112,3 +112,50 @@
 - name: Print result summary
   ansible.builtin.debug:
     var: (summary_file.content | b64decode).splitlines()
+
+- name: Find experiment-level artifacts to preserve with this IO500 result
+  ansible.builtin.find:
+    paths: "{{ result_dir }}"
+    recurse: false
+    hidden: true
+    file_type: any
+  register: experiment_level_artifacts
+
+- name: Preserve experiment-level artifacts in {{ output_dir }}
+  vars:
+    experiment_artifacts_to_copy: >-
+      {{ experiment_level_artifacts.files
+         | rejectattr('path', 'equalto', result_dir ~ '/io500')
+         | list }}
+    experiment_artifact_directories: >-
+      {{ experiment_artifacts_to_copy | selectattr('isdir') | list }}
+    experiment_artifact_files: >-
+      {{ experiment_artifacts_to_copy | rejectattr('isdir') | list }}
+  block:
+    - name: Create experiment artifact subdirectories in {{ output_dir }}
+      ansible.builtin.file:
+        path: "{{ output_dir }}/{{ item.path | basename }}"
+        state: directory
+      loop: "{{ experiment_artifact_directories }}"
+      loop_control:
+        label: "{{ item.path }}"
+
+    - name: Copy experiment artifact directory contents into {{ output_dir }}
+      ansible.builtin.copy:
+        src: "{{ item.path }}/"
+        dest: "{{ output_dir }}/{{ item.path | basename }}/"
+        remote_src: true
+        mode: preserve
+      loop: "{{ experiment_artifact_directories }}"
+      loop_control:
+        label: "{{ item.path }}"
+
+    - name: Copy experiment artifact files into {{ output_dir }}
+      ansible.builtin.copy:
+        src: "{{ item.path }}"
+        dest: "{{ output_dir }}/{{ item.path | basename }}"
+        remote_src: true
+        mode: preserve
+      loop: "{{ experiment_artifact_files }}"
+      loop_control:
+        label: "{{ item.path }}"

@@ -23,6 +23,57 @@
             msg: "CRITICAL: Cannot find pnfs_params.yml at {{ playbook_dir }}/../../vars/pnfs_params.yml"
           when: not file_status.stat.exists
 
+- name: Remove the deployed monolithic pNFS lab
+  hosts: mds[0]
+  become: false
+  gather_facts: false
+  any_errors_fatal: true
+  tags:
+    - never
+    - makeclean
+  vars_files:
+    - ../../vars/pnfs_params.yml
+  vars:
+    cleanup_inventory_candidates: >-
+      {{ ['/tmp/inventory']
+         + ([result_dir ~ '/pnfs/inventory'] if result_dir is defined else []) }}
+
+  tasks:
+    - name: Check for a generated pnfs-lab inventory
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      loop: "{{ cleanup_inventory_candidates }}"
+      register: pnfs_lab_inventory_candidates
+
+    - name: Select the pNFS inventory to use for cleanup
+      ansible.builtin.set_fact:
+        cleanup_inventory_file: >-
+          {{ pnfs_lab_inventory_candidates.results
+             | selectattr('stat.exists')
+             | map(attribute='item')
+             | first
+             | default('') }}
+
+    - name: Require an inventory that describes the deployed pNFS lab
+      ansible.builtin.assert:
+        that:
+          - cleanup_inventory_file | length > 0
+        fail_msg: >-
+          Cannot safely clean pNFS because neither /tmp/inventory nor
+          the saved result-directory inventory exists.
+
+    - name: Stop services, unmount clients, and remove generated pNFS state
+      ansible.builtin.command:
+        argv:
+          - ./scripts/pnfs-lab
+          - --inventory
+          - "{{ cleanup_inventory_file }}"
+          - --profile
+          - multi-mds
+          - --confirm-reset
+          - reset
+        chdir: "{{ lab_source_dir }}"
+
 - name: Setup SSH across the cluster
   hosts: all
   become: true
