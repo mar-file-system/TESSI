@@ -54,13 +54,38 @@
              | first
              | default('') }}
 
-    - name: Require an inventory that describes the deployed pNFS lab
+    - name: Check whether pnfs-mds was deployed on any MDS node
+      ansible.builtin.stat:
+        path: /etc/systemd/system/pnfs-mds.service
+      loop: "{{ groups.get('mds', []) }}"
+      loop_control:
+        label: "{{ item }}"
+      delegate_to: "{{ item }}"
+      register: pnfs_mds_deployment_markers
+
+    - name: Identify MDS nodes with a deployed pnfs-mds service
+      ansible.builtin.set_fact:
+        deployed_mds_hosts: >-
+          {{ pnfs_mds_deployment_markers.results
+             | selectattr('stat.exists')
+             | map(attribute='item')
+             | list }}
+
+    - name: Require an inventory when a pNFS lab is deployed
       ansible.builtin.assert:
         that:
-          - cleanup_inventory_file | length > 0
+          - cleanup_inventory_file | length > 0 or deployed_mds_hosts | length == 0
         fail_msg: >-
-          Cannot safely clean pNFS because neither /tmp/inventory nor
-          the saved result-directory inventory exists.
+          Cannot safely clean pNFS because pnfs-mds is deployed on
+          {{ deployed_mds_hosts | join(', ') }}, but neither /tmp/inventory
+          nor the saved result-directory inventory exists.
+
+    - name: Report that no deployed pNFS lab needs cleanup
+      ansible.builtin.debug:
+        msg: >-
+          No cleanup inventory or deployed pnfs-mds service was found;
+          treating phase5-clean as a no-op.
+      when: cleanup_inventory_file | length == 0
 
     - name: Stop services, unmount clients, and remove generated pNFS state
       ansible.builtin.command:
@@ -73,6 +98,7 @@
           - --confirm-reset
           - reset
         chdir: "{{ lab_source_dir }}"
+      when: cleanup_inventory_file | length > 0
 
 - name: Setup SSH across the cluster
   hosts: all
@@ -156,11 +182,6 @@
         lab_ds_export_subnet: >-
           {{ hostvars[groups['ds'][0]]['infiniband_cidr'] | ansible.utils.ipaddr('subnet') }}
 
-    - name: Calculate the DS export subnet from the InfiniBand network
-      ansible.builtin.set_fact:
-        lab_ds_transport: "rdma"
-
-
     - name: Determine active MDS nodes based on manager colocation
       ansible.builtin.set_fact:
         active_mds_hosts: "{{ groups['mds'][1:] if (not rondb_colocate_mgr | bool) else groups['mds'] }}"
@@ -191,7 +212,7 @@
         dest: "{{ spec_file }}" 
         mode: "0644"
 
-    - name: Generate pnfs-lab inventory environment
+    - name: Generate pnfs-lab inventory environment in {{ lab_source_dir }}
       ansible.builtin.command:
         argv:
           - ./scripts/pnfs-lab-genenv

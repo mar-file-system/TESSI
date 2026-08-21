@@ -28,28 +28,106 @@
     var: mpi_paths
 
 - name: Set io500 path
-  set_fact:
+  ansible.builtin.set_fact:
     io500_path: "{{ mpi_paths.io500 }}"
-    io500_config: "tessi.ini"
-    io500_stonewall: "5"
-    io500_datadir: "/mnt/{{ system.type }}/{{ ansible_env.SUDO_USER | default(ansible_env.USER) }}/io500"
+    io500_config_path: >-
+      /tmp/tessi-io500.{{ ansible_env.SUDO_USER | default(ansible_env.USER) }}.{{ mpi_label }}.ini
+    io500_stonewall: "{{ (io500 | default({})).stonewall_time | default(300) }}"
+    io500_data_dir: "/mnt/{{ system.type }}/{{ ansible_env.SUDO_USER | default(ansible_env.USER) }}/io500"
     io500_hostfile: "/tmp/hostfile.{{ ansible_env.SUDO_USER | default(ansible_env.USER) }}_io500_mpi_label"
 
-- name: Ensure {{ io500_datadir }} exists and is owned by the sudo user
+- name: Set the predefined striped IOR data directories
+  ansible.builtin.set_fact:
+    io500_striped_data_dirs:
+      - "{{ io500_data_dir }}/ior-easy"
+      - "{{ io500_data_dir }}/ior-hard"
+
+- name: Ensure predefined IO500 data directories exist
   ansible.builtin.file:
-    path: "{{ io500_datadir }}"
+    path: "{{ item }}"
     state: directory
     owner: "{{ ansible_env.SUDO_USER | default(ansible_env.USER) }}"
     mode: '0755'
+  loop: "{{ [io500_data_dir] + io500_striped_data_dirs }}"
+  loop_control:
+    label: "{{ item }}"
+
+- name: Configure wide striping on IOR data directories
+  become: true
+  ansible.builtin.command:
+    argv:
+      - setfattr
+      - -n
+      - user.pnfs.hpc_shared
+      - -v
+      - "{{ '1' if system.stripe_width | int > 1 else '0' }}"
+      - "{{ item }}"
+  loop: "{{ io500_striped_data_dirs }}"
+  loop_control:
+    label: "{{ item }}"
 
 - name: Create a default io500 config file 
   ansible.builtin.include_tasks: ../tasks/run_with_mpi_module.yaml
   vars:
     mpi_module: "{{ mpi_config.module }}"
     working_dir: "{{ io500_path }}"
-    creates_path: "{{ io500_path }}/{{ io500_config }}"
+    creates_path: "{{ io500_config_path }}"
     commands: |
-      io500 --list > {{ io500_config }}
+      io500 --list > {{ io500_config_path | quote }}
+
+- name: Require physical-core topology facts for every IO500 client
+  ansible.builtin.assert:
+    that:
+      - hostvars[item].ansible_processor_count is defined
+      - hostvars[item].ansible_processor_cores is defined
+      - hostvars[item].ansible_processor_count | int > 0
+      - hostvars[item].ansible_processor_cores | int > 0
+    fail_msg: >-
+      Cannot determine physical-core MPI slots for {{ item }} from gathered facts.
+  loop: "{{ groups['clients'] }}"
+  loop_control:
+    label: "{{ item }}"
+
+- name: Initialize the IO500 client physical-core map
+  ansible.builtin.set_fact:
+    io500_client_physical_cores: {}
+
+- name: Calculate physical cores for every IO500 client
+  ansible.builtin.set_fact:
+    io500_client_physical_cores: >-
+      {{ io500_client_physical_cores | combine({
+           item: (hostvars[item].ansible_processor_count | int)
+                 * (hostvars[item].ansible_processor_cores | int)
+         }) }}
+  loop: "{{ groups['clients'] }}"
+  loop_control:
+    label: "{{ item }}"
+
+- name: Require a uniform physical-core count for the PPN result label
+  ansible.builtin.assert:
+    that:
+      - io500_client_physical_cores.values() | unique | length == 1
+    fail_msg: >-
+      IO500 clients have different physical-core counts: {{ io500_client_physical_cores }}.
+      A single ppn value cannot describe this run.
+
+- name: Set the requested IO500 processes per client
+  ansible.builtin.set_fact:
+    io500_ppn: >-
+      {{ (io500 | default({})).ppn
+         | default(io500_client_physical_cores.values() | first) | int }}
+
+- name: Require a positive IO500 processes-per-node value
+  ansible.builtin.assert:
+    that:
+      - io500_ppn | int > 0
+    fail_msg: "io500.ppn must be a positive integer, got {{ io500_ppn }}."
+
+- name: Set the IO500 MPI slot map and total process count
+  ansible.builtin.set_fact:
+    io500_client_slots: >-
+      {{ dict(groups['clients'] | zip([io500_ppn | int] * (groups['clients'] | length))) }}
+    io500_num_processes: "{{ (io500_ppn | int) * (groups['clients'] | length) }}"
 
 - name: Set cluster node counts and current timestamp
   ansible.builtin.set_fact:
@@ -58,24 +136,26 @@
     num_ds: "{{ (groups.get('ds', []) + groups.get('oss', [])) | unique | length }}"
     timestamp: "{{ lookup('pipe', 'date +%s') }}"
 
-- name: Create an output dir for these results
-  set_fact:
-    output_dir: "{{ result_dir }}/io500/mds-{{ num_mds }}.ds-{{ num_ds }}.clients-{{ num_clients }}.{{ timestamp }}"
+- name: Set the timestamped IO500 result directory
+  ansible.builtin.set_fact:
+    io500_result_dir: >-
+      {{ result_dir }}/io500/mds-{{ num_mds }}.ds-{{ num_ds }}.clients-{{ num_clients }}.ppn-{{ io500_ppn }}.{{ timestamp }}
 
-- name: Ensure {{ output_dir }} exists and is owned by the sudo user
+- name: Ensure {{ io500_result_dir }} exists and is owned by the sudo user
   ansible.builtin.file:
-    path: "{{ output_dir }}"
+    path: "{{ io500_result_dir }}"
     state: directory
     owner: "{{ ansible_env.SUDO_USER | default(ansible_env.USER) }}"
     mode: '0755'
 
-- name: Dynamically append datadir and stonewall-timer and output_dir to the config updates
+- name: Add the predefined data directory and timestamped result directory to the IO500 configuration
   ansible.builtin.set_fact:
     io500_config_updates: >-
       {{
         io500_config_updates + [
-          { 'section': 'global', 'option': 'datadir',        'value': io500_datadir },
-          { 'section': 'global', 'option': 'resultdir',      'value': output_dir },
+          { 'section': 'global', 'option': 'datadir',           'value': io500_data_dir },
+          { 'section': 'global', 'option': 'timestamp-datadir', 'value': 'FALSE' },
+          { 'section': 'global', 'option': 'resultdir',         'value': io500_result_dir },
           { 'section': 'debug',  'option': 'stonewall-time', 'value': io500_stonewall }
         ]
       }}
@@ -83,7 +163,7 @@
 - name: Apply granular IO500 configuration overrides
   ansible.builtin.include_tasks: ../tasks/configure_io500.yaml
   vars:
-    config_file_path: "{{ io500_path }}/{{ io500_config }}"
+    config_file_path: "{{ io500_config_path }}"
 
 - name: Generate the MPI hostfile from clients inventory using the shared task
   ansible.builtin.include_tasks:
@@ -92,8 +172,16 @@
     mpi_module: "{{ mpi_config.module }}"
     hosts: "{{ groups['clients'] }}"
     hostfile_path: "{{ io500_hostfile }}"
+    slots_by_host: "{{ io500_client_slots }}"
 
-- name: mpirun IO500 - results into {{ output_dir }}
+- name: Show the IO500 MPI rank plan
+  ansible.builtin.debug:
+    msg: >-
+      Running {{ io500_num_processes }} MPI ranks across {{ num_clients }} clients
+      with {{ io500_ppn }} rank(s) per client
+      ({{ io500_client_physical_cores.values() | first }} physical cores per client).
+
+- name: mpirun IO500 - results into {{ io500_result_dir }}
   ansible.builtin.include_tasks: ../tasks/run_with_mpi_module.yaml
   vars:
     mpi_module: "{{ mpi_config.module }}"
@@ -101,12 +189,12 @@
     working_dir: "{{ io500_path }}"
     show_output: true
     commands: >
-      mpirun -np {{ num_clients }} -hostfile {{ io500_hostfile }} {{ mpi_config.mpirun_args }}
-      io500 {{ io500_config }}
+      mpirun -np {{ io500_num_processes }} -hostfile {{ io500_hostfile }} {{ mpi_config.mpirun_args }}
+      io500 {{ io500_config_path | quote }}
 
-- name: Read result summary file from {{ output_dir }}
+- name: Read result summary file from {{ io500_result_dir }}
   ansible.builtin.slurp:
-    src: "{{ output_dir }}/result_summary.txt"
+    src: "{{ io500_result_dir }}/result_summary.txt"
   register: summary_file
 
 - name: Print result summary
@@ -121,7 +209,7 @@
     file_type: any
   register: experiment_level_artifacts
 
-- name: Preserve experiment-level artifacts in {{ output_dir }}
+- name: Preserve experiment-level artifacts in {{ io500_result_dir }}
   vars:
     experiment_artifacts_to_copy: >-
       {{ experiment_level_artifacts.files
@@ -132,28 +220,28 @@
     experiment_artifact_files: >-
       {{ experiment_artifacts_to_copy | rejectattr('isdir') | list }}
   block:
-    - name: Create experiment artifact subdirectories in {{ output_dir }}
+    - name: Create experiment artifact subdirectories in {{ io500_result_dir }}
       ansible.builtin.file:
-        path: "{{ output_dir }}/{{ item.path | basename }}"
+        path: "{{ io500_result_dir }}/{{ item.path | basename }}"
         state: directory
       loop: "{{ experiment_artifact_directories }}"
       loop_control:
         label: "{{ item.path }}"
 
-    - name: Copy experiment artifact directory contents into {{ output_dir }}
+    - name: Copy experiment artifact directory contents into {{ io500_result_dir }}
       ansible.builtin.copy:
         src: "{{ item.path }}/"
-        dest: "{{ output_dir }}/{{ item.path | basename }}/"
+        dest: "{{ io500_result_dir }}/{{ item.path | basename }}/"
         remote_src: true
         mode: preserve
       loop: "{{ experiment_artifact_directories }}"
       loop_control:
         label: "{{ item.path }}"
 
-    - name: Copy experiment artifact files into {{ output_dir }}
+    - name: Copy experiment artifact files into {{ io500_result_dir }}
       ansible.builtin.copy:
         src: "{{ item.path }}"
-        dest: "{{ output_dir }}/{{ item.path | basename }}"
+        dest: "{{ io500_result_dir }}/{{ item.path | basename }}"
         remote_src: true
         mode: preserve
       loop: "{{ experiment_artifact_files }}"
