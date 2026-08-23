@@ -1,10 +1,45 @@
 ---
 
-- name: Assert required variables are defined
-  assert:
+- name: Determine whether this host has local storage to provision
+  ansible.builtin.set_fact:
+    xem_storage_enabled: >-
+      {{ local_storage is defined or local_storage_devices is defined }}
+    xem_storage_mode: >-
+      {{ local_storage_mode | default('filesystem') }}
+
+- name: Assert required storage variables are defined
+  ansible.builtin.assert:
     that:
       - storage_device is defined
       - nvme_mount is defined
+      - local_storage is defined
+  when:
+    - xem_storage_enabled | bool
+    - xem_storage_mode != 'raw-devices'
+
+- name: Require local storage devices in raw-device mode
+  ansible.builtin.assert:
+    that:
+      - local_storage_devices is defined
+      - local_storage_devices | length > 0
+    fail_msg: >-
+      local_storage_mode=raw-devices requires a non-empty
+      local_storage_devices list.
+  when: xem_storage_mode == 'raw-devices'
+
+- name: Determine whether local storage is a raw block device
+  ansible.builtin.set_fact:
+    xem_storage_is_block_device: >-
+      {{ (local_storage | default('')) is match('^/dev/') }}
+
+- name: Select Xem storage provisioning mode
+  ansible.builtin.set_fact:
+    xem_mount_storage: >-
+      {{
+        (xem_storage_enabled | bool)
+        and xem_storage_mode != 'raw-devices'
+        and not (xem_storage_is_block_device | bool)
+      }}
 
 - name: Bring up InfiniBand network
   become: true
@@ -26,6 +61,7 @@
   ansible.builtin.include_tasks: ../../tasks/discover_ib_ip.yaml
 
 - name: Set proxy environment variables
+  become: true
   copy:
     dest: /etc/environment
     content: |
@@ -38,6 +74,7 @@
     mode: '0644'
 
 - name: Configure DNF to use proxy
+  become: true
   ini_file:
     path: /etc/dnf/dnf.conf
     section: main
@@ -53,16 +90,92 @@
       (?m)^URIs: http://(?:us\.archive\.ubuntu\.com|security\.ubuntu\.com)/ubuntu/$
     replace: "URIs: https://mirror.umd.edu/ubuntu/"
     backup: true
+  when: ansible_os_family == 'Debian'
+
+- name: Verify configured raw local storage devices
+  become: true
+  ansible.builtin.command:
+    argv:
+      - test
+      - -b
+      - "{{ item }}"
+  loop: "{{ local_storage_devices | default([]) }}"
+  loop_control:
+    label: "{{ item }}"
+  changed_when: false
+  when: xem_storage_mode == 'raw-devices'
+
+- name: Install raw block-device preparation tools
+  become: true
+  ansible.builtin.package:
+    name:
+      - mdadm
+    state: present
+  when: xem_storage_mode == 'raw-devices'
+
+- name: Prepare raw local storage devices for the system playbook
+  become: true
+  ansible.builtin.shell: |
+    set -euo pipefail
+
+    devices=(
+    {% for dev in local_storage_devices %}
+      {{ dev | quote }}
+    {% endfor %}
+    )
+    declare -A arrays_to_stop=()
+
+    for disk in "${devices[@]}"; do
+      while read -r node type mountpoint; do
+        if [[ -n "${mountpoint:-}" ]]; then
+          umount -lf "$node" 2>/dev/null || umount -lf "$mountpoint" 2>/dev/null || true
+        fi
+        swapoff "$node" 2>/dev/null || true
+
+        node_name=$(basename "$node")
+        for holder in "/sys/class/block/${node_name}/holders/"*; do
+          [[ -e "$holder" ]] || continue
+          holder_name=$(basename "$holder")
+          if [[ -d "/sys/class/block/${holder_name}/md" ]]; then
+            arrays_to_stop["/dev/${holder_name}"]=1
+          fi
+        done
+      done < <(lsblk -nrpo NAME,TYPE,MOUNTPOINT "$disk")
+    done
+
+    for array in "${!arrays_to_stop[@]}"; do
+      mdadm --stop "$array" 2>/dev/null || true
+    done
+    udevadm settle
+
+    for disk in "${devices[@]}"; do
+      while read -r node; do
+        mdadm --zero-superblock --force "$node" 2>/dev/null || true
+      done < <(lsblk -nrpo NAME "$disk" | tac)
+    done
+    udevadm settle
+  args:
+    executable: /bin/bash
+  changed_when: true
+  when: xem_storage_mode == 'raw-devices'
 
 - name: Define optional five-disk NVMe RAID0 layout
   ansible.builtin.set_fact:
-    nvme_raid_members:
-      - /dev/nvme0n1
-      - /dev/nvme1n1
-      - /dev/nvme2n1
-      - /dev/nvme3n1
-      - /dev/nvme4n1
-    nvme_raid_device: /dev/md0
+    nvme_raid_members: >-
+      {{ local_storage_raid_members | default([
+           '/dev/nvme0n1',
+           '/dev/nvme1n1',
+           '/dev/nvme2n1',
+           '/dev/nvme3n1',
+           '/dev/nvme4n1'
+         ]) }}
+    nvme_raid_device: >-
+      {{ local_storage if xem_storage_is_block_device | bool else '/dev/md0' }}
+    mdadm_config_path: >-
+      {{ '/etc/mdadm.conf'
+         if ansible_os_family == 'RedHat'
+         else '/etc/mdadm/mdadm.conf' }}
+  when: xem_storage_mode != 'raw-devices'
 
 - name: Check whether all five NVMe disks exist
   ansible.builtin.shell: |
@@ -75,21 +188,40 @@
   register: nvme_raid_probe
   changed_when: false
   failed_when: false
+  when:
+    - xem_storage_enabled | bool
+    - xem_storage_mode != 'raw-devices'
 
 - name: Record whether the five-disk NVMe RAID0 layout is available
   ansible.builtin.set_fact:
-    nvme_raid_available: "{{ nvme_raid_probe.rc == 0 }}"
+    nvme_raid_available: "{{ (nvme_raid_probe.rc | default(1)) == 0 }}"
+  when: xem_storage_mode != 'raw-devices'
+
+- name: Require every RAID0 member when preparing an unmounted block device
+  ansible.builtin.assert:
+    that:
+      - nvme_raid_available | bool
+    fail_msg: >-
+      Cannot create {{ nvme_raid_device }} because one or more configured
+      RAID0 members are missing: {{ nvme_raid_members | join(', ') }}.
+  when:
+    - xem_storage_enabled | bool
+    - xem_storage_mode != 'raw-devices'
+    - not (xem_mount_storage | bool)
 
 - name: Check if the target mount point is already active
   ansible.builtin.command: findmnt -n -o SOURCE "{{ nvme_mount }}"
   register: active_mount
   changed_when: false
   failed_when: false
+  when: xem_mount_storage | bool
 
 - name: Check whether the active mount is already the expected five-disk RAID
   when:
+    - xem_storage_mode != 'raw-devices'
     - nvme_raid_available | bool
-    - active_mount.rc == 0
+    - active_mount.rc | default(1) == 0
+    - xem_mount_storage | bool
   ansible.builtin.shell: |
     set -euo pipefail
 
@@ -109,16 +241,48 @@
   changed_when: false
   failed_when: false
 
+- name: Check whether the configured RAID0 block device already uses the expected members
+  ansible.builtin.shell: |
+    set -euo pipefail
+
+    array_name=$(basename {{ nvme_raid_device | quote }})
+    sysfs_array="/sys/class/block/${array_name}"
+
+    test -d "${sysfs_array}/md"
+    test "$(find "${sysfs_array}/slaves" -mindepth 1 -maxdepth 1 -type l | wc -l)" -eq {{ nvme_raid_members | length }}
+
+    {% for dev in nvme_raid_members %}
+    test -e "${sysfs_array}/slaves/{{ dev | basename }}"
+    {% endfor %}
+  args:
+    executable: /bin/bash
+  register: raid_device_is_expected
+  changed_when: false
+  failed_when: false
+  when:
+    - xem_storage_mode != 'raw-devices'
+    - nvme_raid_available | bool
+
 - name: Determine whether storage provisioning can be skipped
   ansible.builtin.set_fact:
     storage_provisioning_complete: >-
       {{
-        (active_mount.rc == 0)
-        and
+        not (xem_storage_enabled | bool)
+        or xem_storage_mode == 'raw-devices'
+        or
         (
-          ((nvme_raid_available | bool) and (active_mount_is_expected_raid.rc | default(1) == 0))
-          or
-          (not (nvme_raid_available | bool))
+          ((raid_device_is_expected.rc | default(1)) == 0)
+          if not (xem_mount_storage | bool)
+          else
+          (
+            (active_mount.rc | default(1) == 0)
+            and
+            (
+              ((nvme_raid_available | bool) and (active_mount_is_expected_raid.rc | default(1) == 0))
+              or
+              (not (nvme_raid_available | bool))
+            )
+          )
         )
       }}
 
@@ -128,10 +292,26 @@
       Mount {{ nvme_mount }} is already active on {{ active_mount.stdout }}
       {% if nvme_raid_available | bool %}and uses all five expected NVMe RAID members{% endif %}.
       Skipping provisioning.
-  when: storage_provisioning_complete | bool
+  when:
+    - storage_provisioning_complete | bool
+    - xem_mount_storage | bool
+
+- name: Debug active RAID0 block-device state
+  ansible.builtin.debug:
+    msg: >-
+      RAID0 block device {{ nvme_raid_device }} already uses
+      {{ nvme_raid_members | join(', ') }}. Skipping provisioning.
+  when:
+    - storage_provisioning_complete | bool
+    - xem_storage_enabled | bool
+    - xem_storage_mode != 'raw-devices'
+    - not (xem_mount_storage | bool)
 
 - name: Provision and mount storage
-  when: not (storage_provisioning_complete | bool)
+  when:
+    - xem_storage_enabled | bool
+    - xem_storage_mode != 'raw-devices'
+    - not (storage_provisioning_complete | bool)
   become: true
   block:
     - name: Build RAID0 from all five NVMe disks when available
@@ -215,23 +395,20 @@
             executable: /bin/bash
           changed_when: true
 
-        - name: Create five-disk RAID0 array
+        - name: Create NVMe RAID0 array
           ansible.builtin.command:
-            argv:
-              - mdadm
-              - --create
-              - "{{ nvme_raid_device }}"
-              - --name=pnfs_nvme
-              - --metadata=1.2
-              - --level=0
-              - "--raid-devices={{ nvme_raid_members | length }}"
-              - --run
-              - --force
-              - "{{ nvme_raid_members[0] }}"
-              - "{{ nvme_raid_members[1] }}"
-              - "{{ nvme_raid_members[2] }}"
-              - "{{ nvme_raid_members[3] }}"
-              - "{{ nvme_raid_members[4] }}"
+            argv: >-
+              {{ [
+                   'mdadm',
+                   '--create',
+                   nvme_raid_device,
+                   '--name=tessi_nvme',
+                   '--metadata=1.2',
+                   '--level=0',
+                   '--raid-devices=' ~ (nvme_raid_members | length | string),
+                   '--run',
+                   '--force'
+                 ] + nvme_raid_members }}
           changed_when: true
 
         - name: Wait for the RAID device to become available
@@ -263,15 +440,16 @@
 
         - name: Persist RAID assembly configuration
           ansible.builtin.blockinfile:
-            path: /etc/mdadm/mdadm.conf
+            path: "{{ mdadm_config_path }}"
             create: true
             mode: '0644'
-            marker: "# {mark} ANSIBLE MANAGED PNFS NVME RAID"
+            marker: "# {mark} ANSIBLE MANAGED TESSI NVME RAID"
             block: "{{ mdadm_scan.stdout }}"
           register: mdadm_config
 
         - name: Refresh initramfs after changing RAID configuration
-          ansible.builtin.command: update-initramfs -u
+          ansible.builtin.command: >-
+            {{ 'dracut -f' if ansible_os_family == 'RedHat' else 'update-initramfs -u' }}
           when: mdadm_config.changed
           changed_when: true
 
@@ -280,7 +458,9 @@
             resolved_device: "{{ nvme_raid_device }}"
 
     - name: Select or create a partition on the configured fallback disk
-      when: not (nvme_raid_available | bool)
+      when:
+        - not (nvme_raid_available | bool)
+        - xem_mount_storage | bool
       block:
         - name: Deploy topology analysis engine
           ansible.builtin.copy:
@@ -417,12 +597,14 @@
         fstype: xfs
         dev: "{{ resolved_device }}"
         force: true
+      when: xem_mount_storage | bool
 
     - name: Ensure the mount point directory exists
       ansible.builtin.file:
         path: "{{ nvme_mount }}"
         state: directory
         mode: '0755'
+      when: xem_mount_storage | bool
 
     - name: Mount the partition and persist in fstab
       ansible.builtin.mount:
@@ -431,6 +613,7 @@
         fstype: xfs
         state: mounted
         opts: defaults
+      when: xem_mount_storage | bool
 
 - name: Get actual controlling user (handling sudo)
   set_fact:
@@ -443,3 +626,25 @@
     state: directory
     owner: "{{ local_user }}"
     mode: '0755'
+  when: xem_mount_storage | bool
+
+- name: Verify configured raw local-storage devices
+  when:
+    - xem_storage_enabled | bool
+    - xem_storage_is_block_device | bool
+  block:
+    - name: Check configured raw local-storage devices
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      loop: "{{ local_storage_devices | default([local_storage]) }}"
+      register: raw_local_storage_devices
+
+    - name: Require every configured raw local-storage device
+      ansible.builtin.assert:
+        that:
+          - item.stat.exists
+          - item.stat.isblk
+        fail_msg: "Configured local-storage device {{ item.item }} is not a block device."
+      loop: "{{ raw_local_storage_devices.results }}"
+      loop_control:
+        label: "{{ item.item }}"

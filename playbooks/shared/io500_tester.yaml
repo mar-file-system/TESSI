@@ -18,8 +18,8 @@
           ansible.builtin.debug:
             var: df_output.stdout_lines
 
-- name: Capture server counters before IO500
-  hosts: all:!clients
+- name: Capture network and optional storage counters before IO500
+  hosts: all
   gather_facts: false
   any_errors_fatal: true
 
@@ -31,7 +31,7 @@
       ansible.builtin.include_tasks: ../tasks/start_network_storage_counters.yaml
       vars:
         counter_ib_device: "{{ infiniband_device }}"
-        counter_storage_path: "{{ local_storage }}"
+        counter_storage_path: "{{ local_storage | default('') }}"
 
 - name: Run IO500 using all MPI implementations 
   hosts: clients # must run on all because we require the fqdn for each to create the hostfile
@@ -52,9 +52,30 @@
         - name: Load IO500 variables
           ansible.builtin.include_vars: "../vars/io500.yaml"
 
-        - name: Run IO500 tests for multiple MPI implementations
+        - name: Select configured MPI implementations for IO500
+          ansible.builtin.set_fact:
+            io500_mpi_implementations: >-
+              {{ mpi_implementations
+                 | selectattr(
+                     'module',
+                     'in',
+                     (io500 | default({})).mpi_modules
+                       | default(mpi_implementations | map(attribute='module') | list)
+                   )
+                 | list }}
+
+        - name: Require at least one configured MPI implementation for IO500
+          ansible.builtin.assert:
+            that:
+              - io500_mpi_implementations | length > 0
+            fail_msg: >-
+              None of the requested IO500 MPI modules
+              {{ (io500 | default({})).mpi_modules | default([]) }}
+              are available in mpi_implementations.
+
+        - name: Run IO500 tests for selected MPI implementations
           ansible.builtin.include_tasks: run_io500.yaml
-          loop: "{{ mpi_implementations }}"
+          loop: "{{ io500_mpi_implementations }}"
           loop_control:
             loop_var: mpi_config
           register: io500_task_results
@@ -66,7 +87,9 @@
   any_errors_fatal: true
   vars:
     io500_lead_client: "{{ groups['clients'][0] }}"
-    counter_hosts: "{{ groups['all'] | difference(groups.get('clients', [])) }}"
+    counter_hosts: "{{ groups['all'] }}"
+    aggregate_counter_hosts: >-
+      {{ groups['all'] | difference(groups.get('clients', [])) }}
     counter_report_host: >-
       {{ (groups['all'] | difference(groups.get('clients', [])))[0] }}
     network_storage_stats_path: >-
@@ -84,3 +107,5 @@
 
     - name: Collect and save network and storage counter deltas
       ansible.builtin.include_tasks: ../tasks/collect_save_network_storage_counters.yaml
+      vars:
+        counter_workload_label: IO500

@@ -1,98 +1,108 @@
-- name: Pick the effective IP for this host
-  set_fact:
-    node_ip: >-
-      {{ mvpnet_ip
-         if (networking is defined and networking == 'mvpnet' and (mvpnet_ip is defined))
-         else ansible_host }}
+---
+- name: Discover InfiniBand IP address
+  ansible.builtin.include_tasks: ../../tasks/discover_ib_ip.yaml
 
-- name: Debug {{ node_ip }} for {{ hostname }}
-  debug:
-    var: node_ip
+- name: Set Lustre transport variables
+  ansible.builtin.set_fact:
+    lustre_lnet_transport: "{{ system.lnet_transport | default('tcp') }}"
+    lustre_lnet_network: "{{ (system.lnet_transport | default('tcp')) ~ '0' }}"
+    lustre_failover: "{{ system.failover | default(true) | bool }}"
+    node_ip: "{{ infiniband_ip }}"
 
 - name: Create sorted lists of group members
-  set_fact:
+  ansible.builtin.set_fact:
     sorted_clients: "{{ groups['clients'] | sort }}"
     sorted_mds: "{{ groups['mds'] | sort }}"
     sorted_oss: "{{ groups['oss'] | sort }}"
-  run_once: true  # Ensure lists are only set once globally
 
-- name: Determine group index using sorted lists
-  set_fact:
-    group_index: "{{ hostvars[inventory_hostname][sorted_group].index(inventory_hostname) }}"
+- name: Determine group index
+  ansible.builtin.set_fact:
+    group_index: "{{ groups[inventory_group].index(inventory_hostname) }}"
   loop: "{{ ['clients', 'mds', 'oss'] | select('in', group_names) | list }}"
   loop_control:
     loop_var: inventory_group
-  vars:
-    sorted_group: "sorted_{{ inventory_group }}"  # Dynamically reference sorted lists
 
-- name: set target_mount for clients
-  set_fact:
-    target_mount: '/mnt/lustre'
+- name: Set target mount for clients
+  ansible.builtin.set_fact:
+    target_mount: /mnt/lustre
   when: "'clients' in group_names"
 
-- name: Set mgs_node fact with sorted MDS IPs from inventory (node_ip)
-  set_fact:
-    mgs_node: "{{ sorted_mds | map('extract', hostvars, 'node_ip') | join('@tcp:') ~ '@tcp' }}"
-  run_once: true
+- name: Set MGS NIDs
+  ansible.builtin.set_fact:
+    mgs_node: >-
+      {{
+        (sorted_mds
+         | map('extract', hostvars, 'infiniband_ip')
+         | join('@' ~ lustre_lnet_transport ~ ':'))
+        ~ '@' ~ lustre_lnet_transport
+        if lustre_failover
+        else hostvars[sorted_mds[0]].infiniband_ip ~ '@' ~ lustre_lnet_transport
+      }}
 
-- name: Set last octet of node_ip as 'ip' fact, also replicate group_index as index
-  set_fact:
+- name: Set target index and IP facts
+  ansible.builtin.set_fact:
     ip: "{{ node_ip.split('.')[-1] }}"
     index: "{{ group_index }}"
 
-- name: Set target_type to 'mdt' for MDS hosts
-  set_fact:
-    target_type: "mdt"
+- name: Set target type to MDT for MDS hosts
+  ansible.builtin.set_fact:
+    target_type: mdt
   when: "'mds' in group_names"
 
-- name: Set MGT facts for first MDS host (group_index 0)
-  set_fact:
-    mgt_mount: "/mnt/lustre/mgt"
-    mgt_target: "lustre-mgs"
-  when: "'mds' in group_names and group_index | int == 0"
+- name: Set MGT facts for first MDS host
+  ansible.builtin.set_fact:
+    mgt_mount: /mnt/lustre/mgt
+    mgt_target: lustre-mgs
+  when:
+    - "'mds' in group_names"
+    - group_index | int == 0
 
-- name: Set target_type to 'ost' for OSS hosts
-  set_fact:
-    target_type: "ost"
+- name: Set target type to OST for OSS hosts
+  ansible.builtin.set_fact:
+    target_type: ost
   when: "'oss' in group_names"
 
-- name: Set target and target_mount for MDS and OSS nodes
-  set_fact:
+- name: Set target and target mount for MDS and OSS nodes
+  ansible.builtin.set_fact:
     target: "lustre-{{ inventory_group }}{{ '%02d' | format(group_index | int) }}/{{ target_type }}0"
     target_mount: "/mnt/lustre/{{ inventory_group }}{{ '%02d' | format(group_index | int) }}.{{ target_type }}0"
   loop: "{{ ['mds', 'oss'] | select('in', group_names) | list }}"
   loop_control:
     loop_var: inventory_group
 
-- name: Ensure an even number of MDS and OSS nodes
-  fail:
-    msg: "Failover requires an even number of MDS and OSS nodes!"
-  when: 
-    - sorted_mds | length is odd
-    - sorted_oss | length is odd
-  run_once: true  # Only check this once across all hosts
+- name: Require paired MDS and OSS nodes when failover is enabled
+  ansible.builtin.assert:
+    that:
+      - sorted_mds | length is even
+      - sorted_oss | length is even
+    fail_msg: Failover requires an even number of MDS and OSS nodes.
+  when: lustre_failover
+  run_once: true
 
 - name: Assign failover partners for MDS and OSS
-  set_fact:
-    failnode: "{{ hostvars[sorted_group[(idx | int) + 1]]['node_ip'] if (idx | int) % 2 == 0 else hostvars[sorted_group[(idx | int) - 1]]['node_ip'] }}"
+  ansible.builtin.set_fact:
+    failnode: >-
+      {{
+        hostvars[sorted_group[(group_index | int) + 1]].infiniband_ip
+        if (group_index | int) % 2 == 0
+        else hostvars[sorted_group[(group_index | int) - 1]].infiniband_ip
+      }}
   loop: "{{ ['mds', 'oss'] | select('in', group_names) | list }}"
   loop_control:
     loop_var: inventory_group
   vars:
     sorted_group: "{{ hostvars[inventory_hostname]['sorted_' ~ inventory_group] }}"
-    idx: "{{ sorted_group.index(inventory_hostname) | int }}"
+  when: lustre_failover
 
-- name: Debug the key facts that the configure tasks assume 
-  debug:
+- name: Debug key Lustre configuration facts
+  ansible.builtin.debug:
     msg:
       group_index: "{{ group_index }}"
       mgs_node: "{{ mgs_node }}"
-      index: "{{ index }}"
-      ip_addr: "{{ node_ip }}"
-      ip: "{{ ip | default('none') }}"
+      node_ip: "{{ node_ip }}"
       target_type: "{{ target_type | default('none') }}"
-      mgt_mount: "{{ mgt_mount | default('none') }}"
       mgt_target: "{{ mgt_target | default('none') }}"
       failnode: "{{ failnode | default('none') }}"
       target: "{{ target | default('none') }}"
       target_mount: "{{ target_mount }}"
+      lnet_network: "{{ lustre_lnet_network }}"

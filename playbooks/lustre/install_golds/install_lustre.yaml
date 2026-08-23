@@ -57,7 +57,6 @@
     name:
       - epel-release
       - kernel-rpm-macros
-      - kernel-abi-whitelists
     enablerepo:
       - epel
     state: present
@@ -109,7 +108,8 @@
       - libmount-devel
       - libnl3-cli
       - libnl3-devel
-      - resource-agents
+      - rdma-core-devel
+      - keyutils-libs-devel
     state: latest
     enablerepo: 
       - powertools
@@ -146,6 +146,7 @@
 
 - name: Configure Lustre
   shell: |
+    set -euo pipefail
     cd "{{ lustre_repo }}"
     sh autogen.sh
     ./configure {{ configure_args }} --with-linux=/usr/src/kernels/$(uname -r)
@@ -162,6 +163,7 @@
 
 - name: Build Lustre
   shell: |
+    set -euo pipefail
     cd "{{ lustre_repo }}"
     make -j$(nproc) 
     touch "{{ task_marker }}"
@@ -175,13 +177,47 @@
     - lustre
 
 - name: Run llmountcleanup.sh
-  command: "{{ lustre_repo }}/lustre/tests/llmountcleanup.sh && touch {{ task_marker }}"
+  ansible.builtin.command:
+    argv:
+      - "{{ lustre_repo }}/lustre/tests/llmountcleanup.sh"
   when: "'oss' in group_names or 'mds' in group_names"
+  register: llmountcleanup_result
+  failed_when: >-
+    llmountcleanup_result.rc != 0
+    and not (
+      llmountcleanup_result.rc == 254
+      and 'Memory leaks detected' in llmountcleanup_result.stdout
+    )
   args:
     creates: "{{ task_marker }}"
   vars:
     task_marker: "{{ marker_dir | default('/tmp') }}/llmountcleanup.marker"
   tags: 
+    - cleanup
+    - lustre
+
+- name: Warn about Lustre cleanup memory accounting
+  ansible.builtin.debug:
+    msg: >-
+      llmountcleanup.sh unloaded Lustre but reported a memory-accounting leak:
+      {{ llmountcleanup_result.stderr | default(llmountcleanup_result.stdout) }}
+  when:
+    - "'oss' in group_names or 'mds' in group_names"
+    - llmountcleanup_result.rc | default(0) == 254
+  tags:
+    - cleanup
+    - lustre
+
+- name: Record completed Lustre mount cleanup
+  ansible.builtin.file:
+    path: "{{ task_marker }}"
+    state: touch
+    access_time: preserve
+    modification_time: preserve
+  when: "'oss' in group_names or 'mds' in group_names"
+  vars:
+    task_marker: "{{ marker_dir | default('/tmp') }}/llmountcleanup.marker"
+  tags:
     - cleanup
     - lustre
 
@@ -198,22 +234,41 @@
     - cleanup
     - lustre
 
-- name: Install Lustre
+      #creates: "{{ task_marker }}"
+- name: Install Lustre in {{ lustre_repo }}
   shell: |
+    set -euo pipefail
     cd "{{ lustre_repo }}"
     make -j$(nproc) install
     touch "{{ task_marker }}"
   args:
     executable: /bin/bash
-    creates: "{{ task_marker }}"
   vars:
     task_marker: "{{ marker_dir | default('/tmp') }}/install_lustre.marker"
   tags: 
     - install
     - lustre
 
+- name: Rebuild module dependency map after installing Lustre
+  ansible.builtin.command: depmod -a
+  changed_when: false
+  tags:
+    - install
+    - lustre
+    - modules
+
+- name: Verify the o2ib LNet module was built
+  ansible.builtin.command: modinfo ko2iblnd
+  changed_when: false
+  when: system.lnet_transport | default('tcp') == 'o2ib'
+  tags:
+    - install
+    - lustre
+    - modules
+
 - name: Build Lustre RPMS
   shell: |
+    set -euo pipefail
     cd "{{ lustre_repo }}"
     make -j$(nproc) rpms
     touch "{{ task_marker }}"
@@ -238,9 +293,19 @@
     - lustre
     - rpms
 
+- name: Select Lustre RPMs for this deployment
+  ansible.builtin.set_fact:
+    lustre_rpm_paths: >-
+      {{ rpm_files.files
+         | map(attribute='path')
+         | reject('search', 'lustre-resource-agents')
+         | list
+         if not (system.failover | default(false) | bool)
+         else rpm_files.files | map(attribute='path') | list }}
+
 - name: Install Lustre RPMs
   dnf:
-    name: "{{ rpm_files.files | map(attribute='path') | list }}"
+    name: "{{ lustre_rpm_paths }}"
     state: present
     disable_gpg_check: yes
   tags: 

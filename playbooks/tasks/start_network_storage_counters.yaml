@@ -1,11 +1,33 @@
 ---
+- name: Select storage paths for counter collection
+  ansible.builtin.set_fact:
+    counter_effective_storage_paths: >-
+      {{
+        counter_storage_paths
+        | default(
+            local_storage_devices
+            | default(
+                [counter_storage_path]
+                if counter_storage_path | default('') | length > 0
+                else []
+              )
+          )
+        | reject('equalto', '')
+        | unique
+        | list
+      }}
+
 - name: Define network and storage counter snapshot command
   ansible.builtin.set_fact:
     network_storage_snapshot_command: |
       set -euo pipefail
 
       netdev={{ counter_ib_device | quote }}
-      storage_path={{ counter_storage_path | quote }}
+      storage_paths=(
+      {% for path in counter_effective_storage_paths %}
+        {{ path | quote }}
+      {% endfor %}
+      )
 
       read_counter() {
           local path="$1"
@@ -16,43 +38,86 @@
           fi
       }
 
-      storage_source="$(findmnt -n -o SOURCE --target "${storage_path}")"
-      storage_fstype="$(findmnt -n -o FSTYPE --target "${storage_path}")"
-      storage_device="$(basename "$(readlink -f "${storage_source}")")"
-      storage_stat="/sys/class/block/${storage_device}/stat"
-      if [[ ! -r "${storage_stat}" ]]; then
-          echo "Cannot read block counters for ${storage_path}: source=${storage_source}, expected=${storage_stat}" >&2
-          exit 1
-      fi
-
-      read -r storage_reads _ storage_sectors_read _ \
-          storage_writes _ storage_sectors_written _ _ \
-          storage_io_ms storage_weighted_io_ms _ < "${storage_stat}"
-
+      storage_available=false
+      storage_source=""
+      storage_fstype=""
+      storage_device=""
+      storage_reads=0
+      storage_sectors_read=0
+      storage_writes=0
+      storage_sectors_written=0
+      storage_io_ms=0
+      storage_weighted_io_ms=0
       physical_reads=0
       physical_sectors_read=0
       physical_writes=0
       physical_sectors_written=0
       physical_io_ms=0
       physical_weighted_io_ms=0
+      storage_paths_report=""
+      storage_sources=""
+      storage_fstypes=""
+      storage_devices=""
       physical_devices=""
-      shopt -s nullglob
-      leaf_paths=("/sys/class/block/${storage_device}/slaves/"*)
-      if [[ -z "${leaf_paths[0]:-}" ]]; then
-          leaf_paths=("/sys/class/block/${storage_device}")
-      fi
-      for leaf_path in "${leaf_paths[@]}"; do
-          leaf_device="$(basename "${leaf_path}")"
-          read -r leaf_reads _ leaf_sectors_read _ \
-              leaf_writes _ leaf_sectors_written _ _ \
-              leaf_io_ms leaf_weighted_io_ms _ < "/sys/class/block/${leaf_device}/stat"
-          physical_reads=$((physical_reads + leaf_reads))
-          physical_sectors_read=$((physical_sectors_read + leaf_sectors_read))
-          physical_writes=$((physical_writes + leaf_writes))
-          physical_sectors_written=$((physical_sectors_written + leaf_sectors_written))
-          physical_io_ms=$((physical_io_ms + leaf_io_ms))
-          physical_weighted_io_ms=$((physical_weighted_io_ms + leaf_weighted_io_ms))
-          physical_devices="${physical_devices}${physical_devices:+,}${leaf_device}"
+      declare -A storage_devices_seen=()
+      declare -A physical_devices_seen=()
+      for storage_path in "${storage_paths[@]}"; do
+          storage_available=true
+          if [[ -b "${storage_path}" ]]; then
+              storage_source="$(readlink -f "${storage_path}")"
+              storage_fstype="block-device"
+          else
+              storage_source="$(findmnt -n -o SOURCE --target "${storage_path}")"
+              storage_fstype="$(findmnt -n -o FSTYPE --target "${storage_path}")"
+          fi
+          storage_device="$(basename "$(readlink -f "${storage_source}")")"
+          storage_paths_report="${storage_paths_report}${storage_paths_report:+,}${storage_path}"
+          storage_sources="${storage_sources}${storage_sources:+,}${storage_source}"
+          storage_fstypes="${storage_fstypes}${storage_fstypes:+,}${storage_fstype}"
+
+          if [[ -n "${storage_devices_seen[${storage_device}]:-}" ]]; then
+              continue
+          fi
+          storage_devices_seen["${storage_device}"]=1
+          storage_devices="${storage_devices}${storage_devices:+,}${storage_device}"
+          storage_stat="/sys/class/block/${storage_device}/stat"
+          if [[ ! -r "${storage_stat}" ]]; then
+              echo "Cannot read block counters for ${storage_path}: source=${storage_source}, expected=${storage_stat}" >&2
+              exit 1
+          fi
+
+          read -r device_reads _ device_sectors_read _ \
+              device_writes _ device_sectors_written _ _ \
+              device_io_ms device_weighted_io_ms _ < "${storage_stat}"
+          storage_reads=$((storage_reads + device_reads))
+          storage_sectors_read=$((storage_sectors_read + device_sectors_read))
+          storage_writes=$((storage_writes + device_writes))
+          storage_sectors_written=$((storage_sectors_written + device_sectors_written))
+          storage_io_ms=$((storage_io_ms + device_io_ms))
+          storage_weighted_io_ms=$((storage_weighted_io_ms + device_weighted_io_ms))
+
+          shopt -s nullglob
+          leaf_paths=("/sys/class/block/${storage_device}/slaves/"*)
+          if [[ -z "${leaf_paths[0]:-}" ]]; then
+              leaf_paths=("/sys/class/block/${storage_device}")
+          fi
+          for leaf_path in "${leaf_paths[@]}"; do
+              leaf_device="$(basename "${leaf_path}")"
+              if [[ -n "${physical_devices_seen[${leaf_device}]:-}" ]]; then
+                  continue
+              fi
+              physical_devices_seen["${leaf_device}"]=1
+              read -r leaf_reads _ leaf_sectors_read _ \
+                  leaf_writes _ leaf_sectors_written _ _ \
+                  leaf_io_ms leaf_weighted_io_ms _ < "/sys/class/block/${leaf_device}/stat"
+              physical_reads=$((physical_reads + leaf_reads))
+              physical_sectors_read=$((physical_sectors_read + leaf_sectors_read))
+              physical_writes=$((physical_writes + leaf_writes))
+              physical_sectors_written=$((physical_sectors_written + leaf_sectors_written))
+              physical_io_ms=$((physical_io_ms + leaf_io_ms))
+              physical_weighted_io_ms=$((physical_weighted_io_ms + leaf_weighted_io_ms))
+              physical_devices="${physical_devices}${physical_devices:+,}${leaf_device}"
+          done
       done
 
       hca_paths=("/sys/class/net/${netdev}/device/infiniband/"*)
@@ -96,10 +161,11 @@
       printf '"hca_tx_packets":%s,' "$(read_counter "${hca_counter_dir}/port_xmit_packets")"
       printf '"hca_rx_errors":%s,' "$(read_counter "${hca_counter_dir}/port_rcv_errors")"
       printf '"hca_tx_discards":%s,' "$(read_counter "${hca_counter_dir}/port_xmit_discards")"
+      printf '"storage_available":%s,' "${storage_available}"
       printf '"storage_path":"%s","storage_source":"%s","storage_fstype":"%s",' \
-          "${storage_path}" "${storage_source}" "${storage_fstype}"
+          "${storage_paths_report}" "${storage_sources}" "${storage_fstypes}"
       printf '"storage_device":"%s","physical_devices":"%s",' \
-          "${storage_device}" "${physical_devices}"
+          "${storage_devices}" "${physical_devices}"
       printf '"storage_read_bytes":%s,' "$((storage_sectors_read * 512))"
       printf '"storage_write_bytes":%s,' "$((storage_sectors_written * 512))"
       printf '"storage_reads":%s,"storage_writes":%s,' "${storage_reads}" "${storage_writes}"

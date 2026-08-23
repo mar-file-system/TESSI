@@ -1,8 +1,8 @@
 ---
-- name: Collect ending counters on storage servers
+- name: Collect ending network and optional storage counters
   when: inventory_hostname in counter_hosts
   block:
-    - name: Flush IO500 storage writes before collecting counters
+    - name: Flush storage writes before collecting counters
       ansible.builtin.command: sync
       changed_when: false
 
@@ -17,17 +17,18 @@
       ansible.builtin.set_fact:
         network_storage_counter_end: "{{ network_storage_counter_end_raw.stdout | from_json }}"
 
-    - name: Verify counter sources did not change during IO500
+    - name: Verify counter sources did not change during the measured workload
       ansible.builtin.assert:
         that:
           - network_storage_counter_start.boot_id == network_storage_counter_end.boot_id
           - network_storage_counter_start.network_device == network_storage_counter_end.network_device
           - network_storage_counter_start.hca_device == network_storage_counter_end.hca_device
           - network_storage_counter_start.hca_port == network_storage_counter_end.hca_port
-          - network_storage_counter_start.storage_device == network_storage_counter_end.storage_device
-          - network_storage_counter_start.physical_devices == network_storage_counter_end.physical_devices
+          - network_storage_counter_start.storage_available == network_storage_counter_end.storage_available
+          - not (network_storage_counter_end.storage_available | bool) or network_storage_counter_start.storage_device == network_storage_counter_end.storage_device
+          - not (network_storage_counter_end.storage_available | bool) or network_storage_counter_start.physical_devices == network_storage_counter_end.physical_devices
         fail_msg: >-
-          Counter sources changed on {{ inventory_hostname }} during IO500;
+          Counter sources changed on {{ inventory_hostname }} during the measured workload;
           refusing to calculate invalid deltas.
 
     - name: Calculate per-host network and storage counter deltas
@@ -91,6 +92,7 @@
           hca_tx_discards: >-
             {{ (network_storage_counter_end.hca_tx_discards | int) -
                (network_storage_counter_start.hca_tx_discards | int) }}
+          storage_available: "{{ network_storage_counter_end.storage_available }}"
           storage_path: "{{ network_storage_counter_end.storage_path }}"
           storage_source: "{{ network_storage_counter_end.storage_source }}"
           storage_fstype: "{{ network_storage_counter_end.storage_fstype }}"
@@ -248,7 +250,7 @@
       storage_physical_total_bytes: >-
         {{ (network_storage_aggregate_bytes.storage_physical_total_bytes | int) +
            (hostvars[item].network_storage_counter_delta.storage_physical_total_bytes | int) }}
-  loop: "{{ counter_hosts }}"
+  loop: "{{ aggregate_counter_hosts }}"
   when: inventory_hostname == counter_report_host
 
 - name: Reset aggregate human-readable byte values
@@ -286,12 +288,14 @@
 - name: Build aggregate network and storage statistics report
   ansible.builtin.set_fact:
     network_storage_stats_report: |-
-      TESSI IO500 NETWORK AND STORAGE COUNTERS
+      TESSI {{ counter_workload_label | default('WORKLOAD') | upper }} NETWORK AND STORAGE COUNTERS
       ========================================
 
       report_host: {{ counter_report_host }}
       measured_hosts: {{ counter_hosts | join(',') }}
       host_count: {{ counter_hosts | length }}
+      aggregate_hosts: {{ aggregate_counter_hosts | join(',') }}
+      aggregate_host_count: {{ aggregate_counter_hosts | length }}
       units: bytes, packets, IO operations, and milliseconds
       note: physical InfiniBand byte counters are converted from four-byte words.
       note: IPoIB counters exclude native verbs traffic; HCA counters include both.
@@ -311,7 +315,7 @@
                            physical_read_bytes=0, physical_write_bytes=0,
                            physical_reads=0, physical_writes=0,
                            physical_io_ms=0, physical_weighted_io_ms=0) %}
-      {% for host in counter_hosts %}
+      {% for host in aggregate_counter_hosts %}
       {% set d = hostvars[host].network_storage_counter_delta %}
       {% set t.net_rx_bytes = t.net_rx_bytes + (d.net_rx_bytes | int) %}
       {% set t.net_tx_bytes = t.net_tx_bytes + (d.net_tx_bytes | int) %}
@@ -383,6 +387,28 @@
       storage_physical_io_ms: {{ t.physical_io_ms }}
       storage_physical_weighted_io_ms: {{ t.physical_weighted_io_ms }}
 
+      BALANCE BY INVENTORY GROUP
+      --------------------------
+      balance_definition: maximum host bytes / minimum host bytes
+      balance_ideal: 1.0
+      network_balance_basis: ib_hca_total_bytes
+      storage_balance_basis: storage_physical_total_bytes
+      {% for group_name, group_hosts in groups | dictsort %}
+      {% set network = namespace(values=[]) %}
+      {% set storage = namespace(values=[]) %}
+      {% for host in group_hosts %}
+      {% if host in counter_hosts and hostvars[host].network_storage_counter_delta is defined %}
+      {% set d = hostvars[host].network_storage_counter_delta %}
+      {% set network.values = network.values + [d.ib_hca_total_bytes | int] %}
+      {% if d.storage_available | bool %}
+      {% set storage.values = storage.values + [d.storage_physical_total_bytes | int] %}
+      {% endif %}
+      {% endif %}
+      {% endfor %}
+      {{ group_name }}_network_balance: {% if network.values | length == 0 %}unavailable{% elif network.values | min == 0 and network.values | max == 0 %}unavailable (all zero){% elif network.values | min == 0 %}infinite{% else %}{{ '%.6f' | format((network.values | max | float) / (network.values | min | float)) }}{% endif %}{{ '\n' }}
+      {{ group_name }}_storage_balance: {% if storage.values | length == 0 %}unavailable{% elif storage.values | min == 0 and storage.values | max == 0 %}unavailable (all zero){% elif storage.values | min == 0 %}infinite{% else %}{{ '%.6f' | format((storage.values | max | float) / (storage.values | min | float)) }}{% endif %}{{ '\n' }}
+      {% endfor %}
+
       PER-HOST DELTAS
       ---------------
       {% for host in counter_hosts %}
@@ -415,6 +441,7 @@
         ib_hca_tx_packets: {{ d.hca_tx_packets }}
         ib_hca_rx_errors: {{ d.hca_rx_errors }}
         ib_hca_tx_discards: {{ d.hca_tx_discards }}
+        storage_available: {{ d.storage_available }}
         storage_path: {{ d.storage_path }}
         storage_source: {{ d.storage_source }}
         storage_fstype: {{ d.storage_fstype }}

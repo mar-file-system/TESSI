@@ -1,6 +1,6 @@
 
-- name: Debug some crap
-  debug:
+- name: Show selected MPI configuration
+  ansible.builtin.debug:
     var: mpi_config
 
 - name: Set up a bunch of MPI path facts 
@@ -19,13 +19,20 @@
   loop:
     - { exe: 'io500' }
 
-- name: Debug some crap
-  debug:
+- name: Show selected MPI paths
+  ansible.builtin.debug:
     msg: "{{ mpi_config }} {{ mpi_label }} {{ mpi_bin }}"
 
-- name: Debug some crap
-  debug:
+- name: Show benchmark source paths
+  ansible.builtin.debug:
     var: mpi_paths
+
+- name: Require IO500 integration variables
+  ansible.builtin.assert:
+    that:
+      - system.type is defined
+    fail_msg: >-
+      IO500 requires system.type so it can select the default data mount.
 
 - name: Set io500 path
   ansible.builtin.set_fact:
@@ -33,12 +40,13 @@
     io500_config_path: >-
       /tmp/tessi-io500.{{ ansible_env.SUDO_USER | default(ansible_env.USER) }}.{{ mpi_label }}.ini
     io500_stonewall: "{{ (io500 | default({})).stonewall_time | default(300) }}"
-    io500_data_dir: "/mnt/{{ system.type }}/{{ ansible_env.SUDO_USER | default(ansible_env.USER) }}/io500"
+    io500_data_dir: >-
+      {{ (io500 | default({})).data_root | default('/mnt/' ~ system.type) }}/{{ ansible_env.SUDO_USER | default(ansible_env.USER) }}/io500
     io500_hostfile: "/tmp/hostfile.{{ ansible_env.SUDO_USER | default(ansible_env.USER) }}_io500_mpi_label"
 
-- name: Set the predefined striped IOR data directories
+- name: Set the predefined IOR data directories
   ansible.builtin.set_fact:
-    io500_striped_data_dirs:
+    io500_ior_data_dirs:
       - "{{ io500_data_dir }}/ior-easy"
       - "{{ io500_data_dir }}/ior-hard"
 
@@ -48,23 +56,26 @@
     state: directory
     owner: "{{ ansible_env.SUDO_USER | default(ansible_env.USER) }}"
     mode: '0755'
-  loop: "{{ [io500_data_dir] + io500_striped_data_dirs }}"
+  loop: "{{ [io500_data_dir] + io500_ior_data_dirs }}"
   loop_control:
     label: "{{ item }}"
 
-- name: Configure wide striping on IOR data directories
+- name: Apply configured attributes to IOR data directories
   become: true
   ansible.builtin.command:
     argv:
       - setfattr
       - -n
-      - user.pnfs.hpc_shared
+      - "{{ item.1.name }}"
       - -v
-      - "{{ '1' if system.stripe_width | int > 1 else '0' }}"
-      - "{{ item }}"
-  loop: "{{ io500_striped_data_dirs }}"
+      - "{{ item.1.value }}"
+      - "{{ item.0 }}"
+  loop: >-
+    {{ io500_ior_data_dirs
+       | product((io500 | default({})).data_directory_xattrs | default([]))
+       | list }}
   loop_control:
-    label: "{{ item }}"
+    label: "{{ item.0 }}: {{ item.1.name }}={{ item.1.value }}"
 
 - name: Create a default io500 config file 
   ansible.builtin.include_tasks: ../tasks/run_with_mpi_module.yaml
@@ -129,17 +140,41 @@
       {{ dict(groups['clients'] | zip([io500_ppn | int] * (groups['clients'] | length))) }}
     io500_num_processes: "{{ (io500_ppn | int) * (groups['clients'] | length) }}"
 
-- name: Set cluster node counts and current timestamp
+- name: Initialize the IO500 result name
   ansible.builtin.set_fact:
     num_clients: "{{ groups.get('clients', []) | length }}"
-    num_mds: "{{ groups.get('mds', []) | length }}"
-    num_ds: "{{ (groups.get('ds', []) + groups.get('oss', [])) | unique | length }}"
     timestamp: "{{ lookup('pipe', 'date +%s') }}"
+    io500_result_name_parts: []
+
+- name: Add inventory group dimensions to the IO500 result name
+  ansible.builtin.set_fact:
+    io500_result_name_parts: >-
+      {{ io500_result_name_parts + [item.key ~ '-' ~ (item.value | length | string)] }}
+  loop: "{{ groups | dict2items | sort(attribute='key') }}"
+  when:
+    - item.key not in ['all', 'ungrouped']
+    - item.value | length > 0
+    - item.value | sort != groups['all'] | sort
+  loop_control:
+    label: "{{ item.key }}"
+
+- name: Add PPN to the IO500 result name
+  ansible.builtin.set_fact:
+    io500_result_name_parts: >-
+      {{ io500_result_name_parts + ['ppn-' ~ (io500_ppn | string)] }}
+
+- name: Add configured metadata to the IO500 result name
+  ansible.builtin.set_fact:
+    io500_result_name_parts: >-
+      {{ io500_result_name_parts + [item.key ~ '-' ~ (item.value | string)] }}
+  loop: "{{ (io500 | default({})).result_metadata | default({}) | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
 
 - name: Set the timestamped IO500 result directory
   ansible.builtin.set_fact:
     io500_result_dir: >-
-      {{ result_dir }}/io500/mds-{{ num_mds }}.ds-{{ num_ds }}.clients-{{ num_clients }}.ppn-{{ io500_ppn }}.mdsassign-{{ system.client_mds_assignment | default('first') }}.{{ timestamp }}
+      {{ result_dir }}/io500/{{ io500_result_name_parts | join('.') }}.{{ timestamp }}
 
 - name: Ensure {{ io500_result_dir }} exists and is owned by the sudo user
   ansible.builtin.file:
