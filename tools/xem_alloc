@@ -1,0 +1,466 @@
+#!/usr/bin/env python
+
+import argparse
+from datetime import datetime
+import getpass
+import os
+from pathlib import Path
+import re
+import shlex
+import subprocess
+import sys
+
+if Path("/usr/testbed/opsdir/bin").is_dir():
+    OPSBIN = "/usr/testbed/opsdir/bin"         # path on boss
+else:
+    OPSBIN = "/usr/testbed/bin"                # path elsewhere
+
+MAKEBED = "/share/testbed/bin/makebed"
+NODE_LIST = Path(OPSBIN) / "node_list"
+NODETYPE = "ath"
+PROJECT = "mvpnet"
+STATE_DIR = Path.home() / ".tessi_allocations"
+SYSTEMS = {
+    "beegfs": {
+        "image": "mvpnet/ROCKY9-64-STD",
+    },
+    "lustre": {
+        "image": "mvpnet/LUSTRE_ROCKY9_5_14_0_503_40_1",
+    },
+    "pnfs": {
+        "image": "mvpnet/UBUNTU24_6_19_14_3",
+    },
+}
+
+# create state dir if necessary
+STATE_DIR.mkdir(parents=True, exist_ok=True)
+
+def positive_int(value):
+    try:
+        value = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError("must be an integer")
+
+    if value <= 0:
+        raise argparse.ArgumentTypeError("must be a positive integer")
+
+    return value
+
+def current_user():
+    return os.environ.get("USER") or getpass.getuser()
+
+def load_exp(dirpath, proj, type, tag):
+    #
+    # get created time and image from state file
+    #
+    data = dirpath.read_text(encoding='utf-8').splitlines()
+    if len(data) == 0:
+        print("Warning: No data line in", dirpath)
+        return None
+    dat = data[0].rstrip('\n')
+    match = re.search(r"^(\d+-\d+-\d+T\d+:\d+:\d+-\d+:\d+)\s+(\S+)$", dat)
+    if not match:
+        print("Warning: invalid data in", dirpath)
+        return None
+    created, image = match.group(1), match.group(2)
+    #
+    # use emulab node_list to get experiment sizes
+    #
+    res = subprocess.run([NODE_LIST, "-v", "-e", f"{proj},{type}-{tag}" ],
+                             capture_output=True, text=True)
+    if res.returncode != 0:
+        # error likely in res.stdout, if we need it
+        # we return 0 counts to indicate no data from emulab
+        return { "cli" : 0, "created" : created,
+                 "ds" : 0, "image" : image, "mds" : 0 }
+
+    data = res.stdout.splitlines()
+    if len(data) == 0:
+        print("Warning: No data line in node_list output", dirpath)
+        return None
+    dat = data[0].rstrip('\n')
+    cnts = { "cli": 0, "ds": 0, "mds": 0 }
+    for vh in dat.split():
+        match = re.search(r"^(cli|ds|mds)([0-9])+$", vh)
+        if match:
+            got = int(match.group(2)) + 1
+            if cnts[match.group(1)] < got:
+                cnts[match.group(1)] = got
+    return { "cli" : cnts["cli"], "created" : created,
+             "ds" : cnts["ds"], "image" : image, "mds" : cnts["mds"] }
+
+def load_state(dirpath):
+    state = {};
+    for p in dirpath.iterdir():
+        if re.search(r"^\.", p.name):       # ignore .* files
+            continue
+        match = re.search(r"^(\w+),(\w+),(\w+)$", p.name)
+        if not match:
+            print("Warning: ignoring ill formed state file", p)
+            continue
+        proj, type, tag = match.group(1), match.group(2), match.group(3)
+        exp = load_exp(p, proj, type, tag)
+        if exp is not None:
+            state.setdefault(proj, {})
+            state[proj].setdefault(tag, {})
+            state[proj][tag][type] = exp
+    return state
+
+def node_layout(mds, ds, cli):
+    ds_first = 0
+    ds_last = ds_first + ds - 1
+
+    cli_first = ds_last + 1
+    cli_last = cli_first + cli - 1
+
+    mds_first = cli_last + 1
+    mds_last = mds_first + mds - 1
+
+    return {
+        "ds_first": ds_first,
+        "ds_last": ds_last,
+        "cli_first": cli_first,
+        "cli_last": cli_last,
+        "mds_first": mds_first,
+        "mds_last": mds_last,
+        "total": mds + ds + cli,
+    }
+
+def makebed_command(system, tag, mds, ds, cli, image, remove=False):
+    experiment = f"{system}-{tag}"
+
+    if remove:
+        return [ MAKEBED, "-e", experiment, "-p", PROJECT, "-r" ]
+
+    layout = node_layout(mds, ds, cli)
+    cmd = [
+        MAKEBED,
+        "-e", experiment,
+        "-p", PROJECT,
+        "-f", NODETYPE,
+
+        # Keep the TESSI role names consistent across filesystems.
+        "-h", f"{layout['ds_first']}-{layout['ds_last']}:ds",
+        "-h", f"{layout['mds_first']}-{layout['mds_last']}:mds",
+        "-h", f"{layout['cli_first']}-{layout['cli_last']}:cli",
+
+        "-i", image,
+
+        # m2 is an additional storage device, not a network fabric.
+        # Servers get m2; clients do not.
+        "-f", f"{layout['ds_first']}-{layout['ds_last']}:m2",
+        "-f", f"{layout['mds_first']}-{layout['mds_last']}:m2",
+
+        "-n", str(layout["total"]),
+    ]
+
+    return cmd
+
+def run_command(cmd):
+    print("+", shlex.join(cmd), flush=True)
+
+    try:
+        subprocess.run(cmd, check=True)
+    except subprocess.CalledProcessError as e:
+        print(
+            f"error: makebed failed with exit status {e.returncode}",
+            file=sys.stderr,
+        )
+        return False
+    except OSError as e:
+        print(f"error: could not run {cmd[0]}: {e}", file=sys.stderr)
+        return False
+
+    return True
+
+def command_alloc(args):
+    tag = args.tag
+    system = args.system
+    image = SYSTEMS[system]["image"]
+
+    # XXX: override global for makebed_command
+    global NODETYPE
+    NODETYPE=args.nodetype
+
+    # XXX: override global for makebed_command
+    global PROJECT
+    PROJECT=args.project
+
+    state = load_state(STATE_DIR)
+
+    if args.project in state:
+        if tag in state[args.project]:
+            if system in state[args.project][tag]:
+                old = state[args.project][tag][system]
+                print(
+                    f"error: {args.project} {system}-{tag} - already running",
+                    file=sys.stderr
+                )
+                print(
+                    f"  mds={old.get('mds')} "
+                    f"ds={old.get('ds')} "
+                    f"cli={old.get('cli')}",
+                    file=sys.stderr,
+                )
+                print(
+                    f"\nRemove it first with:\n"
+                    f"  tessi-alloc remove {system}",
+                    f"-p {args.project} -t {tag}",
+                    file=sys.stderr,
+                )
+                return 1
+
+    cmd = makebed_command(system=system, tag=tag, mds=args.mds, ds=args.ds,
+                          cli=args.cli, image=image)
+
+    if args.dryrun:
+        print("dryrun-cmd:", " ".join(cmd))
+        return 0
+
+    # setup tempfile and then hardlink into place
+    tfile = Path(f"{STATE_DIR}/.t{os.getpid()}-{args.project},{system},{tag}")
+    sfile = Path(f"{STATE_DIR}/{args.project},{system},{tag}")
+
+    stamp = datetime.now().astimezone().isoformat(timespec="seconds")
+    tfile.write_text(f"{stamp} {image}\n")
+
+    failed = False
+    try:
+        sfile.hardlink_to(tfile)
+    except Exception as e:
+        failed = True
+    tfile.unlink(missing_ok=True)
+    if failed:
+        return 1
+
+    if not run_command(cmd):
+        sfile.unlink(missing_ok=True)
+        return 1
+     
+    total = args.mds + args.ds + args.cli
+    print(
+        f"Allocated {system} in {args.project} for tag {tag}: "
+        f"{args.mds} mds, {args.ds} ds, {args.cli} cli "
+        f"({total} nodes)"
+    )
+
+    return 0
+
+
+def command_remove(args):
+    sfile = Path(f"{STATE_DIR}/{args.project},{args.system},{args.tag}")
+
+    # XXX: override global for makebed_command
+    global PROJECT
+    PROJECT=args.project
+
+    cmd = makebed_command(system=args.system, tag=args.tag, mds=0,
+                          ds=0, cli=0, image="", remove=True)
+
+    if args.dryrun:
+        print("state-file:", sfile)
+        print("dryrun-cmd:", " ".join(cmd))
+        return 0
+
+    if not run_command(cmd):
+        print("Warning: Remove failed. Will clear any remaining state anyway.")
+
+    sfile.unlink(missing_ok=True)
+ 
+    return 0
+
+def command_list(args):
+    state = load_state(STATE_DIR)
+
+    rows = []
+
+    for project,tags in state.items():
+        for tag, systems in tags.items():
+            for system,allocation in systems.items():
+                mds = allocation["mds"]
+                ds = allocation["ds"]
+                cli = allocation["cli"]
+                total = int(mds) + int(ds) + int(cli)
+                rows.append([
+                    str(project),
+                    str(tag),
+                    str(system),
+                    str(mds),
+                    str(ds),
+                    str(cli),
+                    str(total),
+                    str(allocation.get("image", "?")),
+                ])
+
+    if not rows:
+        print("No allocations recorded.")
+        return 0
+
+    rows.sort(key=lambda row: (row[0], row[1]))
+
+    headers = ["PROJ", "TAG", "SYSTEM", "MDS", "DS", "CLI", "TOTAL", "IMAGE"]
+
+    widths = [
+        max(len(headers[i]), *(len(row[i]) for row in rows))
+        for i in range(len(headers))
+    ]
+
+    def print_row(row):
+        print(
+            f"{row[0]:<{widths[0]}}  "
+            f"{row[1]:<{widths[1]}}  "
+            f"{row[2]:>{widths[2]}}  "
+            f"{row[3]:>{widths[3]}}  "
+            f"{row[4]:>{widths[4]}}  "
+            f"{row[5]:>{widths[5]}}  "
+            f"{row[6]:>{widths[6]}}  "
+            f"{row[7]:<{widths[7]}}"
+        )
+
+    print_row(headers)
+
+    for row in rows:
+        print_row(row)
+
+    return 0
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        prog="tessi-alloc",
+        description="Allocate and manage TESSI Xem nodes.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""examples:
+  tessi-alloc alloc pnfs   -m 1 -d 4 -c 8
+  tessi-alloc alloc lustre -m 1 -d 4 -c 8
+  tessi-alloc alloc beegfs -m 1 -d 4 -c 8
+  tessi-alloc list
+  tessi-alloc remove beegfs
+
+  general flags: [-p project]  - choose project to run under
+                 [-n nodetype] - choose node type (ath, thm, etc.)
+                 [-t tag]      - choose tag (default=$USER)
+                 [-N]          - just print command, do not do it
+""",
+    )
+
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    alloc = subparsers.add_parser(
+        "alloc",
+        help="allocate nodes",
+    )
+    alloc.add_argument(
+        "system",
+        choices=SYSTEMS,
+        metavar="{beegfs,lustre,pnfs}",
+    )
+    alloc.add_argument(
+        "-m", "--mds",
+        required=True,
+        type=positive_int,
+        metavar="M",
+        help="number of metadata servers",
+    )
+    alloc.add_argument(
+        "-d", "--ds",
+        required=True,
+        type=positive_int,
+        metavar="D",
+        help="number of data/storage servers",
+    )
+    alloc.add_argument(
+        "-c", "--cli", "--clients",
+        dest="cli",
+        required=True,
+        type=positive_int,
+        metavar="C",
+        help="number of clients",
+    )
+    alloc.add_argument(
+        "-N",
+        dest="dryrun",
+        default=False,
+        action="store_true",
+        required=False,
+        help="dry run (just print cmd w/o running it)"
+    )
+    alloc.add_argument(
+        "-n",
+        dest="nodetype",
+        default=NODETYPE,
+        required=False,
+        metavar="NODETYPE",
+        help=f"node type to use (default={NODETYPE})",
+    )
+    alloc.add_argument(
+        "-p",
+        dest="project",
+        default=PROJECT,
+        required=False,
+        metavar="PROJ",
+        help="project to create experiment in",
+    )
+    alloc.add_argument(
+        "-t",
+        dest="tag",
+        default=current_user(),
+        required=False,
+        metavar="TAG",
+        help="tag to use (default=username)",
+    )
+    alloc.set_defaults(func=command_alloc)
+
+    list_parser = subparsers.add_parser(
+        "list",
+        help="list allocations",
+    )
+    list_parser.set_defaults(func=command_list)
+
+    remove = subparsers.add_parser(
+        "remove",
+        help="remove an allocation",
+    )
+    remove.add_argument(
+        "system",
+        choices=SYSTEMS,
+        metavar="{beegfs,lustre,pnfs}",
+    )
+    remove.add_argument(
+        "-N",
+        dest="dryrun",
+        default=False,
+        action="store_true",
+        required=False,
+        help="dry run (just print cmd w/o running it)"
+    )
+    remove.add_argument(
+        "-p",
+        dest="project",
+        default=PROJECT,
+        required=False,
+        metavar="PROJ",
+        help="project experiment is running under",
+    )
+    remove.add_argument(
+        "-t",
+        dest="tag",
+        default=current_user(),
+        required=False,
+        metavar="TAG",
+        help="tag to use (default=username)",
+    )
+    remove.set_defaults(func=command_remove)
+
+    return parser.parse_args()
+
+def main():
+    args = parse_args()
+
+    try:
+        return args.func(args)
+    except RuntimeError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+
+if __name__ == "__main__":
+    sys.exit(main())
