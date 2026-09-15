@@ -2,9 +2,29 @@
 set -euo pipefail
 
 usage() {
-  echo "Usage: $0 <inventory-file>" >&2
+  echo "Usage: $0 [--make \"target [target ...]\"] <inventory-file>" >&2
   exit 1
 }
+
+MAKE_TARGETS=""
+#VERBOSE="VERBOSE=1"
+VERBOSE=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --make)
+      [[ $# -ge 2 ]] || usage
+      MAKE_TARGETS="$2"
+      shift 2
+      ;;
+    -*)
+      usage
+      ;;
+    *)
+      break
+      ;;
+  esac
+done
 
 [[ $# -eq 1 ]] || usage
 
@@ -45,4 +65,26 @@ else
   exit 1
 fi
 
-exec ansible-playbook -i "$INV" playbooks/bootstrap/bootstrap.yaml
+MAKEFILE_DISCOVERY=$(mktemp "${TMPDIR:-/tmp}/tessi-makefile.XXXXXX")
+trap 'rm -f "$MAKEFILE_DISCOVERY"' EXIT
+
+ansible-playbook \
+  -i "$INV" \
+  -e "makefile_discovery=$MAKEFILE_DISCOVERY" \
+  playbooks/bootstrap/bootstrap.yaml
+
+if [[ -n "$MAKE_TARGETS" ]]; then
+  if [[ ! -s "$MAKEFILE_DISCOVERY" ]]; then
+    echo "Error: bootstrap did not report a Makefile path." >&2
+    exit 1
+  fi
+
+  MAKEFILE=$(<"$MAKEFILE_DISCOVERY")
+
+  if [[ ! -f "$MAKEFILE" ]]; then
+    echo "Error: generated Makefile does not exist: $MAKEFILE" >&2
+    exit 1
+  fi
+
+  make -C "$(dirname "$MAKEFILE")" $MAKE_TARGETS $VERBOSE 
+fi

@@ -9,11 +9,24 @@
         - playbooks.bootstrap_cluster | length > 0
         - playbooks.bootstrap_cluster != 'NONE'
 
+    - name: Check whether input configuration is a directory
+      ansible.builtin.stat:
+        path: "{{ ansible_inventory_sources | first }}"
+      delegate_to: localhost
+      register: config_input
+
     - name: Compute a stable short hash of the input configuration
       ansible.builtin.set_fact:
         config_hash: >-
-          {{ (lookup('ansible.builtin.file', ansible_inventory_sources | first,
+          {{ (lookup('ansible.builtin.file',
+                     ansible_inventory_sources | first,
                      rstrip=False) | hash('sha256'))[:8] }}
+      when: not config_input.stat.isdir
+
+    - name: Use empty hash when input configuration is a directory
+      ansible.builtin.set_fact:
+        config_hash: ""
+      when: config_input.stat.isdir
 
     - name: Set some artifact paths 
       set_fact:
@@ -497,6 +510,13 @@
           ansible.builtin.command: tofu {{ tofu_chdir }} workspace new -var-file {{ tfvars_file }} {{ tofu_workspace }}
           when: tofu_workspace not in tofu_workspace_list.stdout_lines | map('regex_replace', '^\\*?\\s*', '') | list
         when: network.type != 'mvpnet' and network.type != 'none'
+
+    - name: Write Makefile path for caller discovery
+      ansible.builtin.copy:
+        content: "{{ artifact_dir }}/Makefile\n"
+        dest: "{{ makefile_discovery }}"
+        mode: "0644"
+      when: makefile_discovery is defined
 
     - name: Run 'make -C {{ artifact_dir }} help'
       command: make -C "{{ artifact_dir }}" help
