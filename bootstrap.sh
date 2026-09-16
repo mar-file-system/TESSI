@@ -2,11 +2,15 @@
 set -euo pipefail
 
 usage() {
-  echo "Usage: $0 [--make \"target [target ...]\"] <inventory-file>" >&2
+  echo "Usage: $0 [flags] <inventory>" >&2
+  echo "flags:" >&2
+  echo "        --make \"target [target ...]\"" >&2
+  echo "        --preboot preboot-playbook" >&2
   exit 1
 }
 
 MAKE_TARGETS=""
+PREBOOT_PLAYBOOK=""
 #VERBOSE="VERBOSE=1"
 VERBOSE=""
 
@@ -15,6 +19,11 @@ while [[ $# -gt 0 ]]; do
     --make)
       [[ $# -ge 2 ]] || usage
       MAKE_TARGETS="$2"
+      shift 2
+      ;;
+    --preboot)
+      [[ $# -ge 2 ]] || usage
+      PREBOOT_PLAYBOOK="$2"
       shift 2
       ;;
     -*)
@@ -30,7 +39,7 @@ done
 
 INV="$1"
 
-if [[ ! -f "$INV" ]]; then
+if [[ ! -f "$INV" && ! -d "$INV" ]]; then
   echo "Error: inventory file does not exist: $INV" >&2
   exit 1
 fi
@@ -71,7 +80,8 @@ trap 'rm -f "$MAKEFILE_DISCOVERY"' EXIT
 ansible-playbook \
   -i "$INV" \
   -e "makefile_discovery=$MAKEFILE_DISCOVERY" \
-  playbooks/bootstrap/bootstrap.yaml
+  $PREBOOT_PLAYBOOK playbooks/bootstrap/bootstrap.yaml
+exit 0
 
 if [[ -n "$MAKE_TARGETS" ]]; then
   if [[ ! -s "$MAKEFILE_DISCOVERY" ]]; then
