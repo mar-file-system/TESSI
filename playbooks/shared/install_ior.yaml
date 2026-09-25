@@ -1,217 +1,295 @@
 ---
-# 1. Load OS-specific variables first so we know how to handle paths
+# Install the runtime prerequisites everywhere, build once on the first client,
+# then use the Ansible controller to fan the homogeneous build out over the LAN.
 - name: Load OS-specific variables
-  include_vars: "../vars/mpi_{{ ansible_os_family }}.yml"
+  ansible.builtin.include_vars: "../vars/mpi_{{ ansible_os_family }}.yml"
 
 - name: Load OS-specific IO500 build variables
   ansible.builtin.include_vars: "../vars/io500_{{ ansible_os_family }}.yml"
 
-- name: Set up a bunch of MPI path facts 
+- name: Require at least one client for the shared IO500 build
+  ansible.builtin.assert:
+    that:
+      - groups.get('clients', []) | length > 0
+    fail_msg: "IO500 installation requires a non-empty clients group."
+
+- name: Select the deterministic IO500 build client
+  ansible.builtin.set_fact:
+    io500_build_host: "{{ groups['clients'] | first }}"
+
+- name: Discover the selected MPI installation
   ansible.builtin.include_tasks:
     file: "../tasks/discover_mpi.yaml"
   vars:
-    target_mpi_module: "{{ mpi.module }}"  
+    target_mpi_module: "{{ mpi.module }}"
 
-- name: Diagnostic Log - MPI Bin Evaluation
-  ansible.builtin.debug:
-    msg:
-      - "Target Module: {{ mpi.module }}"
-      - "MPI bin: {{ mpi_bin }}"
-      - "MPI Label: {{ mpi_label }}"
-
-- name: Set MPI_BIN path and other source paths
-  set_fact:
-    mpi_bin_path: "{{ mpi_bin }}"
-
-- name: Set the local installation prefix for MPI-specific tools
+- name: Set MPI-specific installation paths
   ansible.builtin.set_fact:
-    mpi_tools_prefix: "{{ ('/usr/lib/x86_64-linux-gnu/' ~ mpi.module) if mpi_bin.startswith('/share/') else (mpi_bin | dirname) }}"
+    mpi_bin_path: "{{ mpi_bin }}"
+    mpi_tools_prefix: >-
+      {{ ('/usr/lib/x86_64-linux-gnu/' ~ mpi.module)
+         if mpi_bin.startswith('/share/') else (mpi_bin | dirname) }}
 
-- name: Set local MPI tool paths
+- name: Set MPI-specific tool directories
   ansible.builtin.set_fact:
     mpi_tools_bin_path: "{{ mpi_tools_prefix }}/bin"
     mpi_tools_lib_path: "{{ mpi_tools_prefix }}/lib"
 
-- name: Display local MPI tool installation paths
-  ansible.builtin.debug:
-    msg:
-      - "MPI commands: {{ mpi_bin_path }}"
-      - "MPI-specific tools: {{ mpi_tools_bin_path }}"
-
-- name: Set paths to the source for various packages specific to this MPI flavor 
+- name: Set source paths for the shared build
   ansible.builtin.include_tasks:
     file: "../tasks/path_to_mpi_specific_src.yaml"
   vars:
-    target_mpi_label: "{{ mpi_label }}"   # Inherited from your core set_fact base step
-    target_executable: "{{ item.exe }}"
+    target_mpi_label: "{{ mpi_label }}"
+    target_executable: "{{ item }}"
   loop:
-    - { exe: 'ior' }
-    - { exe: 'hello' }
-    - { exe: 'io500' }
+    - hello
+    - io500
 
-- name: Set hello path 
-  set_fact:
+- name: Set shared build and staging paths
+  ansible.builtin.set_fact:
     hello_file_path: "{{ mpi_paths.hello }}/mpi_hello.c"
+    io500_controller_stage: "/tmp/tessi-io500-artifacts"
+    io500_artifact_name: "io500-{{ mpi_label }}.tar.gz"
+    io500_builder_artifact: "/tmp/tessi-io500-{{ mpi_label }}.tar.gz"
+    io500_remote_artifact: "/tmp/tessi-io500-{{ mpi_label }}.tar.gz"
 
-- name: Ensure MPI packages are installed
-  package:
+- name: Show the shared IO500 build plan
+  ansible.builtin.debug:
+    msg:
+      - "MPI module: {{ mpi.module }}"
+      - "MPI commands: {{ mpi_bin_path }}"
+      - "MPI-specific tools: {{ mpi_tools_bin_path }}"
+      - "Build client: {{ io500_build_host }}"
+
+# MPI packages and target directories are required at runtime, so these remain
+# per-host tasks.
+- name: Ensure MPI packages are installed on every client
+  ansible.builtin.package:
     name: "{{ mpi.mpi_packages.split() }}"
     state: present
   when: mpi.mpi_packages is defined
 
-- name: Ensure source and local MPI tool directories exist
-  file:
+- name: Ensure source and local MPI tool directories exist on every client
+  ansible.builtin.file:
     path: "{{ item }}"
     state: directory
-    mode: '0755'
+    mode: "0755"
   loop:
-    - "{{ mpi_paths.ior }}"
     - "{{ mpi_paths.hello }}"
     - "{{ mpi_paths.io500 }}"
     - "{{ mpi_tools_bin_path }}"
     - "{{ mpi_tools_lib_path }}"
 
-- name: Ensure build tools are present
-  package:
+- name: Ensure build tools are present on the selected build client
+  ansible.builtin.package:
     name: [git, autoconf, automake, libtool, make, gcc]
     state: present
+  run_once: true
+  delegate_to: "{{ io500_build_host }}"
 
-- name: Install configured IO500 build packages
+- name: Install configured IO500 build packages on the selected build client
   ansible.builtin.package:
     name: "{{ io500_build_packages }}"
     state: present
   when: io500_build_packages | default([]) | length > 0
+  run_once: true
+  delegate_to: "{{ io500_build_host }}"
 
-- name: Check if IOR binary exists
-  ansible.builtin.stat:
-    path: "{{ mpi_tools_bin_path }}/ior"
-  register: ior_binary
-
-- name: Build and install IOR if missing
-  when: not ior_binary.stat.exists
+- name: Build the MPI-specific IO500 artifact once
+  run_once: true
+  delegate_to: "{{ io500_build_host }}"
   block:
-    - name: Clone IOR
-      ansible.builtin.git:
-        repo: 'https://github.com/hpc/ior'
-        dest: "{{ mpi_paths.ior }}"
-        version: '54fd197c56dbb7a7706221acbe80198903405456'
-        update: false
+    - name: Create mpi_hello source on the build client
+      ansible.builtin.copy:
+        dest: "{{ hello_file_path }}"
+        mode: "0644"
+        content: |
+          #include <mpi.h>
+          #include <stdio.h>
+          int main(int argc, char** argv)
+          {
+              MPI_Init(NULL, NULL);
+              int world_size;
+              MPI_Comm_size(MPI_COMM_WORLD, &world_size);
+              int world_rank;
+              MPI_Comm_rank(MPI_COMM_WORLD, &world_rank);
+              char processor_name[MPI_MAX_PROCESSOR_NAME];
+              int name_len;
+              MPI_Get_processor_name(processor_name, &name_len);
+              printf("Hello world from processor %s, rank %d out of %d processors\n",
+                     processor_name, world_rank, world_size);
+              MPI_Finalize();
+          }
 
-    - name: Bootstrap IOR
-      ansible.builtin.command:
-        cmd: ./bootstrap
-        chdir: "{{ mpi_paths.ior }}"
-        creates: "{{ mpi_paths.ior }}/configure"
-
-    - name: Set IOR install path
-      ansible.builtin.set_fact:
-        ior_install: "{{ mpi_tools_prefix }}"
-
-    - name: Configure, Build, and Install IOR
+    - name: Compile mpi_hello once using the selected MPI
       ansible.builtin.include_tasks: ../tasks/run_with_mpi_module.yaml
       vars:
         mpi_module: "{{ mpi.module }}"
-        working_dir: "{{ mpi_paths.ior }}"
-        creates_path: "{{ mpi_tools_bin_path }}/ior"
+        creates_path: "{{ mpi_paths.hello }}/mpi_hello"
         commands: |
-          ./configure --prefix={{ ior_install }} {{ ior_config_option | default('') }}
-          make clean all install
+          mpicc {{ hello_file_path | quote }} -o {{ mpi_paths.hello | quote }}/mpi_hello
 
-- name: Create mpi_hello.c
-  copy:
-    dest: "{{ hello_file_path }}"
-    content: |
-      #include <mpi.h>
-      #include <stdio.h>
-      int main(int argc, char** argv)
-      {
-          MPI_Init(NULL, NULL);
-          int world_size;
-          MPI_Comm_size(MPI_COMM_WORLD, &world_size);
-          int world_rank;
-          MPI_Comm_rank(MPI_COMM_WORLD, &world_rank);
-          char processor_name[MPI_MAX_PROCESSOR_NAME];
-          int name_len;
-          MPI_Get_processor_name(processor_name, &name_len);
-          printf("Hello world from processor %s, rank %d out of %d processors\n",
-                 processor_name, world_rank, world_size);
-          MPI_Finalize();
-      }
-
-- name: Compile mpi_hello using MPI
-  ansible.builtin.include_tasks: ../tasks/run_with_mpi_module.yaml
-  vars:
-    mpi_module: "{{ mpi.module }}"
-    creates_path: "{{ mpi_tools_bin_path }}/mpi_hello"
-    commands: |
-      mpicc {{ hello_file_path }} -o {{ mpi_tools_bin_path }}/mpi_hello
-
-- name: Check if IO500 binary exists
-  ansible.builtin.stat:
-    path: "{{ mpi_tools_bin_path }}/io500"
-  register: io500_binary
-
-- name: Build and setup IO500 if missing
-  when: not io500_binary.stat.exists
-  block:
-    - name: Ensure IO500 source directory exists
-      ansible.builtin.file:
-        path: "{{ mpi_paths.io500 }}"
-        state: directory
-        mode: '0755'
-
-    - name: Check for an existing IO500 build
+    - name: Check for an existing IO500 repository on the build client
       ansible.builtin.stat:
-        path: "{{ mpi_paths.io500 }}/io500"
-      register: io500_source_binary
+        path: "{{ mpi_paths.io500 }}/.git"
+      register: io500_source_repository
 
-    - name: Clone IO500 Benchmark Repository when no existing build is available
+    - name: Clone IO500 on the build client
       ansible.builtin.git:
-        repo: 'https://github.com/IO500/io500.git'
+        repo: "https://github.com/IO500/io500.git"
         dest: "{{ mpi_paths.io500 }}"
-        version: 'main'
+        version: main
         update: false
-      when: not io500_source_binary.stat.exists
+      when: not io500_source_repository.stat.exists
 
-    - name: Compile IO500
+    - name: Check for a complete existing IO500 build on the build client
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      loop:
+        - "{{ mpi_paths.io500 }}/io500"
+        - "{{ mpi_paths.io500 }}/bin/ior"
+        - "{{ mpi_paths.io500 }}/bin/mdtest"
+      register: io500_prebuild_outputs
+
+    - name: Compile IO500 and its bundled IOR and mdtest once
       ansible.builtin.include_tasks: ../tasks/run_with_mpi_module.yaml
       vars:
         mpi_module: "{{ mpi.module }}"
         working_dir: "{{ mpi_paths.io500 }}"
-        creates_path: "{{ mpi_paths.io500 }}/io500"
         commands: |
           {{ io500_prepare_environment | default('') }}
+          export IOR_EXTRA_CONFIGURE_FLAGS={{ ior_config_option | default('') | quote }}
           ./prepare.sh
-      when: not io500_source_binary.stat.exists
+      when: >-
+        io500_prebuild_outputs.results
+        | selectattr('stat.exists', 'equalto', false)
+        | list
+        | length > 0
 
-    - name: Verify IO500 Binary Generation Layout
+    - name: Check required shared build outputs
       ansible.builtin.stat:
-        path: "{{ mpi_paths.io500 }}/io500"
-      register: io500_bin_check
+        path: "{{ item }}"
+      loop:
+        - "{{ mpi_paths.io500 }}/io500"
+        - "{{ mpi_paths.io500 }}/bin/ior"
+        - "{{ mpi_paths.io500 }}/bin/mdtest"
+        - "{{ mpi_paths.hello }}/mpi_hello"
+      register: io500_build_outputs
 
-    - name: Assert IO500 Compilation succeeded
-      ansible.builtin.fail:
-        msg: "The IO500 binary failed to compile under {{ mpi_paths.io500 }}/io500"
-      when: not io500_bin_check.stat.exists
+    - name: Require IO500, bundled IOR/mdtest, and mpi_hello build outputs
+      ansible.builtin.assert:
+        that:
+          - item.stat.exists
+          - item.stat.isreg
+          - item.stat.executable
+        fail_msg: "Required MPI build output {{ item.item }} is missing or not executable."
+      loop: "{{ io500_build_outputs.results }}"
+      loop_control:
+        label: "{{ item.item }}"
 
-    - name: Install IO500 into the local MPI tool directory
+    - name: Install bundled benchmark binaries on the build client
       ansible.builtin.copy:
-        src: "{{ mpi_paths.io500 }}/io500"
-        dest: "{{ mpi_tools_bin_path }}/io500"
+        src: "{{ item.src }}"
+        dest: "{{ mpi_tools_bin_path }}/{{ item.dest }}"
         remote_src: true
         mode: "0755"
+      loop:
+        - { src: "{{ mpi_paths.io500 }}/io500", dest: io500 }
+        - { src: "{{ mpi_paths.io500 }}/bin/ior", dest: ior }
+        - { src: "{{ mpi_paths.io500 }}/bin/mdtest", dest: mdtest }
+        - { src: "{{ mpi_paths.hello }}/mpi_hello", dest: mpi_hello }
 
-    - name: Make IO500 directory world-writable for regular users
-      ansible.builtin.file:
-        path: "{{ mpi_paths.io500 }}"
-        mode: '0777'
-        recurse: true
+    - name: Create the MPI-specific IO500 distribution archive
+      ansible.builtin.command:
+        argv:
+          - tar
+          - --exclude=.git
+          - --sort=name
+          - --mtime=@0
+          - --owner=0
+          - --group=0
+          - --numeric-owner
+          - -czf
+          - "{{ io500_builder_artifact }}"
+          - -C
+          - /usr/local/src
+          - "{{ mpi_paths.io500 | basename }}"
+          - "{{ mpi_paths.hello | basename }}"
+      # This is a transport artifact, not a persistent configuration change.
+      changed_when: false
 
-    - name: Deploy a baseline template io500 configuration file
-      ansible.builtin.shell: |
-        # IO500 comes with an initialization utility to generate baseline test matrix configurations
-        ./schema-export.sh io500-default-setup.ini
-      args:
-        chdir: "{{ mpi_paths.io500 }}"
-        creates: "{{ mpi_paths.io500 }}/io500-default-setup.ini"
-      when: false
+- name: Ensure controller staging directory exists
+  ansible.builtin.file:
+    path: "{{ io500_controller_stage }}"
+    state: directory
+    mode: "0700"
+  run_once: true
+  delegate_to: localhost
+  become: false
+
+- name: Fetch the shared IO500 artifact to the Ansible controller
+  ansible.builtin.fetch:
+    src: "{{ io500_builder_artifact }}"
+    dest: "{{ io500_controller_stage }}/{{ io500_artifact_name }}"
+    flat: true
+  run_once: true
+  delegate_to: "{{ io500_build_host }}"
+
+- name: Copy the shared IO500 artifact from the controller to every client
+  ansible.builtin.copy:
+    src: "{{ io500_controller_stage }}/{{ io500_artifact_name }}"
+    dest: "{{ io500_remote_artifact }}"
+    mode: "0600"
+  register: io500_artifact_copy
+
+- name: Check for the distributed IO500 working tree
+  ansible.builtin.stat:
+    path: "{{ mpi_paths.io500 }}/io500"
+  register: distributed_io500_binary
+
+- name: Expand the IO500 sources and executables on every client
+  ansible.builtin.unarchive:
+    src: "{{ io500_remote_artifact }}"
+    dest: /usr/local/src
+    remote_src: true
+    mode: "a+rX"
+  when: io500_artifact_copy.changed or not distributed_io500_binary.stat.exists
+
+- name: Install shared benchmark binaries for the selected MPI on every client
+  ansible.builtin.copy:
+    src: "{{ item.src }}"
+    dest: "{{ mpi_tools_bin_path }}/{{ item.dest }}"
+    remote_src: true
+    mode: "0755"
+  loop:
+    - { src: "{{ mpi_paths.io500 }}/io500", dest: io500 }
+    - { src: "{{ mpi_paths.io500 }}/bin/ior", dest: ior }
+    - { src: "{{ mpi_paths.io500 }}/bin/mdtest", dest: mdtest }
+    - { src: "{{ mpi_paths.hello }}/mpi_hello", dest: mpi_hello }
+
+- name: Make the IO500 working tree writable for benchmark users
+  ansible.builtin.file:
+    path: "{{ mpi_paths.io500 }}"
+    mode: "0777"
+    recurse: true
+
+- name: Verify installed MPI-specific benchmark commands on every client
+  ansible.builtin.stat:
+    path: "{{ mpi_tools_bin_path }}/{{ item }}"
+  loop:
+    - io500
+    - ior
+    - mdtest
+    - mpi_hello
+  register: installed_benchmark_commands
+
+- name: Require all MPI-specific benchmark commands on every client
+  ansible.builtin.assert:
+    that:
+      - item.stat.exists
+      - item.stat.isreg
+      - item.stat.executable
+    fail_msg: "Required command {{ item.item }} was not installed for {{ mpi.module }}."
+  loop: "{{ installed_benchmark_commands.results }}"
+  loop_control:
+    label: "{{ item.item }}"
