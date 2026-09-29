@@ -43,25 +43,36 @@
           )
         }}
 
-  - name: Generate known_hosts content (Computed Once)
-    set_fact:
-      all_inventory_identifiers: >-
-        {%- for host in groups['physical_hosts'] -%}
-        {{ host }} {{ hostvars[host]['ansible_default_ipv4']['address'] }} 
+  - name: Generate deterministic physical-host known_hosts content
+    ansible.builtin.set_fact:
+      physical_known_hosts_aliases: >-
+        {%- set ns = namespace(values=[]) -%}
+        {%- for host in groups['physical_hosts'] | sort -%}
+        {%-   set ns.values = ns.values + [host, hostvars[host].ansible_default_ipv4.address] -%}
+        {%-   if hostvars[host].ansible_fqdn is defined -%}
+        {%-     set ns.values = ns.values + [hostvars[host].ansible_fqdn] -%}
+        {%-   endif -%}
+        {%-   if hostvars[host].domain_suffix is defined -%}
+        {%-     set ns.values = ns.values + [host ~ '.' ~ hostvars[host].domain_suffix] -%}
+        {%-   endif -%}
         {%- endfor -%}
-      
-      known_hosts_content: |
-        {% for host in groups['physical_hosts'] %}
-        {% if hostvars[host]['ansible_ssh_host_key_ed25519_public'] is defined %}
-        # {{ host }}
-        {% set names = [host, hostvars[host]['ansible_default_ipv4']['address']] %}
-        {%- if hostvars[host]['domain_suffix'] is defined -%}
-        {%-   set _ = names.append(host ~ '.' ~ hostvars[host]['domain_suffix']) -%}
-        {%- endif -%}
-        {{ names | join(',') }} ssh-ed25519 {{ hostvars[host]['ansible_ssh_host_key_ed25519_public'] }}
+        {{ ns.values | unique | list }}
+      physical_known_hosts_content: |
+        {% for host in groups['physical_hosts'] | sort %}
+        {% if hostvars[host].ansible_ssh_host_key_ed25519_public is defined %}
+        {% set names = [host, hostvars[host].ansible_default_ipv4.address] %}
+        {% if hostvars[host].ansible_fqdn is defined and hostvars[host].ansible_fqdn != host %}
+        {%   set _ = names.append(hostvars[host].ansible_fqdn) %}
+        {% endif %}
+        {% if hostvars[host].domain_suffix is defined %}
+        {%   set _ = names.append(host ~ '.' ~ hostvars[host].domain_suffix) %}
+        {% endif %}
+        {{ names | unique | join(',') }} ssh-ed25519 {{ hostvars[host].ansible_ssh_host_key_ed25519_public }}
         {% endif %}
         {% endfor %}
     run_once: true
+    delegate_to: localhost
+    delegate_facts: true
 
   - name: Map each target file to its respective file system
     ansible.builtin.set_fact:
@@ -109,42 +120,28 @@
       current_mapping.fstype != 'nfs' or
       inventory_hostname == ansible_play_hosts[0]
 
-  - name: Purge stale keys from files
-    shell: |
-      for target in {{ all_inventory_identifiers }}; do
-        ssh-keygen -R "$target" -f "{{ item.path }}" > /dev/null 2>&1
-      done
-    become_user: "{{ item.owner }}"  # <--- Executes as 'root' or 'jbent' dynamically
+  - name: Remove legacy physical-host entries in one pass per file
+    ansible.builtin.replace:
+      path: "{{ item.path }}"
+      regexp: >-
+        ^(?=[^ ]*(?:^|,)(?:{{ hostvars['localhost'].physical_known_hosts_aliases
+        | map('regex_escape') | join('|') }})(?:,| ))[^\n]*\n?
+      replace: ""
+    become_user: "{{ item.owner }}"
     loop: "{{ target_files }}"
-    changed_when: false
     vars:
       current_mapping: "{{ (file_system_mappings | from_json) | selectattr('file_path', 'equalto', item.path) | first }}"
     when: >
       current_mapping.fstype != 'nfs' or
       inventory_hostname == ansible_play_hosts[0]
 
-  - name: Purge stale keys by IP
-    shell: ssh-keygen -R "{{ hostvars[host]['ansible_default_ipv4']['address'] }}" -f "{{ file.path }}" > /dev/null 2>&1
-    become_user: "{{ file.owner }}"
-    loop: "{{ target_files | product(groups['physical_hosts']) | list }}"
-    loop_control:
-      loop_var: pair
-    vars:
-      file: "{{ pair.0 }}"
-      host: "{{ pair.1 }}"
-      current_mapping: "{{ (file_system_mappings | from_json) | selectattr('file_path', 'equalto', file.path) | first }}"
-    changed_when: false
-    when: >
-      current_mapping.fstype != 'nfs' or
-      inventory_hostname == ansible_play_hosts[0]
-
   - name: Add cluster keys to files
-    blockinfile:
+    ansible.builtin.blockinfile:
       path: "{{ item.path }}"
       owner: "{{ item.owner }}"
       mode: '0644'
       marker: "# {mark} ANSIBLE MANAGED CLUSTER KEYS"
-      block: "{{ known_hosts_content }}"
+      block: "{{ hostvars['localhost'].physical_known_hosts_content | trim }}"
     become_user: "{{ item.owner }}"
     loop: "{{ target_files }}"
     vars:
@@ -564,4 +561,3 @@
                 name: sshd
                 state: restarted
       when: "'LimitMEMLOCK=infinity' not in memlock_check.stdout"
-

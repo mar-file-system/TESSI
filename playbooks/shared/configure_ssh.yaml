@@ -1,104 +1,119 @@
-# configure_ssh.yaml 
 ---
-- name: Define task marker variable
-  set_fact:
-    task_marker: "{{ (marker_dir | default('/tmp')) }}/passwordless_ssh.task"
-
-- name: Check if tasks have already been completed via existence of {{ task_marker }} 
-  stat:
-    path: "{{ task_marker }}"
-  register: marker_stat
-
-- name: Configure passwordless ssh across VMs if not already done
+- name: Configure passwordless SSH across VMs
   block:
-  - name: Gather facts
-    setup:
-    tags:
-      - always
+    - name: Gather facts
+      ansible.builtin.setup:
+      tags:
+        - always
 
-  - name: Remove old SSH key for host from known_hosts
-    ansible.builtin.known_hosts:
-      path: "{{ ansible_env.HOME }}/.ssh/known_hosts"
-      name: "{{ inventory_hostname }}"
-      state: absent
+    - name: Include wait_ssh task
+      ansible.builtin.include_tasks: wait_ssh.yaml
+      when: networking != 'mvpnet' and networking != 'none'
 
-  - name: Include wait_ssh task
-    include_tasks: wait_ssh.yaml
-    when: networking != 'mvpnet' and networking != 'none'
-
-  - name: Determine the target IP based on networking type
-    set_fact:
-      target_ip: >-
-        {%- if networking == 'mvpnet' -%}
-          {{ hostvars[inventory_hostname].mvpnet_ip | trim }}
-        {%- elif networking == 'none' -%}
-          {{ hostvars[inventory_hostname]['ansible_default_ipv4']['address'] }}
-        {%- else -%}
-          {{ hostvars[inventory_hostname].ansible_host | trim }}
-        {%- endif -%}
-    when: target_ip is not defined or target_ip | trim == ""
-
-  - name:
-    debug:
-      var: target_ip
-
-  - name: Collect SSH host key for this host at {{ target_ip }}
-    ansible.builtin.shell: |
-      ssh-keyscan {{ target_ip }}
-    register: ssh_hostkey
-
-  - block:
-    - name: Build cluster known_hosts blob (hostname + IP alias)
+    - name: Determine the target IP based on networking type
       ansible.builtin.set_fact:
-        known_hosts_blob: |
-          {%- for h in ansible_play_hosts %}
-          {%- for line in hostvars[h].ssh_hostkey.stdout_lines %}
-          {{ h }},{{ line }}
+        target_ip: >-
+          {%- if networking == 'mvpnet' -%}
+            {{ hostvars[inventory_hostname].mvpnet_ip | trim }}
+          {%- elif networking == 'none' -%}
+            {{ hostvars[inventory_hostname].ansible_default_ipv4.address }}
+          {%- else -%}
+            {{ hostvars[inventory_hostname].ansible_host | trim }}
+          {%- endif -%}
+      when: target_ip is not defined or target_ip | trim == ""
+
+    # Each host contributes only its own keys.  This keeps collection O(N),
+    # rather than having every host scan every other host.
+    - name: Collect SSH host keys for this host
+      ansible.builtin.command:
+        argv:
+          - ssh-keyscan
+          - -T
+          - "10"
+          - "{{ target_ip }}"
+      register: ssh_hostkey
+      changed_when: false
+      retries: 5
+      delay: 3
+      until:
+        - ssh_hostkey.rc == 0
+        - ssh_hostkey.stdout_lines | reject('match', '^#') | list | length > 0
+
+    # Build one deterministic payload on the controller.  delegate_facts is
+    # important here: every managed node reads the exact same assembled blob.
+    - name: Assemble deterministic cluster known_hosts payload
+      ansible.builtin.set_fact:
+        cluster_known_hosts_aliases: >-
+          {%- set ns = namespace(values=[]) -%}
+          {%- for host in ansible_play_hosts | sort -%}
+          {%-   set ns.values = ns.values + [host, hostvars[host].target_ip] -%}
+          {%-   if hostvars[host].ansible_fqdn is defined -%}
+          {%-     set ns.values = ns.values + [hostvars[host].ansible_fqdn] -%}
+          {%-   endif -%}
+          {%-   if hostvars[host].domain_suffix is defined -%}
+          {%-     set ns.values = ns.values + [host ~ '.' ~ hostvars[host].domain_suffix] -%}
+          {%-   endif -%}
+          {%- endfor -%}
+          {{ ns.values | unique | list }}
+        cluster_known_hosts_blob: |
+          {% for host in ansible_play_hosts | sort %}
+          {% set aliases = [host, hostvars[host].target_ip] %}
+          {% if hostvars[host].ansible_fqdn is defined and hostvars[host].ansible_fqdn != host %}
+          {%   set _ = aliases.append(hostvars[host].ansible_fqdn) %}
+          {% endif %}
+          {% if hostvars[host].domain_suffix is defined %}
+          {%   set _ = aliases.append(host ~ '.' ~ hostvars[host].domain_suffix) %}
+          {% endif %}
+          {% for key in hostvars[host].ssh_hostkey.stdout_lines | reject('match', '^#') | reject('equalto', '') | sort %}
+          {{ aliases | unique | join(',') }} {{ key.split(' ', 1)[1] }}
           {% endfor %}
-          {%- endfor %}
-    - name: Debug known_hosts content
-      debug:
-        var: known_hosts_blob
-    run_once: true
-    delegate_to: localhost
+          {% endfor %}
+      run_once: true
+      delegate_to: localhost
+      delegate_facts: true
 
-  - name: Install cluster known_hosts
-    ansible.builtin.copy:
-      dest: "{{ ansible_env.HOME }}/.ssh/known_hosts"
-      content: "{{ known_hosts_blob }}\n"
-      mode: "0644"
+    - name: Ensure SSH directory exists
+      ansible.builtin.file:
+        path: "{{ ansible_env.HOME }}/.ssh"
+        state: directory
+        mode: "0700"
 
-  # ---- expensive network / ssh testing (guarded) ----
-  - block:
-      - name: Ping other nodes (skip, tested in earlier phase)
-        ansible.builtin.command: "ping -c 3 {{ item }}"
-        loop: "{{ ansible_play_hosts }}"
-        when: false and inventory_hostname != item
-        ignore_errors: true
-        register: ping_result
+    - name: Check for an existing known_hosts file
+      ansible.builtin.stat:
+        path: "{{ ansible_env.HOME }}/.ssh/known_hosts"
+      register: cluster_known_hosts_file
 
-      - name: Test SSH using ansible ping
-        ansible.builtin.ping:
-        delegate_to: "{{ item }}"
-        loop: "{{ ansible_play_hosts }}"
-        when: inventory_hostname != item
-        ignore_errors: true
-        register: ssh_ping_result
+    # Migrate files produced by older TESSI releases.  One regex pass removes
+    # cluster aliases wherever they occur in the host field; unlike one
+    # ssh-keygen invocation per peer, this schedules only one task per host.
+    - name: Remove legacy cluster entries from known_hosts in one pass
+      ansible.builtin.replace:
+        path: "{{ ansible_env.HOME }}/.ssh/known_hosts"
+        regexp: >-
+          ^(?=[^ ]*(?:^|,)(?:{{ hostvars['localhost'].cluster_known_hosts_aliases
+          | map('regex_escape') | join('|') }})(?:,| ))[^\n]*\n?
+        replace: ""
+      when: cluster_known_hosts_file.stat.exists
 
-      - name: Test SSH manually (too slow, disable)
-        ansible.builtin.shell: >
-          ssh -o StrictHostKeyChecking=no
-          {{ ansible_user_id }}@{{ item }} echo SSH Success
-        loop: "{{ ansible_play_hosts }}"
-        when: false and inventory_hostname != item
-        ignore_errors: true
-        register: ssh_result
-    when: ansible_play_hosts | length < 17
-    tags: [test]
+    # A managed block replaces old TESSI keys in one operation while retaining
+    # any unrelated keys that the user already has in this file.
+    - name: Install cluster SSH host keys
+      ansible.builtin.blockinfile:
+        path: "{{ ansible_env.HOME }}/.ssh/known_hosts"
+        create: true
+        mode: "0644"
+        marker: "# {mark} TESSI MANAGED CLUSTER KEYS"
+        block: "{{ hostvars['localhost'].cluster_known_hosts_blob | trim }}"
 
-  # ---- marker ----
-  - name: Create task marker file {{ task_marker }}
-    ansible.builtin.file:
-      path: "{{ task_marker }}"
-      state: touch
-
+    # Keep exhaustive connectivity checks bounded to small development
+    # clusters.  Large clusters are validated by their normal MPI workload.
+    - name: Test SSH connectivity on small clusters
+      ansible.builtin.ping:
+      delegate_to: "{{ item }}"
+      loop: "{{ ansible_play_hosts }}"
+      when:
+        - ansible_play_hosts | length < 17
+        - inventory_hostname != item
+      ignore_errors: true
+      register: ssh_ping_result
+      tags: [test]
