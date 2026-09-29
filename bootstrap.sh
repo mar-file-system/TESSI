@@ -44,6 +44,7 @@ if [[ ! -f "$INV" && ! -d "$INV" ]]; then
   echo "Error: inventory file does not exist: $INV" >&2
   exit 1
 fi
+INV=$(realpath "$INV")
 
 if ! command -v ansible-playbook >/dev/null 2>&1; then
   if ! command -v sudo >/dev/null 2>&1 || ! sudo -n true 2>/dev/null; then
@@ -67,11 +68,6 @@ if ! command -v ansible-inventory >/dev/null 2>&1; then
   exit 1
 fi
 
-if ! command -v python3 >/dev/null 2>&1; then
-  echo "Error: python3 is required to read the normalized Ansible inventory." >&2
-  exit 1
-fi
-
 UTF8_LOCALE=$(locale -a 2>/dev/null | awk '
   tolower($0) ~ /^(c|en_us)\.utf-?8$/ && !found { found = $0 }
   END { if (found) print found }
@@ -86,48 +82,31 @@ else
   exit 1
 fi
 
-# Ask Ansible to normalize the inventory so this works for both a single
-# inventory file and an inventory directory. Parsing the YAML directly here
-# would not account for Ansible's inventory plugins or merged group variables.
-INVENTORY_JSON=$(mktemp "${TMPDIR:-/tmp}/tessi-inventory.XXXXXX")
-trap 'rm -f "$INVENTORY_JSON"' EXIT
-
-if ! ansible-inventory -i "$INV" --list --export > "$INVENTORY_JSON"; then
+if ! ansible-inventory -i "$INV" --list >/dev/null; then
   echo "Error: unable to read Ansible inventory: $INV" >&2
   exit 1
 fi
 
-if ! ANSIBLE_FORKS=$(python3 - "$INVENTORY_JSON" "$DEFAULT_ANSIBLE_FORKS" <<'PY'
-import json
-import sys
-
-inventory_path, default_forks = sys.argv[1:]
-with open(inventory_path, encoding="utf-8") as inventory_file:
-    inventory = json.load(inventory_file)
-
-value = inventory.get("all", {}).get("vars", {}).get(
-    "ansible_forks", int(default_forks)
-)
-if isinstance(value, bool) or not isinstance(value, (int, str)):
-    sys.exit(1)
-
-text = str(value)
-if not text.isdecimal() or int(text) <= 0:
-    sys.exit(1)
-
-print(int(text))
-PY
-); then
-  echo "Error: ansible_forks must be a positive integer (default: $DEFAULT_ANSIBLE_FORKS)." >&2
-  exit 1
-fi
-
+FORKS_DISCOVERY=$(mktemp "${TMPDIR:-/tmp}/tessi-forks.XXXXXX")
 MAKEFILE_DISCOVERY=$(mktemp "${TMPDIR:-/tmp}/tessi-makefile.XXXXXX")
-trap 'rm -f "$INVENTORY_JSON" "$MAKEFILE_DISCOVERY"' EXIT
+trap 'rm -f "$FORKS_DISCOVERY" "$MAKEFILE_DISCOVERY"' EXIT
+
+# ansible_forks is an Ansible magic variable and cannot be recovered from
+# normalized inventory output. Load the source file into a namespace instead,
+# then pass the validated value to the main play under a non-reserved name.
+ansible-playbook \
+  -i localhost, \
+  -e "tessi_inventory_source=$INV" \
+  -e "forks_discovery=$FORKS_DISCOVERY" \
+  -e "default_ansible_forks=$DEFAULT_ANSIBLE_FORKS" \
+  playbooks/bootstrap/read_settings.yaml
+
+ANSIBLE_FORKS=$(<"$FORKS_DISCOVERY")
 
 ansible-playbook \
   -i "$INV" \
   -f "$ANSIBLE_FORKS" \
+  -e "tessi_ansible_forks=$ANSIBLE_FORKS" \
   -e "makefile_discovery=$MAKEFILE_DISCOVERY" \
   $PREBOOT_PLAYBOOK \
   playbooks/bootstrap/bootstrap.yaml

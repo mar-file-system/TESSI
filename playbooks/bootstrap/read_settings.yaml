@@ -1,0 +1,41 @@
+---
+- name: Read TESSI bootstrap settings without Ansible magic-variable overrides
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Check whether the inventory source is a file
+      ansible.builtin.stat:
+        path: "{{ tessi_inventory_source }}"
+      register: tessi_inventory_source_stat
+
+    - name: Load the raw inventory file into an isolated namespace
+      ansible.builtin.include_vars:
+        file: "{{ tessi_inventory_source }}"
+        name: tessi_raw_inventory
+      when: tessi_inventory_source_stat.stat.isreg | default(false)
+
+    - name: Select the configured Ansible fork count
+      ansible.builtin.set_fact:
+        configured_ansible_forks: >-
+          {{ (tessi_raw_inventory | default({})).get('all', {}).get('vars', {}).get(
+               'ansible_forks', default_ansible_forks
+             ) }}
+
+    - name: Validate the configured Ansible fork count
+      ansible.builtin.assert:
+        that:
+          - (configured_ansible_forks | string) is match('^[1-9][0-9]*$')
+        fail_msg: >-
+          ansible_forks must be a positive integer
+          (default: {{ default_ansible_forks }}).
+
+    - name: Display the selected Ansible fork count
+      ansible.builtin.debug:
+        msg: "Using {{ configured_ansible_forks }} Ansible forks."
+
+    - name: Return the configured Ansible fork count to bootstrap.sh
+      ansible.builtin.copy:
+        content: "{{ configured_ansible_forks | int }}\n"
+        dest: "{{ forks_discovery }}"
+        mode: "0600"
