@@ -38,6 +38,7 @@ done
 [[ $# -eq 1 ]] || usage
 
 INV="$1"
+DEFAULT_ANSIBLE_FORKS=128
 
 if [[ ! -f "$INV" && ! -d "$INV" ]]; then
   echo "Error: inventory file does not exist: $INV" >&2
@@ -61,12 +62,23 @@ if ! command -v ansible-playbook >/dev/null 2>&1; then
   fi
 fi
 
-if locale -a 2>/dev/null | grep -qi '^C\.UTF-8$'; then
-  export LC_ALL=C.UTF-8
-  export LANG=C.UTF-8
-elif locale -a 2>/dev/null | grep -qi '^en_US\.utf8$'; then
-  export LC_ALL=en_US.UTF-8
-  export LANG=en_US.UTF-8
+if ! command -v ansible-inventory >/dev/null 2>&1; then
+  echo "Error: ansible-inventory is not installed." >&2
+  exit 1
+fi
+
+if ! command -v python3 >/dev/null 2>&1; then
+  echo "Error: python3 is required to read the normalized Ansible inventory." >&2
+  exit 1
+fi
+
+UTF8_LOCALE=$(locale -a 2>/dev/null | awk '
+  tolower($0) ~ /^(c|en_us)\.utf-?8$/ && !found { found = $0 }
+  END { if (found) print found }
+')
+if [[ -n "$UTF8_LOCALE" ]]; then
+  export LC_ALL="$UTF8_LOCALE"
+  export LANG="$UTF8_LOCALE"
 else
   echo "Error: no UTF-8 locale found. Ansible requires UTF-8." >&2
   echo "Available locales:" >&2
@@ -74,12 +86,48 @@ else
   exit 1
 fi
 
+# Ask Ansible to normalize the inventory so this works for both a single
+# inventory file and an inventory directory. Parsing the YAML directly here
+# would not account for Ansible's inventory plugins or merged group variables.
+INVENTORY_JSON=$(mktemp "${TMPDIR:-/tmp}/tessi-inventory.XXXXXX")
+trap 'rm -f "$INVENTORY_JSON"' EXIT
+
+if ! ansible-inventory -i "$INV" --list --export > "$INVENTORY_JSON"; then
+  echo "Error: unable to read Ansible inventory: $INV" >&2
+  exit 1
+fi
+
+if ! ANSIBLE_FORKS=$(python3 - "$INVENTORY_JSON" "$DEFAULT_ANSIBLE_FORKS" <<'PY'
+import json
+import sys
+
+inventory_path, default_forks = sys.argv[1:]
+with open(inventory_path, encoding="utf-8") as inventory_file:
+    inventory = json.load(inventory_file)
+
+value = inventory.get("all", {}).get("vars", {}).get(
+    "ansible_forks", int(default_forks)
+)
+if isinstance(value, bool) or not isinstance(value, (int, str)):
+    sys.exit(1)
+
+text = str(value)
+if not text.isdecimal() or int(text) <= 0:
+    sys.exit(1)
+
+print(int(text))
+PY
+); then
+  echo "Error: ansible_forks must be a positive integer (default: $DEFAULT_ANSIBLE_FORKS)." >&2
+  exit 1
+fi
+
 MAKEFILE_DISCOVERY=$(mktemp "${TMPDIR:-/tmp}/tessi-makefile.XXXXXX")
-trap 'rm -f "$MAKEFILE_DISCOVERY"' EXIT
+trap 'rm -f "$INVENTORY_JSON" "$MAKEFILE_DISCOVERY"' EXIT
 
 ansible-playbook \
   -i "$INV" \
-  -f 128 \
+  -f "$ANSIBLE_FORKS" \
   -e "makefile_discovery=$MAKEFILE_DISCOVERY" \
   $PREBOOT_PLAYBOOK \
   playbooks/bootstrap/bootstrap.yaml
