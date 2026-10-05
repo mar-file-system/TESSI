@@ -1,0 +1,169 @@
+---
+# Usage: ansible-playbook -i INVENTORY fio-filesystem-benchmark.yml -e fio_path=/mnt/my-filesystem
+# The original run.sh defaults create 16 * 64GB files per node. Ensure the
+# filesystem has enough free space. The temporary files are removed afterward.
+- name: Run filesystem FIO on every non-client node
+  hosts: "all:!clients"
+  gather_facts: false
+  become: true
+  vars:
+    # fio_path is intentionally required; set it in inventory or with -e.
+    fio_numjobs: 16
+    fio_filesize: 64GB
+    fio_runtime: 120
+    fio_sequential_bs: 1M
+    fio_random_bs: 4k
+    fio_write_iodepth: 8
+    fio_read_iodepth: 16
+
+  tasks:
+    - name: Require an absolute filesystem path
+      ansible.builtin.assert:
+        that:
+          - fio_path is defined
+          - fio_path | default('') is match('^/')
+        fail_msg: Set fio_path to an absolute path on the existing filesystem.
+
+    - name: Check the target directory
+      ansible.builtin.stat:
+        path: "{{ fio_path }}"
+      register: fio_target
+
+    - name: Require an existing directory
+      ansible.builtin.assert:
+        that: fio_target.stat.isdir | default(false)
+        fail_msg: "{{ fio_path }} must already be a directory on the target filesystem."
+
+    - name: Install fio
+      ansible.builtin.package:
+        name: fio
+        state: present
+      become: true
+
+    - name: Check FIO is installed
+      ansible.builtin.command:
+        argv: [fio, --version]
+      changed_when: false
+
+    - name: Run workloads and clean up their test files
+      block:
+        - name: Create a fresh test directory on the target filesystem
+          ansible.builtin.tempfile:
+            state: directory
+            path: "{{ fio_path }}"
+            prefix: fio-ansible-
+          register: fio_workdir
+
+        # Like run.sh, this writes the complete file set before timing starts.
+        - name: Pre-create 64GB files for each FIO job
+          ansible.builtin.command:
+            argv:
+              - fio
+              - --output=/dev/null
+              - --direct=1
+              - --rw=write
+              - --numjobs={{ fio_numjobs }}
+              - --group_reporting
+              - --ioengine=libaio
+              - --bs={{ fio_sequential_bs }}
+              - --randrepeat=0
+              - --iodepth={{ fio_write_iodepth }}
+              - --name=job
+              - --directory={{ fio_workdir.path }}
+              - --filesize={{ fio_filesize }}
+              - --output-format=json
+          async: 86400
+          poll: 30
+
+        - name: Run timed workloads in the original order
+          ansible.builtin.command:
+            argv:
+              - fio
+              - --direct=1
+              - --rw={{ item.rw }}
+              - --numjobs={{ fio_numjobs }}
+              - --group_reporting
+              - --ioengine=libaio
+              - --bs={{ item.bs }}
+              - --randrepeat=0
+              - --time_based
+              - --runtime={{ fio_runtime }}
+              - --iodepth={{ item.iodepth }}
+              - --name=job
+              - --directory={{ fio_workdir.path }}
+              - --filesize={{ fio_filesize }}
+              - --output-format=json
+          loop:
+            - {rw: write, bs: "{{ fio_sequential_bs }}", iodepth: "{{ fio_write_iodepth }}"}
+            - {rw: randwrite, bs: "{{ fio_random_bs }}", iodepth: "{{ fio_write_iodepth }}"}
+            - {rw: read, bs: "{{ fio_sequential_bs }}", iodepth: "{{ fio_read_iodepth }}"}
+            - {rw: randread, bs: "{{ fio_random_bs }}", iodepth: "{{ fio_read_iodepth }}"}
+          loop_control:
+            label: "{{ item.rw }}"
+          async: 3600
+          poll: 30
+          register: fio_results
+
+        - name: Extract the four whole-node measurements
+          ansible.builtin.set_fact:
+            fio_metrics:
+              read: "{{ (fio_results.results[2].stdout | from_json).jobs[0].read.bw_bytes | float }}"
+              write: "{{ (fio_results.results[0].stdout | from_json).jobs[0].write.bw_bytes | float }}"
+              randread: "{{ (fio_results.results[3].stdout | from_json).jobs[0].read.iops | float }}"
+              randwrite: "{{ (fio_results.results[1].stdout | from_json).jobs[0].write.iops | float }}"
+      always:
+        - name: Remove only this run's temporary test directory
+          ansible.builtin.file:
+            path: "{{ fio_workdir.path }}"
+            state: absent
+          when: fio_workdir is defined and fio_workdir.path is defined
+
+- name: Summarize the cluster results on the controller
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    fio_hosts: "{{ groups['all'] | difference(groups['clients'] | default([])) | sort }}"
+  tasks:
+    - name: Require at least one non-client node
+      ansible.builtin.assert:
+        that: fio_hosts | length > 0
+        fail_msg: The inventory contains no nodes outside the clients group.
+
+    - name: Require a measurement from every selected node
+      ansible.builtin.assert:
+        that: hostvars[item].fio_metrics is defined
+        fail_msg: "No complete result from {{ item }}; cannot report a cluster aggregate."
+      loop: "{{ fio_hosts }}"
+
+    - name: Collect measurements by metric
+      ansible.builtin.set_fact:
+        fio_values: "{{ fio_values | default({}) | combine({item: fio_hosts | map('extract', hostvars, 'fio_metrics') | map(attribute=item) | map('float') | list}) }}"
+      loop: [read, write, randread, randwrite]
+
+    - name: Calculate sum, mean, minimum, and maximum
+      ansible.builtin.set_fact:
+        fio_summary: "{{ fio_summary | default({}) | combine({item.label: {'unit': item.unit, 'sum': ((values | sum) / item.scale) | round(2), 'mean': (((values | sum) / (values | length)) / item.scale) | round(2), 'min': ((values | min) / item.scale) | round(2), 'min_node': fio_hosts[values.index(values | min)], 'max': ((values | max) / item.scale) | round(2), 'max_node': fio_hosts[values.index(values | max)]}}) }}"
+      vars:
+        values: "{{ fio_values[item.key] }}"
+      loop:
+        - {key: read, label: read, unit: MB/s, scale: 1000000}
+        - {key: write, label: write, unit: MB/s, scale: 1000000}
+        - {key: randread, label: randread, unit: kIOPS, scale: 1000}
+        - {key: randwrite, label: randwrite, unit: kIOPS, scale: 1000}
+      loop_control:
+        label: "{{ item.label }}"
+
+    - name: Show cluster and per-node statistics
+      ansible.builtin.debug:
+        msg:
+          nodes: "{{ fio_hosts | length }}"
+          results: "{{ fio_summary }}"
+
+    - name: Save cluster and per-node statistics
+      ansible.builtin.copy:
+        dest: "{{ fio_output }}"
+        content: |
+          {{ {'nodes': fio_hosts | length, 'results': fio_summary} | to_nice_yaml }}
+        mode: '0644'
+      when: fio_output is defined

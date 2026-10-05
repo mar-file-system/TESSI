@@ -1,0 +1,189 @@
+---
+- name: Install fio with libaio from source
+  become: true
+  vars:
+    fio_version: "3.42"
+    fio_prefix: "/usr/local"
+    libaio_version: "0.3.113"
+    libaio_prefix: "/usr/local"
+
+    fio_tarball: "/tmp/fio-{{ fio_version }}.tar.gz"
+    fio_src_dir: "/tmp/fio-{{ fio_version }}"
+    fio_url: "https://brick.kernel.dk/snaps/fio-{{ fio_version }}.tar.gz"
+
+    libaio_tarball: "/tmp/libaio-{{ libaio_version }}.tar.gz"
+    libaio_src_dir: "/tmp/libaio-{{ libaio_version }}"
+    libaio_url: "https://releases.pagure.org/libaio/libaio-0.3.113.tar.gz"
+
+    build_packages:
+      Debian:
+        - build-essential
+      RedHat:
+        - gcc
+        - make
+      Suse:
+        - gcc
+        - make
+      Archlinux:
+        - base-devel
+      Alpine:
+        - build-base
+        - linux-headers
+
+  block:
+
+    #####################################################################
+    # Build prerequisites
+    #####################################################################
+
+    - name: Verify supported OS family
+      ansible.builtin.assert:
+        that:
+          - ansible_facts.os_family in build_packages
+        fail_msg: >-
+          Unsupported OS family '{{ ansible_facts.os_family }}'
+          (package manager '{{ ansible_facts.pkg_mgr }}').
+
+    - name: Refresh apt cache
+      ansible.builtin.apt:
+        update_cache: true
+        cache_valid_time: 3600
+      when: ansible_facts.os_family == "Debian"
+
+    - name: Install compiler and build tools
+      ansible.builtin.package:
+        name: "{{ build_packages[ansible_facts.os_family] }}"
+        state: present
+
+    #####################################################################
+    # libaio
+    #####################################################################
+
+    - name: Download libaio source
+      ansible.builtin.get_url:
+        url: "{{ libaio_url }}"
+        dest: "{{ libaio_tarball }}"
+        mode: "0644"
+
+    - name: Remove old libaio source directory
+      ansible.builtin.file:
+        path: "{{ libaio_src_dir }}"
+        state: absent
+
+    - name: Create libaio source directory
+      ansible.builtin.file:
+        path: "{{ libaio_src_dir }}"
+        state: directory
+        mode: "0755"
+
+    - name: Extract libaio source
+      ansible.builtin.unarchive:
+        src: "{{ libaio_tarball }}"
+        dest: "{{ libaio_src_dir }}"
+        remote_src: true
+        extra_opts:
+          - --strip-components=1
+
+    - name: Build libaio
+      ansible.builtin.command:
+        cmd: "make -j{{ ansible_facts.processor_vcpus | default(4) }}"
+        chdir: "{{ libaio_src_dir }}"
+
+    - name: Install libaio
+      ansible.builtin.command:
+        cmd: "make install prefix={{ libaio_prefix }}"
+        chdir: "{{ libaio_src_dir }}"
+
+    #
+    # Make /usr/local/lib visible to the dynamic loader.
+    #
+    - name: Add /usr/local/lib to dynamic linker configuration
+      ansible.builtin.copy:
+        dest: /etc/ld.so.conf.d/local-libaio.conf
+        content: |
+          {{ libaio_prefix }}/lib
+        mode: "0644"
+      when: ansible_facts.os_family != "Alpine"
+
+    - name: Refresh dynamic linker cache
+      ansible.builtin.command: ldconfig
+      changed_when: false
+      when: ansible_facts.os_family != "Alpine"
+
+    #####################################################################
+    # fio
+    #####################################################################
+
+    - name: Download fio source
+      ansible.builtin.get_url:
+        url: "{{ fio_url }}"
+        dest: "{{ fio_tarball }}"
+        mode: "0644"
+
+    - name: Remove old fio source directory
+      ansible.builtin.file:
+        path: "{{ fio_src_dir }}"
+        state: absent
+
+    - name: Extract fio source
+      ansible.builtin.unarchive:
+        src: "{{ fio_tarball }}"
+        dest: /tmp
+        remote_src: true
+
+    - name: Configure fio
+      ansible.builtin.command:
+        cmd: "./configure --prefix={{ fio_prefix }}"
+        chdir: "{{ fio_src_dir }}"
+      environment:
+        CFLAGS: "-I{{ libaio_prefix }}/include"
+        LDFLAGS: "-L{{ libaio_prefix }}/lib -Wl,-rpath,{{ libaio_prefix }}/lib"
+
+    - name: Build fio
+      ansible.builtin.command:
+        cmd: "make -j{{ ansible_facts.processor_vcpus | default(4) }}"
+        chdir: "{{ fio_src_dir }}"
+
+    - name: Install fio
+      ansible.builtin.command:
+        cmd: make install
+        chdir: "{{ fio_src_dir }}"
+
+    #####################################################################
+    # Verify
+    #####################################################################
+
+    - name: Verify fio version
+      ansible.builtin.command:
+        cmd: "{{ fio_prefix }}/bin/fio --version"
+      register: fio_version_output
+      changed_when: false
+
+    - name: Verify libaio engine is available
+      ansible.builtin.shell: |
+        set -o pipefail
+        {{ fio_prefix }}/bin/fio --enghelp | grep -w libaio
+      args:
+        executable: /bin/bash
+      changed_when: false
+      register: fio_libaio_output
+
+    - name: Show installed fio
+      ansible.builtin.debug:
+        msg:
+          - "{{ fio_version_output.stdout }}"
+          - "libaio engine: {{ fio_libaio_output.stdout }}"
+
+    #####################################################################
+    # Cleanup
+    #####################################################################
+
+    - name: Remove build directories and tarballs
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - "{{ fio_src_dir }}"
+        - "{{ fio_tarball }}"
+        - "{{ libaio_src_dir }}"
+        - "{{ libaio_tarball }}"
