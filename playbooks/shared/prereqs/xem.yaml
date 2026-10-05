@@ -159,9 +159,9 @@
   changed_when: true
   when: xem_storage_mode == 'raw-devices'
 
-- name: Define optional five-disk NVMe RAID0 layout
+- name: Define NVMe RAID0 configuration
   ansible.builtin.set_fact:
-    nvme_raid_members: >-
+    nvme_raid_candidate_members: >-
       {{ local_storage_raid_members | default([
            '/dev/nvme0n1',
            '/dev/nvme1n1',
@@ -169,6 +169,7 @@
            '/dev/nvme3n1',
            '/dev/nvme4n1'
          ]) }}
+    nvme_raid_minimum_members: 4
     nvme_raid_device: >-
       {{ local_storage if xem_storage_is_block_device | bool else '/dev/md0' }}
     mdadm_config_path: >-
@@ -177,33 +178,46 @@
          else '/etc/mdadm/mdadm.conf' }}
   when: xem_storage_mode != 'raw-devices'
 
-- name: Check whether all five NVMe disks exist
-  ansible.builtin.shell: |
-    set -e
-    {% for dev in nvme_raid_members %}
-    test -b {{ dev | quote }}
-    {% endfor %}
-  args:
-    executable: /bin/bash
-  register: nvme_raid_probe
+- name: Probe candidate NVMe RAID members
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  loop: "{{ nvme_raid_candidate_members }}"
+  loop_control:
+    label: "{{ item }}"
+  register: nvme_raid_member_checks
   changed_when: false
-  failed_when: false
   when:
     - xem_storage_enabled | bool
     - xem_storage_mode != 'raw-devices'
 
-- name: Record whether the five-disk NVMe RAID0 layout is available
+- name: Select available NVMe RAID members
   ansible.builtin.set_fact:
-    nvme_raid_available: "{{ (nvme_raid_probe.rc | default(1)) == 0 }}"
+    nvme_raid_members: >-
+      {{
+        nvme_raid_member_checks.results
+        | default([])
+        | selectattr('stat.isblk', 'defined')
+        | selectattr('stat.isblk')
+        | map(attribute='item')
+        | list
+      }}
   when: xem_storage_mode != 'raw-devices'
 
-- name: Require every RAID0 member when preparing an unmounted block device
+- name: Record whether enough NVMe RAID members are available
+  ansible.builtin.set_fact:
+    nvme_raid_ready: >-
+      {{ (nvme_raid_members | length) >= (nvme_raid_minimum_members | int) }}
+  when: xem_storage_mode != 'raw-devices'
+
+- name: Require enough RAID0 members when preparing an unmounted block device
   ansible.builtin.assert:
     that:
-      - nvme_raid_available | bool
+      - nvme_raid_ready | bool
     fail_msg: >-
-      Cannot create {{ nvme_raid_device }} because one or more configured
-      RAID0 members are missing: {{ nvme_raid_members | join(', ') }}.
+      Cannot create {{ nvme_raid_device }} because only
+      {{ nvme_raid_members | length }} usable NVMe RAID0 members are available;
+      at least {{ nvme_raid_minimum_members }} are required.
+      Candidates: {{ nvme_raid_candidate_members | join(', ') }}.
   when:
     - xem_storage_enabled | bool
     - xem_storage_mode != 'raw-devices'
@@ -216,10 +230,10 @@
   failed_when: false
   when: xem_mount_storage | bool
 
-- name: Check whether the active mount is already the expected five-disk RAID
+- name: Check whether the active mount already uses the expected NVMe RAID members
   when:
     - xem_storage_mode != 'raw-devices'
-    - nvme_raid_available | bool
+    - nvme_raid_ready | bool
     - active_mount.rc | default(1) == 0
     - xem_mount_storage | bool
   ansible.builtin.shell: |
@@ -261,7 +275,7 @@
   failed_when: false
   when:
     - xem_storage_mode != 'raw-devices'
-    - nvme_raid_available | bool
+    - nvme_raid_ready | bool
 
 - name: Determine whether storage provisioning can be skipped
   ansible.builtin.set_fact:
@@ -278,9 +292,9 @@
             (active_mount.rc | default(1) == 0)
             and
             (
-              ((nvme_raid_available | bool) and (active_mount_is_expected_raid.rc | default(1) == 0))
+              ((nvme_raid_ready | bool) and (active_mount_is_expected_raid.rc | default(1) == 0))
               or
-              (not (nvme_raid_available | bool))
+              (not (nvme_raid_ready | bool))
             )
           )
         )
@@ -290,7 +304,7 @@
   ansible.builtin.debug:
     msg: >-
       Mount {{ nvme_mount }} is already active on {{ active_mount.stdout }}
-      {% if nvme_raid_available | bool %}and uses all five expected NVMe RAID members{% endif %}.
+      {% if nvme_raid_ready | bool %}and uses the expected NVMe RAID members{% endif %}.
       Skipping provisioning.
   when:
     - storage_provisioning_complete | bool
@@ -314,8 +328,8 @@
     - not (storage_provisioning_complete | bool)
   become: true
   block:
-    - name: Build RAID0 from all five NVMe disks when available
-      when: nvme_raid_available | bool
+    - name: Build RAID0 from available NVMe disks
+      when: nvme_raid_ready | bool
       block:
         - name: Install software RAID tooling
           ansible.builtin.package:
@@ -459,7 +473,7 @@
 
     - name: Select or create a partition on the configured fallback disk
       when:
-        - not (nvme_raid_available | bool)
+        - not (nvme_raid_ready | bool)
         - xem_mount_storage | bool
       block:
         - name: Deploy topology analysis engine

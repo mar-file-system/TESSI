@@ -99,6 +99,7 @@
           - reset
         chdir: "{{ lab_source_dir }}"
       when: cleanup_inventory_file | length > 0
+      ignore_errors: true
 
 - name: Setup SSH across the cluster
   hosts: all
@@ -128,7 +129,7 @@
             mode: '0644'
 
       # Only execute this block if the marker file does NOT exist
-      when: not ssh_marker.stat.exists # or true # always do it because if we added hosts, then everyone must do
+      when: not ssh_marker.stat.exists or true # always do it because if we added hosts, then everyone must do
       tags: setup
 
 - name: Discover the InfiniBand data-plane address on every pNFS node
@@ -311,7 +312,7 @@
         loop_var: pnfs_lab_stage
         label: "{{ pnfs_lab_stage.desc }} ({{ pnfs_lab_stage.cmd }})"
 
-- name: Enable NFSD direct I/O on DS nodes, check for RDMA transport
+- name: Enable NFSD direct I/O on DS nodes, check for RDMA transport, turn on async NFS writes
   hosts: ds
   become: true
   gather_facts: false
@@ -323,6 +324,17 @@
         src: debugfs
         fstype: debugfs
         state: mounted
+
+    - name: Change NFS exports from sync to async
+      ansible.builtin.replace:
+        path: /etc/exports
+        regexp: '(^|\W)sync(?=,|\)|\s|$)'
+        replace: '\1async'
+      register: exports_async
+
+    - name: Reload NFS exports
+      ansible.builtin.command: exportfs -ra
+      when: exports_async.changed
 
     - name: Ensure NFS server is running
       ansible.builtin.systemd:

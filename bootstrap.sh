@@ -79,9 +79,10 @@ trap 'rm -f "$MAKEFILE_DISCOVERY"' EXIT
 
 ansible-playbook \
   -i "$INV" \
+  -f 128 \
   -e "makefile_discovery=$MAKEFILE_DISCOVERY" \
-  $PREBOOT_PLAYBOOK playbooks/bootstrap/bootstrap.yaml
-exit 0
+  $PREBOOT_PLAYBOOK \
+  playbooks/bootstrap/bootstrap.yaml
 
 if [[ -n "$MAKE_TARGETS" ]]; then
   if [[ ! -s "$MAKEFILE_DISCOVERY" ]]; then
@@ -96,5 +97,5 @@ if [[ -n "$MAKE_TARGETS" ]]; then
     exit 1
   fi
 
-  make -C "$(dirname "$MAKEFILE")" $MAKE_TARGETS $VERBOSE 
+  make -C "$(dirname "$MAKEFILE")" $MAKE_TARGETS $VERBOSE
 fi
