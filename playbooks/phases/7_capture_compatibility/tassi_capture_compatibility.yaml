@@ -1,5 +1,6 @@
+
 ---
-# Play 1: Out-of-band collection across the first node of your active group
+# Play 1: Collect facts from the first physical host
 - name: Harvest Dynamic Facts From Target Infrastructure
   hosts: "{{ groups['physical_hosts'][0] }}"
   gather_facts: true
@@ -8,37 +9,60 @@
     - name: Verify cluster connectivity and cache system variables
       ansible.builtin.ping:
 
-# Play 2: Single-node execution on the control node to process the matrix
-- name: Compile and Write Root Compatibility Matrix
+# Play 2: Update the local compatibility matrix
+- name: Compile and Write Local Compatibility Matrix
   hosts: localhost
   gather_facts: false
   any_errors_fatal: true
   vars:
-    # Adjust relative path defaults if needed to match repository root
-    tessi_compatibility_matrix_path: "{{ playbook_dir }}/../../../compatibility.yaml"
+    tessi_root: "{{ playbook_dir }}/../../.."
+    tessi_compatibility_shared_path: "{{ tessi_root }}/compatibility.yaml"
+    tessi_compatibility_matrix_path: "{{ tessi_root }}/compatibility.local.yaml"
 
   tasks:
-    - name: Gather Local Git and User Details
-      block:
-        - name: Get latest git commit hash
-          ansible.builtin.command: "git rev-parse --short HEAD"
-          register: git_commit
-          changed_when: false
+    - name: Get latest git commit hash
+      ansible.builtin.command:
+        cmd: git rev-parse --short HEAD
+        chdir: "{{ tessi_root }}"
+      register: git_commit
+      changed_when: false
 
-        - name: Identify active local user running the playbook
-          ansible.builtin.command: "whoami"
-          register: local_user
-          changed_when: false
+    - name: Identify active local user
+      ansible.builtin.command: whoami
+      register: local_user
+      changed_when: false
 
-    - name: Read existing matrix dictionary from repo root
+    - name: Check for shared compatibility matrix
+      ansible.builtin.stat:
+        path: "{{ tessi_compatibility_shared_path }}"
+      register: shared_matrix_file
+
+    - name: Check for local compatibility matrix
+      ansible.builtin.stat:
+        path: "{{ tessi_compatibility_matrix_path }}"
+      register: local_matrix_file
+
+    - name: Read shared compatibility matrix
+      ansible.builtin.include_vars:
+        file: "{{ tessi_compatibility_shared_path }}"
+        name: shared_data
+      when: shared_matrix_file.stat.exists
+
+    - name: Read local compatibility matrix
       ansible.builtin.include_vars:
         file: "{{ tessi_compatibility_matrix_path }}"
-        name: existing_data
-      failed_when: false
+        name: local_data
+      when: local_matrix_file.stat.exists
 
-    - name: Extract base matrix configuration to a dictionary object
+    - name: Merge shared and local compatibility matrices
       ansible.builtin.set_fact:
-        base_matrix_dict: "{{ (existing_data.compatibility_matrix is defined and existing_data.compatibility_matrix is string) | ternary(existing_data.compatibility_matrix | from_yaml, existing_data.compatibility_matrix | default({}, true)) }}"
+        base_matrix_dict: >-
+          {{
+            (shared_data.compatibility_matrix | default({}))
+            | combine(
+                local_data.compatibility_matrix | default({})
+              )
+          }}
 
     - name: Build new matrix entry from the primary physical host
       ansible.builtin.set_fact:
@@ -46,18 +70,15 @@
           {% set target_host = groups['physical_hosts'][0] %}
           {% set hvars = hostvars[target_host] %}
 
-          {# Extract parameters directly without a loop #}
           {% set target_system = hvars['system']['type'] %}
           {% set target_config = hvars['config_file'] %}
           {% set target_network = hvars['network']['type'] %}
 
-          {# Dynamic system facts gathered from the host #}
           {% set current_distro = hvars.ansible_distribution %}
           {% set current_version = hvars.ansible_distribution_major_version %}
           {% set current_kernel = hvars.ansible_kernel %}
           {% set current_arch = hvars.ansible_architecture %}
 
-          {# Construct the single compound entry #}
           {% set compound_key = target_system ~ '.' ~ target_network ~ '.' ~ (current_distro | lower) ~ '.' ~ current_version %}
           {% set node_details = {
             'system': target_system,
@@ -75,39 +96,20 @@
             'timestamp': now(fmt='%Y-%m-%d %H:%M:%S')
           } %}
 
-          {# Output as a single-entry dictionary payload #}
           {{ {compound_key: node_details} | to_json }}
 
-    - name: DEBUG - State of Matrix Variables Before Combining
-      ansible.builtin.debug:
-        msg:
-          - "================= FILE CONTENT FROM DISK ================="
-          - "Raw File Content Variable: {{ existing_data.compatibility_matrix | default('NOT_DEFINED') }}"
-          - "File Content Type: {{ existing_data.compatibility_matrix | type_debug }}"
-          - "Typecast Base Dict Variable: {{ base_matrix_dict }}"
-          - "Typecast Base Dict Type: {{ base_matrix_dict | type_debug }}"
-          - "================== NEW ENTRIES TO ADD =================="
-          - "Raw Loop JSON String: {{ new_entries_json }}"
-          - "Parsed Loop Dict Type: {{ (new_entries_json | from_json) | type_debug }}"
-
-    - name: Atomic Merge Data Structures
+    - name: Merge current experiment into compatibility matrix
       ansible.builtin.set_fact:
-        current_matrix: "{{ base_matrix_dict | combine(new_entries_json | from_json) }}"
+        current_matrix: >-
+          {{ base_matrix_dict | combine(new_entries_json | from_json) }}
 
-    - name: DEBUG - Result of Successful Merge
-      ansible.builtin.debug:
-        msg:
-          - "================= COMBINED MATRIX OBJECT ================="
-          - "Combined Output: {{ current_matrix }}"
-          - "Combined Output Type: {{ current_matrix | type_debug }}"
-
-    - name: Generate the verified compatibility template string
+    - name: Generate compatibility matrix content
       ansible.builtin.set_fact:
         matrix_file_content: |
           # AUTOGENERATED. DO NOT EDIT.
           {{ {'compatibility_matrix': current_matrix} | to_nice_yaml(indent=2) }}
 
-    - name: Commit updated matrix dictionary back to repository root
+    - name: Write local compatibility matrix
       ansible.builtin.copy:
         content: "{{ matrix_file_content }}"
         dest: "{{ tessi_compatibility_matrix_path }}"
@@ -116,3 +118,4 @@
     - name: Display experiment results directory
       ansible.builtin.debug:
         msg: "Experiment results are in {{ result_dir }}"
+
