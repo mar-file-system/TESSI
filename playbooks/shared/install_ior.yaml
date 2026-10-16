@@ -7,6 +7,11 @@
 - name: Load OS-specific IO500 build variables
   ansible.builtin.include_vars: "../vars/io500_{{ ansible_os_family }}.yml"
 
+# Override io500_version in inventory or with -e to select another tested version.
+- name: Select the IO500 version
+  ansible.builtin.set_fact:
+    io500_version: "{{ io500_version | default('io500-sc26_v2') }}"
+
 - name: Require at least one client for the shared IO500 build
   ansible.builtin.assert:
     that:
@@ -60,6 +65,7 @@
       - "MPI commands: {{ mpi_bin_path }}"
       - "MPI-specific tools: {{ mpi_tools_bin_path }}"
       - "Build client: {{ io500_build_host }}"
+      - "IO500 version: {{ io500_version }}"
 
 # MPI packages and target directories are required at runtime, so these remain
 # per-host tasks.
@@ -129,18 +135,13 @@
         commands: |
           mpicc {{ hello_file_path | quote }} -o {{ mpi_paths.hello | quote }}/mpi_hello
 
-    - name: Check for an existing IO500 repository on the build client
-      ansible.builtin.stat:
-        path: "{{ mpi_paths.io500 }}/.git"
-      register: io500_source_repository
-
-    - name: Clone IO500 on the build client
+    - name: "Check out IO500 {{ io500_version }} on the build client"
       ansible.builtin.git:
         repo: "https://github.com/IO500/io500.git"
         dest: "{{ mpi_paths.io500 }}"
-        version: main
-        update: false
-      when: not io500_source_repository.stat.exists
+        version: "{{ io500_version }}"
+        update: true
+      register: io500_source_checkout
 
     - name: Check for a complete existing IO500 build on the build client
       ansible.builtin.stat:
@@ -151,7 +152,7 @@
         - "{{ mpi_paths.io500 }}/bin/mdtest"
       register: io500_prebuild_outputs
 
-    - name: Compile IO500 and its bundled IOR and mdtest once
+    - name: "Compile IO500 {{ io500_version }} and its bundled IOR and mdtest once"
       ansible.builtin.include_tasks: ../tasks/run_with_mpi_module.yaml
       vars:
         mpi_module: "{{ mpi.module }}"
@@ -161,10 +162,11 @@
           export IOR_EXTRA_CONFIGURE_FLAGS={{ ior_config_option | default('') | quote }}
           ./prepare.sh
       when: >-
-        io500_prebuild_outputs.results
-        | selectattr('stat.exists', 'equalto', false)
-        | list
-        | length > 0
+        io500_source_checkout.changed or
+        (io500_prebuild_outputs.results
+         | selectattr('stat.exists', 'equalto', false)
+         | list
+         | length > 0)
 
     - name: Check required shared build outputs
       ansible.builtin.stat:
@@ -266,12 +268,6 @@
     - { src: "{{ mpi_paths.io500 }}/bin/ior", dest: ior }
     - { src: "{{ mpi_paths.io500 }}/bin/mdtest", dest: mdtest }
     - { src: "{{ mpi_paths.hello }}/mpi_hello", dest: mpi_hello }
-
-- name: Make the IO500 working tree writable for benchmark users
-  ansible.builtin.file:
-    path: "{{ mpi_paths.io500 }}"
-    mode: "0777"
-    recurse: true
 
 - name: Verify installed MPI-specific benchmark commands on every client
   ansible.builtin.stat:
