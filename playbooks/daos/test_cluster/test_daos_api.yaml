@@ -1,0 +1,112 @@
+---
+- name: Verify DAOS-API readiness
+  hosts: clients
+  gather_facts: true
+  any_errors_fatal: true
+  vars_files: [../configure_cluster/vars.yaml]
+  tasks:
+    - name: Load TESSI MPI package and module settings
+      ansible.builtin.include_vars: ../../vars/mpi_{{ ansible_os_family }}.yml
+    - name: Require the phase1 MPI benchmark executable
+      ansible.builtin.stat:
+        path: /usr/local/bin/tessi-daos-api-mpi
+      register: daos_api_mpi_binary
+    - name: Require phase1 MPI installation and benchmark build
+      ansible.builtin.assert:
+        that:
+          - daos_api_mpi_binary.stat.exists
+          - daos_api_mpi_binary.stat.executable | default(false)
+        fail_msg: Run phase1 to install MPI and build the DAOS MPI benchmark before phase6.
+- name: Run DAOS-API MPI sweep from the management client
+  hosts: clients[0]
+  gather_facts: false
+  any_errors_fatal: true
+  vars_files: [../configure_cluster/vars.yaml]
+  tasks:
+    - name: Require API-only configuration
+      ansible.builtin.assert:
+        that: system.access | default('api') == 'api'
+    - name: Require every storage engine joined before testing
+      ansible.builtin.command: dmg --json system query
+      register: daos_api_before
+      changed_when: false
+      run_once: true
+    - name: Check all configured servers are healthy
+      ansible.builtin.assert:
+        that:
+          - (daos_api_before.stdout | from_json).response.members | length == groups['ds'] | length
+          - (daos_api_before.stdout | from_json).response.members | map(attribute='state') | unique | list == ['joined']
+      run_once: true
+    - name: Allocate unique native object and result directory
+      ansible.builtin.set_fact:
+        daos_api_run_id: "{{ lookup('pipe', 'date +%s%N') }}"
+      run_once: true
+    - name: Set shared result location
+      ansible.builtin.set_fact:
+        daos_api_result_dir: "{{ result_dir }}/daos_api/{{ daos_api_run_id }}"
+    - name: Create result directory
+      ansible.builtin.file:
+        path: "{{ daos_api_result_dir }}"
+        state: directory
+        mode: '0755'
+      run_once: true
+    - name: Save initial engine state
+      ansible.builtin.copy:
+        dest: "{{ daos_api_result_dir }}/system-before.json"
+        content: "{{ daos_api_before.stdout }}\n"
+        mode: '0644'
+      run_once: true
+
+    - name: Sweep MPI concurrency and transfer sizes across all clients
+      ansible.builtin.include_tasks: run_mpi_case.yaml
+      loop: "{{ (system.daos.api_ranks_per_client | default([1, 4, 16])) | product(system.daos.api_value_sizes | default([4096, 1048576])) | list }}"
+      loop_control:
+        loop_var: daos_api_case
+        index_var: daos_api_case_index
+      run_once: true
+
+    - name: Query system health after native API verification
+      ansible.builtin.command: dmg --json system query
+      register: daos_api_after
+      changed_when: false
+      run_once: true
+    - name: Require all engines still joined after testing
+      ansible.builtin.assert:
+        that:
+          - (daos_api_after.stdout | from_json).response.members | length == groups['ds'] | length
+          - (daos_api_after.stdout | from_json).response.members | map(attribute='state') | unique | list == ['joined']
+      run_once: true
+    - name: Save final engine state
+      ansible.builtin.copy:
+        dest: "{{ daos_api_result_dir }}/system-after.json"
+        content: "{{ daos_api_after.stdout }}\n"
+        mode: '0644'
+      run_once: true
+    - name: Save native API verification summary
+      ansible.builtin.copy:
+        dest: "{{ daos_api_result_dir }}/summary.txt"
+        mode: '0644'
+        content: |
+          PASS DAOS-API MPI sweep
+          Clients: {{ groups['clients'] | length }}
+          Ranks per client: {{ system.daos.api_ranks_per_client | default([1, 4, 16]) }}
+          Value sizes: {{ system.daos.api_value_sizes | default([4096, 1048576]) }}
+          Seconds per timed operation: {{ system.daos.api_seconds | default(30) }}
+          Metrics are logical KV operations and payload bytes, excluding replication traffic.
+          Per-case metrics.json, output.json, and validation.jsonl are stored here.
+          Cross-rank byte verification passed; all storage engines remained joined.
+      run_once: true
+    - name: Collect and save concise MPI performance summary
+      ansible.builtin.command:
+        argv: [python3, '-', "{{ daos_api_result_dir }}", "{{ groups['clients'] | length | string }}"]
+        stdin: "{{ lookup('file', 'summarize_results.py') }}"
+      register: daos_api_performance_summary
+      run_once: true
+    - name: Print MPI performance summary
+      ansible.builtin.debug:
+        msg: "{{ daos_api_performance_summary.stdout_lines }}"
+      run_once: true
+    - name: Show API verification result location
+      ansible.builtin.debug:
+        msg: "PASS DAOS-API: {{ daos_api_result_dir }}"
+      run_once: true

@@ -1,0 +1,324 @@
+---
+- name: Prepare DAOS cluster networking
+  tags: [network]
+  hosts: ds:clients
+  become: true
+  any_errors_fatal: true
+  vars_files: [vars.yaml]
+  tasks:
+    - name: Open lab firewall and SELinux using shared tasks
+      ansible.builtin.include_tasks: ../../shared/disable_firewall_selinux.yaml
+
+    - name: Discover and verify InfiniBand using shared tasks
+      ansible.builtin.include_tasks: ../../tasks/discover_ib_ip.yaml
+
+    - name: Configure cluster SSH using shared tasks
+      ansible.builtin.include_tasks: ../../shared/configure_ssh.yaml
+
+    - name: Discover the benchmark user's primary group
+      ansible.builtin.command: "id -gn {{ daos_user }}"
+      register: daos_primary_group
+      changed_when: false
+      when: "'clients' in group_names"
+
+    - name: Create DAOS log directory
+      ansible.builtin.file:
+        path: /var/log/daos
+        state: directory
+        owner: "{{ 'daos_server' if 'ds' in group_names else 'daos_agent' }}"
+        mode: '0755'
+
+    - name: Configure administration client
+      ansible.builtin.copy:
+        dest: /etc/daos/daos_control.yml
+        mode: '0644'
+        content: |
+          name: daos_server
+          hostlist: {{ daos_server_addresses | to_json }}
+          port: 10001
+          transport_config:
+            allow_insecure: true
+      when: inventory_hostname == groups['clients'][0]
+
+- name: Configure DAOS storage engines
+  tags: [servers]
+  hosts: ds
+  become: true
+  any_errors_fatal: true
+  vars_files: [vars.yaml]
+  tasks:
+    - name: Require explicit raw NVMe devices
+      ansible.builtin.assert:
+        that:
+          - local_storage_mode | default('') == 'raw-devices'
+          - local_storage_devices | default([]) | length > 0
+          - local_storage_devices is not string
+
+    - name: Inspect persisted NVMe mapping
+      ansible.builtin.stat:
+        path: /etc/daos/tessi_nvme.json
+      register: daos_mapping
+
+    - name: Validate unused raw devices and discover PCI addresses before binding
+      ansible.builtin.shell: |
+        set -euo pipefail
+        python3 - <<'PY'
+        import json, pathlib, subprocess
+        devices = {{ local_storage_devices | to_json }}
+        addresses = []
+        for device in devices:
+            node = pathlib.Path(device)
+            if not node.is_block_device():
+                raise SystemExit('Not a block device: ' + device)
+            entries = json.loads(subprocess.check_output(['lsblk', '-J', '-o', 'NAME,MOUNTPOINTS', device]))['blockdevices']
+            if any(entry.get('children') or any(entry.get('mountpoints') or []) for entry in entries):
+                raise SystemExit('Device has partitions or mounts: ' + device)
+            if subprocess.check_output(['wipefs', '-n', '--noheadings', device]).strip():
+                raise SystemExit('Device has existing signatures: ' + device)
+            controller = node.name.rsplit('n', 1)[0]
+            addresses.append(pathlib.Path('/sys/class/nvme', controller, 'device').resolve().name)
+        print(json.dumps(addresses))
+        PY
+      args:
+        executable: /bin/bash
+      register: daos_discovered_pci
+      changed_when: false
+      when: not daos_mapping.stat.exists
+
+    - name: Persist mapping so reruns work after NVMe binds to vfio
+      ansible.builtin.copy:
+        dest: /etc/daos/tessi_nvme.json
+        content: "{{ daos_discovered_pci.stdout }}\n"
+        mode: '0644'
+      when: not daos_mapping.stat.exists
+
+    - name: Read NVMe PCI mapping
+      ansible.builtin.slurp:
+        src: /etc/daos/tessi_nvme.json
+      register: daos_saved_mapping
+
+    - name: Read network NUMA node
+      ansible.builtin.command: "cat /sys/class/net/{{ infiniband_device }}/device/numa_node"
+      register: daos_numa
+      changed_when: false
+
+    - name: Set engine topology
+      ansible.builtin.set_fact:
+        daos_pci_addresses: "{{ daos_saved_mapping.content | b64decode | from_json }}"
+        daos_fabric_numa: "{{ [0, daos_numa.stdout | int] | max }}"
+
+    - name: Create persistent control metadata directory
+      ansible.builtin.file:
+        path: /var/lib/daos
+        state: directory
+        owner: daos_server
+        group: daos_server
+        mode: '0755'
+
+    - name: Check initialized server configuration fingerprint
+      ansible.builtin.stat:
+        path: /var/lib/daos/tessi_config.sha256
+      register: daos_fingerprint
+
+    - name: Read initialized server configuration fingerprint
+      ansible.builtin.slurp:
+        src: /var/lib/daos/tessi_config.sha256
+      register: daos_saved_fingerprint
+      when: daos_fingerprint.stat.exists
+
+    - name: Refuse configuration changes to initialized engines
+      ansible.builtin.assert:
+        that:
+          - (daos_saved_fingerprint.content | b64decode | trim) == (lookup('template', 'templates/daos_server.yml.j2') | hash('sha256'))
+        fail_msg: >-
+          The initialized DAOS engine configuration changed. Restore its original
+          configuration; changing storage topology requires a separate explicit rebuild.
+      when: daos_fingerprint.stat.exists
+
+    - name: Render DAOS engine configuration
+      ansible.builtin.template:
+        src: templates/daos_server.yml.j2
+        dest: /etc/daos/daos_server.yml
+        mode: '0644'
+      register: daos_server_config
+
+    - name: Stop server before rebinding when configuration changes
+      ansible.builtin.systemd_service:
+        name: daos_server
+        state: stopped
+      when: daos_server_config.changed
+
+    - name: Inspect service state before NVMe preparation
+      ansible.builtin.service_facts:
+
+    - name: Prepare only selected NVMe devices and hugepages for DAOS
+      ansible.builtin.command:
+        argv:
+          - daos_server
+          - nvme
+          - prepare
+          - --target-user=daos_server
+          - "{{ daos_pci_addresses | join(',') }}"
+      when: ansible_facts.services['daos_server.service'].state != 'running'
+      changed_when: false
+
+    - name: Enable and start DAOS server
+      ansible.builtin.systemd_service:
+        name: daos_server
+        enabled: true
+        state: started
+
+    - name: Wait for DAOS control listener
+      ansible.builtin.wait_for:
+        port: 10001
+        timeout: 120
+
+    - name: Verify VFIO has active IOMMU groups
+      ansible.builtin.find:
+        paths: /sys/kernel/iommu_groups
+        file_type: directory
+      register: daos_active_iommu
+
+    - name: Require operational IOMMU
+      ansible.builtin.assert:
+        that: daos_active_iommu.matched | int > 0
+
+- name: Configure DAOS agents
+  tags: [agents]
+  hosts: clients
+  become: true
+  any_errors_fatal: true
+  vars_files: [vars.yaml]
+  tasks:
+    - name: Render DAOS agent configuration
+      ansible.builtin.copy:
+        dest: /etc/daos/daos_agent.yml
+        mode: '0644'
+        content: |
+          name: daos_server
+          access_points: {{ daos_replicas | to_json }}
+          port: 10001
+          transport_config:
+            allow_insecure: true
+          log_file: /var/log/daos/daos_agent.log
+      register: daos_agent_config
+
+    - name: Enable DAOS agent
+      ansible.builtin.systemd_service:
+        name: daos_agent
+        enabled: true
+        state: "{{ 'restarted' if daos_agent_config.changed else 'started' }}"
+
+- name: Initialize DAOS and create benchmark storage
+  tags: [initialize]
+  hosts: clients[0]
+  become: true
+  any_errors_fatal: true
+  vars_files: [vars.yaml]
+  tasks:
+    - name: Query system state before first-time formatting
+      ansible.builtin.command: dmg --json system query
+      register: daos_preformat_state
+      changed_when: false
+      failed_when: false
+
+    - name: Format unformatted engines without reformatting existing storage
+      ansible.builtin.command: dmg storage format
+      register: daos_format
+      when: daos_preformat_state.rc != 0
+      retries: 12
+      delay: 5
+      until: daos_format.rc == 0
+      changed_when: "'formatted' in daos_format.stdout"
+
+    - name: Wait for every server engine to join
+      ansible.builtin.command: dmg --json system query
+      register: daos_members
+      changed_when: false
+      retries: 24
+      delay: 5
+      until:
+        - daos_members.rc == 0
+        - (daos_members.stdout | from_json).response.members | length == groups['ds'] | length
+        - (daos_members.stdout | from_json).response.members | map(attribute='state') | unique | list == ['joined']
+
+    - name: List registered pools without querying their readiness
+      ansible.builtin.command: dmg --json pool list --no-query
+      register: daos_registered_pools
+      changed_when: false
+      retries: 12
+      delay: 5
+      until: daos_registered_pools.rc == 0
+
+    - name: Create benchmark pool only when its label is absent
+      ansible.builtin.command: >-
+        dmg pool create --size={{ daos_pool_size }}
+        --user={{ daos_user }} --group={{ daos_group }} {{ daos_pool }}
+      when: daos_pool not in ((daos_registered_pools.stdout | from_json).response.pools | default([], true) | map(attribute='label') | list)
+
+    - name: Wait for benchmark pool to become queryable
+      ansible.builtin.command: "dmg --json pool query {{ daos_pool }}"
+      register: daos_existing_pool
+      changed_when: false
+      retries: 24
+      delay: 5
+      until: daos_existing_pool.rc == 0
+
+    - name: List existing API containers as benchmark user
+      become_user: "{{ daos_user }}"
+      ansible.builtin.command: "daos --json container list {{ daos_pool }}"
+      register: daos_registered_containers
+      changed_when: false
+      retries: 12
+      delay: 5
+      until: daos_registered_containers.rc == 0
+
+    - name: Create shared native API container only when its label is absent
+      become_user: "{{ daos_user }}"
+      ansible.builtin.command: >-
+        daos container create {{ daos_pool }} {{ daos_container }}
+      when: daos_container not in ((daos_registered_containers.stdout | from_json).response | default([], true) | map(attribute='label') | list)
+
+    - name: Verify API container is queryable as benchmark user
+      become_user: "{{ daos_user }}"
+      ansible.builtin.command: "daos container query {{ daos_pool }} {{ daos_container }}"
+      register: daos_existing_container
+      changed_when: false
+      retries: 12
+      delay: 5
+      until: daos_existing_container.rc == 0
+
+- name: Preserve initialized engine configuration fingerprints
+  tags: [preserve]
+  hosts: ds
+  become: true
+  gather_facts: false
+  vars_files: [vars.yaml]
+  tasks:
+    - name: Save configuration fingerprint after successful system initialization
+      ansible.builtin.copy:
+        dest: /var/lib/daos/tessi_config.sha256
+        content: "{{ lookup('template', 'templates/daos_server.yml.j2') | hash('sha256') }}\n"
+        owner: daos_server
+        mode: '0644'
+
+- name: Stop DAOS services without deleting stored data
+  hosts: ds:clients
+  become: true
+  gather_facts: false
+  tags: [never, makeclean]
+  tasks:
+    - name: Stop client agents
+      ansible.builtin.systemd_service:
+        name: "{{ item }}"
+        state: stopped
+        enabled: false
+      loop: [daos_agent]
+      when: "'clients' in group_names"
+
+    - name: Stop servers
+      ansible.builtin.systemd_service:
+        name: daos_server
+        state: stopped
+        enabled: false
+      when: "'ds' in group_names"

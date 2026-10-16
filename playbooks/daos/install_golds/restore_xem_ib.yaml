@@ -1,0 +1,44 @@
+---
+# OFED installation and reboots can remove testbed IPoIB addressing.
+- name: Install persistent Xem IPoIB restoration service
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/tessi-xem-ib.service
+    mode: '0644'
+    content: |
+      [Unit]
+      Description=Restore Xem InfiniBand addressing for DAOS
+      Wants=network-online.target
+      After=network-online.target
+      Before=daos_server.service daos_agent.service
+      [Service]
+      Type=oneshot
+      ExecStart=/share/testbed/bin/network --ib up
+      RemainAfterExit=yes
+      [Install]
+      WantedBy=multi-user.target
+
+- name: Restore Xem InfiniBand network after installing OFED
+  ansible.builtin.systemd_service:
+    name: tessi-xem-ib
+    daemon_reload: true
+    enabled: true
+    state: restarted
+
+- name: Create DAOS service dependency directory
+  ansible.builtin.file:
+    path: "/etc/systemd/system/{{ 'daos_server' if 'ds' in group_names else 'daos_agent' }}.service.d"
+    state: directory
+    mode: '0755'
+
+- name: Require restored IPoIB before starting DAOS
+  ansible.builtin.copy:
+    dest: "/etc/systemd/system/{{ 'daos_server' if 'ds' in group_names else 'daos_agent' }}.service.d/tessi-network.conf"
+    mode: '0644'
+    content: |
+      [Unit]
+      Requires=tessi-xem-ib.service
+      After=tessi-xem-ib.service
+
+- name: Reload systemd with network dependency
+  ansible.builtin.systemd_service:
+    daemon_reload: true

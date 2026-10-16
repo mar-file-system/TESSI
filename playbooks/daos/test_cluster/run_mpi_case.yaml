@@ -1,0 +1,79 @@
+---
+- name: Validate MPI benchmark parameters
+  ansible.builtin.assert:
+    that:
+      - daos_api_case.0 | int > 0
+      - daos_api_case.0 | int <= (groups['clients'] | map('extract', hostvars, 'ansible_processor_vcpus') | min | int)
+      - daos_api_case.1 | int > 0
+      - daos_api_case.1 | int <= 16777216
+      - system.daos.api_seconds | default(30) | int > 0
+      - system.daos.api_slots | default(128) | int > 0
+      - system.daos.api_slots | default(128) | int <= 4096
+- name: Set case paths and slot allocation
+  ansible.builtin.set_fact:
+    daos_api_case_dir: "{{ daos_api_result_dir }}/ppn-{{ daos_api_case.0 }}.bytes-{{ daos_api_case.1 }}"
+    daos_api_case_container: "tessi-api-{{ daos_api_run_id }}-{{ daos_api_case_index }}"
+    daos_api_case_container_created: false
+    daos_api_slots_by_host: "{{ dict(groups['clients'] | zip([daos_api_case.0 | int] * (groups['clients'] | length))) }}"
+- name: Create MPI case result directory
+  ansible.builtin.file:
+    path: "{{ daos_api_case_dir }}"
+    state: directory
+    mode: '0755'
+- name: Write MPI hostfile using TESSI shared task
+  ansible.builtin.include_tasks: ../../tasks/write_mpi_hostfile.yaml
+  vars:
+    mpi_module: "mpi/daos-doca-openmpi"
+    hosts: "{{ groups['clients'] }}"
+    slots_by_host: "{{ daos_api_slots_by_host }}"
+    hostfile_path: "{{ daos_api_case_dir }}/hosts"
+- name: Run MPI DAOS load and preserve output even on failure
+  block:
+    - name: Create temporary container owned by this benchmark case
+      ansible.builtin.command:
+        argv: [daos, container, create, "{{ daos_pool }}", "{{ daos_api_case_container }}"]
+    - name: Record temporary container creation
+      ansible.builtin.set_fact:
+        daos_api_case_container_created: true
+    - name: Launch native DAOS MPI benchmark using TESSI runner
+      ansible.builtin.include_tasks: ../../tasks/run_with_mpi_module.yaml
+      vars:
+        mpi_module: "mpi/daos-doca-openmpi"
+        working_dir: /tmp
+        show_output: true
+        command_timeout: "{{ system.daos.api_timeout | default(600) }}"
+        commands: >-
+          mpirun -np {{ (groups['clients'] | length) * (daos_api_case.0 | int) }}
+          -hostfile {{ (daos_api_case_dir ~ '/hosts') | quote }}
+          --prefix "$MPI_HOME"
+          --mca plm_rsh_args '-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null'
+          --map-by slot --bind-to core
+          /usr/local/bin/tessi-daos-api-mpi
+          {{ daos_pool | quote }} {{ daos_api_case_container | quote }}
+          {{ (daos_api_run_id | int) + (daos_api_case_index | int) }}
+          {{ daos_api_case.1 }} {{ system.daos.api_seconds | default(30) }}
+          {{ system.daos.api_slots | default(128) }}
+          {{ (daos_api_case_dir ~ '/validation.jsonl') | quote }}
+    - name: Save aggregate read and write performance metrics
+      ansible.builtin.copy:
+        dest: "{{ daos_api_case_dir }}/metrics.json"
+        content: "{{ mpi_shell_result.stdout_lines | select('match', '^\\{') | map('from_json') | list | to_nice_json }}\n"
+        mode: '0644'
+    - name: Print completed case read and write rates
+      ansible.builtin.debug:
+        msg: "{{ item.operation }}: {{ item.cluster_iops | round(1) }} cluster IOPS; {{ item.cluster_bandwidth_MiBps | round(1) }} MiB/s; {{ item.ranks }} ranks; {{ item.value_bytes }} bytes/value"
+      loop: "{{ mpi_shell_result.stdout_lines | select('match', '^\\{') | map('from_json') | list }}"
+  always:
+    - name: Save MPI output and errors
+      ansible.builtin.copy:
+        dest: "{{ daos_api_case_dir }}/output.json"
+        content: "{{ mpi_shell_result | default({}) | to_nice_json }}\n"
+        mode: '0644'
+    - name: Delete only this case's temporary container after success or failure
+      ansible.builtin.command:
+        argv: [daos, container, destroy, --force, "{{ daos_pool }}", "{{ daos_api_case_container }}"]
+      register: daos_api_case_cleanup
+      when: daos_api_case_container_created | bool
+      retries: 3
+      delay: 2
+      until: daos_api_case_cleanup.rc == 0
