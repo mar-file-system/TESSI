@@ -1,15 +1,30 @@
 ---
+- name: Reuse the common OSU installation path
+  ansible.builtin.include_tasks: osu_paths.yaml
+  vars:
+    osu_mpi_module: "{{ mpi_implementation.module }}"
+
 - name: Set OSU build variables for {{ mpi_implementation.module }}
   set_fact:
     osu_version: "7.5.2"
-    osu_prefix: "/usr/local/osu/{{ mpi_implementation.module | regex_replace('/', '_') }}"
+    osu_prefix: "{{ osu_install_prefix }}"
     osu_src_dir: "/tmp/osu-micro-benchmarks/{{ mpi_implementation.module | regex_replace('/', '_') }}"
     osu_tarball: "osu-micro-benchmarks-7.5.2.tar.gz"
     osu_url: "https://mvapich.cse.ohio-state.edu/download/mvapich/osu-micro-benchmarks-7.5.2.tar.gz"
 
+- name: Identify the active MPI compiler and runtime for the OSU build cache
+  ansible.builtin.include_tasks: run_with_mpi_module.yaml
+  vars:
+    mpi_module: "{{ mpi_implementation.module }}"
+    mpi_operation_name: Identify OSU MPI build dependencies
+    command_timeout: 120
+    commands: |
+      mpirun --version
+      mpicc -show
+
 - name: Set OSU flag used to avoid repeating work 
   set_fact:
-    osu_stamp: "{{ osu_prefix }}/.installed"
+    osu_stamp: "{{ osu_prefix }}/.installed-{{ osu_version }}-{{ mpi_shell_result.stdout | hash('sha256') }}"
 
 - name: Check if OSU already installed
   stat:
@@ -67,6 +82,8 @@
         mpi_module: "{{ mpi_implementation.module }}"
         working_dir: "{{ osu_src_dir }}"
         commands: |
+          MPICC_PATH=$(command -v mpicc)
+          MPICXX_PATH=$(command -v mpicxx)
           MPI_LIB_PATH=$(readlink -f $(dirname "$MPICC_PATH")/../lib)
           ./configure CC="$MPICC_PATH" CXX="$MPICXX_PATH" \
               LDFLAGS="-Wl,-rpath,${MPI_LIB_PATH}" \

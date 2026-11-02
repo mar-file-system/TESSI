@@ -1,0 +1,41 @@
+---
+# Official 2.4.1-5 includes the UCX packed-worker-address cache fix and restores
+# missing runtime dependencies. Upgrade the entire set, including any local RPMs.
+- name: Query installed Mercury package versions
+  ansible.builtin.command: rpm -q --qf '%{VERSION}-%{RELEASE}\n' mercury mercury-ucx mercury-devel
+  register: daos_mercury_installed
+  changed_when: false
+  failed_when: false
+
+- name: Collect service state before upgrading Mercury
+  ansible.builtin.service_facts:
+
+- name: Stop running DAOS services before replacing Mercury libraries
+  ansible.builtin.systemd_service:
+    name: "{{ 'daos_server' if 'ds' in group_names else 'daos_agent' }}"
+    state: stopped
+  vars:
+    daos_mercury_service: "{{ 'daos_server.service' if 'ds' in group_names else 'daos_agent.service' }}"
+  when:
+    - daos_mercury_installed.stdout_lines != ['2.4.1-5.el9'] * 3
+    - ansible_facts.services.get(daos_mercury_service, {}).get('state', '') == 'running'
+
+- name: Install the matched official Mercury runtime, UCX plugin and headers
+  ansible.builtin.dnf:
+    name:
+      - mercury-2.4.1-5.el9
+      - mercury-ucx-2.4.1-5.el9
+      - mercury-devel-2.4.1-5.el9
+    state: present
+    enablerepo: daos-packages
+    update_cache: true
+
+- name: Verify official fixed Mercury releases on every node
+  ansible.builtin.command: rpm -q --qf '%{VERSION}-%{RELEASE}\n' mercury mercury-ucx mercury-devel
+  register: daos_mercury_verified
+  changed_when: false
+  failed_when: daos_mercury_verified.rc != 0 or daos_mercury_verified.stdout_lines != ['2.4.1-5.el9'] * 3
+
+- name: Print installed official Mercury release
+  ansible.builtin.debug:
+    msg: "Official DAOS-18988 fix installed: {{ daos_mercury_verified.stdout_lines }}. Phase5 starts services with the new libraries."

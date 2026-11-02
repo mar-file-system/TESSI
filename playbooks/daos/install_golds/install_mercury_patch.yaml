@@ -1,0 +1,157 @@
+---
+- name: Load pinned Mercury build recipe
+  ansible.builtin.include_vars: mercury_patch_vars.yaml
+
+- name: Require an allocated client for the single Mercury build
+  ansible.builtin.assert:
+    that: groups.get('clients', []) | length > 0
+
+- name: Check for incompatible installed Mercury libfabric package
+  ansible.builtin.command: rpm -q mercury-libfabric
+  register: daos_mercury_ofi
+  changed_when: false
+  failed_when: false
+
+- name: Require UCX-only Mercury packaging for this DAOS allocation
+  ansible.builtin.assert:
+    that: daos_mercury_ofi.rc != 0
+    fail_msg: The local Mercury recipe is UCX-only and cannot replace an installed mercury-libfabric package.
+
+- name: Prepare the single Mercury RPM build client
+  run_once: true
+  delegate_to: "{{ daos_mercury_builder }}"
+  block:
+    - name: Install Mercury RPM build prerequisites
+      ansible.builtin.dnf:
+        name: [rpm-build, redhat-rpm-config, cmake, cmake-rpm-macros, gcc-c++, boost-devel, ucx-devel, json-c-devel, patch, bzip2, make]
+        state: present
+
+    - name: Create Mercury RPM build directories
+      ansible.builtin.file:
+        path: "{{ daos_mercury_topdir }}/{{ item }}"
+        state: directory
+        mode: '0755'
+      loop: [SOURCES, SPECS, BUILD, BUILDROOT, RPMS, SRPMS]
+
+    - name: Download checksummed Mercury 2.4.1 release source
+      ansible.builtin.get_url:
+        url: "https://github.com/mercury-hpc/mercury/releases/download/v{{ daos_mercury_version }}/mercury-{{ daos_mercury_version }}.tar.bz2"
+        dest: "{{ daos_mercury_topdir }}/SOURCES/mercury-{{ daos_mercury_version }}.tar.bz2"
+        checksum: "sha256:{{ daos_mercury_source_sha256 }}"
+        mode: '0644'
+
+    - name: Download pinned checksummed DAOS Mercury patches
+      ansible.builtin.get_url:
+        url: "https://raw.githubusercontent.com/daos-stack/daos/{{ daos_mercury_patch_commit }}/deps/patches/mercury/{{ item.name }}"
+        dest: "{{ daos_mercury_topdir }}/SOURCES/{{ item.name }}"
+        checksum: "sha256:{{ item.sha256 }}"
+        mode: '0644'
+      loop: "{{ daos_mercury_patches }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: Write Mercury build provenance
+      ansible.builtin.copy:
+        dest: "{{ daos_mercury_topdir }}/SOURCES/build-provenance.json"
+        mode: '0644'
+        content: "{{ {'version': daos_mercury_version, 'release': daos_mercury_release, 'source_sha256': daos_mercury_source_sha256, 'daos_patch_commit': daos_mercury_patch_commit, 'patches': daos_mercury_patches, 'transport': 'ucx'} | to_nice_json }}\n"
+      register: daos_mercury_provenance
+
+    - name: Render Mercury RPM spec
+      ansible.builtin.template:
+        src: mercury-tessi.spec.j2
+        dest: "{{ daos_mercury_topdir }}/SPECS/mercury.spec"
+        mode: '0644'
+      register: daos_mercury_spec
+
+    - name: Check cached Mercury RPM outputs
+      ansible.builtin.stat:
+        path: "{{ daos_mercury_topdir }}/RPMS/x86_64/{{ item }}-{{ daos_mercury_version }}-{{ daos_mercury_release }}.el9.x86_64.rpm"
+      loop: "{{ daos_mercury_packages }}"
+      register: daos_mercury_cached_rpms
+
+    - name: Build patched Mercury RPMs once (log in build.log)
+      ansible.builtin.shell: |
+        rpmbuild -ba --define '_topdir {{ daos_mercury_topdir }}' \
+          --define '_smp_mflags -j4' '{{ daos_mercury_topdir }}/SPECS/mercury.spec' \
+          > '{{ daos_mercury_topdir }}/build.log' 2>&1 || {
+            tail -80 '{{ daos_mercury_topdir }}/build.log' >&2
+            exit 1
+          }
+      args:
+        executable: /bin/bash
+      async: 1800
+      poll: 10
+      when: >-
+        daos_mercury_spec.changed or daos_mercury_provenance.changed or
+        (daos_mercury_cached_rpms.results | selectattr('stat.exists', 'equalto', false) | list | length > 0)
+
+- name: Create controller Mercury artifact staging directory
+  ansible.builtin.file:
+    path: /tmp/tessi-mercury-daos18988
+    state: directory
+    mode: '0700'
+  delegate_to: localhost
+  become: false
+  run_once: true
+
+- name: Fetch patched RPMs from the single build client
+  ansible.builtin.fetch:
+    src: "{{ daos_mercury_topdir }}/RPMS/x86_64/{{ item }}-{{ daos_mercury_version }}-{{ daos_mercury_release }}.el9.x86_64.rpm"
+    dest: /tmp/tessi-mercury-daos18988/
+    flat: true
+  delegate_to: "{{ daos_mercury_builder }}"
+  run_once: true
+  loop: "{{ daos_mercury_packages }}"
+
+- name: Create per-node Mercury RPM staging directory
+  ansible.builtin.file:
+    path: /var/tmp/tessi-mercury-daos18988
+    state: directory
+    mode: '0755'
+
+- name: Distribute patched RPMs to every allocated DAOS node
+  ansible.builtin.copy:
+    src: "/tmp/tessi-mercury-daos18988/{{ item }}-{{ daos_mercury_version }}-{{ daos_mercury_release }}.el9.x86_64.rpm"
+    dest: "/var/tmp/tessi-mercury-daos18988/{{ item }}.rpm"
+    mode: '0644'
+  loop: "{{ daos_mercury_packages }}"
+
+- name: Query currently installed Mercury release
+  ansible.builtin.command: rpm -q --qf '%{VERSION}-%{RELEASE}\n' mercury mercury-ucx mercury-devel
+  register: daos_mercury_installed
+  changed_when: false
+  failed_when: false
+
+- name: Collect service state before replacing Mercury libraries
+  ansible.builtin.service_facts:
+
+- name: Stop running DAOS services before a Mercury package upgrade
+  ansible.builtin.systemd_service:
+    name: "{{ 'daos_server' if 'ds' in group_names else 'daos_agent' }}"
+    state: stopped
+  vars:
+    daos_mercury_service: "{{ 'daos_server.service' if 'ds' in group_names else 'daos_agent.service' }}"
+  when:
+    - daos_mercury_installed.stdout_lines != [daos_mercury_version ~ '-' ~ daos_mercury_release ~ '.el9'] * 3
+    - ansible_facts.services.get(daos_mercury_service, {}).get('state', '') == 'running'
+
+- name: Install the matched locally built Mercury RPM set
+  ansible.builtin.dnf:
+    name:
+      - /var/tmp/tessi-mercury-daos18988/mercury.rpm
+      - /var/tmp/tessi-mercury-daos18988/mercury-ucx.rpm
+      - /var/tmp/tessi-mercury-daos18988/mercury-devel.rpm
+    state: present
+    # Only these locally built RPMs are unsigned; repository checking is unchanged.
+    disable_gpg_check: true
+
+- name: Verify patched Mercury releases on every node
+  ansible.builtin.command: rpm -q --qf '%{VERSION}-%{RELEASE}\n' mercury mercury-ucx mercury-devel
+  register: daos_mercury_verified
+  changed_when: false
+  failed_when: daos_mercury_verified.stdout_lines != [daos_mercury_version ~ '-' ~ daos_mercury_release ~ '.el9'] * 3
+
+- name: Print installed patched Mercury release
+  ansible.builtin.debug:
+    msg: "DAOS-18988 Mercury installed: {{ daos_mercury_verified.stdout_lines }}. Phase5 starts services with the new libraries."

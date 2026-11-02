@@ -1,5 +1,5 @@
 ---
-# TESSI DAOS 2.8 installation tasks (include/import with become: true).
+# TESSI DAOS 2.8.1 installation tasks (include/import with become: true).
 # Rocky Linux 9.7, NVIDIA InfiniBand, DOCA-OFED 3.2.1, UCX 1.20.0.
 # Uses NVIDIA DOCA 3.2.1-044413 fixed EL9 repository (not latest).
 # No NVMe formatting, binding, DAOS service startup or DAOS initialization here.
@@ -21,15 +21,12 @@
     name: epel-release
     state: present
 
+- name: Install shared Python report dependencies during phase1
+  ansible.builtin.include_tasks: ../../shared/install_report_dependencies.yaml
+
 - name: Install host build and diagnostic prerequisites
   ansible.builtin.dnf:
     name:
-      - dnf-plugins-core
-      - dkms
-      - gcc
-      - make
-      - "kernel-devel-{{ ansible_facts['kernel'] }}"
-      - "kernel-headers"
       - pciutils
       - numactl
       - nvme-cli
@@ -38,52 +35,24 @@
       - fuse3
     state: present
 
+- name: Install YAML parser for phase5 server configuration validation
+  ansible.builtin.dnf:
+    name: python3-pyyaml
+    state: present
+  when: "'ds' in group_names"
+
 - name: Install environment modules for DAOS MPI clients
   ansible.builtin.package:
     name: environment-modules
     state: present
   when: "'clients' in group_names"
 
-- name: Import NVIDIA DOCA signing key
-  ansible.builtin.rpm_key:
-    key: https://linux.mellanox.com/public/repo/doca/3.2.1-044413/rhel9/x86_64/nvidia-doca-rpm-gpg-public-key.asc
-    state: present
+- name: Install the shared DOCA RDMA MPI and UCX stack
+  ansible.builtin.include_tasks: ../../shared/install_doca.yaml
 
-- name: Configure NVIDIA DOCA 3.2.1 repository
-  ansible.builtin.yum_repository:
-    name: doca
-    description: NVIDIA DOCA 3.2.1-044413 RHEL9 x86_64
-    baseurl: https://linux.mellanox.com/public/repo/doca/3.2.1-044413/rhel9/x86_64/
-    enabled: true
-    gpgcheck: true
-    gpgkey: https://linux.mellanox.com/public/repo/doca/3.2.1-044413/rhel9/x86_64/nvidia-doca-rpm-gpg-public-key.asc
-    state: present
-
-- name: Import NVIDIA Mellanox OFED signing key
-  ansible.builtin.rpm_key:
-    key: https://www.mellanox.com/downloads/ofed/RPM-GPG-KEY-Mellanox-SHA256
-    state: present
-
-- name: Install NVIDIA DOCA-OFED
-  ansible.builtin.dnf:
-    name: doca-ofed
-    state: present
-    update_cache: true
-
-- name: Check installed DOCA-OFED version
-  ansible.builtin.command: rpm -q --qf '%{VERSION}\n' doca-ofed
-  register: daos_doca_version
-  changed_when: false
-
-- name: Require validated DOCA-OFED version
-  ansible.builtin.assert:
-    that:
-      - daos_doca_version.stdout is match('^3\\.2\\.1($|[.-])')
-    fail_msg: "Required DOCA-OFED 3.2.1; installed {{ daos_doca_version.stdout }}"
-
-- name: Install DAOS 2.8 RPM repository file
+- name: Install DAOS 2.8.1 RPM repository file
   ansible.builtin.get_url:
-    url: https://packages.daos.io/v2.8/EL9/packages/x86_64/daos_packages.repo
+    url: https://packages.daos.io/v2.8.1/EL9/packages/x86_64/daos_packages.repo
     dest: /etc/yum.repos.d/daos-packages.repo
     owner: root
     group: root
@@ -91,56 +60,25 @@
 
 - name: Import DAOS RPM signing key
   ansible.builtin.rpm_key:
-    key: https://packages.daos.io/RPM-GPG-KEY
+    key: https://packages.daos.io/v2.8.1/DAOS_2025_1_GPG_KEY
     state: present
 
-- name: Install DAOS UCX transport
+- name: Install the matched official Mercury packages with the DAOS-18988 fix
+  ansible.builtin.include_tasks: install_mercury_official.yaml
+
+- name: Install coherent DAOS 2.8.1 packages for this node
   ansible.builtin.dnf:
-    name: mercury-ucx
+    name: >-
+      {{ ['daos-server-2.8.1'] if 'ds' in group_names else
+         (['daos-client-2.8.1', 'daos-devel-2.8.1'] +
+          (['daos-admin-2.8.1'] if inventory_hostname == groups['clients'][0] else [])) }}
     state: present
-    update_cache: true
 
-- name: Install DAOS server RPM
-  ansible.builtin.dnf:
-    name: daos-server
-    state: present
-  when: "'ds' in group_names"
-
-- name: Install DAOS client RPM
-  ansible.builtin.dnf:
-    name: daos-client
-    state: present
-  when: "'clients' in group_names"
-
-- name: Install DAOS administration RPM on first client
-  ansible.builtin.dnf:
-    name: daos-admin
-    state: present
-  when:
-    - "'clients' in group_names"
-    - inventory_hostname == groups['clients'][0]
-
-- name: Discover DOCA Open MPI compiler directory
-  ansible.builtin.shell: rpm -ql openmpi | sed -n 's@/mpicc$@@p'
-  register: daos_mpi_bin
-  changed_when: false
-  when: "'clients' in group_names"
-
-- name: Require DOCA Open MPI compiler
-  ansible.builtin.assert:
-    that: daos_mpi_bin.stdout_lines | length == 1
-    fail_msg: DOCA Open MPI must provide exactly one mpicc compiler wrapper.
-  when: "'clients' in group_names"
-
-- name: Register DOCA Open MPI using TESSI shared module installer
-  ansible.builtin.include_tasks: ../../tasks/install_module.yaml
+- name: Register DOCA Open MPI using shared RPM discovery and module installation
+  ansible.builtin.include_tasks: ../../tasks/register_rpm_openmpi.yaml
   vars:
-    modulefiles_base_path: /usr/share/modulefiles
-    module_name: mpi/daos-doca-openmpi
-    module_home: "{{ daos_mpi_bin.stdout | dirname }}"
-    module_bin_path: "{{ daos_mpi_bin.stdout }}"
-    module_lib_path: "{{ daos_mpi_bin.stdout | dirname }}/lib64"
-    module_env_vars:
+    openmpi_module_name: mpi/daos-doca-openmpi
+    openmpi_module_env_vars:
       - {name: OMPI_MCA_pml, value: ob1}
       - {name: OMPI_MCA_btl, value: 'tcp,self'}
   when: "'clients' in group_names"
@@ -174,6 +112,10 @@
         command_timeout: 120
         commands: mpicc -O2 -Wall -Wextra -Werror /usr/local/src/tessi/daos_api_mpi.c -o /usr/local/bin/tessi-daos-api-mpi -ldaos
 
+
+- name: Install DAOS-enabled IO500 on clients
+  ansible.builtin.include_tasks: install_io500.yaml
+  when: "'clients' in group_names"
 
 - name: Check installed UCX library version
   ansible.builtin.command: rpm -q --qf '%{VERSION}\n' ucx
@@ -214,80 +156,8 @@
     state: started
   when: "'ds' in group_names"
 
-# A "Translated" dmesg message alone does not mean Intel IOMMU is enabled.
-- name: Enable Intel IOMMU for the next server boot
-  ansible.builtin.command: grubby --update-kernel=ALL --args=intel_iommu=on
-  when:
-    - "'ds' in group_names"
-    - ansible_processor | join(' ') is search('Intel')
-    - ansible_cmdline.intel_iommu | default('') != 'on'
-  changed_when: false
-
-# Xem images may disable BLS. grubby updates BLS files but not the active
-# static menu, and its saved_entry uses a different ID format in that case.
-- name: Rebuild the active GRUB menu and retain the running OFED kernel
-  ansible.builtin.shell: |
-    set -euo pipefail
-    if grep -q '^GRUB_ENABLE_BLSCFG=false' /etc/default/grub; then
-      grub2-mkconfig -o /boot/grub2/grub.cfg
-      python3 - <<'PYBOOT'
-    import pathlib, re, subprocess
-    needle = 'gnulinux-{{ ansible_kernel }}-advanced-'
-    for line in pathlib.Path('/boot/grub2/grub.cfg').read_text().splitlines():
-        if line.startswith('menuentry '):
-            for entry in re.findall(r"'([^']+)'", line):
-                if entry.startswith(needle):
-                    subprocess.run(['grub2-set-default', entry], check=True)
-                    raise SystemExit(0)
-    raise SystemExit('Running kernel missing from generated GRUB menu')
-    PYBOOT
-    else
-      grubby --set-default /boot/vmlinuz-{{ ansible_kernel }}
-    fi
-  args:
-    executable: /bin/bash
-  changed_when: false
-
-- name: Find active IOMMU groups on storage servers
-  ansible.builtin.find:
-    paths: /sys/kernel/iommu_groups
-    file_type: directory
-    recurse: false
-  register: daos_iommu_groups
-  when: "'ds' in group_names"
-
-- name: Reboot storage servers to activate IOMMU when necessary
-  ansible.builtin.reboot:
-    reboot_timeout: 900
-    connect_timeout: 10
-    post_reboot_delay: 10
-  register: daos_iommu_reboot
-  when:
-    - "'ds' in group_names"
-    - daos_iommu_groups.matched | int == 0
-
-- name: Refresh storage-server facts after automatic reboot
-  ansible.builtin.setup:
-  when:
-    - "'ds' in group_names"
-    - daos_iommu_reboot.rebooted | default(false)
-
-- name: Verify active IOMMU groups after automatic reboot
-  ansible.builtin.find:
-    paths: /sys/kernel/iommu_groups
-    file_type: directory
-    recurse: false
-  register: daos_active_iommu_groups
-  when: "'ds' in group_names"
-
-- name: Require operational IOMMU before DAOS configuration
-  ansible.builtin.assert:
-    that:
-      - daos_active_iommu_groups.matched | int > 0
-    fail_msg: >-
-      No active IOMMU groups after phase1's automatic reboot. Check BIOS VT-d
-      support and the active kernel command line; phase1 cannot complete without VFIO.
-  when: "'ds' in group_names"
+- name: Prepare storage-server boot settings using the common baseline and DAOS tasks
+  ansible.builtin.include_tasks: ../../shared/prepare_storage_boot.yaml
 
 - name: Require explicitly configured NVMe list on storage servers
   ansible.builtin.assert:

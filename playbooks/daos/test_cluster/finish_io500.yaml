@@ -1,0 +1,48 @@
+---
+- name: Preserve DAOS IO500 output including failures
+  ansible.builtin.copy:
+    dest: "{{ io500_result_dir }}/mpi-output.json"
+    content: "{{ mpi_shell_result | default({}) | to_nice_json }}\n"
+    mode: '0644'
+
+- name: Record available space after IO500
+  ansible.builtin.include_tasks: query_pool_space.yaml
+  vars:
+    daos_api_case_dir: "{{ io500_result_dir }}"
+    daos_api_space_stage: after
+
+- name: Delete only the temporary container belonging to this IO500 run
+  block:
+    - name: Destroy IO500 temporary container after success or failure
+      ansible.builtin.command:
+        argv: [daos, container, destroy, --force, "{{ daos_pool }}", "{{ io500_daos_container }}"]
+      register: io500_daos_cleanup
+      when: io500_daos_container_created | default(false) | bool
+      retries: 3
+      delay: 2
+      until: io500_daos_cleanup.rc == 0
+  always:
+    - name: Record available space after IO500 cleanup
+      ansible.builtin.include_tasks: query_pool_space.yaml
+      vars:
+        daos_api_case_dir: "{{ io500_result_dir }}"
+        daos_api_space_stage: after-cleanup
+
+    - name: Query DAOS state after IO500 including failed runs
+      ansible.builtin.command: dmg --json system query
+      register: io500_daos_after
+      changed_when: false
+      failed_when: false
+
+    - name: Save DAOS state after IO500
+      ansible.builtin.copy:
+        dest: "{{ io500_result_dir }}/system-after.json"
+        content: "{{ io500_daos_after | to_nice_json }}\n"
+        mode: '0644'
+
+    - name: Require all DAOS engines still joined after IO500
+      ansible.builtin.assert:
+        that:
+          - io500_daos_after.rc == 0
+          - (io500_daos_after.stdout | from_json).response.members | length == groups['ds'] | length
+          - (io500_daos_after.stdout | from_json).response.members | map(attribute='state') | unique | list == ['joined']

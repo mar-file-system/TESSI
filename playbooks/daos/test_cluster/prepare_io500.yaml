@@ -1,0 +1,56 @@
+---
+- name: Load DAOS pool settings for IO500
+  ansible.builtin.include_vars: ../configure_cluster/vars.yaml
+
+- name: Select a unique temporary IO500 DFS container
+  ansible.builtin.set_fact:
+    io500_daos_container: "tessi-io500-{{ lookup('pipe', 'date +%s%N') }}"
+    io500_daos_container_created: false
+
+- name: Require supported direct-DFS directory options
+  ansible.builtin.assert:
+    that: (io500 | default({})).data_directory_xattrs | default([]) | length == 0
+    fail_msg: POSIX directory xattrs are unsupported with direct DFS.
+
+- name: Configure IO500 to use direct DAOS access
+  ansible.builtin.set_fact:
+    io500_stonewall: "{{ (io500 | default({})).stonewall_time | default(30) }}"
+    io500_config_updates: >-
+      {{ io500_config_updates + [
+        {'section': 'global', 'option': 'api', 'value': 'DFS --dfs.pool=' ~ daos_pool ~ ' --dfs.cont=' ~ io500_daos_container},
+        {'section': 'global', 'option': 'drop-caches', 'value': 'FALSE'},
+        {'section': 'debug', 'option': 'stonewall-time', 'value': (io500 | default({})).stonewall_time | default(30)}
+      ] }}
+
+# DAOS-API diagnostic workload: mdtest only.
+- name: Run only mdtest phases for DAOS-API IO500
+  ansible.builtin.set_fact:
+    io500_config_updates: >-
+      {{ io500_config_updates + [
+        {'section': item, 'option': 'run', 'value': 'TRUE' if item.startswith('mdtest-') else 'FALSE'}
+      ] }}
+  loop:
+    - mdtest-easy
+    - mdtest-easy-write
+    - mdtest-easy-stat
+    - mdtest-easy-delete
+    - mdtest-hard
+    - mdtest-hard-write
+    - mdtest-hard-read
+    - mdtest-hard-stat
+    - mdtest-hard-delete
+    - ior-easy
+    - ior-easy-write
+    - ior-easy-read
+    - ior-rnd4K-easy-read
+    - ior-hard
+    - ior-hard-write
+    - ior-hard-read
+    - find
+    - find-easy
+    - find-hard
+    - mdworkbench
+    - mdworkbench-create
+    - mdworkbench-bench
+    - mdworkbench-delete
+

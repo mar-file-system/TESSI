@@ -41,7 +41,7 @@
       /tmp/tessi-io500.{{ ansible_env.SUDO_USER | default(ansible_env.USER) }}.{{ mpi_label }}.ini
     io500_stonewall: "{{ (io500 | default({})).stonewall_time | default(300) }}"
     io500_data_dir: >-
-      {{ (io500 | default({})).data_root | default('/mnt/' ~ system.type) }}/{{ ansible_env.SUDO_USER | default(ansible_env.USER) }}/io500
+      {{ (io500 | default({})).data_root | default('/io500' if system.type == 'daos' and system.access | default('api') == 'api' else '/mnt/' ~ system.type) }}/{{ ansible_env.SUDO_USER | default(ansible_env.USER) }}/io500
     io500_hostfile: "/tmp/hostfile.{{ ansible_env.SUDO_USER | default(ansible_env.USER) }}_io500_mpi_label"
 
 - name: Set the predefined IOR data directories
@@ -56,12 +56,14 @@
     state: directory
     owner: "{{ ansible_env.SUDO_USER | default(ansible_env.USER) }}"
     mode: '0755'
+  when: not (system.type == 'daos' and system.access | default('api') == 'api')
   loop: "{{ [io500_data_dir] + io500_ior_data_dirs }}"
   loop_control:
     label: "{{ item }}"
 
 - name: Apply configured attributes to IOR data directories
   become: true
+  when: not (system.type == 'daos' and system.access | default('api') == 'api')
   ansible.builtin.command:
     argv:
       - setfattr
@@ -196,6 +198,10 @@
         ]
       }}
 
+- name: Configure direct DAOS IO500 storage and find phases
+  ansible.builtin.include_tasks: ../daos/test_cluster/prepare_io500.yaml
+  when: system.type == 'daos' and system.access | default('api') == 'api'
+
 - name: Apply granular IO500 configuration overrides
   ansible.builtin.include_tasks: ../tasks/configure_io500.yaml
   vars:
@@ -210,6 +216,12 @@
     hostfile_path: "{{ io500_hostfile }}"
     slots_by_host: "{{ io500_client_slots }}"
 
+- name: Build IO500 launcher using shared MPI settings
+  ansible.builtin.include_tasks: ../tasks/build_mpi_command.yaml
+  vars:
+    mpi_launcher_module: "{{ mpi_config.module }}"
+    mpi_launcher_hostfile: "{{ io500_hostfile }}"
+
 - name: Show the IO500 MPI rank plan
   ansible.builtin.debug:
     msg: >-
@@ -217,17 +229,39 @@
       with {{ io500_ppn }} rank(s) per client
       ({{ io500_client_physical_cores.values() | first }} physical cores per client).
 
-- name: mpirun IO500 - results into {{ io500_result_dir }}
-  ansible.builtin.include_tasks: ../tasks/run_with_mpi_module.yaml
-  vars:
-    mpi_operation_name: "Run IO500 benchmark with {{ io500_num_processes }} MPI ranks ({{ io500_ppn }} per client)"
-    mpi_module: "{{ mpi_config.module }}"
-    command_timeout: 6000 # fail if it takes too long
-    working_dir: "{{ io500_path }}"
-    show_output: true
-    commands: >
-      mpirun -np {{ io500_num_processes }} -hostfile {{ io500_hostfile }} {{ mpi_config.mpirun_args }}
-      io500 {{ io500_config_path | quote }}
+- name: Preserve DAOS per-node stack versions beside IO500 results
+  ansible.builtin.copy:
+    dest: "{{ io500_result_dir }}/software_versions.json"
+    content: >-
+      {%- set ns = namespace(versions={}) -%}
+      {%- for host in groups['all'] -%}
+      {%- set _ = ns.versions.update({host: hostvars[host].benchmark_software_versions.stdout_lines}) -%}
+      {%- endfor -%}
+      {{ ns.versions | to_nice_json }}
+    mode: '0644'
+  when: system.type == 'daos'
+
+- name: Run IO500 and finalize DAOS storage when applicable
+  block:
+    - name: Prepare DAOS container and space diagnostics before IO500
+      ansible.builtin.include_tasks: ../daos/test_cluster/start_io500.yaml
+      when: system.type == 'daos' and system.access | default('api') == 'api'
+    - name: mpirun IO500 - results into {{ io500_result_dir }}
+      ansible.builtin.include_tasks: ../tasks/run_with_mpi_module.yaml
+      vars:
+        mpi_operation_name: "Run IO500 benchmark with {{ io500_num_processes }} MPI ranks ({{ io500_ppn }} per client)"
+        mpi_module: "{{ mpi_config.module }}"
+        command_timeout: 6000 # fail if it takes too long
+        working_dir: "{{ io500_path }}"
+        show_output: true
+        commands: >
+          {{ mpi_launcher_command }} -np {{ io500_num_processes }} {{ mpi_config.mpirun_args | default('') }}
+          io500 {{ io500_config_path | quote }}
+
+  always:
+    - name: Finalize direct DAOS IO500 and preserve space diagnostics
+      ansible.builtin.include_tasks: ../daos/test_cluster/finish_io500.yaml
+      when: system.type == 'daos' and system.access | default('api') == 'api'
 
 - name: Read result summary file from {{ io500_result_dir }}
   ansible.builtin.slurp:
@@ -284,3 +318,21 @@
       loop: "{{ experiment_artifact_files }}"
       loop_control:
         label: "{{ item.path }}"
+
+- name: Save the completed DAOS IO500 run pointer for phase7
+  when: system.type == 'daos'
+  block:
+    - name: Ensure the controller report directory exists
+      ansible.builtin.file:
+        path: "{{ image_dir }}"
+        state: directory
+        mode: '0755'
+      delegate_to: localhost
+      become: false
+    - name: Record the completed IO500 result directory
+      ansible.builtin.copy:
+        dest: "{{ image_dir }}/io500-last-result-path.txt"
+        content: "{{ io500_result_dir }}\n"
+        mode: '0644'
+      delegate_to: localhost
+      become: false

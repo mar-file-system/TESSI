@@ -27,6 +27,12 @@
     hosts: "{{ groups['clients'] }}"
     slots_by_host: "{{ daos_api_slots_by_host }}"
     hostfile_path: "{{ daos_api_case_dir }}/hosts"
+- name: Build native DAOS launcher using shared MPI settings
+  ansible.builtin.include_tasks: ../../tasks/build_mpi_command.yaml
+  vars:
+    mpi_launcher_module: mpi/daos-doca-openmpi
+    mpi_launcher_hostfile: "{{ daos_api_case_dir }}/hosts"
+    mpi_launcher_extra_args: [--map-by, slot, --bind-to, core]
 - name: Run MPI DAOS load and preserve output even on failure
   block:
     - name: Create temporary container owned by this benchmark case
@@ -35,6 +41,10 @@
     - name: Record temporary container creation
       ansible.builtin.set_fact:
         daos_api_case_container_created: true
+    - name: Record available space immediately before MPI
+      ansible.builtin.include_tasks: query_pool_space.yaml
+      vars:
+        daos_api_space_stage: before
     - name: Launch native DAOS MPI benchmark using TESSI runner
       ansible.builtin.include_tasks: ../../tasks/run_with_mpi_module.yaml
       vars:
@@ -44,11 +54,7 @@
         show_output: true
         command_timeout: "{{ system.daos.api_timeout | default(600) }}"
         commands: >-
-          mpirun -np {{ (groups['clients'] | length) * (daos_api_case.0 | int) }}
-          -hostfile {{ (daos_api_case_dir ~ '/hosts') | quote }}
-          --prefix "$MPI_HOME"
-          --mca plm_rsh_args '-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null'
-          --map-by slot --bind-to core
+          {{ mpi_launcher_command }} -np {{ (groups['clients'] | length) * (daos_api_case.0 | int) }}
           /usr/local/bin/tessi-daos-api-mpi
           {{ daos_pool | quote }} {{ daos_api_case_container | quote }}
           {{ (daos_api_run_id | int) + (daos_api_case_index | int) }}
@@ -65,16 +71,27 @@
         msg: "{{ item.operation }}: {{ item.cluster_iops | round(1) }} cluster IOPS; {{ item.cluster_bandwidth_MiBps | round(1) }} MiB/s; {{ item.ranks }} ranks; {{ item.value_bytes }} bytes/value"
       loop: "{{ mpi_shell_result.stdout_lines | select('match', '^\\{') | map('from_json') | list }}"
   always:
+    - name: Record available space after MPI including failed jobs
+      ansible.builtin.include_tasks: query_pool_space.yaml
+      vars:
+        daos_api_space_stage: after
     - name: Save MPI output and errors
       ansible.builtin.copy:
         dest: "{{ daos_api_case_dir }}/output.json"
         content: "{{ mpi_shell_result | default({}) | to_nice_json }}\n"
         mode: '0644'
-    - name: Delete only this case's temporary container after success or failure
-      ansible.builtin.command:
-        argv: [daos, container, destroy, --force, "{{ daos_pool }}", "{{ daos_api_case_container }}"]
-      register: daos_api_case_cleanup
-      when: daos_api_case_container_created | bool
-      retries: 3
-      delay: 2
-      until: daos_api_case_cleanup.rc == 0
+    - name: Clean temporary container and record space afterwards
+      block:
+        - name: Delete only this case's temporary container after success or failure
+          ansible.builtin.command:
+            argv: [daos, container, destroy, --force, "{{ daos_pool }}", "{{ daos_api_case_container }}"]
+          register: daos_api_case_cleanup
+          when: daos_api_case_container_created | bool
+          retries: 3
+          delay: 2
+          until: daos_api_case_cleanup.rc == 0
+      always:
+        - name: Record space after container cleanup
+          ansible.builtin.include_tasks: query_pool_space.yaml
+          vars:
+            daos_api_space_stage: after-cleanup

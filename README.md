@@ -34,7 +34,7 @@ The motivation and some additional information about TESSI can be found in our [
 Note that a demo video showing how to run TESSI can be found in our [documents](doc) folder.
 
 ## Phases
-TESSI runs in five main phases. Phase 0 is the step documented above. The created Makefile will then allow you to proceed through the following phases:
+TESSI runs setup, testing, and reporting as separate phases. Phase 0 is the step documented above. The created Makefile will then allow you to proceed through the following phases:
 1. Creation of gold VMs. This creates and stores gold VMs with the necessary software. 
    - For example, the Lustre config creates one gold client image and one gold server image. 
    - Note that the Lustre config supports patching both Lustre itself as well as the ZFS backend.
@@ -42,7 +42,16 @@ TESSI runs in five main phases. Phase 0 is the step documented above. The create
 3. Creation of the virtual cluster (i.e. cloning from the gold images).
 4. Testing of the virtual network connecting the nodes in the virtual cluster.
 5. Configuration of the virtual cluster (e.g. setting up the servers and mounting the clients).
-6. Testing of the virtual cluster (e.g. using MPI to run IOR).
+6. Testing of the cluster (e.g. using MPI to run IOR), saving results for reporting.
+7. PDF report generation from saved test outputs.
+8. Explicit compatibility capture: update the main `compatibility.yaml` after phase7 succeeds.
+
+`make all` runs through phase7; it does not update compatibility records.
+Run `make phase8` explicitly to record a successful configuration.
+For report-only iteration, use `make phase7-clean phase7`; completed tests are
+reused. Editing the report playbook or its template also makes phase7 rebuild.
+Regenerate existing Makefiles with `bootstrap.sh` to use this phase layout.
+`compatibility.local.yaml` is no longer read or written by compatibility capture.
 
 ## Help
 For help with TESSI, please create a [new Issue](https://gitlab.newmexicoconsortium.org/jbent/tassi/-/issues/new) in this repo or email jbent@newmexicoconsortium.org.

@@ -1,0 +1,39 @@
+---
+- name: Require all DAOS engines joined before IO500
+  ansible.builtin.command: dmg --json system query
+  register: io500_daos_before
+  changed_when: false
+
+- name: Check DAOS membership before IO500
+  ansible.builtin.assert:
+    that:
+      - (io500_daos_before.stdout | from_json).response.members | length == groups['ds'] | length
+      - (io500_daos_before.stdout | from_json).response.members | map(attribute='state') | unique | list == ['joined']
+
+- name: Save DAOS state before IO500
+  ansible.builtin.copy:
+    dest: "{{ io500_result_dir }}/system-before.json"
+    content: "{{ io500_daos_before.stdout }}\n"
+    mode: '0644'
+
+- name: Save the effective IO500 configuration
+  ansible.builtin.copy:
+    src: "{{ io500_config_path }}"
+    dest: "{{ io500_result_dir }}/io500.ini"
+    remote_src: true
+    mode: '0644'
+
+- name: Record available space before IO500
+  ansible.builtin.include_tasks: query_pool_space.yaml
+  vars:
+    daos_api_case_dir: "{{ io500_result_dir }}"
+    daos_api_space_stage: before
+
+- name: Create a fresh POSIX-layout container for direct DFS API access
+  ansible.builtin.command:
+    argv: [daos, container, create, --type=POSIX, "{{ daos_pool }}", "{{ io500_daos_container }}"]
+
+- name: Record ownership of this IO500 temporary container
+  ansible.builtin.set_fact:
+    io500_daos_container_created: true
+    mpi_shell_result: {}

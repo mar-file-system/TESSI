@@ -1,0 +1,225 @@
+---
+- name: Prepare measured system identity and preflight every node
+  hosts: all
+  gather_facts: true
+  any_errors_fatal: true
+  vars:
+    perf: "{{ system.performance }}"
+  tasks:
+    - name: Require both storage and client roles
+      ansible.builtin.assert:
+        that:
+          - groups.get('ds', []) | length > 0
+          - groups.get('clients', []) | length > 0
+          - groups['ds'] | intersect(groups['clients']) | length == 0
+          - system.performance.allow_destructive_writes | bool
+          - system.performance.fio_runtime_seconds | int > 0
+          - system.performance.fio_iodepth | int > 0
+          - system.performance.osu_iterations | int > 0
+      run_once: true
+    - name: Check IB addresses and link state using shared preflight
+      ansible.builtin.include_tasks: ../tasks/discover_ib_ip.yaml
+    - name: Verify UCX RDMA before starting any storage benchmarks
+      ansible.builtin.include_tasks: ../tasks/check_ucx_rdma.yaml
+    - name: Validate all raw devices before starting any writes
+      ansible.builtin.command:
+        argv: [python3, /usr/local/bin/tessi-measure-perf, check]
+        stdin: "{{ {'devices': local_storage_devices} | to_json }}"
+      become: true
+      when: "'ds' in group_names"
+      changed_when: false
+    - name: Record RDMA hardware and negotiated link information
+      ansible.builtin.command: ibv_devinfo
+      register: performance_rdma_hardware
+      changed_when: false
+    - name: Capture the benchmark stack with shared provenance tasks
+      ansible.builtin.include_tasks: ../tasks/capture_benchmark_versions.yaml
+    - name: Preserve the performance software snapshot
+      ansible.builtin.set_fact:
+        performance_versions: "{{ benchmark_software_versions }}"
+    - name: Build identity from all measured kernels, OS versions, and inventory groups
+      ansible.builtin.set_fact:
+        performance_system_id: >-
+          {%- set ns = namespace(os=[], kernels=[], roles=[]) -%}
+          {%- for host in groups['all'] | sort -%}
+          {%- set _ = ns.os.append(hostvars[host].ansible_distribution ~ '-' ~ hostvars[host].ansible_distribution_version) -%}
+          {%- set _ = ns.kernels.append(hostvars[host].ansible_kernel) -%}
+          {%- endfor -%}
+          {%- for group in groups | reject('in', ['all', 'ungrouped']) | sort -%}
+          {%- set _ = ns.roles.append((groups[group] | length | string) ~ '-' ~ group) -%}
+          {%- endfor -%}
+          {{ (ns.kernels | unique | sort | join('+')) ~ '-' ~ (ns.os | unique | sort | join('+')) ~ '-' ~ (ns.roles | join('-')) }}
+      run_once: true
+    - name: Create system baseline directory on controller
+      ansible.builtin.file:
+        path: "{{ perf.results_root }}/{{ performance_system_id }}"
+        state: directory
+        mode: '0755'
+      delegate_to: localhost
+      become: false
+      run_once: true
+    - name: Allocate a unique timestamped run directory
+      ansible.builtin.command:
+        argv:
+          - mktemp
+          - -d
+          - "{{ perf.results_root }}/{{ performance_system_id }}/{{ ansible_date_time.iso8601_basic_short }}-XXXXXX"
+      register: performance_directory
+      delegate_to: localhost
+      become: false
+      run_once: true
+    - name: Preserve run path for all plays
+      ansible.builtin.set_fact:
+        performance_run_dir: "{{ performance_directory.stdout }}"
+    - name: Create temporary benchmark artifact directory on each node
+      ansible.builtin.tempfile:
+        state: directory
+        prefix: tessi-performance-
+      register: performance_scratch
+    - name: Print manifest destination
+      ansible.builtin.debug:
+        msg: "Performance manifest will be {{ performance_run_dir }}/manifest.json"
+      run_once: true
+
+- name: Measure all storage servers concurrently
+  hosts: ds
+  gather_facts: false
+  any_errors_fatal: true
+  tasks:
+    - name: Launch raw-device FIO on every storage server
+      ansible.builtin.command:
+        argv: [python3, /usr/local/bin/tessi-measure-perf, fio, --output, "{{ performance_scratch.path }}"]
+        stdin: "{{ {'config': system.performance, 'devices': local_storage_devices} | to_json }}"
+      become: true
+      async: "{{ system.performance.command_timeout_seconds | int * 4 + 60 }}"
+      poll: 0
+      register: performance_fio_job
+    - name: Wait for FIO measurements
+      ansible.builtin.async_status:
+        jid: "{{ performance_fio_job.ansible_job_id }}"
+      become: true
+      register: performance_fio_result
+      until: performance_fio_result.finished
+      retries: "{{ (system.performance.command_timeout_seconds | int * 4 / 10) | int + 12 }}"
+      delay: 10
+    - name: Preserve FIO results
+      ansible.builtin.set_fact:
+        performance_fio: "{{ performance_fio_result.stdout | from_json }}"
+
+- name: Measure IB links using the shared MPI execution wrapper
+  hosts: clients[0]
+  gather_facts: false
+  tasks:
+    - name: Locate MPI using the common discovery task
+      ansible.builtin.include_tasks: ../tasks/discover_mpi.yaml
+      vars:
+        mpi:
+          module: mpi/performance-openmpi
+    - name: Resolve OSU using the common installation path
+      ansible.builtin.include_tasks: ../tasks/osu_paths.yaml
+      vars:
+        osu_mpi_module: mpi/performance-openmpi
+    - name: Write the baseline hostfile using the shared task
+      ansible.builtin.include_tasks: ../tasks/write_mpi_hostfile.yaml
+      vars:
+        mpi_module: mpi/performance-openmpi
+        hosts: "{{ groups['clients'] + groups['ds'] }}"
+        hostfile_path: "{{ performance_scratch.path }}/hosts"
+    - name: Build the baseline MPI launcher using shared settings
+      ansible.builtin.include_tasks: ../tasks/build_mpi_command.yaml
+      vars:
+        mpi_launcher_module: mpi/performance-openmpi
+        mpi_launcher_hostfile: "{{ performance_scratch.path }}/hosts"
+        mpi_launcher_extra_args: ['--mca', pml, ucx, '--mca', osc, ucx]
+    - name: Execute OSU pairwise and concurrent-pair benchmarks
+      ansible.builtin.include_tasks: ../tasks/run_with_mpi_module.yaml
+      vars:
+        mpi_module: mpi/performance-openmpi
+        mpi_operation_name: Measure IB baseline using OSU
+        command_timeout: "{{ system.performance.command_timeout_seconds }}"
+        commands: |
+          python3 /usr/local/bin/tessi-measure-perf network --output {{ performance_scratch.path | quote }} <<'TESSI_PERFORMANCE_INPUT'
+          {{ {'config': system.performance, 'topology': {'clients': groups['clients'] | map('extract', hostvars, 'ansible_fqdn') | list, 'ds': groups['ds'] | map('extract', hostvars, 'ansible_fqdn') | list}, 'mpi': {'launcher_argv': mpi_launcher_argv, 'osu_binary_dir': osu_binary_dir}} | to_json }}
+          TESSI_PERFORMANCE_INPUT
+    - name: Preserve network results
+      ansible.builtin.set_fact:
+        performance_network: "{{ mpi_shell_result.stdout | from_json }}"
+
+- name: Store raw artifacts and publish manifest
+  hosts: all
+  gather_facts: false
+  any_errors_fatal: true
+  tasks:
+    - name: Find node benchmark artifacts
+      ansible.builtin.find:
+        paths: "{{ performance_scratch.path }}"
+        file_type: file
+      register: performance_artifacts
+      become: true
+    - name: Fetch raw benchmark files
+      ansible.builtin.fetch:
+        src: "{{ item.path }}"
+        dest: "{{ performance_run_dir }}/raw/{{ inventory_hostname }}/{{ item.path | basename }}"
+        flat: true
+      loop: "{{ performance_artifacts.files }}"
+      become: true
+    - name: Assemble manifest including hardware, versions, settings, and commands
+      ansible.builtin.set_fact:
+        performance_payload: >-
+          {%- set ns = namespace(hosts={}) -%}
+          {%- for host in groups['all'] | sort -%}
+          {%- set h = hostvars[host] -%}
+          {%- set _ = ns.hosts.update({host: {
+            'hostname': h.ansible_hostname, 'fqdn': h.ansible_fqdn,
+            'os': h.ansible_distribution, 'os_version': h.ansible_distribution_version,
+            'kernel': h.ansible_kernel, 'architecture': h.ansible_architecture,
+            'cpu': h.ansible_processor, 'vcpus': h.ansible_processor_vcpus,
+            'memory_MiB': h.ansible_memtotal_mb, 'groups': h.group_names,
+            'ib_device': h.infiniband_device, 'ib_address': h.infiniband_cidr,
+            'rdma_hardware': h.performance_rdma_hardware.stdout_lines,
+            'software_versions': h.performance_versions.stdout_lines,
+            'fio': h.performance_fio | default({}) }}) -%}
+          {%- endfor -%}
+          {{ {'system_id': performance_system_id, 'groups': groups,
+              'config': system.performance, 'hosts': ns.hosts,
+              'network': hostvars[groups['clients'][0]].performance_network} }}
+      run_once: true
+    - name: Generate and print the baseline manifest and concise summary
+      ansible.builtin.command:
+        argv:
+          - "{{ ansible_playbook_python }}"
+          - -c
+          - "{{ lookup('file', 'files/measure.py') }}"
+          - manifest
+          - --output
+          - "{{ performance_run_dir }}"
+        stdin: "{{ performance_payload | to_json }}"
+      delegate_to: localhost
+      become: false
+      run_once: true
+      register: performance_summary
+    - name: Ensure the report artifact directory exists
+      ansible.builtin.file:
+        path: "{{ image_dir }}"
+        state: directory
+        mode: '0755'
+      delegate_to: localhost
+      become: false
+      run_once: true
+    - name: Save this experiment's completed manifest path for phase7
+      ansible.builtin.copy:
+        dest: "{{ image_dir }}/performance-manifest-path.txt"
+        content: "{{ performance_run_dir }}/manifest.json\n"
+        mode: '0644'
+      delegate_to: localhost
+      become: false
+      run_once: true
+    - name: Show baseline summary and saved paths
+      ansible.builtin.debug:
+        msg: "{{ performance_summary.stdout_lines }}"
+      run_once: true
+    - name: Remove temporary artifacts after successful collection
+      ansible.builtin.file:
+        path: "{{ performance_scratch.path }}"
+        state: absent
+      become: true

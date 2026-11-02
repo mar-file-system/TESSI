@@ -1,0 +1,40 @@
+---
+# Both Rocky's split runtime/devel packages and DOCA's combined package layout.
+# Inputs: openmpi_module_name and optional openmpi_module_env_vars.
+- name: Discover installed Open MPI compiler directory
+  ansible.builtin.shell: |
+    set -o pipefail
+    {
+      rpm -ql openmpi
+      if rpm -q --quiet openmpi-devel; then
+        rpm -ql openmpi-devel
+      fi
+    } | sed -n 's@/mpicc$@@p' | sort -u
+  args:
+    executable: /bin/bash
+  register: rpm_openmpi_bin
+  changed_when: false
+
+- name: Discover installed Open MPI library directory
+  ansible.builtin.shell: rpm -ql openmpi | sed -n 's@/libmpi.so\..*$@@p' | sort -u
+  register: rpm_openmpi_lib
+  changed_when: false
+
+- name: Require a single complete Open MPI installation
+  ansible.builtin.assert:
+    that:
+      - rpm_openmpi_bin.stdout_lines | length == 1
+      - rpm_openmpi_lib.stdout_lines | length == 1
+    fail_msg: >-
+      Expected one Open MPI compiler and library directory from installed
+      openmpi/openmpi-devel packages; found compilers={{ rpm_openmpi_bin.stdout_lines }},
+      libraries={{ rpm_openmpi_lib.stdout_lines }}.
+
+- name: Register Open MPI with the shared module installer
+  ansible.builtin.include_tasks: install_module.yaml
+  vars:
+    modulefiles_base_path: /usr/share/modulefiles
+    module_name: "{{ openmpi_module_name }}"
+    module_bin_path: "{{ rpm_openmpi_bin.stdout }}"
+    module_lib_path: "{{ rpm_openmpi_lib.stdout }}"
+    module_env_vars: "{{ openmpi_module_env_vars | default([]) }}"

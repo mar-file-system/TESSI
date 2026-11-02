@@ -1,0 +1,29 @@
+---
+- name: Query DAOS pool space ({{ daos_api_space_stage }})
+  ansible.builtin.command:
+    argv: [dmg, --json, pool, query, "{{ daos_pool }}"]
+  register: daos_api_space_query
+  changed_when: false
+  failed_when: false
+
+- name: Save pool space query and errors ({{ daos_api_space_stage }})
+  ansible.builtin.copy:
+    dest: "{{ daos_api_case_dir }}/space-{{ daos_api_space_stage }}.json"
+    content: "{{ daos_api_space_query | to_nice_json }}\n"
+    mode: '0644'
+
+- name: Print available DAOS space by tier ({{ daos_api_space_stage }})
+  ansible.builtin.debug:
+    msg: >-
+      {{ daos_api_space_stage }}: pool={{ daos_pool }} tier={{ item.media_type }};
+      free={{ item.free }} / {{ item.total }} bytes
+      ({{ ((item.free | float) / 1073741824) | round(2) }} GiB free);
+      per-target free min={{ item.min }} max={{ item.max }} mean={{ item.mean }} bytes.
+  loop: "{{ ((daos_api_space_query.stdout | from_json).response.tier_stats | default([], true)) if daos_api_space_query.rc == 0 else [] }}"
+  loop_control:
+    label: "{{ item.media_type }}"
+
+- name: Print pool-space query failure without masking the MPI result
+  ansible.builtin.debug:
+    msg: "{{ daos_api_space_stage }}: pool space query failed: {{ daos_api_space_query.stderr | default(daos_api_space_query.msg | default('unknown error'), true) }}"
+  when: daos_api_space_query.rc != 0

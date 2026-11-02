@@ -1,0 +1,87 @@
+---
+# DAOS-only adapter: reuse the normal shared IO500 build/distribution pipeline.
+- name: Install DAOS IO500 headers and runtime dependencies on clients
+  ansible.builtin.package:
+    name: [daos-devel, libuuid-devel]
+    state: present
+
+- name: Check for an existing DOCA MPI IO500 source tree
+  ansible.builtin.stat:
+    path: /usr/local/src/io500_daos-doca-openmpi/Makefile
+  register: daos_io500_existing_tree
+  run_once: true
+  delegate_to: "{{ groups['clients'] | first }}"
+
+- name: Invalidate an earlier IO500 build without DAOS support
+  ansible.builtin.include_tasks:
+    file: ../../tasks/run_with_mpi_module.yaml
+    apply:
+      delegate_to: "{{ groups['clients'] | first }}"
+  vars:
+    mpi_module: mpi/daos-doca-openmpi
+    mpi_operation_name: Check whether the existing IO500 build enables DAOS
+    working_dir: /usr/local/src/io500_daos-doca-openmpi
+    command_timeout: 120
+    commands: |
+      if ! grep -Eq '^#define USE_DAOS_AIORI([[:space:]]|$)' build/ior/src/config.h 2>/dev/null ||
+         ! grep -q -- '-ldfs' local.mk 2>/dev/null; then
+        make clean
+        rm -f io500
+      fi
+  when: daos_io500_existing_tree.stat.exists
+  run_once: true
+
+- name: Build and distribute DAOS-enabled IO500 using shared TESSI tasks
+  environment:
+    IO500_EXTRA_CFLAGS: -I/usr/include
+    IO500_EXTRA_LDFLAGS: -L/usr/lib64 -Wl,-rpath,/usr/lib64 -ldaos -ldaos_common -ldfs -lgurt -luuid
+  block:
+    - name: Include shared IO500 installer with DAOS configuration
+      ansible.builtin.include_tasks: ../../shared/install_ior.yaml
+      vars:
+        # No mpi_packages: DOCA already provides this MPI and its development files.
+        mpi:
+          module: mpi/daos-doca-openmpi
+        ior_config_option: --with-daos=/usr
+
+- name: Verify installed DAOS IO500 capabilities on every client
+  ansible.builtin.include_tasks: ../../tasks/run_with_mpi_module.yaml
+  vars:
+    mpi_module: mpi/daos-doca-openmpi
+    mpi_operation_name: Verify DAOS-enabled IO500, IOR, and mdtest without running I/O
+    working_dir: /usr/local/src/io500_daos-doca-openmpi
+    command_timeout: 120
+    show_output: true
+    commands: |
+      grep -Eq '^#define USE_DAOS_AIORI([[:space:]]|$)' build/ior/src/config.h
+      for program in ior mdtest; do
+        # IOR/mdtest return 1 for successful help output in the pinned release.
+        help_rc=0
+        "$program" -h > "daos-${program}-help.txt" 2>&1 || help_rc=$?
+        if [ "$help_rc" -gt 1 ] ||
+           ! grep -E 'API.*\bDFS\b' "daos-${program}-help.txt"; then
+          echo "DAOS capability check failed for $program (help exit=$help_rc)" >&2
+          cat "daos-${program}-help.txt" >&2
+          exit 1
+        fi
+      done
+      for program in io500 ior mdtest; do
+        ldd "$(command -v "$program")" > "daos-${program}-ldd.txt"
+        if grep -q 'not found' "daos-${program}-ldd.txt"; then
+          cat "daos-${program}-ldd.txt"
+          exit 1
+        fi
+        grep -E 'libdaos\.so' "daos-${program}-ldd.txt"
+        grep -E 'libdfs\.so' "daos-${program}-ldd.txt"
+      done
+      printf '%s\n' 'PASS: IO500, IOR, and mdtest linked to DAOS; DFS API enabled.'
+
+- name: Install IO500 direct-DFS find helper source
+  ansible.builtin.copy:
+    src: ../test_cluster/io500_dfs_find.c
+    dest: /usr/local/src/tessi/io500_dfs_find.c
+    mode: '0644'
+
+- name: Build IO500 direct-DFS find helper during phase1
+  ansible.builtin.command:
+    argv: [gcc, -O2, -Wall, -Wextra, -Werror, /usr/local/src/tessi/io500_dfs_find.c, -o, /usr/local/bin/tessi-io500-dfs-find, -ldfs, -ldaos]

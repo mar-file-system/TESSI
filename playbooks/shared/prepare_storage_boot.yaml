@@ -1,0 +1,77 @@
+---
+# Match server boot settings and loaded OFED drivers before either baseline or DAOS.
+# A "Translated" dmesg message alone does not mean Intel IOMMU is enabled.
+- name: Enable Intel IOMMU for the next server boot
+  ansible.builtin.command: grubby --update-kernel=ALL --args=intel_iommu=on
+  when:
+    - "'ds' in group_names"
+    - ansible_processor | join(' ') is search('Intel')
+    - ansible_cmdline.intel_iommu | default('') != 'on'
+  changed_when: false
+
+# Xem images may disable BLS. grubby updates BLS files but not the active
+# static menu, and its saved_entry uses a different ID format in that case.
+- name: Rebuild the active GRUB menu and retain the running OFED kernel
+  ansible.builtin.shell: |
+    set -euo pipefail
+    if grep -q '^GRUB_ENABLE_BLSCFG=false' /etc/default/grub; then
+      grub2-mkconfig -o /boot/grub2/grub.cfg
+      python3 - <<'PYBOOT'
+    import pathlib, re, subprocess
+    needle = 'gnulinux-{{ ansible_kernel }}-advanced-'
+    for line in pathlib.Path('/boot/grub2/grub.cfg').read_text().splitlines():
+        if line.startswith('menuentry '):
+            for entry in re.findall(r"'([^']+)'", line):
+                if entry.startswith(needle):
+                    subprocess.run(['grub2-set-default', entry], check=True)
+                    raise SystemExit(0)
+    raise SystemExit('Running kernel missing from generated GRUB menu')
+    PYBOOT
+    else
+      grubby --set-default /boot/vmlinuz-{{ ansible_kernel }}
+    fi
+  args:
+    executable: /bin/bash
+  changed_when: false
+
+- name: Find active IOMMU groups on storage servers
+  ansible.builtin.find:
+    paths: /sys/kernel/iommu_groups
+    file_type: directory
+    recurse: false
+  register: daos_iommu_groups
+  when: "'ds' in group_names"
+
+- name: Reboot storage servers to activate IOMMU or the installed OFED drivers
+  ansible.builtin.reboot:
+    reboot_timeout: 900
+    connect_timeout: 10
+    post_reboot_delay: 10
+  register: daos_iommu_reboot
+  when:
+    - "'ds' in group_names"
+    - daos_iommu_groups.matched | int == 0 or doca_install_result.changed | default(false)
+
+- name: Refresh storage-server facts after automatic reboot
+  ansible.builtin.setup:
+  when:
+    - "'ds' in group_names"
+    - daos_iommu_reboot.rebooted | default(false)
+
+- name: Verify active IOMMU groups after automatic reboot
+  ansible.builtin.find:
+    paths: /sys/kernel/iommu_groups
+    file_type: directory
+    recurse: false
+  register: daos_active_iommu_groups
+  when: "'ds' in group_names"
+
+- name: Require operational IOMMU before DAOS configuration
+  ansible.builtin.assert:
+    that:
+      - daos_active_iommu_groups.matched | int > 0
+    fail_msg: >-
+      No active IOMMU groups after phase1's automatic reboot. Check BIOS VT-d
+      support and the active kernel command line; phase1 cannot complete without VFIO.
+  when: "'ds' in group_names"
+

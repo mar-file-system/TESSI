@@ -126,14 +126,31 @@
       register: daos_saved_fingerprint
       when: daos_fingerprint.stat.exists
 
-    - name: Refuse configuration changes to initialized engines
+    - name: Allow metadata-memory expansion or correction on an empty RAM disk
+      ansible.builtin.command:
+        argv:
+          - python3
+          - '-c'
+          - |
+            import json, pathlib, sys, yaml
+            old = yaml.safe_load(pathlib.Path('/etc/daos/daos_server.yml').read_text())
+            new = json.load(sys.stdin)
+            old_size = old['engines'][0]['storage'][0]['scm_size']
+            new_size = new['engines'][0]['storage'][0]['scm_size']
+            empty = not any(p.is_file() for p in pathlib.Path('/mnt/daos_scm').rglob('*'))
+            assert new_size >= old_size or empty, 'Refusing to shrink metadata memory while pool data remains'
+            old['engines'][0]['storage'][0]['scm_size'] = new_size
+            assert old == new, 'Only scm_size expansion is allowed; engine topology must remain unchanged'
+        stdin: "{{ lookup('template', 'templates/daos_server.yml.j2') | from_yaml | to_json }}"
+      changed_when: false
+      when:
+        - daos_fingerprint.stat.exists
+        - (daos_saved_fingerprint.content | b64decode | trim) != (lookup('template', 'templates/daos_server.yml.j2') | hash('sha256'))
+
+    - name: Require RAM headroom for the configured metadata memory
       ansible.builtin.assert:
-        that:
-          - (daos_saved_fingerprint.content | b64decode | trim) == (lookup('template', 'templates/daos_server.yml.j2') | hash('sha256'))
-        fail_msg: >-
-          The initialized DAOS engine configuration changed. Restore its original
-          configuration; changing storage topology requires a separate explicit rebuild.
-      when: daos_fingerprint.stat.exists
+        that: (daos_scm_size | int) * 1024 <= (ansible_memtotal_mb | int) * 0.6
+        fail_msg: Metadata memory must leave at least 40 percent of server RAM for DAOS and the OS.
 
     - name: Render DAOS engine configuration
       ansible.builtin.template:
@@ -147,6 +164,20 @@
         name: daos_server
         state: stopped
       when: daos_server_config.changed
+
+    - name: Inspect an existing metadata RAM-disk mount
+      ansible.builtin.command: findmnt -n -o FSTYPE /mnt/daos_scm
+      register: daos_scm_mount
+      changed_when: false
+      failed_when: false
+      when: daos_server_config.changed
+
+    - name: Expand an existing metadata RAM disk without reformatting
+      ansible.builtin.command:
+        argv: [mount, -o, "remount,size={{ daos_scm_size }}G", /mnt/daos_scm]
+      when:
+        - daos_server_config.changed
+        - daos_scm_mount.stdout | default('') | trim == 'tmpfs'
 
     - name: Inspect service state before NVMe preparation
       ansible.builtin.service_facts:
@@ -168,10 +199,20 @@
         enabled: true
         state: started
 
-    - name: Wait for DAOS control listener
-      ansible.builtin.wait_for:
-        port: 10001
-        timeout: 120
+    - name: Wait for DAOS control listener with startup diagnostics
+      block:
+        - name: Wait for DAOS control listener
+          ansible.builtin.wait_for:
+            port: 10001
+            timeout: 120
+      rescue:
+        - name: Read DAOS startup errors
+          ansible.builtin.command: journalctl -u daos_server -n 16 --no-pager
+          register: daos_startup_errors
+          changed_when: false
+        - name: Report DAOS startup failure
+          ansible.builtin.fail:
+            msg: "DAOS control listener did not start. Recent service logs: {{ daos_startup_errors.stdout }}"
 
     - name: Verify VFIO has active IOMMU groups
       ansible.builtin.find:
@@ -250,10 +291,40 @@
       delay: 5
       until: daos_registered_pools.rc == 0
 
+    - name: Validate independent metadata and data pool capacities
+      ansible.builtin.assert:
+        that:
+          - daos_pool_metadata_gib_per_server | int > 0
+          - daos_pool_data_gib_per_server | int > 0
+          - (daos_pool_metadata_gib_per_server | float) <= (daos_scm_size | float) * 0.8
+          - (system.daos | default({})).pool_size is not defined
+          - (system.daos | default({})).pool_tier_ratio is not defined
+        fail_msg: >-
+          Use positive system.daos.pool_metadata_gib_per_server and
+          pool_data_gib_per_server values. Metadata must leave 20 percent RAM-disk
+          headroom. Remove legacy pool_size/pool_tier_ratio overrides.
+
+    - name: Print requested metadata and data pool capacities
+      ansible.builtin.debug:
+        msg: >-
+          Per server: {{ daos_pool_metadata_gib_per_server }} GiB metadata,
+          {{ daos_pool_data_gib_per_server }} GiB data.
+          Across {{ groups['ds'] | length }} servers:
+          {{ (daos_pool_metadata_gib_per_server | int) * (groups['ds'] | length) }} GiB metadata,
+          {{ (daos_pool_data_gib_per_server | int) * (groups['ds'] | length) }} GiB data.
+
     - name: Create benchmark pool only when its label is absent
-      ansible.builtin.command: >-
-        dmg pool create --size={{ daos_pool_size }}
-        --user={{ daos_user }} --group={{ daos_group }} {{ daos_pool }}
+      ansible.builtin.command:
+        argv:
+          - dmg
+          - pool
+          - create
+          - "--meta-size={{ (daos_pool_metadata_gib_per_server | int) * 1073741824 }}"
+          - "--data-size={{ (daos_pool_data_gib_per_server | int) * 1073741824 }}"
+          - --mem-ratio=100%
+          - "--user={{ daos_user }}"
+          - "--group={{ daos_group }}"
+          - "{{ daos_pool }}"
       when: daos_pool not in ((daos_registered_pools.stdout | from_json).response.pools | default([], true) | map(attribute='label') | list)
 
     - name: Wait for benchmark pool to become queryable
@@ -263,6 +334,18 @@
       retries: 24
       delay: 5
       until: daos_existing_pool.rc == 0
+
+    - name: Verify pool metadata and data capacities independently
+      vars:
+        daos_pool_actual: "{{ (daos_existing_pool.stdout | from_json).response }}"
+        daos_expected_metadata_bytes: "{{ (daos_pool_metadata_gib_per_server | int) * 1073741824 * (groups['ds'] | length) }}"
+        daos_expected_data_bytes: "{{ (daos_pool_data_gib_per_server | int) * 1073741824 * (groups['ds'] | length) }}"
+      ansible.builtin.assert:
+        that:
+          - daos_pool_actual.total_engines | int == groups['ds'] | length
+          - ((daos_pool_actual.tier_stats[0].total | float) / (daos_expected_metadata_bytes | float) - 1) | abs < 0.02
+          - ((daos_pool_actual.tier_stats[1].total | float) / (daos_expected_data_bytes | float) - 1) | abs < 0.02
+        fail_msg: Existing pool does not match requested per-server capacities. Run phase5-clean while servers are running, then rerun phase5.
 
     - name: List existing API containers as benchmark user
       become_user: "{{ daos_user }}"
@@ -302,11 +385,12 @@
         owner: daos_server
         mode: '0644'
 
-- name: Stop DAOS services without deleting stored data
+- name: Delete the benchmark pool and stop DAOS services
   hosts: ds:clients
   become: true
   gather_facts: false
   tags: [never, makeclean]
+  vars_files: [vars.yaml]
   tasks:
     - name: Stop client agents
       ansible.builtin.systemd_service:
@@ -315,6 +399,29 @@
         enabled: false
       loop: [daos_agent]
       when: "'clients' in group_names"
+
+    - name: List pools before stopping the storage servers
+      ansible.builtin.command: dmg --json pool list --no-query
+      register: daos_cleanup_pools
+      changed_when: false
+      failed_when: false
+      run_once: true
+      delegate_to: "{{ groups['clients'][0] }}"
+
+    - name: Delete only the configured benchmark pool so phase5 can resize it
+      ansible.builtin.command:
+        argv: [dmg, pool, destroy, --recursive, --force, "{{ daos_pool }}"]
+      when:
+        - daos_cleanup_pools.rc == 0
+        - daos_pool in ((daos_cleanup_pools.stdout | from_json).response.pools | default([], true) | map(attribute='label') | list)
+      run_once: true
+      delegate_to: "{{ groups['clients'][0] }}"
+
+    - name: Report skipped pool cleanup if storage servers are already stopped
+      ansible.builtin.debug:
+        msg: "Pool listing unavailable; no pool deleted. Phase5 will check existing pool sizing before reuse. {{ daos_cleanup_pools.stderr | default('') }}"
+      when: daos_cleanup_pools.rc != 0
+      run_once: true
 
     - name: Stop servers
       ansible.builtin.systemd_service:

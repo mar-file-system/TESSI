@@ -1,0 +1,60 @@
+---
+# Shared pinned RDMA/MPI/UCX stack for component baselines and DAOS.
+- name: Install EPEL for DOCA driver build prerequisites
+  ansible.builtin.dnf:
+    name: epel-release
+    state: present
+
+- name: Install DOCA kernel and compiler prerequisites
+  ansible.builtin.dnf:
+    name:
+      - dnf-plugins-core
+      - dkms
+      - gcc
+      - make
+      - "kernel-devel-{{ ansible_facts['kernel'] }}"
+      - kernel-headers
+    state: present
+
+- name: Import NVIDIA DOCA signing key
+  ansible.builtin.rpm_key:
+    key: https://linux.mellanox.com/public/repo/doca/3.2.1-044413/rhel9/x86_64/nvidia-doca-rpm-gpg-public-key.asc
+    state: present
+
+- name: Configure NVIDIA DOCA 3.2.1 repository
+  ansible.builtin.yum_repository:
+    name: doca
+    description: NVIDIA DOCA 3.2.1-044413 RHEL9 x86_64
+    baseurl: https://linux.mellanox.com/public/repo/doca/3.2.1-044413/rhel9/x86_64/
+    enabled: true
+    gpgcheck: true
+    gpgkey: https://linux.mellanox.com/public/repo/doca/3.2.1-044413/rhel9/x86_64/nvidia-doca-rpm-gpg-public-key.asc
+    state: present
+
+- name: Import NVIDIA Mellanox OFED signing key
+  ansible.builtin.rpm_key:
+    key: https://www.mellanox.com/downloads/ofed/RPM-GPG-KEY-Mellanox-SHA256
+    state: present
+
+- name: Install NVIDIA DOCA-OFED
+  ansible.builtin.dnf:
+    name: doca-ofed
+    state: present
+    update_cache: true
+    # Performance baselines may leave distro libfabric/openmpi-devel installed.
+    # Let DNF replace incompatible dependents as it installs the matched DOCA
+    # RDMA/MPI/UCX stack; do not manually erase the active stack beforehand.
+    allowerasing: true
+  register: doca_install_result
+
+- name: Check installed DOCA-OFED version
+  ansible.builtin.command: rpm -q --qf '%{VERSION}\n' doca-ofed
+  register: doca_version
+  changed_when: false
+
+- name: Require validated DOCA-OFED version
+  ansible.builtin.assert:
+    that:
+      - doca_version.stdout is match('^3\\.2\\.1($|[.-])')
+    fail_msg: "Required DOCA-OFED 3.2.1; installed {{ doca_version.stdout }}"
+
