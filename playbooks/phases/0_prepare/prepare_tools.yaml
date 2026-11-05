@@ -9,159 +9,39 @@
   delegate_to: localhost
   run_once: true
 
-- name: Refresh SSH known_hosts for physical hosts 
-  block:
-  
-  - name: Set some variables
-    set_fact:
-      ansible_ssh_common_args: '-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null'
-      
-  - name: Detect the actual connecting user
-    set_fact:
-      real_user: "{{ ansible_env.SUDO_USER | default(ansible_user_id) }}"
+# Physical hosts and final VM/bare-metal clusters use the same writer election
+# and content-aware completion marker. Preserve trust for root and login user.
+- name: Identify the connecting user for physical-host SSH trust
+  ansible.builtin.set_fact:
+    real_user: "{{ ansible_env.SUDO_USER | default(ansible_user_id) }}"
 
-  - name: Get passwd entry for real_user
-    ansible.builtin.getent:
-      database: passwd
-      key: "{{ real_user }}"
+- name: Look up the connecting user's home directory
+  ansible.builtin.getent:
+    database: passwd
+    key: "{{ real_user }}"
 
-  - name: Set real_user_home fact
-    set_fact:
-      real_user_home: "{{ getent_passwd[real_user][4] }}"
+- name: Configure root SSH trust on physical hosts using the shared implementation
+  ansible.builtin.include_tasks: ../../shared/configure_ssh.yaml
+  vars:
+    cluster_ssh_physical: true
+    cluster_ssh_skip_connectivity: true
+    cluster_ssh_home: /root
+  args:
+    apply:
+      become: true
+      become_user: root
 
-  - name: Build target file list
-    set_fact:
-      # We build a list of objects. Each has a path and the owner user.
-      target_files: >-
-        {{
-          [
-            {'path': '/root/.ssh/known_hosts', 'owner': 'root'}
-          ] +
-          (
-            [{'path': real_user_home + '/.ssh/known_hosts', 'owner': real_user}]
-            if real_user != 'root' else []
-          )
-        }}
-
-  - name: Generate deterministic physical-host known_hosts content
-    ansible.builtin.set_fact:
-      physical_known_hosts_aliases: >-
-        {%- set ns = namespace(values=[]) -%}
-        {%- for host in groups['physical_hosts'] | sort -%}
-        {%-   set ns.values = ns.values + [host, hostvars[host].ansible_default_ipv4.address] -%}
-        {%-   if hostvars[host].ansible_fqdn is defined -%}
-        {%-     set ns.values = ns.values + [hostvars[host].ansible_fqdn] -%}
-        {%-   endif -%}
-        {%-   if hostvars[host].domain_suffix is defined -%}
-        {%-     set ns.values = ns.values + [host ~ '.' ~ hostvars[host].domain_suffix] -%}
-        {%-   endif -%}
-        {%- endfor -%}
-        {{ ns.values | unique | list }}
-      physical_known_hosts_content: |
-        {% for host in groups['physical_hosts'] | sort %}
-        {% if hostvars[host].ansible_ssh_host_key_ed25519_public is defined %}
-        {% set names = [host, hostvars[host].ansible_default_ipv4.address] %}
-        {% if hostvars[host].ansible_fqdn is defined and hostvars[host].ansible_fqdn != host %}
-        {%   set _ = names.append(hostvars[host].ansible_fqdn) %}
-        {% endif %}
-        {% if hostvars[host].domain_suffix is defined %}
-        {%   set _ = names.append(host ~ '.' ~ hostvars[host].domain_suffix) %}
-        {% endif %}
-        {{ names | unique | join(',') }} ssh-ed25519 {{ hostvars[host].ansible_ssh_host_key_ed25519_public }}
-        {% endif %}
-        {% endfor %}
-    run_once: true
-    delegate_to: localhost
-    delegate_facts: true
-
-  - name: Map each target file to its respective file system
-    ansible.builtin.set_fact:
-      file_system_mappings: >-
-        {% set results = [] %}
-        {% for item in target_files %}
-          {% set matching_mounts = ansible_mounts | selectattr('mount', 'in', item.path) | sort(attribute='mount') %}
-          {% if matching_mounts | length > 0 %}
-            {% set target_mount = matching_mounts | last %}
-            {% set _ = results.append({
-              'file_path': item.path,
-              'owner': item.owner | default('unknown'),
-              'mount_point': target_mount.mount,
-              'fstype': target_mount.fstype,
-              'device': target_mount.device
-            }) %}
-          {% else %}
-            {% set _ = results.append({
-              'file_path': item.path,
-              'owner': item.owner | default('unknown'),
-              'mount_point': 'unknown',
-              'fstype': 'unknown',
-              'device': 'unknown'
-            }) %}
-          {% endif %}
-        {% endfor %}
-        {{ results | to_json }}
-
-  - name: Example task using the saved data later in the play
-    ansible.builtin.debug:
-      msg: "File {{ item.file_path }} (owned by {{ item.owner }}) is sitting on {{ item.mount_point }} ({{ item.fstype }})"
-    loop: "{{ file_system_mappings | from_json }}"
-
-  - name: Ensure known_hosts files exist
-    file:
-      path: "{{ item.path }}"
-      state: touch
-      owner: "{{ item.owner }}"
-      mode: '0644'
-    become_user: "{{ item.owner }}"  # <--- THE MAGIC SWITCH
-    loop: "{{ target_files }}"
-    vars:
-      current_mapping: "{{ (file_system_mappings | from_json) | selectattr('file_path', 'equalto', item.path) | first }}"
-    when: >
-      current_mapping.fstype != 'nfs' or
-      inventory_hostname == ansible_play_hosts[0]
-
-  - name: Remove legacy physical-host entries in one pass per file
-    ansible.builtin.replace:
-      path: "{{ item.path }}"
-      regexp: >-
-        ^(?=[^ ]*(?:^|,)(?:{{ hostvars['localhost'].physical_known_hosts_aliases
-        | map('regex_escape') | join('|') }})(?:,| ))[^\n]*\n?
-      replace: ""
-    become_user: "{{ item.owner }}"
-    loop: "{{ target_files }}"
-    vars:
-      current_mapping: "{{ (file_system_mappings | from_json) | selectattr('file_path', 'equalto', item.path) | first }}"
-    when: >
-      current_mapping.fstype != 'nfs' or
-      inventory_hostname == ansible_play_hosts[0]
-
-  - name: Add cluster keys to files
-    ansible.builtin.blockinfile:
-      path: "{{ item.path }}"
-      owner: "{{ item.owner }}"
-      mode: '0644'
-      marker: "# {mark} ANSIBLE MANAGED CLUSTER KEYS"
-      block: "{{ hostvars['localhost'].physical_known_hosts_content | trim }}"
-    become_user: "{{ item.owner }}"
-    loop: "{{ target_files }}"
-    vars:
-      current_mapping: "{{ (file_system_mappings | from_json) | selectattr('file_path', 'equalto', item.path) | first }}"
-    when: >
-      current_mapping.fstype != 'nfs' or
-      inventory_hostname == ansible_play_hosts[0]
-
-  - name: Cleanup backup files
-    file:
-      path: "{{ item.path }}.old"
-      state: absent
-    become_user: "{{ item.owner }}"
-    loop: "{{ target_files }}"
-    vars:
-      current_mapping: "{{ (file_system_mappings | from_json) | selectattr('file_path', 'equalto', item.path) | first }}"
-    when: >
-      current_mapping.fstype != 'nfs' or
-      inventory_hostname == ansible_play_hosts[0]
-  become: true
+- name: Configure login-user SSH trust using the shared implementation
+  ansible.builtin.include_tasks: ../../shared/configure_ssh.yaml
+  vars:
+    cluster_ssh_physical: true
+    cluster_ssh_skip_connectivity: true
+    cluster_ssh_home: "{{ getent_passwd[real_user][4] }}"
+  args:
+    apply:
+      become: true
+      become_user: "{{ real_user }}"
+  when: real_user != 'root'
 
 - name: Ensure a bunch of TASSI prerequisites across all physical hosts 
   block:

@@ -28,7 +28,7 @@ LABELS = {'write': 'Sequential write (1 MiB)', 'read': 'Sequential read (1 MiB)'
 
 
 
-def derive(data):
+def derive_role(data):
     storage = {}
     totals = {}
     capacity = {}
@@ -113,11 +113,11 @@ def derive(data):
             'Independent concurrent OSU sweeps are not barrier-synchronized. Aggregate values approximate overlapping traffic.',
             'Unpaired nodes do not contribute to the measured concurrent network sum; do not extrapolate linearly.',
             'FIO is a short, time-based region test with direct I/O, not full-device steady-state preconditioning. Capacity is raw, not usable DAOS capacity.',
-            'Raw block IOPS are not a ceiling for mdtest metadata IOPS. Cross-node stddev does not estimate run-to-run uncertainty.'
+            'Metadata comparisons assume one metadata operation per I/O; real metadata operations may require multiple I/Os. Cross-node stddev does not estimate run-to-run uncertainty.'
         ],
         'environment': {'fio_versions': sorted(fio_versions), 'osu_versions': sorted(osu_versions)},
         'capacity': {'total_storage_bytes': sum(capacity.values()), 'per_node_bytes': capacity,
-                     'total_storage_devices': sum(len(h.get('fio', {}).get('devices', [])) for h in data['hosts'].values())},
+                     'total_storage_devices': sum(len(data['hosts'][h].get('fio', {}).get('devices', [])) for h in data['groups']['ds'])},
         'storage': {'aggregate_by_workload': totals, 'per_node_statistics': node_stats,
                     'estimated_max_aggregate_bandwidth_bytes_per_second': storage_bw,
                     'estimated_max_aggregate_iops_4KiB': storage_iops},
@@ -137,11 +137,32 @@ def derive(data):
                     'iops_bottleneck': iops_limit['bottleneck'], 'by_direction': directional}}
 
 
+def derive(data):
+    # Preserve the existing data-plane schema for DAOS and existing consumers.
+    result = derive_role(data)
+    result['architecture'] = 'split' if data['groups'].get('mds') else 'shared'
+    result['planes'] = {'data': {key: result[key] for key in
+                              ('capacity', 'storage', 'network', 'cluster')}}
+    if data['groups'].get('mds'):
+        if not data['network'].get('metadata'):
+            raise ValueError('Split MDS/DS baseline needs MDS FIO and client/MDS OSU samples; rerun phase1 and phase6')
+        scoped = dict(data)
+        scoped['groups'] = dict(data['groups'], ds=data['groups']['mds'])
+        scoped['network'] = data['network']['metadata']
+        metadata = derive_role(scoped)
+        result['planes']['metadata'] = {key: metadata[key] for key in
+                                       ('capacity', 'storage', 'network', 'cluster')}
+        result['assumptions'].append(
+            'Data and metadata ceilings are isolated-workload estimates. Shared client NICs '
+            'and fabric prevent adding them as simultaneously achievable rates.')
+    return result
+
+
 def select_manifest(root, groups, pointer=None):
     def matches(path):
         data = json.loads(path.read_text())
         return all(sorted(data.get('groups', {}).get(role, [])) == sorted(groups.get(role, []))
-                   for role in ('ds', 'clients'))
+                   for role in ('ds', 'clients', 'mds'))
     if pointer and Path(pointer).is_file():
         candidate = Path(Path(pointer).read_text().strip())
         if candidate.is_file() and matches(candidate):
@@ -254,6 +275,30 @@ def report_pages(data, derived, eps):
     p.paragraph('Model and limitations', size=12)
     for item in derived['assumptions']:
         p.paragraph('- ' + item, size=9)
+    if 'metadata' in derived.get('planes', {}):
+        metadata = derived['planes']['metadata']
+        p.page('Metadata-server component ceilings')
+        p.paragraph('MDS devices and client-to-MDS OSU paths are measured separately from the data plane. Metadata operation comparisons assume one operation per I/O.', size=10)
+        p.kv('Metadata servers', len(data['groups']['mds']))
+        p.kv('MDS raw capacity', f"{metadata['capacity']['total_storage_bytes']/GIB:,.1f} GiB")
+        for plane_name, plane in derived['planes'].items():
+            p.kv(plane_name.title()+' bandwidth ceiling', format_bw(plane['cluster']['estimated_max_aggregate_bandwidth_bytes_per_second']))
+            p.kv(plane_name.title()+' IOPS ceiling', format_iops(plane['cluster']['estimated_max_aggregate_iops_4KiB']))
+        for direction, row in metadata['cluster']['by_direction'].items():
+            p.kv('MDS '+direction+' storage bandwidth', format_bw(row['storage_bandwidth_bytes_per_second']))
+            p.kv('MDS '+direction+' storage IOPS', format_iops(row['storage_iops_4KiB']))
+            p.kv('Metadata '+direction+' bandwidth ceiling', format_bw(row['cluster_bandwidth']['value'])+' ('+row['cluster_bandwidth']['bottleneck']+')')
+            p.kv('Metadata '+direction+' IOPS ceiling', format_iops(row['cluster_iops_4KiB']['value'])+' ('+row['cluster_iops_4KiB']['bottleneck']+')')
+        p.kv('Client/MDS network bandwidth', format_bw(metadata['network']['estimated_max_aggregate_bandwidth_bytes_per_second']))
+        p.kv('Client/MDS 4KiB message proxy', format_iops(metadata['network']['estimated_aggregate_iops_proxy_4KiB']))
+        p.paragraph('Do not add these ceilings: clients and fabric are shared. Read ceilings assume the measured client-to-server bandwidth also holds in reverse.', size=9)
+        p.page('Metadata-server storage balance')
+        for workload, metrics in metadata['storage']['per_node_statistics'].items():
+            p.paragraph(LABELS[workload], size=11)
+            for metric, row in metrics.items():
+                fmt = format_iops if metric == 'iops' else format_bw
+                p.kv(metric, f"Mean {fmt(row['mean'])}; stddev {fmt(row['stddev_population'])}")
+                p.paragraph(f"Min {fmt(row['min'])}: {', '.join(row['min_nodes'])}; max {fmt(row['max'])}: {', '.join(row['max_nodes'])}", size=9)
     return p.finish(), p.number
 
 
@@ -274,7 +319,8 @@ def generate(manifest_path, output_pdf, template):
                       'topology_dot': str(dot), 'topology_png': str(directory / 'topology.png')}
     atomic_json(manifest_path, data)
     print(json.dumps({'manifest': str(manifest_path), 'pdf': str(generated),
-                      'workflow_pdf': str(output_pdf), 'pages': pages, 'cluster': derived['cluster']}, indent=2))
+                      'workflow_pdf': str(output_pdf), 'pages': pages, 'cluster': derived['cluster'],
+                      'metadata_cluster': derived.get('planes', {}).get('metadata', {}).get('cluster')}, indent=2))
 
 
 def main():

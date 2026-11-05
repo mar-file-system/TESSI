@@ -2,10 +2,10 @@
 - name: Require supported baseline hosts
   ansible.builtin.assert:
     that:
-      - ansible_facts.distribution == 'Rocky'
-      - ansible_facts.distribution_version == '9.7'
+      - >-
+        (ansible_facts.distribution == 'Rocky' and ansible_facts.distribution_version == '9.7')
+        or (ansible_facts.distribution == 'Ubuntu' and ansible_facts.distribution_major_version == '24')
       - ansible_facts.architecture == 'x86_64'
-      - "'ds' in group_names or 'clients' in group_names"
 
 - name: Require a client controller before performance installation
   ansible.builtin.include_tasks: ../shared/require_client_controller.yaml
@@ -14,23 +14,36 @@
 
 - name: Install the shared DOCA RDMA MPI and UCX stack
   ansible.builtin.include_tasks: ../shared/install_doca.yaml
+  when: ansible_facts.os_family == 'RedHat'
+
+- name: Refresh Ubuntu package metadata
+  ansible.builtin.apt:
+    update_cache: true
+    cache_valid_time: 3600
+  when: ansible_facts.os_family == 'Debian'
 
 - name: Install shared Python report dependencies during phase1
   ansible.builtin.include_tasks: ../shared/install_report_dependencies.yaml
 
 - name: Install baseline prerequisites in phase1
   ansible.builtin.package:
-    name: [environment-modules, gcc-c++, python3, libibverbs-utils, openssh-clients]
+    name: "{{ performance_prerequisites[ansible_facts.os_family] }}"
     state: present
+  vars:
+    performance_prerequisites:
+      RedHat: [environment-modules, gcc-c++, python3, libibverbs-utils, openssh-clients]
+      Debian: [environment-modules, g++, python3, ibverbs-utils, openssh-client, ucx-utils, libucx-dev, libibverbs-dev, ibverbs-providers, rdma-core, curl]
 
 - name: Load shared MPI installation variables
-  ansible.builtin.include_vars: ../vars/mpi_RedHat.yml
+  ansible.builtin.include_vars: "../vars/mpi_{{ ansible_facts.os_family }}.yml"
 
 - name: Prepare storage-server boot settings using the common baseline and DAOS tasks
   ansible.builtin.include_tasks: ../shared/prepare_storage_boot.yaml
+  when: ansible_facts.os_family == 'RedHat'
 
 - name: Restore Xem InfiniBand after OFED installation or reboot
   ansible.builtin.include_tasks: ../shared/restore_xem_ib.yaml
+  when: ansible_facts.os_family == 'RedHat'
 
 - name: Verify UCX RDMA support during installation
   ansible.builtin.include_tasks: ../tasks/check_ucx_rdma.yaml
@@ -39,6 +52,16 @@
   ansible.builtin.include_tasks: ../tasks/register_rpm_openmpi.yaml
   vars:
     openmpi_module_name: mpi/performance-openmpi
+  when: ansible_facts.os_family == 'RedHat'
+
+- name: Register Ubuntu Open MPI using the shared MPI installer
+  ansible.builtin.include_tasks: ../tasks/install_mpi.yaml
+  vars:
+    mpi:
+      module: mpi/performance-openmpi
+      mpi_packages: openmpi-bin libopenmpi-dev
+      env_vars: []
+  when: ansible_facts.os_family == 'Debian'
 
 - name: Build OSU using the shared TESSI installer
   ansible.builtin.include_tasks: ../tasks/install_osu_micro_benchmarks.yaml
@@ -48,7 +71,7 @@
 
 - name: Install FIO on storage servers using the shared installer
   ansible.builtin.include_tasks: ../shared/install_fio.yaml
-  when: "'ds' in group_names"
+  when: "'ds' in group_names or 'mds' in group_names"
 
 - name: Install baseline runner during phase1
   ansible.builtin.copy:
@@ -58,6 +81,7 @@
 
 - name: Install existing TESSI PDF report prerequisites on clients
   ansible.builtin.package:
-    name: [enscript, ghostscript, ImageMagick, poppler-utils, graphviz]
+    name: "{{ ['enscript', 'ghostscript', 'poppler-utils', 'graphviz'] +
+              [(ansible_facts.os_family == 'Debian') | ternary('imagemagick', 'ImageMagick')] }}"
     state: present
   when: "'clients' in group_names"

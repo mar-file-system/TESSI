@@ -1,5 +1,11 @@
 ---
-- name: Configure passwordless SSH across VMs
+# Called by physical-host phase0 and final-cluster phase5. The marker at
+# /tmp/tessi-known-hosts-v2-<home/user hash> contains payload SHA256 + known_hosts SHA1.
+# Markers are node-local and separated by SSH home and effective user.
+# It is written only by the elected directory writer after installation.
+# Keys/aliases are still collected on entry to detect allocation/VM changes.
+# Set cluster_ssh_force=true to bypass the marker; no cross-node ping on a hit.
+- name: Configure cluster SSH host-key trust
   block:
     - name: Gather facts
       ansible.builtin.setup:
@@ -8,19 +14,22 @@
 
     - name: Include wait_ssh task
       ansible.builtin.include_tasks: wait_ssh.yaml
-      when: networking != 'mvpnet' and networking != 'none'
+      when:
+        - not (cluster_ssh_physical | default(false) | bool)
+        - networking | default('none') not in ['mvpnet', 'none']
 
     - name: Determine the target IP based on networking type
       ansible.builtin.set_fact:
         target_ip: >-
-          {%- if networking == 'mvpnet' -%}
+          {%- if cluster_ssh_physical | default(false) | bool -%}
+            {{ ansible_default_ipv4.address }}
+          {%- elif networking | default('none') == 'mvpnet' -%}
             {{ hostvars[inventory_hostname].mvpnet_ip | trim }}
-          {%- elif networking == 'none' -%}
+          {%- elif networking | default('none') == 'none' -%}
             {{ hostvars[inventory_hostname].ansible_default_ipv4.address }}
           {%- else -%}
             {{ hostvars[inventory_hostname].ansible_host | trim }}
           {%- endif -%}
-      when: target_ip is not defined or target_ip | trim == ""
 
     # Each host contributes only its own keys.  This keeps collection O(N),
     # rather than having every host scan every other host.
@@ -74,36 +83,130 @@
 
     - name: Ensure SSH directory exists
       ansible.builtin.file:
-        path: "{{ ansible_env.HOME }}/.ssh"
+        path: "{{ cluster_ssh_home | default(ansible_env.HOME) }}/.ssh"
         state: directory
         mode: "0700"
 
+    # Identical HOME strings do not imply sharing. Match the NFS source and
+    # the directory within that export, allowing different local mountpoints.
+    # Local/unknown filesystems deliberately keep one writer per node.
+    - name: Identify the filesystem backing the SSH directory with findmnt
+      ansible.builtin.command:
+        argv:
+          - python3
+          - -c
+          - |
+            import json, os, posixpath, subprocess, sys
+            directory = os.path.realpath(sys.argv[1])
+            identity = {'node': sys.argv[2]}
+            try:
+                result = subprocess.run(
+                    ['findmnt', '--json', '--target', directory,
+                     '--output', 'SOURCE,FSTYPE,TARGET,FSROOT'],
+                    check=True, text=True, stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE)
+                mount = json.loads(result.stdout)['filesystems'][0]
+                if mount['fstype'] in ('nfs', 'nfs4'):
+                    relative = os.path.relpath(directory, mount['target'])
+                    if relative != '..' and not relative.startswith('../'):
+                        identity = {
+                            'nfs_source': mount['source'],
+                            'export_directory': posixpath.normpath(
+                                posixpath.join(mount.get('fsroot') or '/', relative))}
+            except (OSError, subprocess.CalledProcessError, ValueError, KeyError, IndexError):
+                pass
+            print(json.dumps(identity, sort_keys=True))
+          - "{{ cluster_ssh_home | default(ansible_env.HOME) }}/.ssh"
+          - "{{ inventory_hostname }}"
+      register: cluster_ssh_mount_identity
+      changed_when: false
+
+    - name: Select one known_hosts writer per shared NFS directory
+      ansible.builtin.set_fact:
+        cluster_known_hosts_writer: >-
+          {%- set ns = namespace(writer=inventory_hostname, found=false) -%}
+          {%- for host in ansible_play_hosts | sort -%}
+          {%- if not ns.found and
+              hostvars[host].cluster_ssh_mount_identity.stdout == cluster_ssh_mount_identity.stdout -%}
+          {%- set ns.writer = host -%}
+          {%- set ns.found = true -%}
+          {%- endif -%}
+          {%- endfor -%}
+          {{ ns.writer }}
+
+    - name: Show selected SSH host-key writer
+      ansible.builtin.debug:
+        msg: >-
+          {{ inventory_hostname }} uses known_hosts writer {{ cluster_known_hosts_writer }};
+          filesystem identity={{ cluster_ssh_mount_identity.stdout }}
+
     - name: Check for an existing known_hosts file
       ansible.builtin.stat:
-        path: "{{ ansible_env.HOME }}/.ssh/known_hosts"
+        path: "{{ cluster_ssh_home | default(ansible_env.HOME) }}/.ssh/known_hosts"
       register: cluster_known_hosts_file
+      when: inventory_hostname == cluster_known_hosts_writer
+
+    # Marker is specific to this directory, payload and installed file contents.
+    # An unchanged marker never suppresses recovery of a deleted/edited file.
+    - name: Read the cluster SSH completion marker
+      ansible.builtin.slurp:
+        src: "/tmp/tessi-known-hosts-v2-{{ ((cluster_ssh_home | default(ansible_env.HOME)) ~ ':' ~ ansible_user_id) | hash('sha256') }}"
+      register: cluster_ssh_marker
+      failed_when: false
+      when: inventory_hostname == cluster_known_hosts_writer
+
+    - name: Decide whether this SSH directory needs an update
+      ansible.builtin.set_fact:
+        cluster_ssh_update_needed: >-
+          {{ cluster_ssh_force | default(false) | bool or
+             (hostvars[cluster_known_hosts_writer].cluster_ssh_marker.content | default('') | b64decode | trim)
+             != ((hostvars['localhost'].cluster_known_hosts_blob | trim | hash('sha256')) ~ ':' ~
+                 (hostvars[cluster_known_hosts_writer].cluster_known_hosts_file.stat.checksum | default('missing'))) }}
 
     # Migrate files produced by older TESSI releases.  One regex pass removes
     # cluster aliases wherever they occur in the host field; unlike one
     # ssh-keygen invocation per peer, this schedules only one task per host.
     - name: Remove legacy cluster entries from known_hosts in one pass
       ansible.builtin.replace:
-        path: "{{ ansible_env.HOME }}/.ssh/known_hosts"
+        path: "{{ cluster_ssh_home | default(ansible_env.HOME) }}/.ssh/known_hosts"
         regexp: >-
           ^(?=[^ ]*(?:^|,)(?:{{ hostvars['localhost'].cluster_known_hosts_aliases
           | map('regex_escape') | join('|') }})(?:,| ))[^\n]*\n?
         replace: ""
-      when: cluster_known_hosts_file.stat.exists
+      when:
+        - inventory_hostname == cluster_known_hosts_writer
+        - cluster_ssh_update_needed | bool
+        - cluster_known_hosts_file.stat.exists | default(false)
 
     # A managed block replaces old TESSI keys in one operation while retaining
     # any unrelated keys that the user already has in this file.
     - name: Install cluster SSH host keys
       ansible.builtin.blockinfile:
-        path: "{{ ansible_env.HOME }}/.ssh/known_hosts"
+        path: "{{ cluster_ssh_home | default(ansible_env.HOME) }}/.ssh/known_hosts"
         create: true
         mode: "0644"
         marker: "# {mark} TESSI MANAGED CLUSTER KEYS"
         block: "{{ hostvars['localhost'].cluster_known_hosts_blob | trim }}"
+      when:
+        - inventory_hostname == cluster_known_hosts_writer
+        - cluster_ssh_update_needed | bool
+
+    - name: Read the installed known_hosts checksum
+      ansible.builtin.stat:
+        path: "{{ cluster_ssh_home | default(ansible_env.HOME) }}/.ssh/known_hosts"
+      register: cluster_ssh_installed
+      when:
+        - inventory_hostname == cluster_known_hosts_writer
+        - cluster_ssh_update_needed | bool
+
+    - name: Mark successful cluster SSH host-key installation
+      ansible.builtin.copy:
+        dest: "/tmp/tessi-known-hosts-v2-{{ ((cluster_ssh_home | default(ansible_env.HOME)) ~ ':' ~ ansible_user_id) | hash('sha256') }}"
+        content: "{{ hostvars['localhost'].cluster_known_hosts_blob | trim | hash('sha256') }}:{{ cluster_ssh_installed.stat.checksum }}\n"
+        mode: '0600'
+      when:
+        - inventory_hostname == cluster_known_hosts_writer
+        - cluster_ssh_update_needed | bool
 
     # Keep exhaustive connectivity checks bounded to small development
     # clusters.  Large clusters are validated by their normal MPI workload.
@@ -112,6 +215,8 @@
       delegate_to: "{{ item }}"
       loop: "{{ ansible_play_hosts }}"
       when:
+        - cluster_ssh_update_needed | bool
+        - not (cluster_ssh_skip_connectivity | default(false) | bool)
         - ansible_play_hosts | length < 17
         - inventory_hostname != item
       ignore_errors: true

@@ -1,0 +1,49 @@
+---
+# Phase7 controller-only adapter. YAML is decoded by Ansible, not a new Python dependency.
+- name: Locate the saved IO500 run for this experiment
+  ansible.builtin.command:
+    argv:
+      - "{{ ansible_playbook_python }}"
+      - "{{ playbook_dir }}/../../shared/files/tessi_io500_report.py"
+      - --select
+      - --result-root
+      - "{{ result_dir }}"
+      - --pointer
+      - "{{ image_dir }}/io500-last-result-path.txt"
+  register: io500_report_selection
+  when: io500_report_result_dir is not defined and daos_report_result_dir is not defined
+  changed_when: false
+
+- name: Select explicit or discovered IO500 results
+  ansible.builtin.set_fact:
+    io500_report_run: "{{ io500_report_result_dir | default(daos_report_result_dir | default(io500_report_selection.stdout | default(''))) }}"
+    io500_report_facts: {}
+
+- name: Read the saved node facts without contacting nodes
+  ansible.builtin.set_fact:
+    io500_report_facts: >-
+      {{ io500_report_facts | combine({item | basename | regex_replace('[.]yaml$', ''):
+          lookup('file', item) | from_yaml}) }}
+  loop: "{{ lookup('fileglob', io500_report_run ~ '/facts/*.yaml', wantlist=True) }}"
+  no_log: true
+
+- name: Read an updated baseline reference from the source config for existing inventories
+  ansible.builtin.set_fact:
+    performance_manifest: "{{ (lookup('file', config_file) | from_yaml).all.vars.performance_manifest | default('') }}"
+  when:
+    - performance_manifest | default('') | length == 0
+    - config_file is defined
+    - config_file | length > 0
+
+- name: Generate IO500 PDF and a separate normalized results manifest
+  ansible.builtin.command:
+    argv: >-
+      {{ [ansible_playbook_python, playbook_dir ~ '/../../shared/files/tessi_io500_report.py',
+          '--run', io500_report_run, '--output-pdf', image_dir ~ '/summary.pdf']
+         + (['--baseline', performance_manifest] if performance_manifest | default('') else []) }}
+    stdin: "{{ {'groups': groups, 'facts': io500_report_facts, 'system': system} | to_json }}"
+  register: io500_report_result
+
+- name: IO500 report and comparison manifest paths
+  ansible.builtin.debug:
+    msg: "{{ io500_report_result.stdout | from_json }}"

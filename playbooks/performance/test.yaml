@@ -12,6 +12,7 @@
           - groups.get('ds', []) | length > 0
           - groups.get('clients', []) | length > 0
           - groups['ds'] | intersect(groups['clients']) | length == 0
+          - groups.get('mds', []) | intersect(groups['clients'] + groups['ds']) | length == 0
           - system.performance.allow_destructive_writes | bool
           - system.performance.fio_runtime_seconds | int > 0
           - system.performance.fio_iodepth | int > 0
@@ -26,7 +27,7 @@
         argv: [python3, /usr/local/bin/tessi-measure-perf, check]
         stdin: "{{ {'devices': local_storage_devices} | to_json }}"
       become: true
-      when: "'ds' in group_names"
+      when: "'ds' in group_names or 'mds' in group_names"
       changed_when: false
     - name: Record RDMA hardware and negotiated link information
       ansible.builtin.command: ibv_devinfo
@@ -82,7 +83,7 @@
       run_once: true
 
 - name: Measure all storage servers concurrently
-  hosts: ds
+  hosts: ds:mds
   gather_facts: false
   any_errors_fatal: true
   tasks:
@@ -123,7 +124,7 @@
       ansible.builtin.include_tasks: ../tasks/write_mpi_hostfile.yaml
       vars:
         mpi_module: mpi/performance-openmpi
-        hosts: "{{ groups['clients'] + groups['ds'] }}"
+        hosts: "{{ (groups['clients'] + groups['ds'] + groups.get('mds', [])) | unique | list }}"
         hostfile_path: "{{ performance_scratch.path }}/hosts"
     - name: Build the baseline MPI launcher using shared settings
       ansible.builtin.include_tasks: ../tasks/build_mpi_command.yaml
@@ -139,7 +140,7 @@
         command_timeout: "{{ system.performance.command_timeout_seconds }}"
         commands: |
           python3 /usr/local/bin/tessi-measure-perf network --output {{ performance_scratch.path | quote }} <<'TESSI_PERFORMANCE_INPUT'
-          {{ {'config': system.performance, 'topology': {'clients': groups['clients'] | map('extract', hostvars, 'ansible_fqdn') | list, 'ds': groups['ds'] | map('extract', hostvars, 'ansible_fqdn') | list}, 'mpi': {'launcher_argv': mpi_launcher_argv, 'osu_binary_dir': osu_binary_dir}} | to_json }}
+          {{ {'config': system.performance, 'topology': {'clients': groups['clients'] | map('extract', hostvars, 'ansible_fqdn') | list, 'ds': groups['ds'] | map('extract', hostvars, 'ansible_fqdn') | list, 'mds': groups.get('mds', []) | map('extract', hostvars, 'ansible_fqdn') | list}, 'mpi': {'launcher_argv': mpi_launcher_argv, 'osu_binary_dir': osu_binary_dir}} | to_json }}
           TESSI_PERFORMANCE_INPUT
     - name: Preserve network results
       ansible.builtin.set_fact:

@@ -1,4 +1,13 @@
 ---
+- name: Preserve cluster connectivity during pNFS dependency installation
+  hosts: all
+  gather_facts: true
+  any_errors_fatal: true
+  become: true
+  tasks:
+    - name: Defer package-triggered service restarts before pnfs-lab runs
+      ansible.builtin.include_tasks: ../../shared/defer_package_service_restarts.yaml
+
 - name: Debug Cluster Parameters Variable Loading
   hosts: mds[0]
   gather_facts: false
@@ -104,32 +113,13 @@
 - name: Setup SSH across the cluster
   hosts: all
   become: true
-  vars:
-    ssh_setup_marker: "/root/.ssh_setup_complete"
-
   tasks:
-    - name: Check for SSH setup marker
-      stat:
-        path: "{{ ssh_setup_marker }}"
-      register: ssh_marker
+    - name: Configure SSH using the shared content-aware completion marker
+      ansible.builtin.include_tasks: ../../shared/configure_ssh.yaml
+      tags: setup
 
-    - name: Configure SSH cluster-wide
-      block:
-        - name: Run SSH configuration tasks
-          include_tasks: ../../shared/configure_ssh.yaml
-
-        - name: Refresh cluster facts post-configuration because some variables might have gone out of scope
-          setup:
-
-        - name: Create marker file to skip future runs
-          file:
-            path: "{{ ssh_setup_marker }}"
-            state: touch
-            owner: root
-            mode: '0644'
-
-      # Only execute this block if the marker file does NOT exist
-      when: not ssh_marker.stat.exists or true # always do it because if we added hosts, then everyone must do
+    - name: Refresh cluster facts after SSH configuration
+      ansible.builtin.setup:
       tags: setup
 
 - name: Discover the InfiniBand data-plane address on every pNFS node

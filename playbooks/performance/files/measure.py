@@ -78,7 +78,7 @@ def measure_fio(config, devices, output):
             'note': 'Time-based raw region tests, not a full-device steady-state preconditioning study.'}
 
 
-def measure_network(config, topology, output, mpi):
+def measure_network_role(config, topology, output, mpi, tag_prefix=""):
     # Ansible's shared tasks supply the MPI launcher and OSU installation path.
     # This runner only schedules pairs, chooses rank placement and records data.
     prefix = str(pathlib.Path(mpi['osu_binary_dir']) / 'mpi' / 'pt2pt') + '/'
@@ -98,6 +98,7 @@ def measure_network(config, topology, output, mpi):
                 '-i', str(int(config['osu_iterations'])),
                 '-x', str(int(config['osu_warmup_iterations']))]
         text = run(argv, timeout)
+        tag = tag_prefix + tag
         (output / f'{tag}.txt').write_text(text)
         rows = []
         for line in text.splitlines():
@@ -134,22 +135,41 @@ def measure_network(config, topology, output, mpi):
             'note': 'Independent concurrent OSU sweeps; large-message samples approximate overlapping steady traffic, without a global MPI barrier.'}
 
 
+def measure_network(config, topology, output, mpi):
+    result = measure_network_role(config, topology, output, mpi)
+    if topology.get('mds'):
+        result['metadata'] = measure_network_role(
+            config, {'clients': topology['clients'], 'ds': topology['mds']},
+            output, mpi, tag_prefix='metadata-')
+        result['role_measurement_note'] = (
+            'Data and metadata network sweeps run separately; shared client NIC/fabric '
+            'ceilings cannot be added as simultaneously achievable throughput.')
+    return result
+
+
 def manifest(payload, output):
     hosts = payload['hosts']
     storage = {}
+    storage_by_role = {}
     for name, host in hosts.items():
+        role = 'ds' if name in payload['groups'].get('ds', []) else 'mds' if name in payload['groups'].get('mds', []) else None
+        if role is None:
+            continue
+        role_storage = storage_by_role.setdefault(role, {})
         for measurement in host.get('fio', {}).get('measurements', []):
-            metric = storage.setdefault(measurement['workload'], {'bandwidth_bytes_per_second': 0, 'iops': 0})
+            metric = role_storage.setdefault(measurement['workload'], {'bandwidth_bytes_per_second': 0, 'iops': 0})
             metric['bandwidth_bytes_per_second'] += measurement['bandwidth_bytes_per_second']
             metric['iops'] += measurement['iops']
-    payload.update(schema_version=1, measured_at_utc=datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    storage = storage_by_role.get('ds', {})
+    payload.update(storage_aggregate_by_role=storage_by_role, architecture='split' if payload['groups'].get('mds') else 'shared', schema_version=1, measured_at_utc=datetime.datetime.now(datetime.timezone.utc).isoformat(),
                    storage_aggregate=storage,
-                   interpretation='Storage aggregates sum simultaneously launched server jobs. These are measured component baselines, not guaranteed DAOS ceilings. Metadata IOPS are not comparable directly to raw 4K IOPS.')
+                   interpretation='Storage aggregates sum simultaneously launched server jobs. These are measured component baselines, not guaranteed DAOS ceilings. Metadata comparisons assume one metadata operation per I/O; data and metadata ceilings share client NIC/fabric resources and must not be added.')
     output.mkdir(parents=True, exist_ok=True)
     (output / 'manifest.json').write_text(json.dumps(payload, indent=2) + '\n')
     lines = [f'Performance baseline: {payload["system_id"]}', f'Manifest: {output / "manifest.json"}']
-    for workload, metric in storage.items():
-        lines.append(f'FIO {workload}: {metric["bandwidth_bytes_per_second"] / 2**30:.3f} GiB/s, {metric["iops"]:.0f} IOPS (all storage servers)')
+    for role, workloads in storage_by_role.items():
+        for workload, metric in workloads.items():
+            lines.append(f'FIO {role} {workload}: {metric["bandwidth_bytes_per_second"] / 2**30:.3f} GiB/s, {metric["iops"]:.0f} IOPS')
     lines.append(f'OSU concurrent client/server pairs: {payload["network"]["concurrent_bandwidth_MB_per_second"]:.3f} MB/s')
     (output / 'summary.txt').write_text('\n'.join(lines) + '\n')
     print('\n'.join(lines))
