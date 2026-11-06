@@ -1,0 +1,43 @@
+---
+# Reuse the existing destructive RAID0/XFS provisioner, one disjoint array per role.
+- name: Validate explicit colocated storage assignments before provisioning
+  ansible.builtin.assert:
+    that:
+      - system.type == 'pnfs'
+      - system.pnfs_ds_devices | length == 3
+      - system.pnfs_mds_devices | length == 2
+      - system.pnfs_ds_devices | unique | length == 3
+      - system.pnfs_mds_devices | unique | length == 2
+      - system.pnfs_ds_devices | intersect(system.pnfs_mds_devices) | length == 0
+      - system.pnfs_ds_mount != system.pnfs_mds_mount
+      - system.pnfs_ds_array != system.pnfs_mds_array
+    fail_msg: Colocated pNFS requires three DS and two MDS devices in disjoint arrays and mountpoints.
+
+- name: Require every selected storage device before creating either array
+  ansible.builtin.command:
+    argv: [test, -b, "{{ item }}"]
+  loop: "{{ system.pnfs_ds_devices + system.pnfs_mds_devices }}"
+  changed_when: false
+
+- name: Provision each colocated storage role with the common Xem tasks
+  ansible.builtin.include_tasks: ../shared/prereqs/xem.yaml
+  loop:
+    - devices: "{{ system.pnfs_ds_devices }}"
+      mount: "{{ system.pnfs_ds_mount }}"
+      array: "{{ system.pnfs_ds_array }}"
+    - devices: "{{ system.pnfs_mds_devices }}"
+      mount: "{{ system.pnfs_mds_mount }}"
+      array: "{{ system.pnfs_mds_array }}"
+  loop_control:
+    loop_var: pnfs_storage_role
+    label: "{{ pnfs_storage_role.mount }}"
+  vars:
+    storage_device: /dev/sda
+    minimum_nvme_gb: 32
+    local_storage_mode: filesystem
+    local_storage: "{{ pnfs_storage_role.mount }}"
+    nvme_mount: "{{ pnfs_storage_role.mount }}"
+    local_storage_devices: "{{ pnfs_storage_role.devices }}"
+    local_storage_raid_members: "{{ pnfs_storage_role.devices }}"
+    local_storage_raid_minimum_members: "{{ pnfs_storage_role.devices | length }}"
+    local_storage_raid_device: "{{ pnfs_storage_role.array }}"
