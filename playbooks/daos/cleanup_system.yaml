@@ -1,0 +1,196 @@
+---
+# Included by the makeclean-only play using the OLD server inventory.
+# Check reachable management state for membership and unrelated pools, then
+# perform the full reset locally. Do not require an erase RPC to broken engines.
+- name: Inspect persisted DAOS state on storage servers
+  ansible.builtin.find:
+    paths: /var/lib/daos
+    recurse: true
+    hidden: true
+    file_type: file
+  register: daos_cleanup_state_files
+  when: "'ds' in group_names"
+
+- name: Inspect completion of a previous full cleanup
+  ansible.builtin.stat:
+    path: /etc/daos/tessi_system_clean
+  register: daos_cleanup_marker
+  when: "'ds' in group_names"
+
+- name: Determine whether the old system still needs erasing
+  ansible.builtin.set_fact:
+    daos_cleanup_needs_erase: >-
+      {%- set ns = namespace(needed=false) -%}
+      {%- for host in groups['ds'] -%}
+      {%- if not hostvars[host].daos_cleanup_marker.stat.exists
+            and hostvars[host].daos_cleanup_state_files.matched | int > 0 -%}
+      {%- set ns.needed = true -%}
+      {%- endif -%}
+      {%- endfor -%}
+      {{ ns.needed }}
+  run_once: true
+
+- name: Read the old server configuration before resetting its state
+  ansible.builtin.slurp:
+    src: /etc/daos/daos_server.yml
+  register: daos_cleanup_old_config
+  when: "'ds' in group_names"
+
+- name: Require TESSI-managed metadata paths before full cleanup
+  ansible.builtin.assert:
+    that:
+      - (daos_cleanup_old_config.content | b64decode).startswith('# Managed by TESSI.')
+      - (daos_cleanup_old_config.content | b64decode | from_yaml).control_metadata.path == '/var/lib/daos'
+      - (daos_cleanup_old_config.content | b64decode | from_yaml).engines | length == 1
+      - (daos_cleanup_old_config.content | b64decode | from_yaml).engines[0].storage[0].class == 'ram'
+      - (daos_cleanup_old_config.content | b64decode | from_yaml).engines[0].storage[0].scm_mount == '/mnt/daos_scm'
+    fail_msg: Full cleanup supports only the TESSI-managed one-engine RAM-metadata layout; refusing to guess which paths to erase.
+  when: "'ds' in group_names"
+
+- name: Check old DAOS membership and pool ownership before local reset
+  when: daos_cleanup_needs_erase | bool
+  block:
+    - name: Start old control services if an earlier cleanup stopped them
+      ansible.builtin.systemd_service:
+        name: daos_server
+        state: started
+      when: "'ds' in group_names"
+
+    - name: Wait for old DAOS control services for ownership checks
+      ansible.builtin.wait_for:
+        host: 127.0.0.1
+        port: 10001
+        timeout: 120
+      when: "'ds' in group_names"
+
+    - name: Query the old DAOS membership before resetting it
+      ansible.builtin.command: dmg --json system query
+      register: daos_cleanup_members
+      changed_when: false
+      failed_when: false
+      run_once: true
+      delegate_to: "{{ groups['clients'][0] }}"
+
+    - name: Recognize an already uninitialized DAOS system
+      ansible.builtin.set_fact:
+        daos_cleanup_uninitialized: >-
+          {{ daos_cleanup_members.rc != 0
+             and 'system is uninitialized' in (daos_cleanup_members.stderr | default(''))
+             and ((daos_cleanup_members.stdout | default('{}', true) | from_json).status | default(0) | int) == -1025 }}
+      run_once: true
+
+    - name: Require a successful membership query or the explicit uninitialized response
+      ansible.builtin.assert:
+        that: daos_cleanup_members.rc == 0 or daos_cleanup_uninitialized | bool
+        fail_msg: "Cannot establish DAOS ownership-check state: {{ daos_cleanup_members.stderr | default('') }} {{ daos_cleanup_members.stdout | default('') }}"
+      run_once: true
+
+    - name: Finish local cleanup when the management system is already uninitialized
+      ansible.builtin.debug:
+        msg: DAOS reports system uninitialized (-1025). Pool/erase RPCs are unavailable; full cleanup will stop services and explicitly discard saved benchmark namespaces and local control metadata using the old inventory.
+      when: daos_cleanup_uninitialized | bool
+      run_once: true
+
+    - name: Validate the initialized system when membership is available
+      when: not (daos_cleanup_uninitialized | bool)
+      block:
+        - name: Require cleanup to cover every old storage server
+          ansible.builtin.assert:
+            that:
+              - (daos_cleanup_members.stdout | from_json).response.members | length <= groups['ds'] | length
+              - >-
+                ((daos_cleanup_members.stdout | from_json).response.members
+                 | map(attribute='addr') | map('regex_replace', ':[0-9]+$', '') | unique | list)
+                | difference(groups['ds'] | map('extract', hostvars, ['ansible_default_ipv4', 'address']) | list) | length == 0
+            fail_msg: Run phase5-clean with the OLD experiment's Makefile and complete server inventory before reducing or changing its server count.
+          run_once: true
+
+        - name: List pools before full system cleanup
+          ansible.builtin.command: dmg --json pool list --no-query
+          register: daos_cleanup_pools
+          changed_when: false
+          run_once: true
+          delegate_to: "{{ groups['clients'][0] }}"
+
+        - name: Refuse full cleanup if unrelated pools exist
+          ansible.builtin.assert:
+            that:
+              - >-
+                ((daos_cleanup_pools.stdout | from_json).response.pools | default([], true)
+                 | rejectattr('label', 'equalto', daos_pool) | list | length) == 0
+            fail_msg: This DAOS system contains pools other than the configured benchmark pool; full system cleanup would destroy them.
+          run_once: true
+
+        - name: Explain the local full-reset path
+          ansible.builtin.debug:
+            msg: Membership and pool ownership checked. Stop services and discard the saved benchmark namespaces locally; do not depend on dmg pool destroy/system stop/system erase RPCs to failed engines.
+          run_once: true
+
+- name: Stop and disable DAOS servers before the local full reset
+  ansible.builtin.systemd_service:
+    name: daos_server
+    state: stopped
+    enabled: false
+  when: "'ds' in group_names"
+
+- name: Stop and disable DAOS client agents
+  ansible.builtin.systemd_service:
+    name: daos_agent
+    state: stopped
+    enabled: false
+  when: "'clients' in group_names"
+
+- name: Find any remaining metadata RAM-disk mount
+  ansible.builtin.command: findmnt -n -M /mnt/daos_scm -o FSTYPE
+  register: daos_cleanup_ram_mount
+  changed_when: false
+  failed_when: daos_cleanup_ram_mount.rc not in [0, 1]
+  when: "'ds' in group_names"
+
+- name: Require a RAM filesystem before unmounting DAOS metadata
+  ansible.builtin.assert:
+    that: daos_cleanup_ram_mount.stdout | trim == 'tmpfs'
+    fail_msg: Refusing to discard an unexpected persistent filesystem at /mnt/daos_scm.
+  when:
+    - "'ds' in group_names"
+    - daos_cleanup_ram_mount.rc == 0
+
+- name: Unmount the old DAOS metadata RAM disk
+  ansible.builtin.command: umount /mnt/daos_scm
+  when:
+    - "'ds' in group_names"
+    - daos_cleanup_ram_mount.rc == 0
+
+- name: Return stopped DAOS NVMe controllers to the kernel driver
+  ansible.builtin.include_tasks: reset_nvme_for_bootstrap.yaml
+  when: "'ds' in group_names"
+
+- name: Discard only the saved benchmark NVMe namespaces after preflight checks
+  ansible.builtin.script:
+    cmd: discard_test_nvme.py
+    executable: python3
+  when: "'ds' in group_names"
+
+- name: Remove persistent management and engine metadata from the old test system
+  ansible.builtin.file:
+    path: /var/lib/daos/daos_control
+    state: absent
+  when: "'ds' in group_names"
+
+- name: Remove the old initialized engine fingerprint
+  ansible.builtin.file:
+    path: /var/lib/daos/tessi_config.sha256
+    state: absent
+  when: "'ds' in group_names"
+
+- name: Record completed full-system cleanup for idempotent retries
+  ansible.builtin.copy:
+    dest: /etc/daos/tessi_system_clean
+    content: "TESSI system erased; services stopped; RAM metadata unmounted; NVMe reset and discarded; local control metadata removed.\n"
+    mode: '0600'
+  when: "'ds' in group_names"
+
+- name: Report that the allocation is ready for a different DAOS server count
+  ansible.builtin.debug:
+    msg: Old DAOS system erased and all old servers cleaned. This allocation can now be bootstrapped with a different server count; no node reboot or new allocation is required.
+  run_once: true

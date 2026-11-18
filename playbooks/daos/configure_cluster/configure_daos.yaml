@@ -152,6 +152,11 @@
         that: (daos_scm_size | int) * 1024 <= (ansible_memtotal_mb | int) * 0.6
         fail_msg: Metadata memory must leave at least 40 percent of server RAM for DAOS and the OS.
 
+    - name: Invalidate the previous cleanup marker before configuring engines
+      ansible.builtin.file:
+        path: /etc/daos/tessi_system_clean
+        state: absent
+
     - name: Render DAOS engine configuration
       ansible.builtin.template:
         src: templates/daos_server.yml.j2
@@ -192,6 +197,11 @@
           - "{{ daos_pci_addresses | join(',') }}"
       when: ansible_facts.services['daos_server.service'].state != 'running'
       changed_when: false
+
+    - name: Clear a previous DAOS startup rate limit after configuration correction
+      ansible.builtin.command: systemctl reset-failed daos_server
+      changed_when: false
+      when: daos_server_config.changed
 
     - name: Enable and start DAOS server
       ansible.builtin.systemd_service:
@@ -385,47 +395,14 @@
         owner: daos_server
         mode: '0644'
 
-- name: Delete the benchmark pool and stop DAOS services
+- name: Erase the benchmark DAOS system for reuse with any server count
   hosts: ds:clients
   become: true
-  gather_facts: false
+  gather_facts: true
+  gather_subset: [min, network]
+  any_errors_fatal: true
   tags: [never, makeclean]
   vars_files: [vars.yaml]
   tasks:
-    - name: Stop client agents
-      ansible.builtin.systemd_service:
-        name: "{{ item }}"
-        state: stopped
-        enabled: false
-      loop: [daos_agent]
-      when: "'clients' in group_names"
-
-    - name: List pools before stopping the storage servers
-      ansible.builtin.command: dmg --json pool list --no-query
-      register: daos_cleanup_pools
-      changed_when: false
-      failed_when: false
-      run_once: true
-      delegate_to: "{{ groups['clients'][0] }}"
-
-    - name: Delete only the configured benchmark pool so phase5 can resize it
-      ansible.builtin.command:
-        argv: [dmg, pool, destroy, --recursive, --force, "{{ daos_pool }}"]
-      when:
-        - daos_cleanup_pools.rc == 0
-        - daos_pool in ((daos_cleanup_pools.stdout | from_json).response.pools | default([], true) | map(attribute='label') | list)
-      run_once: true
-      delegate_to: "{{ groups['clients'][0] }}"
-
-    - name: Report skipped pool cleanup if storage servers are already stopped
-      ansible.builtin.debug:
-        msg: "Pool listing unavailable; no pool deleted. Phase5 will check existing pool sizing before reuse. {{ daos_cleanup_pools.stderr | default('') }}"
-      when: daos_cleanup_pools.rc != 0
-      run_once: true
-
-    - name: Stop servers
-      ansible.builtin.systemd_service:
-        name: daos_server
-        state: stopped
-        enabled: false
-      when: "'ds' in group_names"
+    - name: Reset initialized DAOS system state using the old inventory
+      ansible.builtin.include_tasks: ../cleanup_system.yaml

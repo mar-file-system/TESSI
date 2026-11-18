@@ -1,0 +1,70 @@
+---
+# Shared by phase5-clean and bootstrap; PCI driver reset retains data and mappings.
+# SPDK-bound devices have no /dev/nvme* nodes until reset to the kernel driver.
+- name: Inspect configured DAOS raw block paths
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  loop: "{{ local_storage_devices }}"
+  register: daos_bootstrap_block_paths
+
+- name: Restore missing DAOS block paths using the saved PCI mapping
+  become: true
+  when: daos_bootstrap_block_paths.results | selectattr('stat.exists', 'equalto', false) | list | length > 0
+  block:
+    - name: Check for a previous TESSI DAOS PCI mapping
+      ansible.builtin.stat:
+        path: /etc/daos/tessi_nvme.json
+      register: daos_bootstrap_mapping
+
+    - name: Reset only previously mapped SPDK-bound NVMe controllers
+      when: daos_bootstrap_mapping.stat.exists
+      block:
+        - name: Identify saved NVMe controllers still bound to SPDK
+          ansible.builtin.command:
+            argv:
+              - python3
+              - -c
+              - |
+                import json, pathlib, re, sys
+                addresses = json.loads(pathlib.Path('/etc/daos/tessi_nvme.json').read_text())
+                assert isinstance(addresses, list) and addresses, 'Empty/invalid DAOS PCI mapping'
+                assert len(addresses) == len(set(addresses)), 'Duplicate DAOS PCI addresses'
+                bound = []
+                for address in addresses:
+                    assert re.fullmatch(r'[0-9a-fA-F]{4}:[0-9a-fA-F]{2}:[0-9a-fA-F]{2}\.[0-7]', address), 'Invalid PCI address'
+                    pci = pathlib.Path('/sys/bus/pci/devices') / address
+                    assert (pci / 'class').read_text().strip().startswith('0x0108'), 'Saved device is not an NVMe controller: ' + address
+                    driver = (pci / 'driver').resolve().name
+                    if driver in ('vfio-pci', 'uio_pci_generic', 'igb_uio'):
+                        bound.append(address)
+                print(json.dumps(bound))
+          register: daos_bootstrap_bound_controllers
+          changed_when: false
+
+        - name: Return mapped controllers to the OS only while DAOS is stopped
+          when: daos_bootstrap_bound_controllers.stdout | from_json | length > 0
+          block:
+            - name: Check DAOS server state before resetting controllers
+              ansible.builtin.command: systemctl is-active daos_server
+              register: daos_bootstrap_server_state
+              changed_when: false
+              failed_when: false
+
+            - name: Require an inactive DAOS server before resetting NVMe
+              ansible.builtin.assert:
+                that:
+                  - daos_bootstrap_server_state.stdout | trim == 'inactive'
+                fail_msg: Stop DAOS with make phase5-clean before bootstrapping another config; refusing to rebind controllers while DAOS may be running.
+
+            - name: Reset the saved SPDK-bound controllers to kernel NVMe drivers
+              ansible.builtin.command:
+                argv:
+                  - daos_server
+                  - nvme
+                  - reset
+                  - --ignore-config
+                  - "{{ daos_bootstrap_bound_controllers.stdout | from_json | join(',') }}"
+
+            - name: Wait for kernel device nodes after DAOS NVMe reset
+              ansible.builtin.command: udevadm settle --timeout=30
+              changed_when: false
